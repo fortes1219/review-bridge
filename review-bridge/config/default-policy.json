@@ -1,0 +1,82 @@
+{
+  "schema_version": 4,
+  "policy_schema_version": 4,
+  "package_policy_id": "review-bridge-v4-0.x-current",
+  "limits": {
+    "max_claude_calls": 2,
+    "max_claude_minutes_per_call": 15,
+    "authorization_ttl_seconds": 86400,
+    "recovery_window_seconds": 86400,
+    "heartbeat_interval_seconds": 5,
+    "lock_stale_seconds": 30,
+    "reconcile_grace_seconds": 5,
+    "reconcile_guard_ttl_seconds": 15
+  },
+  "writer": {
+    "mode": "writer_only",
+    "effort": "low",
+    "disallowed_tools": ["Agent"],
+    "self_review": "one_local_consistency_pass",
+    "independent_reviewer": "Codex"
+  },
+  "hard_stops": [
+    "new human decision required",
+    "approved or ratified decision must be reopened",
+    "scope expansion or another work package",
+    "change type or path outside the authorized work package",
+    "commit, push, deploy, release, or adapter activation",
+    "malformed or missing machine-readable review gate",
+    "token, call-count, or wall-clock budget exhausted",
+    "authentication or rate-limit failure"
+  ],
+  "classification": {
+    "default_review_level": "STANDARD",
+    "allowed_review_levels": ["LIGHT", "STANDARD", "FULL", "SECURITY", "FINAL_CLOSURE"],
+    "effort_by_level": {
+      "LIGHT": "low",
+      "STANDARD": "medium",
+      "FULL": "high",
+      "SECURITY": "high",
+      "FINAL_CLOSURE": "high"
+    },
+    "rules": [
+      {
+        "id": "package-final-closure",
+        "protected": true,
+        "level": "FINAL_CLOSURE",
+        "priority": 500,
+        "reason": "final closure or completion review",
+        "any": ["final[ -]closure", "final completion", "closure review"],
+        "none": []
+      },
+      {
+        "id": "package-security",
+        "protected": true,
+        "level": "SECURITY",
+        "priority": 400,
+        "reason": "security or authorization boundary",
+        "any": ["\\bauth\\b", "authentication", "authorization", "permission", "security boundary", "transaction boundary", "request cancel(lation)?"],
+        "none": []
+      },
+      {
+        "id": "package-full",
+        "protected": true,
+        "level": "FULL",
+        "priority": 300,
+        "reason": "cross-contract or full semantic review",
+        "any": ["cross[ -]?contract", "state machine", "truth table", "precedence matrix", "architecture review", "full review"],
+        "none": []
+      },
+      {
+        "id": "package-light",
+        "protected": false,
+        "level": "LIGHT",
+        "priority": 100,
+        "reason": "narrow mechanical review",
+        "any": ["smoke test", "named finding", "focused correction", "boundary check", "typo", "formatting only"],
+        "none": ["contract", "architecture", "decision", "schema", "endpoint", "auth", "permission", "security", "implementation"]
+      }
+    ]
+  },
+  "release_actions_require_human": true
+}

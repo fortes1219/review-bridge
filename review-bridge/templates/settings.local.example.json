@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \".claude/tools/review-bridge/bootstrap.mjs\" enqueue --no-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+

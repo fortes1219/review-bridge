@@ -1,0 +1,163 @@
+# Codex Review Bridge Installer
+
+Private preview for installing the Claude-to-Codex review bridge into one project workspace at a time. Git is supported but optional.
+
+Human users should begin with `START_HERE.md`. It starts at the moment a user receives the release ZIP, extracts it outside the target project, performs human-approved initialization, and then defines the first complete Claude writer / Codex reviewer work package without manual CONTROL or session-ID editing.
+
+Supported profiles are loaded from the declarative `profiles/*.json` registry. The preview includes Rust, Vue/TypeScript, Node.js backend, Go, Python, Java, PHP Laravel, and .NET/C#.
+
+## Positioning
+
+Codex Review Bridge is a repository-local delivery review controller. It externalizes writer/reviewer separation, work-package authorization, review gates, correction budgets, durable evidence, and human breakpoints from agent context.
+
+It is not a general agent framework, a session synchronization protocol, or an agent-computer platform. Session synchronization, agent-computer execution, and delivery review operate on different responsibility planes; this project does not use feature-count comparisons to claim superiority.
+
+## Safety Model
+
+- `plan` is read-only and never invokes a model.
+- Integrity and authorization tokens are checked by the controller. Human-facing commands show the target, scope, budget, breakpoint, and effects instead of asking users to copy hashes.
+- Git is not required. Without Git, the controller creates its own before/after workspace evidence and scope-violation report.
+- In a Git repository, `.claude/` must already be ignored. The installer never edits tracked `.gitignore`.
+- Existing Claude permissions, unrelated hooks, rules, skills, docs, and handoffs are preserved.
+- Existing project-specific review prompts are preserved at `.claude/review-bridge/review-prompt.md` and override the packaged generic prompt.
+- Fresh installs create no `CONTROL.json`. Immutable work packages and authorizations create run state only after checksum approval.
+- Failed transactions immediately restore the pre-operation managed paths.
+- Successful operations retain a checksum-verified rollback point outside the target repository.
+- Windows x64 is native-verified. Apple Silicon macOS is a selectable RC canary adapter but is not native-verified; Linux remains experimental and fail-closed.
+
+## Install
+
+### Start From A Release ZIP
+
+Do not ask an agent to install the Bridge. In File Explorer or Finder, extract the ZIP into any local directory outside the target project. Open a terminal in that extracted directory. Do not copy the ZIP or installer source into the target project.
+
+Run `node --version` and require Node.js 22 or newer before continuing. `init` automatically verifies the extracted package before it reads the target or installs anything. A missing, modified, or damaged packaged file produces one fail-closed error and no installation; users do not compare integrity values manually.
+
+### Human-Approved Initialization
+
+The normal entry point installs the Bridge and runs `PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, and `RATE_LIMIT` with fake CLIs, so it consumes no model tokens:
+
+```powershell
+node bridge.mjs init --target D:\projects\my-project
+```
+
+The confirmation screen shows the target workspace, operation, detected profile, workspace evidence mode, and planned changes. Enter `y` only after those values are correct. Entering `n` or pressing Enter cancels without installing the Bridge.
+
+Use `--yes` only for CI or disposable automated verification. The command detects the project profile, applies the checksum-gated installer internally, verifies the fake runtime, and reports whether the native Claude and Codex CLIs are available. It does not modify application files or require a Git repository.
+
+After `init` succeeds, stop. Installation is complete, but no real Claude or Codex work has started. Real model use begins only after a human creates and confirms a work package.
+
+## Release Packaging
+
+Maintainers must create release archives through the cross-platform Node packager. It writes every ZIP entry with the specification-defined `/` separator, then parses the finished archive and fails closed on backslashes, absolute paths, traversal segments, case-colliding entries, or a missing required tree. The PowerShell file is only a thin compatibility wrapper around the same Node implementation.
+
+Do not use Windows PowerShell 5.1 `Compress-Archive` for a release. Its backslash entry names can appear usable on Windows or tolerant extractors while breaking macOS Finder extraction. A release archive is not deliverable until `verify-release-archive.mjs` accepts the actual ZIP.
+
+```text
+npm run package:release
+```
+
+The external checksum sidecar is optional supply-chain evidence for advanced consumers. It is not part of the normal human installation flow; `init` verifies extracted package integrity automatically.
+
+Controller state must be on a local filesystem with atomic file operations. Known synchronized and network-mounted locations fail preflight. Exclusive-create concurrency is not supported on OneDrive, Dropbox, iCloud Drive, UNC, NFS, CIFS, or SMB state paths. This RC has real local NTFS evidence; APFS and ext4 support must not be claimed until equivalent native evidence exists.
+
+On non-Windows systems, `npm run test:state-v4` is expected to report 19 passing suites and one skipped suite. AC-16 is the real local NTFS-only exercise; its skip is intentional outside Windows. AC-15 still verifies POSIX synchronized/network path rejection on every platform.
+
+The lower-level plan/apply interface remains an internal maintainer API for controlled upgrades and automation. Normal users should use `bridge.mjs init`; maintainer details are isolated in `docs/installer-contract.md`.
+
+## Start The First Work Package
+
+After installation, copy `.claude/work-packages/TEMPLATE.md` to a new task file and edit its work, acceptance criteria, allowed paths, and prohibited actions. Then create a controller-validated authorization plan:
+
+```powershell
+node .claude/tools/review-bridge/bootstrap.mjs work-plan `
+  --task-file .claude/work-packages/trial-001.md `
+  --owner "YOUR_NAME" `
+  --work-package trial-001 `
+  --breakpoint "return after Codex review" `
+  --change-types docs `
+  --allow-paths "README.md" `
+  --max-claude-calls 2 `
+  --max-claude-minutes 8 `
+  --out .claude/review-queue/trial-001.plan.json
+```
+
+Review the scope, budget, and breakpoint printed by `work-plan`. `work-start` then displays the complete task and those limits, asks for confirmation, and validates the internal authorization token itself.
+
+Run the first plan in no-token fake mode:
+
+```powershell
+node .claude/tools/review-bridge/bootstrap.mjs work-start `
+  --plan .claude/review-queue/trial-001.plan.json `
+  --fake-cli `
+  --fake-scenario PASS
+```
+
+Fake scenarios include `PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, and `RATE_LIMIT`. A fake run consumes that plan. Generate a new plan before native execution.
+
+On Windows x64, start the new plan without fake flags:
+
+```powershell
+node .claude/tools/review-bridge/bootstrap.mjs work-start `
+  --plan .claude/review-queue/trial-001.plan.json
+```
+
+`work-start` creates the Claude session, runs the writer, runs ephemeral read-only Codex review, performs only budgeted named corrections, and stops at PASS or a human hard stop. It never commits, pushes, deploys, or starts another work package.
+
+On Apple Silicon macOS, the adapter is selectable for an explicit RC canary after all fake scenarios pass. `init` reports `adapter_status: candidate` and `runtime_verified: false`; that is a disclosure, not a support claim. The canary result is evidence required before promoting macOS to native-verified.
+
+```powershell
+node .claude/tools/review-bridge/bootstrap.mjs work-status
+node .claude/tools/review-bridge/bootstrap.mjs work-cancel --reason "cancelled_by_human_owner"
+```
+
+See `docs/first-work-package.md` for scope categories, status meanings, cancellation, and fail-closed behavior.
+
+`auto` selects a profile only when exactly one profile matches. Mixed-stack or ambiguous repositories fail closed and list the explicit profile IDs to choose from. Planning an adoption of an existing unmanaged bridge requires `--adopt-existing`.
+
+Available profile IDs:
+
+```text
+rust-backend
+vue-frontend
+node-backend
+go-backend
+python-backend
+java-backend
+php-laravel
+dotnet-backend
+```
+
+Detection identifies tooling evidence and candidate verification commands. It does not approve commands, infer domain policy, or generate application code.
+
+When `--adopt-existing` finds a customized runtime `review-prompt.md`, the approved plan records its hash and migrates it to the project-owned override path before replacing the shared runtime. A conflicting pre-existing override fails closed.
+
+When a Claude Stop hook enqueues a report before `bounded-resume` performs its own durable enqueue, the controller accepts the duplicate only if the matching message hash is still present in `pending`. Duplicates found only in completed or failed history remain fail-closed.
+
+## Upgrade, Uninstall, And Rollback
+
+Upgrade, uninstall, rollback, and legacy migration use the same internal plan validation as installation. They are maintainer operations, not normal onboarding steps; use `docs/installer-contract.md` instead of asking users to copy an authorization token.
+
+An upgrade stages the complete runtime before activation and holds an upgrade marker while it verifies the new runtime and records invalidated unclaimed authorizations. An interrupted operation exposes either the previous runtime or an explicit incomplete-upgrade state, never a partially copied runtime. Resolve an incomplete upgrade through a controller-validated rollback before starting new work.
+
+`uninstall` removes unchanged installer-owned files and preserves project state that was changed after installation. `rollback` is the exact-state recovery path: it restores the latest pre-operation snapshot, including Claude settings, queue/review artifacts, and the ownership manifest.
+
+The default persistent backup root is `%LOCALAPPDATA%\CodexReviewBridge\backups` on Windows. Use `--backup-root <external-path>` during planning to select another location. The backup root must be outside the target repository.
+
+Persistent snapshots may contain private CONTROL, queue, review, or Claude settings data. Do not publish, commit, or include the backup root in a distribution archive. Automatic retention/pruning is not part of this preview.
+
+Legacy v2/v3 migration is separate from fresh installation. It is model-free, refuses active legacy state, archives the exact legacy bytes, and creates no replayable authorization. Fresh installs do not use this path.
+
+No remote repository, npm publication, commit, push, or deploy is performed by this preview. `init` invokes no model; native `work-start` does.
+
+## Verification Evidence
+
+On 2026-08-28, the rc.2 source passed 33/33 installer, profile, product-init, workspace-evidence, rollback, package-integrity, human-approval, and disposable-workspace tests on Windows. The no-Git Vue workspace completed `PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, and `RATE_LIMIT` through the public fake-CLI workflow without leaving self-test artifacts in the installed project. `npm run test:runtime` passed 33/33 tests. `npm run test:state-v4:evidence` passed all 20 acceptance suites, including AC-20 same-plan replay rejection and real local NTFS claim, stale-lock, stale-guard, migration, rollback, upgrade, and concurrency evidence. This does not constitute native APFS, ext4, macOS CLI, or Linux CLI verification.
+
+Maintainers can separately verify the installed Claude Code session contract. This opt-in smoke makes exactly two small live Claude calls: the first uses `--session-id <uuid>` and the second uses `--resume <same uuid>`. It runs in Claude safe mode, disables tools, uses a temporary working directory, and sets a US$0.25 maximum per call. It is intentionally excluded from `npm test`.
+
+```powershell
+npm run smoke:claude-session-live -- --confirm-live-model-calls
+```
+
+The live smoke passed on Claude Code 2.1.218 on 2026-08-27. It verified that the first `--session-id` call and the following `--resume` call returned the same UUID and that the resumed call recovered a nonce supplied only in the first turn.

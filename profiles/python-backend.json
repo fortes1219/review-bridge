@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "profile_id": "python-backend",
+  "display_name": "Python backend",
+  "required_files_any": ["pyproject.toml", "requirements.txt", "Pipfile", "setup.py"],
+  "auto_detection": { "files_any": ["pyproject.toml", "requirements.txt", "Pipfile", "setup.py"] },
+  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
+  "semantic_reference_tool": "pyright",
+  "structural_search_tool": "sg",
+  "capability_patterns": [
+    { "name": "fastapi", "file": "pyproject.toml", "patterns": ["fastapi"] },
+    { "name": "fastapi", "file": "requirements.txt", "patterns": ["(^|\\n)fastapi([=<>~!]|$)"] },
+    { "name": "django", "file": "pyproject.toml", "patterns": ["django"] },
+    { "name": "django", "file": "requirements.txt", "patterns": ["(^|\\n)django([=<>~!]|$)"] },
+    { "name": "flask", "file": "pyproject.toml", "patterns": ["flask"] },
+    { "name": "flask", "file": "requirements.txt", "patterns": ["(^|\\n)flask([=<>~!]|$)"] },
+    { "name": "pytest", "file": "pyproject.toml", "patterns": ["pytest"] },
+    { "name": "pytest", "file": "requirements.txt", "patterns": ["(^|\\n)pytest([=<>~!]|$)"] },
+    { "name": "ruff", "file": "pyproject.toml", "patterns": ["\\[tool\\.ruff"] },
+    { "name": "mypy", "file": "pyproject.toml", "patterns": ["\\[tool\\.mypy"] }
+  ],
+  "verification_rules": [
+    { "command": "python -m pytest", "files_any": ["pytest.ini", "conftest.py"] },
+    { "command": "python -m ruff check .", "files_any": ["ruff.toml"] },
+    { "command": "python -m mypy .", "files_any": ["mypy.ini"] }
+  ],
+  "review_terms": {
+    "security": ["authentication", "authorization", "credential", "csrf", "request cancellation"],
+    "full": ["API contract", "ORM model", "migration", "transaction state", "async task lifecycle"]
+  }
+}

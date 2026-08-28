@@ -1,0 +1,28 @@
+{
+  "package": "codex-review-bridge-runtime",
+  "version": "0.2.0-rc.2",
+  "snapshot_date": "2026-08-28",
+  "status": "private-release-candidate",
+  "active_target": "win32-x64",
+  "candidate_targets": ["darwin-arm64"],
+  "experimental_targets": ["linux-x64"],
+  "included": [
+    "Node shared core",
+    "Windows, Darwin, and Linux adapters",
+    "fake CLI and native smoke tests",
+    "generic review prompt",
+    "state contract v4 default policy and hook integration",
+    "immutable work-package, authorization, claim, run, and event state",
+    "bridge completion rule",
+    "architecture documentation"
+  ],
+  "excluded": [
+    "legacy or real CONTROL.json",
+    "Claude session IDs",
+    "queue and review artifacts",
+    "logs and locks",
+    "project handoff and contracts",
+    "environment files and credentials",
+    "legacy PowerShell rollback implementation"
+  ]
+}

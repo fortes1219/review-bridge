@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "entrypoint": "bootstrap.mjs",
+  "commands": [
+    "enqueue",
+    "review",
+    "bounded-resume",
+    "work-plan",
+    "work-start",
+    "work-status",
+    "work-cancel",
+    "status",
+    "wait",
+    "migrate-control"
+  ],
+  "adapters": {
+    "win32-x64": {
+      "id": "win32-node",
+      "module": "./platforms/win32-x64/adapter.mjs",
+      "status": "active",
+      "runtime_verified": true
+    },
+    "darwin-arm64": {
+      "id": "darwin-arm64-node",
+      "module": "./platforms/darwin-arm64/adapter.mjs",
+      "status": "candidate",
+      "runtime_verified": false
+    },
+    "linux-x64": {
+      "id": "linux-x64-node",
+      "module": "./platforms/linux-x64/adapter.mjs",
+      "status": "experimental",
+      "runtime_verified": false
+    }
+  }
+}

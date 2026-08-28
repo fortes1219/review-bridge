@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "profile_id": "java-backend",
+  "display_name": "Java backend",
+  "required_files_any": ["pom.xml", "build.gradle", "build.gradle.kts"],
+  "auto_detection": { "files_any": ["pom.xml", "build.gradle", "build.gradle.kts"] },
+  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
+  "semantic_reference_tool": "jdtls",
+  "structural_search_tool": "sg",
+  "capability_patterns": [
+    { "name": "spring-boot", "file": "pom.xml", "patterns": ["spring-boot"] },
+    { "name": "spring-boot", "file": "build.gradle", "patterns": ["spring-boot"] },
+    { "name": "spring-boot", "file": "build.gradle.kts", "patterns": ["spring-boot"] },
+    { "name": "quarkus", "file": "pom.xml", "patterns": ["quarkus"] },
+    { "name": "micronaut", "file": "build.gradle", "patterns": ["micronaut"] }
+  ],
+  "verification_rules": [
+    { "command": ".\\mvnw.cmd test", "files_any": ["mvnw.cmd"], "platform": "win32" },
+    { "command": "./mvnw test", "files_any": ["mvnw"], "platforms": ["darwin", "linux"] },
+    { "command": "mvn test", "files_any": ["pom.xml"], "files_none": ["mvnw", "mvnw.cmd"] },
+    { "command": ".\\gradlew.bat test", "files_any": ["gradlew.bat"], "platform": "win32" },
+    { "command": "./gradlew test", "files_any": ["gradlew"], "platforms": ["darwin", "linux"] },
+    { "command": "gradle test", "files_any": ["build.gradle", "build.gradle.kts"], "files_none": ["gradlew", "gradlew.bat"] }
+  ],
+  "review_terms": {
+    "security": ["authentication", "authorization", "credential", "csrf", "security filter chain"],
+    "full": ["API contract", "entity model", "migration", "transaction boundary", "cross-module architecture"]
+  }
+}

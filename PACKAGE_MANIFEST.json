@@ -1,0 +1,56 @@
+{
+  "package": "codex-review-bridge-installer",
+  "installer_version": "0.2.0-rc.2",
+  "bridge_version": "0.2.0-rc.2",
+  "snapshot_date": "2026-08-28",
+  "status": "private-release-candidate",
+  "active_target": "win32-x64",
+  "candidate_targets": ["darwin-arm64"],
+  "experimental_targets": ["linux-x64"],
+  "profiles": [
+    "rust-backend",
+    "vue-frontend",
+    "node-backend",
+    "go-backend",
+    "python-backend",
+    "java-backend",
+    "php-laravel",
+    "dotnet-backend"
+  ],
+  "included": [
+    "checksum-gated plan/apply/upgrade/uninstall/rollback lifecycle",
+    "transaction lock, ownership manifest, immediate failure rollback, and persistent exact-state rollback points",
+    "structural Claude settings merge",
+    "v4 immutable work-package, authorization, claim, run projection, and append-only event lifecycles",
+    "fresh install with no CONTROL, active authorization, or session identity",
+    "checksum-gated v2/v3 migration with exact-byte archive and rollback",
+    "tighten-only policy snapshots, current-only 0.x upgrade invalidation, crash recovery, and budget extension",
+    "checksum-gated first-work-package plan/start/status/cancel lifecycle",
+    "one-command product init with four no-token fake gate checks",
+    "Git-optional workspace snapshot, delta, and scope-violation evidence",
+    "sanitized review bridge runtime",
+    "project-owned review prompt override preserved across adoption and upgrades",
+    "declarative Rust, Vue, Node.js, Go, Python, Java, Laravel, and .NET capability profiles",
+    "installer, runtime, and AC-01 through AC-20 acceptance tests with raw evidence",
+    "architecture and contract documentation"
+  ],
+  "excluded": [
+    "real CONTROL values and model session IDs",
+    "queue, review, log, lock, and prompt artifacts",
+    "project handoffs, contracts, and domain policy",
+    "environment files and credentials",
+    "persistent rollback snapshots and their private runtime data",
+    "Git history and remote configuration",
+    "npm publication metadata"
+  ],
+  "verification": [
+    "installer lifecycle, profile, product-init, workspace-evidence, and disposable-workspace tests: 31/31 passed on Windows 11",
+    "review bridge fake-CLI runtime tests: 33/33 passed on Windows 11",
+    "installed disposable repository completed PASS, FAIL_THEN_PASS, HARD_STOP, and RATE_LIMIT scenarios",
+    "Windows native adapter smoke passed without model calls",
+    "Claude Code 2.1.218 live --session-id then --resume contract smoke passed with the same UUID and resumed context",
+    "Gitleaks source scan passed before packaging",
+    "state contract v4 acceptance suites: AC-01 through AC-20 passed on real local NTFS",
+    "Darwin arm64 is a selectable canary candidate and is not native-verified; Linux remains experimental"
+  ]
+}
