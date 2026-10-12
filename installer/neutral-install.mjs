@@ -126,6 +126,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     detection,
     runtime_sha256: await runtimeFingerprint(),
     work_template_sha256: sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md"))),
+    rules_sha256: sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "rules.md"))),
     git: boundary,
     changes: [
       ...(boundary.repository && !boundary.ignored ? ["Keep Bridge private state out of Git using local Git exclusion"] : []),
@@ -241,6 +242,8 @@ async function applyNeutralInstallLocked(plan, claimed) {
     await fsp.mkdir(path.join(privateRoot, "work-packages"), { recursive: true });
     await fsp.copyFile(path.join(packageRoot, "project-templates", "work-package.md"),
       path.join(privateRoot, "work-packages", "TEMPLATE.md"));
+    await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"),
+      path.join(privateRoot, "review-bridge", "rules.md"));
     for (const name of ["pending", "running", "done", "failed", "work-packages", "authorizations",
       "authorization-claims", "authorization-invalidations", "runs", "events", "run-locks",
       "reconcile-guards", "upgrade-reports"]) {
@@ -257,6 +260,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
       plan_sha256: claimed,
       runtime_sha256: plan.runtime_sha256,
       work_template_sha256: plan.work_template_sha256,
+      rules_sha256: plan.rules_sha256,
       installed_files: installedFiles,
       git_exclusion: wroteExclude ? { path: excludePath, pattern: plan.git.pattern, added_prefix_newline: addedPrefixNewline } : null,
     });
@@ -347,6 +351,10 @@ export async function verifyNeutralInstall(target) {
   if (runtimeSha !== manifest.runtime_sha256) throw new Error("Neutral runtime checksum mismatch.");
   const templateSha = sha256(await fsp.readFile(path.join(privateRoot, "work-packages", "TEMPLATE.md")));
   if (templateSha !== manifest.work_template_sha256) throw new Error("Neutral work template checksum mismatch.");
+  // rules.md is owner-editable: it must exist and stay within one page; its content is not pinned.
+  const rulesText = await fsp.readFile(path.join(privateRoot, "review-bridge", "rules.md"), "utf8").catch(() => null);
+  if (rulesText === null) throw new Error("Neutral rules digest is missing (.review-bridge/review-bridge/rules.md).");
+  if (!rulesText.trim() || rulesText.length > 4000) throw new Error("Neutral rules digest must be 1 to 4000 characters.");
   const boundary = gitBoundary(root);
   if (boundary.repository && !boundary.ignored) throw new Error("Neutral Bridge state is not private in Git.");
   return { valid: true, layout: "neutral", roles: manifest.roles, runtime_sha256: runtimeSha };

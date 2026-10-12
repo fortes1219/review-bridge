@@ -27,6 +27,7 @@ const managed = {
   policyOverride: ".claude/review-bridge/policy.override.json",
   promptOverride: ".claude/review-bridge/review-prompt.md",
   workTemplate: ".claude/work-packages/TEMPLATE.md",
+  rulesDigest: ".claude/review-bridge/rules.md",
   manifest: ".claude/review-bridge-install.json",
   upgradeMarker: ".claude/review-queue/upgrade-in-progress.json",
 };
@@ -860,6 +861,11 @@ async function installOrUpgrade(target, plan, rollbackPoint) {
     await fsp.mkdir(path.dirname(path.join(target, managed.workTemplate)), { recursive: true });
     await fsp.copyFile(path.join(installerRoot, "project-templates", "work-package.md"), path.join(target, managed.workTemplate));
     seeded.push({ path: managed.workTemplate, seed_sha256: await hashFile(path.join(target, managed.workTemplate)) });
+  }
+  if (!(await exists(path.join(target, managed.rulesDigest)))) {
+    await fsp.mkdir(path.dirname(path.join(target, managed.rulesDigest)), { recursive: true });
+    await fsp.copyFile(path.join(installerRoot, "project-templates", "rules.md"), path.join(target, managed.rulesDigest));
+    seeded.push({ path: managed.rulesDigest, seed_sha256: await hashFile(path.join(target, managed.rulesDigest)) });
   }
   const settingsPath = path.join(target, managed.settings);
   await writeJson(settingsPath, mergeHook((await readJsonOptional(settingsPath)) || {}));

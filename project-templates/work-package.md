@@ -1,19 +1,33 @@
-# Work Package
+<!-- rb:name -->
+# 工作名稱
+小型牧場
 
-## Work
+<!-- rb:product -->
+## 產品
 
-Describe the requested change in multiple lines.
 
-## Acceptance Criteria
+<!-- rb:version -->
+## 版本
 
-- State the observable result.
-- State the verification that must pass.
 
-## Allowed Paths
+<!-- rb:work -->
+## 工作內容
+用 babylonJS 做一個小型牧場場景：有幾棵樹、一片牧草、一間放牧草的倉庫、一台農車。
 
-- List the application paths the writer may change.
+<!-- rb:acceptance -->
+## 可驗收條件
+- 打開頁面會看到牧場，裡面有樹、牧草、倉庫、農車
+- 用鍵盤方向鍵可以讓農車在牧場裡移動
+- 農車撞到倉庫會停下來，不會穿過去
 
-## Prohibited Actions
+<!-- rb:references -->
+## 參考資料（可略過）
 
-- Do not commit, push, deploy, or release.
-- Do not modify files outside the approved paths.
+<!--
+怎麼填（這段可以整段刪掉）：
+- 工作名稱：一句話，一行。產品和版本可以空著，有填會顯示在卡片和網頁上。
+- 工作內容：用你自己的話說要做什麼。不用技術細節。
+- 可驗收條件：每一條都是你打開成品可以自己確認的事：你會看到什麼、做什麼會發生什麼。三到四條就夠。這段一定要填。
+- 參考資料：可以空著。寫檔案或資料夾的路徑（例如 src/game/），Bridge 就只改那些地方；寫文字（例如「照首頁的做法」）只給人看。
+- 上面以 rb: 開頭的那幾行註解是 Bridge 認段落用的，不要改、不要刪。
+-->

@@ -71,6 +71,7 @@ const schemas = {
     "--max-claude-calls": { key: "maxCalls", type: "number" },
     "--max-claude-minutes": { key: "maxMinutes", type: "number" },
     "--out": { key: "outPath", type: "string" },
+    "--plain": { key: "plain", type: "boolean" },
   },
   "work-start": {
     "--plan": { key: "planPath", type: "string" },
@@ -356,6 +357,21 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       maxMinutes: options.maxMinutes ?? 8,
       outPath: options.outPath,
     });
+    // JSON stays the default because the installer and tests read it; --plain is the human summary (C5.2).
+    if (isV4 && options.plain) {
+      const order = plan.work_order;
+      const pathRefs = order ? order.references.filter((entry) => entry.kind === "path").length : 0;
+      process.stdout.write([
+        order ? "工作名稱：" + order.name : "工作包：" + plan.work_package_id,
+        ...(order && (order.product || order.version) ? ["產品／版本：" + [order.product, order.version].filter(Boolean).join(" / ")] : []),
+        "範圍：" + ({ default: "預設（整個專案減禁改清單）", references: "參考資料收緊", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
+        ...(order ? ["參考資料：" + order.references.length + " 條（" + pathRefs + " 個路徑）"] : []),
+        "plan：" + plan.plan_path,
+        "sha：" + plan.plan_sha256,
+        "下一步：work-start --plan " + plan.plan_path + " --approve " + plan.plan_sha256,
+      ].join("\n") + "\n");
+      return 0;
+    }
     process.stdout.write(JSON.stringify({
       valid: true,
       plan_path: plan.plan_path,
@@ -385,6 +401,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       planPath: options.planPath,
       approval,
       executionMode: options.fakeCli ? "fake_cli" : "native",
+      authorizedVia: options.approval ? "approve_flag" : options.yes ? "yes_flag" : "terminal",
     });
     const exitCode = await runBoundedResume({
       paths,

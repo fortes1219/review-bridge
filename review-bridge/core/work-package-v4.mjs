@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { assertUnder, fileExists, readJson, samePath, writeJson, writeText } from "./io.mjs";
@@ -13,7 +14,115 @@ import {
   loadControlView,
   readRun,
 } from "./state-v4.mjs";
-import { createWorkspaceBaseline } from "./workspace-evidence.mjs";
+import { hasWorkOrderMarkers, MESSAGES as ORDER_MESSAGES, parseWorkOrder, WorkOrderError } from "./work-order.mjs";
+import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspace-evidence.mjs";
+
+// T0-03 C2.1: fixed, in code, listed in every plan. Never from a model.
+export const FORBIDDEN_PATHS = Object.freeze([
+  ".git/**", ".review-bridge/**", ".claude/**", ".codex/**", ".env", ".env.*",
+  "**/*.pem", "**/*.key", "**/id_rsa*",
+  "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum", "poetry.lock", "composer.lock", "Gemfile.lock",
+  ".github/**", ".gitlab-ci.yml", "Jenkinsfile", "Dockerfile*", "docker-compose*", "**/*.tf",
+]);
+const RULES_RELATIVE = "review-bridge/rules.md";
+const RULES_MAX_CHARS = 4_000;
+const REFERENCE_MAX_FILES = 200;
+const REFERENCE_MAX_BYTES = 2 * 1024 * 1024;
+const SKIPPED_DIRS = new Set([".git", "node_modules", "dist", "coverage", "target", ".nuxt", ".output"]);
+
+function sha256Of(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+async function pathExists(paths, relative) {
+  const absolute = path.resolve(paths.repoRoot, ...relative.split("/"));
+  return await fsp.stat(absolute).then((stat) => ({ absolute, directory: stat.isDirectory() })).catch(() => null);
+}
+
+// C2: scope from references (narrowed), from --allow-paths (explicit, must be a subset), or the default.
+async function resolveScope({ paths, workOrder, allowedPaths }) {
+  const referencePaths = workOrder ? workOrder.references.filter((entry) => entry.kind === "path") : [];
+  const forbidden = [...FORBIDDEN_PATHS];
+  if (allowedPaths) {
+    const explicit = parseAllowedPaths(allowedPaths);
+    for (const entry of explicit) {
+      // C2.4 existence applies to human work orders; the legacy inline/test path keeps shape checks only.
+      if (workOrder && !(await pathExists(paths, entry))) throw new Error("允許路徑不存在：" + entry);
+      if (matchesForbiddenPath(entry, forbidden)) throw new Error("允許路徑在禁改清單內：" + entry);
+      if (referencePaths.length && !referencePaths.some((ref) => entry === ref.path || entry.startsWith(ref.path + "/"))) {
+        throw new Error("允許路徑不在參考資料的範圍內：" + entry);
+      }
+    }
+    return { allowed_paths: explicit, forbidden_paths: forbidden, source: "explicit" };
+  }
+  if (referencePaths.length) {
+    const narrowed = [...new Set(referencePaths.map((ref) => ref.path))].sort();
+    for (const entry of narrowed) {
+      if (matchesForbiddenPath(entry, forbidden)) throw new Error("參考資料的路徑在禁改清單內：" + entry);
+    }
+    return { allowed_paths: narrowed, forbidden_paths: forbidden, source: "references" };
+  }
+  if (!workOrder) throw new Error("At least one allowed path is required.");
+  return { allowed_paths: ["**"], forbidden_paths: forbidden, source: "default" };
+}
+
+// C3.3: the rules digest the writer will be shown, sealed into the plan.
+export async function snapshotRules(paths) {
+  const absolute = path.join(paths.configRoot, "rules.md");
+  const relative = path.basename(paths.privateRoot) + "/" + RULES_RELATIVE;
+  const text = await fsp.readFile(absolute, "utf8").catch(() => null);
+  if (text === null) throw new Error("規則摘要檔不見了：" + relative + "。從 project-templates/rules.md 復原後再建 plan。");
+  if (!text.trim()) throw new Error("規則摘要檔是空的：" + relative + "。寫回內容或從 project-templates/rules.md 復原。");
+  if (text.length > RULES_MAX_CHARS) throw new Error("規則摘要檔超過 " + RULES_MAX_CHARS + " 字：" + relative + "。縮短後再建 plan。");
+  return { path: relative, sha256: sha256Of(text), text };
+}
+
+// C3.4: every referenced file by hash; contents are verified at startup, not copied here.
+export async function snapshotReferences(paths, workOrder) {
+  const records = [];
+  let totalFiles = 0;
+  let totalBytes = 0;
+  const count = (bytes) => {
+    totalFiles += 1;
+    totalBytes += bytes;
+    if (totalFiles > REFERENCE_MAX_FILES || totalBytes > REFERENCE_MAX_BYTES) {
+      throw new Error("參考資料太多：超過 " + REFERENCE_MAX_FILES + " 個檔或 2 MiB，請把路徑收窄。");
+    }
+  };
+  for (const reference of (workOrder?.references || []).filter((entry) => entry.kind === "path")) {
+    const found = await pathExists(paths, reference.path);
+    if (!found) throw new Error("參考資料裡這條路徑不存在：" + reference.path);
+    if (!found.directory) {
+      const buffer = await fsp.readFile(found.absolute);
+      count(buffer.length);
+      records.push({ path: reference.path, sha256: sha256Of(buffer), bytes: buffer.length });
+      continue;
+    }
+    const files = [];
+    async function walk(directory, prefix) {
+      const entries = await fsp.readdir(directory, { withFileTypes: true });
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.isSymbolicLink()) continue;
+        const relative = prefix + "/" + entry.name;
+        if (entry.isDirectory()) {
+          if (!SKIPPED_DIRS.has(entry.name)) await walk(path.join(directory, entry.name), relative);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const buffer = await fsp.readFile(path.join(directory, entry.name));
+        count(buffer.length);
+        files.push({ path: relative, sha256: sha256Of(buffer), bytes: buffer.length });
+      }
+    }
+    await walk(found.absolute, reference.path);
+    records.push({ path: reference.path, files });
+  }
+  return records;
+}
+
+function referenceDigest(records) {
+  return sha256Of(JSON.stringify(records));
+}
 
 const allowedChangeTypes = new Set([
   "docs", "code", "tests", "config", "contract", "schema", "migration", "external-behavior",
@@ -90,8 +199,16 @@ export async function createV4WorkPackagePlan({
     taskText = await fsp.readFile(resolved, "utf8");
   }
   taskText = requiredText(taskText, "Task", 40_000);
+  // A human work order (from a file, or any text carrying rb: markers) is parsed by fixed rules;
+  // inline --task text without markers is the legacy/test path and keeps requiring --allow-paths.
+  const workOrder = hasWorkOrderMarkers(taskText) ? await parseWorkOrder(taskText, { repoRoot: paths.repoRoot }) : null;
+  // A file without markers is not a work order; it is accepted only as the legacy path with an explicit scope.
+  if (!workOrder && taskFile && !allowedPaths) throw new WorkOrderError([ORDER_MESSAGES.no_markers()]);
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   const budget = validateBudget(snapshot.effective_policy, maxCalls, maxMinutes);
+  const scope = await resolveScope({ paths, workOrder, allowedPaths });
+  const rules = workOrder ? await snapshotRules(paths) : null;
+  const references = workOrder ? await snapshotReferences(paths, workOrder) : [];
   const plan = {
     schema_version: 4,
     operation: "start_work_package",
@@ -104,9 +221,12 @@ export async function createV4WorkPackagePlan({
     breakpoint: requiredText(breakpoint, "Breakpoint", 160),
     task: taskText,
     task_sha256: digest(taskText),
+    work_order: workOrder,
+    rules,
+    references,
     scope: {
       change_types: parseChangeTypes(changeTypes),
-      allowed_paths: parseAllowedPaths(allowedPaths),
+      ...scope,
     },
     budget,
     effective_policy_sha256: snapshot.effective_policy_sha256,
@@ -120,7 +240,7 @@ export async function createV4WorkPackagePlan({
   return { ...plan, plan_path: resolvedOut };
 }
 
-export async function authorizeV4WorkPackage({ paths, planPath, approval, executionMode = "native" }) {
+export async function authorizeV4WorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
   const plan = await readJson(resolvedPlan);
   if (plan.schema_version !== 4 || plan.operation !== "start_work_package") throw new Error("Unsupported v4 work plan.");
@@ -136,6 +256,18 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     throw new Error("Work plan is stale because effective policy changed.");
   }
   validateBudget(snapshot.effective_policy, plan.budget.max_claude_calls, plan.budget.max_claude_minutes_per_call);
+  // C3.7: what the model will be shown must still be what the Owner approved.
+  if (plan.rules) {
+    const current = await snapshotRules(paths);
+    if (current.sha256 !== plan.rules.sha256) throw new Error("批准後 " + plan.rules.path + " 變了，重新建 plan");
+  }
+  if (plan.work_order) {
+    const current = await snapshotReferences(paths, plan.work_order);
+    if (referenceDigest(current) !== referenceDigest(plan.references || [])) {
+      const changed = current.find((entry, index) => JSON.stringify(entry) !== JSON.stringify((plan.references || [])[index]));
+      throw new Error("批准後 " + (changed ? changed.path : "參考資料") + " 變了，重新建 plan");
+    }
+  }
   const workPackage = await createImmutableWorkPackage(paths, {
     work_package_id: plan.work_package_id,
     task: plan.task,
@@ -147,7 +279,9 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
   const authorization = await createAuthorization(paths, {
     authorizationId: "plan-" + plan.plan_sha256,
     kind: "start",
-    authorizedBy: plan.owner,
+    // C4: the OS user running work-start, never the name typed into the plan.
+    authorizedBy: os.userInfo().username,
+    authorizedVia,
     workPackageSha256: workPackage.record.content_sha256,
     policySha256: snapshot.effective_policy_sha256,
     ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,
@@ -157,6 +291,7 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     paths,
     planSha256: plan.plan_sha256,
     allowedPaths: plan.scope.allowed_paths,
+    forbiddenPaths: plan.scope.forbidden_paths || [],
   });
   const started = await claimStartAuthorization(paths, authorization.authorization_id, {
     runId: plan.proposed_run_id,

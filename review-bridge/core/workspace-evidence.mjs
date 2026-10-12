@@ -39,9 +39,36 @@ function isExcluded(relative) {
 export function matchesAllowedPath(relative, allowedPaths) {
   const candidate = normalizeRelative(relative);
   return allowedPaths.some((entry) => {
+    if (entry === "**") return true;
     const allowed = normalizeRelative(entry).replace(/\/$/, "");
     return candidate === allowed || candidate.startsWith(allowed + "/");
   });
+}
+
+// Glob subset for the fixed forbidden list (T0-03 C2.1): "**/" any depth, "**" any run,
+// "*" within one segment, "?" one character. A pattern without "/" matches a file name at any depth.
+function globToRegExp(pattern) {
+  let out = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      if (pattern[index + 1] === "*") {
+        if (pattern[index + 2] === "/") { out += "(?:.*/)?"; index += 2; } else { out += ".*"; index += 1; }
+      } else {
+        out += "[^/]*";
+      }
+    } else if (char === "?") {
+      out += "[^/]";
+    } else {
+      out += char.replace(/[.+^${}()|[\]\\]/, "\\$&");
+    }
+  }
+  return new RegExp("^" + (pattern.includes("/") ? "" : "(?:.*/)?") + out + "$");
+}
+
+export function matchesForbiddenPath(relative, forbiddenPaths) {
+  const candidate = normalizeRelative(relative);
+  return (forbiddenPaths || []).some((pattern) => globToRegExp(pattern).test(candidate));
 }
 
 async function manifest(root) {
@@ -74,7 +101,7 @@ function byPath(files) {
   return new Map(files.map((file) => [file.path, file]));
 }
 
-export async function createWorkspaceBaseline({ paths, planSha256, allowedPaths }) {
+export async function createWorkspaceBaseline({ paths, planSha256, allowedPaths, forbiddenPaths = [] }) {
   const evidenceId = String(planSha256).slice(0, 32);
   const evidenceDir = assertUnder(path.join(paths.evidenceRoot, evidenceId), paths.evidenceRoot, "Evidence directory");
   await fsp.rm(evidenceDir, { recursive: true, force: true });
@@ -98,6 +125,7 @@ export async function createWorkspaceBaseline({ paths, planSha256, allowedPaths 
     created_at: new Date().toISOString(),
     repo_root: paths.repoRoot,
     allowed_paths: allowedPaths,
+    forbidden_paths: forbiddenPaths,
     files: baseline.files,
     total_bytes: baseline.total_bytes,
     copied_allowed_files: copied.map((file) => file.path),
@@ -129,7 +157,8 @@ export async function createWorkspaceDelta({ paths, baselinePath, deltaId = "cur
   }
   changed.sort((a, b) => a.path.localeCompare(b.path));
   const scopeViolations = changed
-    .filter((entry) => !matchesAllowedPath(entry.path, baseline.allowed_paths || []))
+    .filter((entry) => !matchesAllowedPath(entry.path, baseline.allowed_paths || [])
+      || matchesForbiddenPath(entry.path, baseline.forbidden_paths || []))
     .map((entry) => entry.path);
   const delta = {
     schema_version: 1,
@@ -138,6 +167,7 @@ export async function createWorkspaceDelta({ paths, baselinePath, deltaId = "cur
     created_at: new Date().toISOString(),
     baseline_path: baselineFile,
     allowed_paths: baseline.allowed_paths,
+    forbidden_paths: baseline.forbidden_paths || [],
     changed_files: changed,
     scope_violations: scopeViolations,
   };
