@@ -1,15 +1,19 @@
 import path from "node:path";
 import { assertUnder } from "./io.mjs";
 
-export function getBridgePaths(repoRoot, bridgeRoot) {
+export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName = ".claude" } = {}) {
   const root = path.resolve(repoRoot);
-  const privateRoot = assertUnder(path.join(root, ".claude"), root, "Private root");
+  const runtimeRoot = path.resolve(bridgeRoot);
+  if (![".claude", ".review-bridge"].includes(privateRootName)) {
+    throw new Error("Unsupported Bridge private root.");
+  }
+  const privateRoot = assertUnder(path.join(root, privateRootName), root, "Private root");
   const queueRoot = assertUnder(path.join(privateRoot, "review-queue"), privateRoot, "Queue root");
   const reviewsRoot = assertUnder(path.join(privateRoot, "reviews"), privateRoot, "Reviews root");
   const configRoot = assertUnder(path.join(privateRoot, "review-bridge"), privateRoot, "Bridge config root");
   return {
     repoRoot: root,
-    bridgeRoot: path.resolve(bridgeRoot),
+    bridgeRoot: runtimeRoot,
     privateRoot,
     queueRoot,
     reviewsRoot,

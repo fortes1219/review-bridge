@@ -2,6 +2,7 @@
 
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import {
   bridgeRootFrom,
   resolveAdapterModule,
@@ -15,6 +16,10 @@ import { getBridgePaths } from "./core/paths.mjs";
 
 const bridgeRoot = bridgeRootFrom(import.meta.url);
 const repoRoot = path.resolve(bridgeRoot, "../../..");
+const privateRootName = path.basename(path.dirname(path.dirname(bridgeRoot)));
+if (![".claude", ".review-bridge"].includes(privateRootName)) {
+  throw new Error("Bridge runtime is outside a supported private layout.");
+}
 
 function printUsage() {
   process.stderr.write(
@@ -32,6 +37,10 @@ function printUsage() {
       "  status           Show queue and latest-review status",
       "  wait             Wait for the next queued report",
       "  doctor           Validate platform selection without running work",
+      "  watch            Open the local setup page (loopback only)",
+      "  up               Start the resident page service in the background",
+      "  down             Stop the resident page service",
+      "  ps               Show whether the resident page service is running",
       "  migrate-control  Plan/apply/rollback a legacy v2/v3 CONTROL migration",
       "",
     ].join("\n"),
@@ -50,14 +59,20 @@ async function main() {
     throw new Error("Unsupported review bridge command: " + command);
   }
   const fakeRequested = args.includes("--fake-cli");
+  // Stage 2 has no UV-backed authorization issuer yet. Keep every native model
+  // entrypoint closed while fake acceptance and model-free inspection remain usable.
+  if (!fakeRequested && ["work-start", "review", "bounded-resume", "enqueue"].includes(command)) {
+    throw new Error("Native execution is unavailable until Stage 2 human authorization is verified.");
+  }
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "migrate-control"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "migrate-control", "up", "down", "ps"]);
   let adapterDefinition = null;
   let implementation = {};
+  let adapterSource = null;
   if (fakeRequested) {
-    if (!["work-start", "doctor"].includes(command)) {
-      throw new Error("--fake-cli is supported only by work-start and doctor.");
+    if (!["work-start", "doctor", "watch", "up"].includes(command)) {
+      throw new Error("--fake-cli is supported only by work-start, doctor, watch, and up.");
     }
     implementation = createFakeAdapter(bridgeRoot, fakeScenario);
     adapterDefinition = {
@@ -67,10 +82,11 @@ async function main() {
   } else if (!modelFreeCommands.has(command)) {
     adapterDefinition = selectAdapter(manifest, process.platform, process.arch);
     const moduleUrl = resolveAdapterModule(bridgeRoot, adapterDefinition.module);
+    adapterSource = fileURLToPath(moduleUrl);
     implementation = await import(moduleUrl);
   }
   if (command === "doctor") {
-    const paths = getBridgePaths(repoRoot, bridgeRoot);
+    const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
     process.stdout.write(JSON.stringify(
       await inspectDoctor({ paths, adapter: adapterDefinition, manifest }),
       null,
@@ -90,6 +106,10 @@ async function main() {
     bridgeRoot,
     repoRoot,
     adapter: implementation,
+    adapterId: adapterDefinition?.id || null,
+    adapterDefinition,
+    adapterSource,
+    privateRootName,
   });
 }
 

@@ -19,6 +19,9 @@ import {
   rollbackLegacyControlMigration,
 } from "./migration-v4.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
+import { createReviewerProbeService } from "./reviewer-probe.mjs";
+import { serviceDown, serviceFiles, serviceStatus, serviceUp } from "./service.mjs";
+import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watch.mjs";
 import {
   authorizeWorkPackage,
   cancelWorkPackage,
@@ -89,6 +92,15 @@ const schemas = {
   wait: {
     "--timeout-minutes": { key: "timeoutMinutes", type: "number" },
   },
+  watch: {
+    "--port": { key: "port", type: "number" },
+    "--fake-cli": { key: "fakeCli", type: "boolean" },
+  },
+  up: {
+    "--fake-cli": { key: "fakeCli", type: "boolean" },
+  },
+  down: {},
+  ps: {},
 };
 
 async function confirmV4WorkStart(paths, planPath, assumeYes) {
@@ -121,8 +133,46 @@ async function confirmV4WorkStart(paths, planPath, assumeYes) {
   return plan.plan_sha256;
 }
 
-export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter }) {
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapterSource, port: portOption }) {
+  const config = await readJson(paths.bridgeConfigPath);
+  const port = portOption ?? config.watch?.port ?? DEFAULT_WATCH_PORT;
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("watch port must be 0 through 65535.");
+  const roles = { writer: config.roles?.writer?.provider_id, reviewer: config.roles?.reviewer?.provider_id };
+  if (!roles.writer || !roles.reviewer) throw new Error("watch requires roles selected by init.");
+  const service = createReviewerProbeService({
+    roles,
+    adapter,
+    adapterId,
+    adapterConfig: adapterDefinition || null,
+    adapterSource,
+    // Audit only: the watch process memory is the sole source of a current proof.
+    auditPath: path.join(paths.configRoot, "reviewer-probe-audit.json"),
+  });
+  const watch = await startWatchServer({
+    service,
+    uiRoot: path.join(paths.bridgeRoot, "ui"),
+    port,
+    strictPort: config.watch?.strict_port === true,
+  });
+  if (watch.bumped) {
+    const notice = portBumpNotice(watch.requestedPort, watch.url, findPortOwner(watch.requestedPort));
+    process.stdout.write(notice + "\n");
+    Promise.resolve(adapter.notify?.("Review Bridge", notice)).catch(() => {});
+  }
+  // The stable URL file is what up, ps, and editors read; it survives restarts.
+  await fsp.writeFile(serviceFiles(paths).urlPath, watch.url + "\n", "utf8");
+  process.stdout.write("Review Bridge setup page: " + watch.url + "\n"
+    + "Opening or refreshing the page uses no model. Press Ctrl+C to stop.\n");
+  await new Promise((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  await watch.close();
+  return 0;
+}
+
+export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName = ".claude" }) {
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
   const migrationAction = command === "migrate-control" ? args[0] : null;
   const commandArgs = command === "migrate-control" ? args.slice(1) : args;
   const options = parseOptions(commandArgs, schemas[command] || {});
@@ -199,6 +249,21 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     }
   }
 
+  if (command === "watch") {
+    if (!isV4) throw new Error("watch requires the v4 runtime configuration created by init.");
+    return await startWatch({ paths, adapter, adapterId, adapterDefinition, adapterSource, port: options.port });
+  }
+  if (["up", "down", "ps"].includes(command)) {
+    if (!isV4) throw new Error(command + " requires the v4 runtime configuration created by init.");
+    if (command === "up") {
+      return (await serviceUp({
+        paths,
+        bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs"),
+        watchArgs: options.fakeCli ? ["--fake-cli"] : [],
+      })).exitCode;
+    }
+    return (await (command === "down" ? serviceDown : serviceStatus)({ paths })).exitCode;
+  }
   if (command === "status") {
     process.stdout.write(JSON.stringify(await queueStatus(paths), null, 2) + "\n");
     return 0;

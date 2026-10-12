@@ -6,7 +6,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { inspectStateFilesystem } from "../review-bridge/core/filesystem-v4.mjs";
 import { getBridgePaths } from "../review-bridge/core/paths.mjs";
@@ -240,7 +240,7 @@ function removeHook(settings) {
   return output;
 }
 
-function projectPolicyOverride(profile) {
+export function projectPolicyOverride(profile) {
   const rules = [];
   if ((profile.review_terms?.security || []).length) {
     rules.push({
@@ -351,7 +351,7 @@ async function autoProfileMatches(target, profile) {
   return Object.values(rules).some((value) => Array.isArray(value) && value.length > 0);
 }
 
-async function resolveProfile(target, requestedId) {
+export async function resolveProfile(target, requestedId) {
   if (requestedId !== "auto") return await loadProfile(requestedId);
   const matched = [];
   for (const id of await listProfileIds()) {
@@ -365,7 +365,7 @@ async function resolveProfile(target, requestedId) {
   return matched[0];
 }
 
-async function detectProject(target, profile) {
+export async function detectProject(target, profile) {
   const evidence = [];
   for (const candidate of profile.required_files_any || []) {
     if (await exists(path.join(target, candidate))) evidence.push(candidate);
@@ -1062,9 +1062,11 @@ async function main() {
   throw new Error("Unknown command: " + command);
 }
 
-try {
-  process.exitCode = await main();
-} catch (error) {
-  process.stderr.write("Installer failed closed: " + error.message + "\n");
-  process.exitCode = 2;
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  try {
+    process.exitCode = await main();
+  } catch (error) {
+    process.stderr.write("Installer failed closed: " + error.message + "\n");
+    process.exitCode = 2;
+  }
 }

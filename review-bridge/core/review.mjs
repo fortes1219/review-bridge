@@ -12,6 +12,12 @@ import {
 } from "./io.mjs";
 import { runProcess } from "./process.mjs";
 import { validateJobPolicy } from "./policy.mjs";
+import {
+  classifyProviderFailure,
+  codexDiagnosticTrailer,
+  readEvidenceTail,
+  writeFailureRecord,
+} from "./provider-failure.mjs";
 
 function renderPrompt(template, values) {
   let output = template;
@@ -69,6 +75,7 @@ export async function runReviewWorker({
   }
   const codex = await adapter.resolveExecutable("codex");
   const release = await acquireLock(paths.workerLockPath);
+  const outcomes = [];
   try {
     const jobs = await listJson(paths.pendingDir);
     for (const pendingPath of jobs) {
@@ -95,6 +102,7 @@ export async function runReviewWorker({
         throw error;
       }
 
+      let providerFailure = null;
       try {
         const job = await readJson(runningPath);
         validateJobPolicy(job, control);
@@ -112,6 +120,7 @@ export async function runReviewWorker({
         await writeText(promptPath, prompt);
 
         let exitCode = 0;
+        let timedOut = false;
         if (dryRun) {
           await writeText(resultPath, [
             "# Review Bridge Dry Run",
@@ -144,9 +153,24 @@ export async function runReviewWorker({
             stderrPath,
           });
           exitCode = processResult.exitCode;
+          timedOut = Boolean(processResult.timedOut);
         }
 
         if (exitCode !== 0 || !(await fileExists(resultPath)) || (await fsp.stat(resultPath)).size === 0) {
+          const classified = classifyProviderFailure({
+            role: "reviewer",
+            provider: "codex",
+            phase: "review",
+            exitCode,
+            timedOut,
+            texts: [codexDiagnosticTrailer(await readEvidenceTail(stderrPath))],
+          });
+          const written = await writeFailureRecord(paths, paths.reviewsRoot, jobId, classified, {
+            stdout_path: stdoutPath,
+            stderr_path: stderrPath,
+            report_path: reportPath,
+          });
+          providerFailure = { ...written.record, record_path: written.record_path };
           throw new Error("Codex review failed or produced no result (exit code " + exitCode + ").");
         }
         const completed = {
@@ -159,12 +183,15 @@ export async function runReviewWorker({
         await writeJson(runningPath, completed);
         await writeJson(metadataPath, completed);
         await fsp.rename(runningPath, donePath);
+        outcomes.push({ job_id: jobId, status: "done", result_path: resultPath });
         if (!dryRun) await writeText(paths.latestPath, resultPath + "\n");
         if (!noNotification) await adapter.notify("Codex review complete", resultPath);
       } catch (error) {
         const errorPath = path.join(paths.reviewsRoot, jobId + "-error.txt");
         await writeText(errorPath, new Date().toISOString() + "\n" + error.message + "\n");
+        let preservedJobPath = null;
         if (await fileExists(runningPath)) {
+          preservedJobPath = runningPath;
           try {
             const job = await readJson(runningPath);
             const failed = {
@@ -172,18 +199,28 @@ export async function runReviewWorker({
               status: "failed",
               failed_at: new Date().toISOString(),
               error_path: errorPath,
+              provider_failure: providerFailure,
             };
             await writeJson(runningPath, failed);
             await writeJson(metadataPath, failed);
             await fsp.rename(runningPath, failedPath);
+            preservedJobPath = failedPath;
           } catch {
             // Keep the running job and error artifact for manual recovery.
           }
         }
+        outcomes.push({
+          job_id: jobId,
+          status: "failed",
+          error_path: errorPath,
+          job_path: preservedJobPath && await fileExists(preservedJobPath) ? preservedJobPath : null,
+          provider_failure: providerFailure,
+        });
         if (!noNotification) await adapter.notify("Codex review failed", errorPath);
       }
     }
   } finally {
     await release();
   }
+  return outcomes;
 }

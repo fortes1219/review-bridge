@@ -1,0 +1,13 @@
+body { font-family: system-ui, sans-serif; margin: 0; background: #f6f6f4; color: #1d1d1b; }
+main { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; }
+h1 { font-size: 1.4rem; }
+h2 { font-size: 1.1rem; margin-top: 0; }
+dt { font-weight: 600; margin-top: .5rem; }
+dd { margin: .25rem 0 0 0; }
+.note { color: #555; }
+.cost { background: #fff6e0; border-left: 4px solid #d79b00; padding: .5rem .75rem; }
+.ok { color: #1a7f37; }
+.bad { color: #b42318; }
+button { font-size: 1rem; padding: .5rem 1rem; margin-top: .5rem; }
+button[disabled] { opacity: .5; }

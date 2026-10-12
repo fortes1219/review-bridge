@@ -1,5 +1,24 @@
 # Codex Review Bridge Installer
 
+## Stage 2 development status
+
+The current development branch supports role selection and a provider-neutral private install:
+
+```text
+node bridge.mjs roles-check --writer codex --reviewer claude
+node bridge.mjs init --target <workspace> --writer codex --reviewer claude
+```
+
+`init` checks the selected CLIs and sign-in state without calling a model. If a CLI is missing, signed out, or its sign-in state is unknown, `init` shows the missing step and reports the roles as not ready; setup still completes with fake self-tests only, which need no CLI or login. It installs under `.review-bridge/`, leaving existing `.claude/` and `.codex/` alone. Four fake scenarios run in a disposable copy. Reviewer write denial and independent sessions have not been proved, so native readiness remains false. Every native model entrypoint rejects until the Stage 2 UV authorization issuer is implemented. The rc.2 work commands below are historical and cannot start native work in this branch. Neutral upgrade and uninstall are still in development.
+
+After `init`, open the local setup page:
+
+```text
+node .review-bridge/tools/review-bridge/bootstrap.mjs watch
+```
+
+The page binds to `127.0.0.1` only and shows the selected writer and reviewer with their CLI and sign-in status. Opening or refreshing it uses no model. The button "將使用一次模型呼叫確認 reviewer 無法寫入" runs one reviewer call in a disposable folder under the provider's read-only sandbox and asks it to write a unique file. It passes only when the reviewer really tried to write, the sandbox denied it, and no file appeared. It also requires a successful CLI exit, a completed run, and exactly one recognisable fixed write command; a refusal, error, nonzero exit, timeout, rate limit, ambiguous output, or unsupported reviewer stays unproven. The result is held only in the running `watch` process memory and becomes stale when the roles, CLI identity or version, platform adapter source or configuration, probe code, or sandbox arguments change; restarting `watch` returns it to not tested. The JSON audit file it writes is never read back as proof, and `doctor`, as a separate process, always reports `not_run` (`watch_session_only`). Only the Codex reviewer can currently produce this proof, so the button is disabled for other reviewers. The page token blocks foreign webpages but does not prove a human clicked. Native work still cannot start.
+
 Private preview for installing the Claude-to-Codex review bridge into one project workspace at a time. Git is supported but optional.
 
 Human users should begin with `START_HERE.md`. It starts at the moment a user receives the release ZIP, extracts it outside the target project, performs human-approved initialization, and then defines the first complete Claude writer / Codex reviewer work package without manual CONTROL or session-ID editing.

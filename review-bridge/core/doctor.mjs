@@ -81,6 +81,8 @@ async function listLegacyWarnings(paths) {
 
 export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = process.version }) {
   if (await fileExists(paths.bridgeConfigPath)) {
+    const bridgeConfig = await readJson(paths.bridgeConfigPath);
+    const neutralLayout = path.basename(paths.privateRoot) === ".review-bridge";
     const { snapshot } = await loadOrCreatePolicySnapshot(paths);
     const profile = classificationProfileFromSnapshot(snapshot);
     const control = { codex_policy: codexPolicyFromSnapshot(snapshot) };
@@ -101,6 +103,15 @@ export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = pr
     return {
       valid: profileValid,
       state_contract: "v4",
+      native_readiness: neutralLayout ? {
+        ready: false,
+        roles: bridgeConfig.roles || null,
+        // doctor is a separate process: it cannot attest a proof held in watch memory
+        // and never reads the editable audit file or a stored Boolean as proof.
+        reviewer_readonly_proven: "not_run",
+        reviewer_readonly_authority: "watch_session_only",
+        reason: "Stage 2 UV-backed authorization is not installed yet.",
+      } : null,
       state_filesystem: inspectStateFilesystem(paths.repoRoot),
       platform: {
         target: adapter.target,

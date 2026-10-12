@@ -11,7 +11,11 @@
     "work-cancel",
     "status",
     "wait",
-    "migrate-control"
+    "migrate-control",
+    "watch",
+    "up",
+    "down",
+    "ps"
   ],
   "adapters": {
     "win32-x64": {

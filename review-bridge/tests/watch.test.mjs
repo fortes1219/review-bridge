@@ -1,0 +1,212 @@
+import assert from "node:assert/strict";
+import http from "node:http";
+import net from "node:net";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { assertLoopbackBind, findPortOwner, portBumpNotice, startWatchServer, TOKEN_HEADER } from "../core/watch.mjs";
+
+const uiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "ui");
+
+function fakeService() {
+  const state = { runs: 0, statusCalls: 0, inFlight: false, release: null };
+  return {
+    state,
+    async status() {
+      state.statusCalls += 1;
+      return { roles: { writer: "claude", reviewer: "codex" }, checks: {}, native_ready: false, probe_available: true };
+    },
+    async run() {
+      state.runs += 1;
+      state.inFlight = true;
+      if (state.release === null) await new Promise((resolve) => { state.release = resolve; });
+      state.inFlight = false;
+      return { proven: "unknown", reason: "no_write_attempt", model_calls: 1 };
+    },
+    isInFlight: () => state.inFlight,
+  };
+}
+
+function request(watch, { method = "GET", pathname = "/", headers = {}, body } = {}) {
+  const { port } = new URL(watch.url);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, method, path: pathname, headers }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+    });
+    req.on("error", reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+function validHeaders(watch, overrides = {}) {
+  const origin = watch.url.replace(/\/$/, "");
+  return {
+    Host: new URL(watch.url).host,
+    Origin: origin,
+    "Content-Type": "application/json",
+    [TOKEN_HEADER]: watch.token,
+    ...overrides,
+  };
+}
+
+const probeBody = (id = "0123456789abcdef-0001") => JSON.stringify({ confirm: "one_model_call", request_id: id });
+
+async function open(t) {
+  const service = fakeService();
+  const watch = await startWatchServer({ service, uiRoot });
+  t.after(() => { service.state.release?.(); return watch.close(); });
+  return { service, watch };
+}
+
+test("watch refuses remote binds", async () => {
+  for (const host of ["0.0.0.0", "::", "192.168.1.10", "localhost"]) {
+    assert.throws(() => assertLoopbackBind(host));
+    await assert.rejects(startWatchServer({ service: fakeService(), uiRoot, host }));
+  }
+});
+
+test("page and status load without a model call and show the cost notice", async (t) => {
+  const { service, watch } = await open(t);
+  const host = new URL(watch.url).host;
+  const page = await request(watch, { headers: { Host: host } });
+  assert.equal(page.status, 200);
+  assert.match(page.body, /將使用一次模型呼叫確認 reviewer 無法寫入/);
+  assert.match(page.body, /會花費一次模型呼叫/);
+  assert.ok(page.body.includes(watch.token));
+  assert.equal(page.headers["access-control-allow-origin"], undefined);
+  assert.equal(page.headers["set-cookie"], undefined);
+  const status = await request(watch, { pathname: "/api/status", headers: { Host: host } });
+  assert.equal(status.status, 200);
+  assert.equal(JSON.parse(status.body).native_ready, false);
+  assert.equal(service.state.runs, 0);
+  const getProbe = await request(watch, { pathname: "/api/reviewer-probe", headers: { Host: host } });
+  assert.equal(getProbe.status, 405);
+  assert.equal(service.state.runs, 0);
+});
+
+test("foreign host, origin, token, and content type are rejected before any model call", async (t) => {
+  const { service, watch } = await open(t);
+  const cases = [
+    [{ Host: "evil.example:80" }, 421],
+    [{ Host: "localhost:" + (Number(new URL(watch.url).port) + 1) }, 421],
+    [{ Host: "127.0.0.1:" + new URL(watch.url).port }, 403],
+    [{ Origin: "http://evil.example" }, 403],
+    [{ Origin: "http://127.0.0.1" }, 403],
+    [{ Origin: undefined }, 403],
+    [{ [TOKEN_HEADER]: "wrong" }, 403],
+    [{ [TOKEN_HEADER]: undefined }, 403],
+    [{ "Content-Type": "text/plain" }, 415],
+    [{ "Content-Type": "application/x-www-form-urlencoded" }, 415],
+  ];
+  for (const [override, expected] of cases) {
+    const headers = validHeaders(watch, override);
+    for (const key of Object.keys(headers)) if (headers[key] === undefined) delete headers[key];
+    const response = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers, body: probeBody() });
+    assert.equal(response.status, expected, JSON.stringify(override));
+    assert.equal(response.headers["access-control-allow-origin"], undefined);
+  }
+  const preflight = await request(watch, { method: "OPTIONS", pathname: "/api/reviewer-probe", headers: validHeaders(watch) });
+  assert.equal(preflight.status, 405);
+  const unconfirmed = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch),
+    body: JSON.stringify({ request_id: "0123456789abcdef-0002" }) });
+  assert.equal(unconfirmed.status, 400);
+  assert.equal(service.state.runs, 0);
+});
+
+test("valid request runs once; in-flight and replayed clicks are rejected", async (t) => {
+  const { service, watch } = await open(t);
+  const first = request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch), body: probeBody("0123456789abcdef-0003") });
+  while (!service.state.inFlight) await new Promise((resolve) => setTimeout(resolve, 5));
+  const concurrent = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch), body: probeBody("0123456789abcdef-0004") });
+  assert.equal(concurrent.status, 409);
+  assert.equal(JSON.parse(concurrent.body).error, "in_flight");
+  service.state.release();
+  const done = await first;
+  assert.equal(done.status, 200);
+  assert.equal(JSON.parse(done.body).result.reason, "no_write_attempt");
+  const replay = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch), body: probeBody("0123456789abcdef-0003") });
+  assert.equal(replay.status, 409);
+  assert.equal(JSON.parse(replay.body).error, "replayed_request");
+  assert.equal(service.state.runs, 1);
+});
+
+test("unsupported reviewer is rejected by the service without a model call", async (t) => {
+  const service = fakeService();
+  service.run = async () => { const error = new Error("unsupported"); error.code = "unsupported_reviewer"; throw error; };
+  const watch = await startWatchServer({ service, uiRoot });
+  t.after(() => watch.close());
+  const response = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch), body: probeBody("0123456789abcdef-0005") });
+  assert.equal(response.status, 409);
+  assert.equal(JSON.parse(response.body).error, "unsupported_reviewer");
+  assert.equal(service.state.runs, 0);
+});
+
+test("page states that proof is watch-session only and not human authorization", async (t) => {
+  const { watch } = await open(t);
+  const page = await request(watch, { headers: { Host: new URL(watch.url).host } });
+  assert.match(page.body, /只保存在這次執行中的 watch 程式記憶體/);
+  assert.match(page.body, /不代表人類授權/);
+});
+
+async function freePort() {
+  const probe = net.createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+
+async function occupy(port) {
+  const blocker = net.createServer();
+  await new Promise((resolve, reject) => { blocker.once("error", reject); blocker.listen(port, "127.0.0.1", resolve); });
+  return blocker;
+}
+
+test("configured port is honoured and the URL uses the localhost form", async (t) => {
+  const port = await freePort();
+  const watch = await startWatchServer({ service: fakeService(), uiRoot, port });
+  t.after(() => watch.close());
+  assert.equal(watch.url, `http://localhost:${port}/`);
+  assert.equal(watch.port, port);
+  assert.equal(watch.bumped, false);
+});
+
+test("occupied port bumps to the next free one unless strict", async (t) => {
+  const port = await freePort();
+  const blocker = await occupy(port);
+  t.after(() => new Promise((resolve) => blocker.close(resolve)));
+  const watch = await startWatchServer({ service: fakeService(), uiRoot, port });
+  t.after(() => watch.close());
+  assert.equal(watch.bumped, true);
+  assert.equal(watch.requestedPort, port);
+  assert.ok(watch.port > port && watch.port <= port + 20);
+  assert.equal(watch.url, `http://localhost:${watch.port}/`);
+  await assert.rejects(startWatchServer({ service: fakeService(), uiRoot, port, strictPort: true }),
+    (error) => error.code === "port_in_use" && /strict_port/.test(error.message));
+});
+
+test("Host localhost and 127.0.0.1 are both accepted; the probe origin must match the Host used", async (t) => {
+  const { service, watch } = await open(t);
+  const { port } = new URL(watch.url);
+  for (const host of ["localhost:" + port, "127.0.0.1:" + port]) {
+    const page = await request(watch, { headers: { Host: host } });
+    assert.equal(page.status, 200, host);
+  }
+  const viaLoopback = request(watch, { method: "POST", pathname: "/api/reviewer-probe",
+    headers: validHeaders(watch, { Host: "127.0.0.1:" + port, Origin: "http://127.0.0.1:" + port }),
+    body: probeBody("0123456789abcdef-0006") });
+  while (!service.state.inFlight) await new Promise((resolve) => setTimeout(resolve, 5));
+  service.state.release();
+  assert.equal((await viaLoopback).status, 200);
+  assert.equal(service.state.runs, 1);
+});
+
+test("bump notice names the occupier when known and omits it otherwise", () => {
+  assert.equal(portBumpNotice(9100, "http://localhost:9101/", "node.exe"), "9100 被 node.exe 占用，改用 http://localhost:9101/");
+  assert.equal(portBumpNotice(9100, "http://localhost:9101/", null), "9100 被占用，改用 http://localhost:9101/");
+  assert.equal(findPortOwner(9100, "linux"), null);
+});

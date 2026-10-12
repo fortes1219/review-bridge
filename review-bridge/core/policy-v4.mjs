@@ -16,6 +16,7 @@ const levelRank = new Map([
   ["SECURITY", 4],
   ["FINAL_CLOSURE", 5],
 ]);
+const WRITER_MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,79}$/;
 const effortRank = new Map([["low", 1], ["medium", 2], ["high", 3]]);
 
 export function canonical(value) {
@@ -76,6 +77,9 @@ export function validateDefaultPolicy(policy) {
   }
   if (limits.reconcile_guard_ttl_seconds <= limits.reconcile_grace_seconds) {
     throw new Error("Reconcile guard TTL must exceed the grace period.");
+  }
+  if (policy.writer?.model !== undefined && !WRITER_MODEL.test(String(policy.writer.model))) {
+    throw new Error("Writer model setting is invalid.");
   }
   if (policy.release_actions_require_human !== true) throw new Error("Release approval cannot be disabled.");
   const classification = policy.classification || {};
@@ -139,6 +143,13 @@ export function mergePolicy(defaultPolicy, override = {}) {
     merged.writer.disallowed_tools,
     override.writer?.disallowed_tools,
   );
+  // Not protected: a project may pick any writer model the CLI accepts.
+  if (override.writer?.model !== undefined) {
+    if (typeof override.writer.model !== "string" || !WRITER_MODEL.test(override.writer.model)) {
+      throw new Error("Project override writer model is invalid.");
+    }
+    merged.writer.model = override.writer.model;
+  }
   if (override.release_actions_require_human === false) {
     throw new Error("Project override cannot disable human release approval.");
   }

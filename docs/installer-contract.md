@@ -3,6 +3,8 @@
 Status: APPROVED / RECORDED  
 Approved: 2026-08-11
 
+Stage 2 development: role-first onboarding replaces the fixed Claude-writer/Codex-reviewer pairing. The initial reviewer write-denial probe is one human-triggered model call during first setup. Installer automation, fake scenarios, and smoke tests remain model-free. Stage 2 native execution must be blocked until that probe proves reviewer read-only capability. Fresh `init` now installs under `.review-bridge/` and leaves `.claude/` and `.codex/` unchanged; a Git target gets a local `info/exclude` entry when needed. Neutral upgrade and uninstall are not implemented; the rc.2 installer behavior below is historical for the new layout.
+
 ## Approved Product Shape
 
 - Canonical source lives in a separate private Git repository.

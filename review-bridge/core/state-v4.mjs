@@ -22,7 +22,7 @@ import {
 const activeStatuses = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
 const terminalStatuses = new Set([
   "pass", "hard_stop", "rate_limited", "cancelled", "policy_failure",
-  "call_budget_exhausted", "claude_timeout", "claude_failed", "controller_failure",
+  "call_budget_exhausted", "claude_timeout", "claude_failed", "reviewer_failed", "controller_failure",
 ]);
 
 function nowIso(clock) {

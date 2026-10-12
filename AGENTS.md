@@ -8,7 +8,7 @@ This private repository is the canonical source for the generic review bridge ru
 
 - Do not commit, push, publish, release, or activate an adapter without explicit human-owner authorization.
 - Installer tests and smoke tests must not invoke Claude or Codex models.
-- Keep Claude as writer and Codex as independent reviewer; do not move independent review back into Claude self-review.
+- Keep writer and reviewer as separately configured roles with independent sessions; do not move independent review into writer self-review. The Stage 2 role-first onboarding contract supersedes the rc.2 fixed Claude-writer/Codex-reviewer pairing.
 - Never distribute a legacy `CONTROL.json`, active authorization, claim, run, or model session identity.
 - Preserve fail-closed gates, consumed authorization, writer-only limits, exact machine-readable review gates, and human breakpoints.
 - Do not add project-domain rules to the organization baseline or framework profiles.

@@ -18,6 +18,30 @@ import { parseReviewGate } from "./gate.mjs";
 import { runProcess } from "./process.mjs";
 import { validateWriterPolicy } from "./policy.mjs";
 import { classificationProfileFromSnapshot } from "./policy-v4.mjs";
+import {
+  budgetStop,
+  classifyProviderFailure,
+  controllerError,
+  failureSummary,
+  readEvidenceTail,
+  writeFailureRecord,
+} from "./provider-failure.mjs";
+
+const REVIEW_RESUME_LIMITATION = "Review-only resume is not implemented; the writer output is preserved "
+  + "and is not re-run. Continuing requires a new human-owner authorization.";
+
+// The exact job this bounded run enqueued; a hook may have queued the same message first.
+async function enqueuedJobId(paths, enqueued) {
+  if (!enqueued.duplicate) {
+    const jobId = enqueued.job?.job_id;
+    if (!jobId) throw new Error("Enqueued review job has no job ID.");
+    return jobId;
+  }
+  const suffix = "-" + enqueued.message_hash + ".json";
+  const matches = (await listJson(paths.pendingDir)).filter((file) => path.basename(file).endsWith(suffix));
+  if (matches.length !== 1) throw new Error("Pending review job for this run is missing or ambiguous.");
+  return path.basename(matches[0], ".json");
+}
 
 function writerPrefix(control) {
   const scope = control.authorized_scope || {};
@@ -70,6 +94,13 @@ async function loadLiveControl(paths, runtimeState) {
   return runtimeState ? await runtimeState.loadControl() : await readJson(paths.controlPath);
 }
 
+export const DEFAULT_WRITER_MODEL = "opus";
+
+// The policy snapshot pins the model for v4 runs; legacy controls use the package default.
+export function writerModelFor(control) {
+  return control?.v4?.policy_snapshot?.effective_policy?.writer?.model || DEFAULT_WRITER_MODEL;
+}
+
 async function writeBoundedState(paths, runtimeState, state) {
   if (runtimeState) return await runtimeState.recordState(state);
   return await writeJson(paths.boundedStatePath, state);
@@ -96,6 +127,7 @@ export async function validateBoundedResume({
     transport: control.dispatch_transport,
     disallowed_tools: ["Agent"],
     mode: "writer_only",
+    model: writerModelFor(control),
     effort: "low",
     max_claude_calls: maxCalls,
     max_claude_minutes_per_call: maxMinutes,
@@ -122,6 +154,7 @@ export async function runBoundedResume({
   try {
     const claude = await adapter.resolveExecutable("claude");
     const sessionId = validation.session_id;
+    const writerModel = validation.model;
     let currentPromptPath = validation.prompt_path;
     let currentControl = control;
 
@@ -145,6 +178,7 @@ export async function runBoundedResume({
         startNewSession && call === 1 ? "--session-id" : "--resume", sessionId,
         "--permission-mode", "auto",
         "--disallowedTools", "Agent",
+        "--model", writerModel,
         "--effort", "low",
         "--output-format", "json",
       ];
@@ -158,8 +192,13 @@ export async function runBoundedResume({
         timeoutMs: maxMinutes * 60_000,
       });
       if (processResult.timedOut) {
+        const timeout = await writeFailureRecord(paths, paths.queueRoot, stamp + "-claude", classifyProviderFailure({
+          role: "writer", provider: "claude", phase: "write", exitCode: processResult.exitCode, timedOut: true,
+        }), { stdout_path: stdoutPath, stderr_path: stderrPath });
         await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel,
           status: "claude_timeout",
+          failure: failureSummary(timeout.record, timeout.record_path),
           session_id: sessionId,
           call,
           updated_at: new Date().toISOString(),
@@ -170,29 +209,49 @@ export async function runBoundedResume({
         await consumeAuthorization(paths, control, "claude_timeout");
         return 77;
       }
-      if (!(await fileExists(stdoutPath)) || (await fsp.stat(stdoutPath)).size === 0) {
-        throw new Error("Claude produced no JSON result (exit code " + processResult.exitCode + ").");
+      let claudeResult = null;
+      if (await fileExists(stdoutPath) && (await fsp.stat(stdoutPath)).size > 0) {
+        try {
+          claudeResult = parseJson(await fsp.readFile(stdoutPath, "utf8"));
+        } catch {
+          claudeResult = null;
+        }
       }
-      const claudeResult = parseJson(await fsp.readFile(stdoutPath, "utf8"));
-      if (String(claudeResult.session_id) !== sessionId) {
+      if (claudeResult && String(claudeResult.session_id) !== sessionId) {
         throw new Error("Claude session drift detected.");
       }
-      const resultText = String(claudeResult.result || "");
-      if (claudeResult.is_error === true || processResult.exitCode !== 0) {
-        const limited = /session limit|usage limit|resets\s/i.test(resultText);
+      const resultText = String(claudeResult?.result || "");
+      if (!claudeResult || claudeResult.is_error === true || processResult.exitCode !== 0) {
+        const classified = classifyProviderFailure({
+          role: "writer",
+          provider: "claude",
+          phase: "write",
+          exitCode: processResult.exitCode,
+          texts: [
+            resultText,
+            await readEvidenceTail(stderrPath),
+            claudeResult ? "" : await readEvidenceTail(stdoutPath),
+          ],
+        });
+        const written = await writeFailureRecord(paths, paths.queueRoot, stamp + "-claude", classified, {
+          stdout_path: stdoutPath,
+          stderr_path: stderrPath,
+        });
+        const limited = classified.reason === "provider_usage_limit";
         await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel,
           status: limited ? "rate_limited" : "claude_failed",
           session_id: sessionId,
           call,
           updated_at: new Date().toISOString(),
           claude_exit_code: processResult.exitCode,
-          result: resultText,
+          claude_json_valid: Boolean(claudeResult),
+          failure: failureSummary(classified, written.record_path),
           stdout_path: stdoutPath,
           stderr_path: stderrPath,
         });
         await consumeAuthorization(paths, control, limited ? "rate_limited" : "claude_failed");
-        if (limited) return 75;
-        throw new Error("Claude failed: " + resultText);
+        return limited ? 75 : 1;
       }
       if (!/^\s*CODEX_REVIEW_REQUIRED\s*:\s*true\s*$/im.test(resultText)) {
         throw new Error("Claude result is missing CODEX_REVIEW_REQUIRED: true.");
@@ -209,9 +268,6 @@ export async function runBoundedResume({
         stop_hook_active: false,
         last_assistant_message: resultText,
       };
-      const previousLatest = await fileExists(paths.latestPath)
-        ? (await fsp.readFile(paths.latestPath, "utf8")).trim()
-        : null;
       await writeJson(payloadPath, payload);
       const enqueued = await enqueueReview({
         payload,
@@ -227,12 +283,41 @@ export async function runBoundedResume({
       if (!enqueued.accepted || (enqueued.duplicate && !hookQueuedDuplicate)) {
         throw new Error("Bounded correction did not create a new review job.");
       }
-      await runReviewWorker({ paths, control: currentControl, adapter, noNotification: true });
-      if (!(await fileExists(paths.latestPath))) throw new Error("Codex review did not update LATEST.txt.");
-      const latestReviewPath = (await fsp.readFile(paths.latestPath, "utf8")).trim();
-      if (!latestReviewPath || latestReviewPath === previousLatest) {
-        throw new Error("Codex review did not produce a new LATEST result.");
+      const ownJobId = await enqueuedJobId(paths, enqueued);
+      const reviewOutcomes = await runReviewWorker({
+        paths, control: currentControl, adapter, noNotification: true,
+      });
+      // Other pending jobs may run in the same worker pass; only this run's job is attributed here.
+      const ownOutcomes = (reviewOutcomes || []).filter((outcome) => outcome.job_id === ownJobId);
+      if (ownOutcomes.length !== 1) {
+        throw new Error("Review worker returned no unambiguous outcome for job " + ownJobId + ".");
       }
+      const [ownOutcome] = ownOutcomes;
+      if (ownOutcome.status === "failed") {
+        const failedReview = ownOutcome;
+        const failure = failedReview.provider_failure || controllerError({ phase: "review" });
+        const status = failure.reason === "provider_usage_limit" ? "rate_limited"
+          : failure.reason === "controller_error" ? "controller_failure" : "reviewer_failed";
+        await writeBoundedState(paths, runtimeState, {
+          status,
+          session_id: sessionId,
+          call,
+          updated_at: new Date().toISOString(),
+          failure: failureSummary(failure, failedReview.provider_failure?.record_path || null),
+          failed_review_job_id: failedReview.job_id,
+          failed_review_job_path: failedReview.job_path,
+          review_error_path: failedReview.error_path,
+          claude_stdout_path: stdoutPath,
+          claude_stderr_path: stderrPath,
+          resume_limitation: REVIEW_RESUME_LIMITATION,
+        });
+        await consumeAuthorization(paths, control, status);
+        return status === "rate_limited" ? 75 : 1;
+      }
+      if (ownOutcome.status !== "done" || !ownOutcome.result_path) {
+        throw new Error("Review job " + ownJobId + " did not complete.");
+      }
+      const latestReviewPath = ownOutcome.result_path;
       assertUnder(latestReviewPath, paths.reviewsRoot, "Latest review");
       if (!(await fileExists(latestReviewPath))) throw new Error("Codex review result is missing.");
       const review = await fsp.readFile(latestReviewPath, "utf8");
@@ -241,6 +326,7 @@ export async function runBoundedResume({
         gate = parseReviewGate(review);
       } catch (error) {
         await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel,
           status: "malformed_review_gate",
           session_id: sessionId,
           call,
@@ -253,6 +339,7 @@ export async function runBoundedResume({
         throw error;
       }
       await writeBoundedState(paths, runtimeState, {
+        writer_model: writerModel,
         status: gate.review_gate === "PASS"
           ? "pass"
           : gate.hard_stop_required ? "hard_stop" : "correction_required",
@@ -273,6 +360,17 @@ export async function runBoundedResume({
         return 0;
       }
       if (call >= maxCalls) {
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel,
+          status: "call_budget_exhausted",
+          session_id: sessionId,
+          call,
+          updated_at: new Date().toISOString(),
+          ...gate,
+          review_path: latestReviewPath,
+          claude_stdout_path: stdoutPath,
+          failure: failureSummary(budgetStop({ phase: "correction", maxCalls })),
+        });
         await consumeAuthorization(paths, control, "call_budget_exhausted", gate);
         return 76;
       }
@@ -317,9 +415,11 @@ export async function runBoundedResume({
     if (!stateBelongsToThisInvocation && authorizationStillActive) {
       await writeBoundedState(paths, runtimeState, {
         status: "controller_failure",
+        writer_model: validation.model,
         session_id: validation.session_id,
         updated_at: new Date().toISOString(),
         error: error.message,
+        failure: failureSummary(controllerError({ phase: "controller" })),
       });
     }
     await consumeAuthorization(paths, control, "controller_failure");

@@ -206,6 +206,7 @@ export async function v4WorkPackageStatus(paths, runId = null) {
     execution_mode: selected.execution_mode,
     closed_reason: selected.closed_reason || null,
     latest_state: selected.last_state,
+    stop_reason: selected.last_state?.failure || null,
     active_runs: runs.filter((run) => ["running", "review_pending", "correction_pending", "interrupted"].includes(run.status)).length,
     runs: ordered.map((run) => ({
       run_id: run.run_id,

@@ -1,5 +1,9 @@
 # Review Bridge 快速開始
 
+> `dev/rc-3` 開發中：`init` 已能先選任一 writer／reviewer 組合、檢查 CLI 與登入，再安裝到專屬 `.review-bridge/`；既有 `.claude/`、`.codex/` 不會被改動。四個 fake 情境會在暫存副本執行。native 模型入口仍關閉，直到 reviewer 拒寫實測與人類 UV 授權完成。下方第 1 節起的 rc.2 安裝與工作範例尚未更新，不能照它啟動正式 Stage 2 工作。
+
+目前可在解壓後的 Bridge 目錄執行 `node bridge.mjs init --target <你的專案> --writer claude --reviewer codex`；兩個角色可互換，也可選同一 provider。若缺少 CLI 或尚未登入，安裝會先停下並指出哪一邊需要處理。成功只代表安裝與 fake 自測完成，不代表可以啟動真實工作。
+
 這是人類使用者唯一的安裝入口。從「剛收到 ZIP」開始，不需要先叫 Claude 或 Codex 安裝，也不需要知道 `CONTROL.json` 或 session ID。
 
 Review Bridge 是 Claude writer / Codex reviewer 的 workspace-local review controller。它把工作範圍、預算、review gate、修正次數與人類斷點放在可驗證的 controller state，不依賴 Agent 自己記住流程。
@@ -57,11 +61,12 @@ node bridge.mjs init --target /Users/me/projects/my-app
 
 `init` 會：
 
-1. 檢查 Node、target、檔案系統與專案 profile。
-2. 建立不可竄改的 install plan 並要求確認。
-3. 安裝 private `.claude/` controller，不修改 application code。
-4. 用 fake CLI 跑完 `PASS`、`FAIL_THEN_PASS`、`HARD_STOP`、`RATE_LIMIT`。
-5. 顯示 native Claude/Codex CLI 是否 ready。
+1. 先選 writer／reviewer，以零 LLM 檢查兩邊 CLI 與登入；目前未支援的角色組合在寫入 target 前停下。
+2. 檢查 Node、target、檔案系統與專案 profile。
+3. 建立不可竄改的 install plan 並要求確認。
+4. 安裝 private `.claude/` controller，不修改 application code。
+5. 用 fake CLI 跑完 `PASS`、`FAIL_THEN_PASS`、`HARD_STOP`、`RATE_LIMIT`。
+6. 顯示 CLI 與登入結果；native 仍不可開始。
 
 確認畫面會列出 target workspace、operation、detected profile、workspace evidence mode 與 planned changes。只有在下列條件都正確時才輸入 `y`：
 
@@ -75,7 +80,7 @@ node bridge.mjs init --target /Users/me/projects/my-app
 自動化或 disposable workspace 才使用 `--yes`：
 
 ```text
-node bridge.mjs init --target <專案的絕對路徑> --yes
+node bridge.mjs init --target <專案的絕對路徑> --writer claude --reviewer codex --yes
 ```
 
 成功標準不是只有「安裝完成」，而是四個 fake gate 全部完成，且 `fake_runtime_verified` 為 `true`。若任何 preflight 或 gate 失敗，先看終端輸出的 error，不要直接改 controller JSON。
