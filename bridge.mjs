@@ -295,7 +295,7 @@ async function init(options) {
     throw new Error(`Setup failed and was rolled back: ${error.message}`);
   }
   const realMode = await inspectNativeReadiness(roles);
-  const service = startService(target, Boolean(options["fake-cli"]));
+  const service = await startService(target, Boolean(options["fake-cli"]));
   return {
     ok: true,
     target,
@@ -313,6 +313,7 @@ async function init(options) {
     work_folder: path.join(target, ".review-bridge", "work-packages"),
     url: service.url,
     service_started: service.started,
+    service_reason: service.reason,
     service_notice: service.notice,
     next_step: {
       action: "open_work_template",
@@ -322,25 +323,29 @@ async function init(options) {
   };
 }
 
-// Starts the resident page service through the installed runtime; a failure to start
-// leaves the install in place and is reported instead of rolled back.
-function startService(target, fakeCli) {
-  const bootstrap = path.join(target, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
-  const result = run(process.execPath, [bootstrap, "up", ...(fakeCli ? ["--fake-cli"] : [])], {
+// Starts the resident page service through the installed runtime, then verifies it with
+// the runtime's own health check (T0-01 C4). Nothing printed by `up` is parsed; a failure
+// to start leaves the install in place and is reported instead of rolled back.
+async function startService(target, fakeCli) {
+  const runtimeRoot = path.join(target, ".review-bridge", "tools", "review-bridge");
+  run(process.execPath, [path.join(runtimeRoot, "bootstrap.mjs"), "up", ...(fakeCli ? ["--fake-cli"] : [])], {
     cwd: target, expected: [0, 1, 2],
   });
-  const lines = String(result.stdout || "").split(/\r?\n/).filter(Boolean);
-  const url = /http:\/\/localhost:\d+\//.exec(lines.find((line) => line.startsWith("網頁：")) || "")?.[0] || null;
-  const notice = lines.filter((line) => !line.startsWith("網頁：")).join("\n")
-    || String(result.stderr || "").trim() || null;
-  return { started: result.status === 0 && Boolean(url), url, notice: url ? notice : notice || "Bridge 沒有啟動。" };
+  const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, "core", "paths.mjs")).href);
+  const { checkService, serviceFiles } = await import(pathToFileURL(path.join(runtimeRoot, "core", "service.mjs")).href);
+  const paths = getBridgePaths(target, runtimeRoot, { privateRootName: ".review-bridge" });
+  const check = await checkService(paths);
+  // Display only: the port-bump line the watch process logged.
+  const stdoutLog = await fsp.readFile(serviceFiles(paths).stdoutPath, "utf8").catch(() => "");
+  const notice = stdoutLog.split(/\r?\n/).find((line) => line.includes("占用，改用")) || null;
+  return { started: check.running, url: check.running ? check.url : null, reason: check.reason, notice };
 }
 
 function formatInitResult(result) {
   return [
     ...(result.service_notice ? [result.service_notice] : []),
     "工作資料夾：" + result.work_folder,
-    "網頁：" + (result.url || "沒有啟動，執行 review-bridge up"),
+    "網頁：" + (result.url || "沒有啟動（" + result.service_reason + "），執行 review-bridge up"),
     "下一步：在 VS Code 打開 " + result.next_step.path,
   ].join("\n") + "\n";
 }

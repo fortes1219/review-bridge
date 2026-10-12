@@ -20,7 +20,7 @@ import {
 } from "./migration-v4.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { createReviewerProbeService } from "./reviewer-probe.mjs";
-import { serviceDown, serviceFiles, serviceStatus, serviceUp } from "./service.mjs";
+import { removeServiceSession, serviceDown, serviceFiles, serviceStatus, serviceUp, writeServiceSession } from "./service.mjs";
 import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watch.mjs";
 import {
   authorizeWorkPackage,
@@ -160,6 +160,10 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
     Promise.resolve(adapter.notify?.("Review Bridge", notice)).catch(() => {});
   }
   // The stable URL file is what up, ps, and editors read; it survives restarts.
+  // C1: the listening process records itself; up, ps, down and init verify against this.
+  await writeServiceSession(paths, {
+    pid: process.pid, port: watch.port, url: watch.url, service_id: watch.serviceId, started_at: new Date().toISOString(),
+  });
   await fsp.writeFile(serviceFiles(paths).urlPath, watch.url + "\n", "utf8");
   process.stdout.write("Review Bridge setup page: " + watch.url + "\n"
     + "Opening or refreshing the page uses no model. Press Ctrl+C to stop.\n");
@@ -168,6 +172,7 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
     process.once("SIGTERM", resolve);
   });
   await watch.close();
+  await removeServiceSession(paths);
   return 0;
 }
 

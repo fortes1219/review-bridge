@@ -175,6 +175,25 @@ test("configured port is honoured and the URL uses the localhost form", async (t
   assert.equal(watch.bumped, false);
 });
 
+test("T5 /api/status carries the service identity the session record is checked against", async (t) => {
+  const port = await freePort();
+  const serviceId = "ab".repeat(16);
+  const watch = await startWatchServer({ service: fakeService(), uiRoot, port, serviceId });
+  t.after(() => watch.close());
+  assert.equal(watch.serviceId, serviceId);
+  const status = await request(watch, { pathname: "/api/status", headers: { Host: `localhost:${port}` } });
+  assert.equal(status.status, 200);
+  const body = JSON.parse(status.body);
+  assert.equal(body.service_id, serviceId);
+  assert.equal(body.pid, process.pid);
+  assert.equal(body.port, port);
+  const generated = await startWatchServer({ service: fakeService(), uiRoot });
+  t.after(() => generated.close());
+  assert.match(generated.serviceId, /^[0-9a-f]{32}$/);
+  await assert.rejects(startWatchServer({ service: fakeService(), uiRoot, serviceId: "short" }), /service id/);
+});
+
+
 test("occupied port bumps to the next free one unless strict", async (t) => {
   const port = await freePort();
   const blocker = await occupy(port);

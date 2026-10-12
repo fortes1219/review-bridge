@@ -304,6 +304,10 @@ test("init starts the resident service and prints exactly three plain lines", as
   assert.deepEqual(config.watch, { port, strict_port: false });
   assert.equal((await fsp.readFile(path.join(root, ".review-bridge", "watch-url.txt"), "utf8")).trim(), url);
   assert.equal((await fetch(url)).status, 200);
+  // B8: the URL init printed is the one the running service recorded and answers for.
+  const session = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "watch-session.json"), "utf8"));
+  assert.equal(session.url, url);
+  assert.equal((await (await fetch(url + "api/status")).json()).service_id, session.service_id);
 
   const bootstrap = path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
   const run = (...args) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true });
@@ -326,5 +330,6 @@ test("init --json adds the service URL", async (t) => {
   const output = JSON.parse(result.stdout);
   assert.equal(output.url, `http://localhost:${args.at(-1)}/`);
   assert.equal(output.service_started, true);
+  assert.equal(output.service_reason, "running");
   assert.equal(output.next_step.path, ".review-bridge/work-packages/TEMPLATE.md");
 });

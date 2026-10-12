@@ -101,7 +101,9 @@ export async function startWatchServer({
   port = 0,
   strictPort = false,
   token = randomBytes(32).toString("hex"),
+  serviceId = randomBytes(16).toString("hex"),
 }) {
+  if (!/^[0-9a-f]{32}$/.test(serviceId)) throw new Error("watch service id must be 32 lowercase hex characters.");
   assertLoopbackBind(host);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("watch port must be 0 through 65535.");
   const usedRequestIds = new Set();
@@ -121,7 +123,8 @@ export async function startWatchServer({
         return send(res, 200, content, type);
       }
       if (req.method === "GET" && url.pathname === "/api/status") {
-        return send(res, 200, { ok: true, ...(await service.status()) });
+        // C3: identity fields let the check tell this process from anything else on the port.
+        return send(res, 200, { ok: true, ...(await service.status()), service_id: serviceId, pid: process.pid, port: server.address().port });
       }
       if (url.pathname === "/api/reviewer-probe") {
         if (req.method !== "POST") return reject(res, 405, "method_not_allowed");
@@ -182,6 +185,7 @@ export async function startWatchServer({
     requestedPort: port,
     bumped: port !== 0 && bound !== port,
     token,
+    serviceId,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
