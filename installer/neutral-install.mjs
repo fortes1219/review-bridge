@@ -82,6 +82,14 @@ async function assertSafeExcludePath(excludePath) {
 }
 
 export const DEFAULT_WATCH_PORT = 8080;
+export const DEFAULT_RETENTION_DAYS = 15;
+
+function validateRetentionDays(days) {
+  if (!Number.isInteger(days) || days < 1 || days > 365) {
+    throw new Error("retention.days must be a whole number from 1 to 365.");
+  }
+  return days;
+}
 
 function validateWatchPort(port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Watch port must be 1 through 65535.");
@@ -113,6 +121,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     target: root,
     roles: selected,
     watch: { port: validateWatchPort(watchPort), strict_port: false },
+    retention: { days: DEFAULT_RETENTION_DAYS },
     profile: { id: profile.profile_id, label: profile.display_name, sha256: sha256(JSON.stringify(profile)) },
     detection,
     runtime_sha256: await runtimeFingerprint(),
@@ -222,6 +231,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
       },
       requires_human_authorization: true,
       watch: { port: plan.watch.port, strict_port: plan.watch.strict_port },
+      retention: { days: plan.retention?.days ?? DEFAULT_RETENTION_DAYS },
       readiness: { reviewer_readonly_proven: "not_run" },
       default_policy_ref: ".review-bridge/tools/review-bridge/config/default-policy.json",
       project_override_ref: ".review-bridge/review-bridge/policy.override.json",
@@ -327,6 +337,11 @@ export async function verifyNeutralInstall(target) {
     if (config.watch.strict_port !== undefined && typeof config.watch.strict_port !== "boolean") {
       throw new Error("Neutral install watch.strict_port must be true or false.");
     }
+  }
+  // The retention block is owner-editable too; only its shape is checked.
+  if (config.retention !== undefined) {
+    if (!config.retention || typeof config.retention !== "object") throw new Error("Neutral install retention settings are invalid.");
+    if (config.retention.days !== undefined) validateRetentionDays(config.retention.days);
   }
   const runtimeSha = await runtimeFingerprint(path.join(privateRoot, "tools", "review-bridge"));
   if (runtimeSha !== manifest.runtime_sha256) throw new Error("Neutral runtime checksum mismatch.");

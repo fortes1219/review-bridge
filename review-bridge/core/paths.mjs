@@ -40,6 +40,7 @@ export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName = ".claud
     upgradeMarkerPath: path.join(queueRoot, "upgrade-in-progress.json"),
     upgradeReportsDir: path.join(queueRoot, "upgrade-reports"),
     legacyArchiveDir: path.join(queueRoot, "legacy-archive"),
+    archiveDir: path.join(privateRoot, "archive"),
     latestPath: path.join(reviewsRoot, "LATEST.txt"),
     reviewPromptOverridePath: path.join(privateRoot, "review-bridge", "review-prompt.md"),
     reviewPromptPath: path.join(path.resolve(bridgeRoot), "review-prompt.md"),

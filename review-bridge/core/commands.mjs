@@ -20,6 +20,7 @@ import {
 } from "./migration-v4.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { createReviewerProbeService } from "./reviewer-probe.mjs";
+import { formatPruneSummary, prune, removeRun, RetentionConfigError } from "./retention.mjs";
 import { removeServiceSession, serviceDown, serviceFiles, serviceStatus, serviceUp, writeServiceSession } from "./service.mjs";
 import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watch.mjs";
 import {
@@ -101,7 +102,32 @@ const schemas = {
   },
   down: {},
   ps: {},
+  prune: {
+    "--json": { key: "json", type: "boolean" },
+  },
+  rm: {},
 };
+
+// T0-02 R3: one entry point for every prune trigger (CLI, watch start, daily timer).
+async function runPrune(paths, { json = false, out = process.stdout } = {}) {
+  const config = (await fileExists(paths.bridgeConfigPath)) ? await readJson(paths.bridgeConfigPath).catch(() => ({})) : {};
+  let ttlSeconds = 86_400;
+  for (const file of [paths.defaultPolicyPath, paths.policyOverridePath]) {
+    const policy = (await fileExists(file)) ? await readJson(file).catch(() => null) : null;
+    if (Number.isInteger(policy?.limits?.authorization_ttl_seconds)) ttlSeconds = policy.limits.authorization_ttl_seconds;
+  }
+  try {
+    const summary = await prune(paths, { config, ttlSeconds });
+    out.write(json ? JSON.stringify(summary, null, 2) + "\n" : formatPruneSummary(summary) + "\n");
+    return summary.merge_errors.length ? 1 : 0;
+  } catch (error) {
+    if (error instanceof RetentionConfigError) {
+      out.write("沒有清：" + error.message + "\n");
+      return 1;
+    }
+    throw error;
+  }
+}
 
 async function confirmV4WorkStart(paths, planPath, assumeYes) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
@@ -165,12 +191,19 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
     pid: process.pid, port: watch.port, url: watch.url, service_id: watch.serviceId, started_at: new Date().toISOString(),
   });
   await fsp.writeFile(serviceFiles(paths).urlPath, watch.url + "\n", "utf8");
+  // T0-02 R3.4: prune at start and once a day while the service runs.
+  await runPrune(paths).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
+  const pruneTimer = setInterval(() => {
+    runPrune(paths).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
+  }, 86_400_000);
+  pruneTimer.unref();
   process.stdout.write("Review Bridge setup page: " + watch.url + "\n"
     + "Opening or refreshing the page uses no model. Press Ctrl+C to stop.\n");
   await new Promise((resolve) => {
     process.once("SIGINT", resolve);
     process.once("SIGTERM", resolve);
   });
+  clearInterval(pruneTimer);
   await watch.close();
   await removeServiceSession(paths);
   return 0;
@@ -179,7 +212,8 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
 export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName = ".claude" }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
   const migrationAction = command === "migrate-control" ? args[0] : null;
-  const commandArgs = command === "migrate-control" ? args.slice(1) : args;
+  const removeTarget = command === "rm" ? args[0] : null;
+  const commandArgs = command === "migrate-control" || command === "rm" ? args.slice(1) : args;
   const options = parseOptions(commandArgs, schemas[command] || {});
   const isV4 = await fileExists(paths.bridgeConfigPath);
   if (command === "migrate-control") {
@@ -249,6 +283,9 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       }
       return 0;
     } catch (error) {
+      // T0-02 R5.1: a Claude session with no Bridge run is the normal case for every
+      // other session in the repo; it is not an error and is not logged.
+      if (/Expected exactly one active run/.test(String(error?.message || ""))) return manualPayload ? 2 : 0;
       await writeHookError(paths, error).catch(() => {});
       return manualPayload ? 2 : 0;
     }
@@ -268,6 +305,17 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       })).exitCode;
     }
     return (await (command === "down" ? serviceDown : serviceStatus)({ paths })).exitCode;
+  }
+  if (command === "prune") {
+    if (!isV4) throw new Error("prune requires the v4 runtime configuration created by init.");
+    return await runPrune(paths, { json: Boolean(options.json) });
+  }
+  if (command === "rm") {
+    if (!isV4) throw new Error("rm requires the v4 runtime configuration created by init.");
+    if (!removeTarget) throw new Error("rm requires a run id.");
+    const result = await removeRun(paths, removeTarget);
+    process.stdout.write(result.line + "\n");
+    return result.exitCode;
   }
   if (command === "status") {
     process.stdout.write(JSON.stringify(await queueStatus(paths), null, 2) + "\n");

@@ -15,7 +15,9 @@
     "watch",
     "up",
     "down",
-    "ps"
+    "ps",
+    "prune",
+    "rm"
   ],
   "adapters": {
     "win32-x64": {

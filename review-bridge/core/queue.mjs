@@ -11,6 +11,7 @@ import {
   timestampId,
   writeJsonAtomic,
 } from "./io.mjs";
+import { appendArchiveLine } from "./retention.mjs";
 import { classifyReview } from "./policy.mjs";
 import { createWorkspaceDelta } from "./workspace-evidence.mjs";
 
@@ -137,24 +138,23 @@ export async function enqueueReview({
   return { accepted: true, duplicate: false, job, jobPath };
 }
 
+// Hook errors are lines in the day file (T0-02 R5.2); there is no separate log.
 export async function writeHookError(paths, error) {
-  await ensureDir(paths.queueRoot);
-  const line = new Date().toISOString() + " " + String(error?.message || error) + "\n";
-  await fsp.appendFile(path.join(paths.queueRoot, "hook-errors.log"), line, "utf8");
+  await appendArchiveLine(paths, { type: "hook_error", level: "error", message: String(error?.message || error) });
 }
 
 export async function writeHookWarning(paths, result) {
-  await ensureDir(paths.queueRoot);
   const safeFields = Array.isArray(result?.invalid_fields)
     ? result.invalid_fields.filter((field) => [
       "payload", "session_id", "cwd", "last_assistant_message", "stop_hook_active",
     ].includes(field))
     : [];
   const suffix = safeFields.length ? " fields=" + safeFields.join(",") : "";
-  const line = new Date().toISOString()
-    + " WARNING enqueue_rejected reason=" + String(result?.reason || "unknown")
-    + suffix + "\n";
-  await fsp.appendFile(path.join(paths.queueRoot, "hook-errors.log"), line, "utf8");
+  await appendArchiveLine(paths, {
+    type: "hook_error",
+    level: "warning",
+    message: "enqueue_rejected reason=" + String(result?.reason || "unknown") + suffix,
+  });
 }
 
 export async function queueStatus(paths) {

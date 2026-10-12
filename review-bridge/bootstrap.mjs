@@ -41,6 +41,8 @@ function printUsage() {
       "  up               Start the resident page service in the background",
       "  down             Stop the resident page service",
       "  ps               Show whether the resident page service is running",
+      "  prune            Fold finished runs into day files and drop records past retention",
+      "  rm <run_id>      Remove one finished run (folds it first)",
       "  migrate-control  Plan/apply/rollback a legacy v2/v3 CONTROL migration",
       "",
     ].join("\n"),
@@ -66,7 +68,7 @@ async function main() {
   }
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "migrate-control", "up", "down", "ps"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "migrate-control", "up", "down", "ps", "prune", "rm"]);
   let adapterDefinition = null;
   let implementation = {};
   let adapterSource = null;

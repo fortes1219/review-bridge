@@ -112,9 +112,16 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   const configPath = path.join(root, ".review-bridge", "review-bridge", "bridge.json");
   const config = JSON.parse(await fsp.readFile(configPath, "utf8"));
   assert.deepEqual(config.watch, { port, strict_port: false });
+  // T0-02 R3.1: retention ships with the 15-day default and is owner-editable.
+  assert.deepEqual(plan.retention, { days: 15 });
+  assert.deepEqual(config.retention, { days: 15 });
   assert.equal((await verifyNeutralInstall(root)).valid, true);
   await fsp.writeFile(configPath, JSON.stringify({ ...config, watch: { port: port + 1, strict_port: true } }));
   assert.equal((await verifyNeutralInstall(root)).valid, true);
+  await fsp.writeFile(configPath, JSON.stringify({ ...config, retention: { days: 30 } }));
+  await verifyNeutralInstall(root);
+  await fsp.writeFile(configPath, JSON.stringify({ ...config, retention: { days: 0 } }));
+  await assert.rejects(verifyNeutralInstall(root), /retention\.days/);
   await fsp.writeFile(configPath, JSON.stringify({ ...config, watch: { port: "eighty", strict_port: false } }));
   await assert.rejects(verifyNeutralInstall(root), /Watch port/);
   await assert.rejects(planNeutralInstall({ target: root, roles: plan.roles, watchPort: 70000 }));

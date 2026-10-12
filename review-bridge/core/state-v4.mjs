@@ -460,6 +460,10 @@ export async function listRuns(paths, { activeOnly = false } = {}) {
 }
 
 export async function reconcileRunProjection(paths, runId) {
+  // An archived terminal run has had its event log folded into the day file (T0-02);
+  // its projection is final and is served as-is.
+  const archived = await readOptional(runFile(paths, runId));
+  if (archived?.archived_at && !(await fileExists(eventFile(paths, runId)))) return archived;
   const source = await fsp.readFile(eventFile(paths, runId), "utf8");
   const lines = source.split("\n");
   if (lines.at(-1) !== "") throw new Error("Event log has a partial tail.");

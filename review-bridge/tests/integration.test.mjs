@@ -435,9 +435,14 @@ test("manual payload mode returns nonzero and records only field names for inval
       adapter: makeAdapter("PASS"),
     });
     assert.equal(exitCode, 2);
-    const log = await fsp.readFile(path.join(runtime.paths.queueRoot, "hook-errors.log"), "utf8");
+    // T0-02: hook warnings are lines in today's day file, not a separate log.
+    const archiveFiles = await fsp.readdir(runtime.paths.archiveDir);
+    assert.equal(archiveFiles.length, 1);
+    const log = await fsp.readFile(path.join(runtime.paths.archiveDir, archiveFiles[0]), "utf8");
+    assert.match(log, /"type":"hook_error"/);
     assert.match(log, /reason=invalid_payload fields=session_id/);
     assert.doesNotMatch(log, /CODEX_REVIEW_REQUIRED/);
+    assert.equal(await fsp.stat(path.join(runtime.paths.queueRoot, "hook-errors.log")).catch(() => null), null);
   } finally {
     await runtime.cleanup();
   }
