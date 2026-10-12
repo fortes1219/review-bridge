@@ -66,6 +66,9 @@ export function validateDefaultPolicy(policy) {
   for (const key of [
     "max_claude_calls",
     "max_claude_minutes_per_call",
+    "max_turns",
+    "max_tokens_per_call",
+    "max_tokens_per_run",
     "authorization_ttl_seconds",
     "recovery_window_seconds",
     "heartbeat_interval_seconds",

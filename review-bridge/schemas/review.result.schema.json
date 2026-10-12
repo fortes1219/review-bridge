@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "review.result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event", "work_order", "call", "gate", "hard_stop", "hard_stop_reason", "findings", "verified", "not_run"],
+  "properties": {
+    "event": { "const": "review.result" },
+    "work_order": { "type": "string", "minLength": 1 },
+    "call": { "type": "integer", "minimum": 1 },
+    "gate": { "enum": ["PASS", "FAIL"] },
+    "hard_stop": { "type": "boolean" },
+    "hard_stop_reason": { "enum": ["needs_human_decision", "scope_expansion", "release_action", null] },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "path", "line", "reach", "claim", "evidence", "fix", "acceptance_ref"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^F[0-9]+$" },
+          "severity": { "enum": ["HIGH", "MEDIUM", "LOW"] },
+          "path": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 },
+          "reach": { "type": "string", "maxLength": 200 },
+          "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "evidence": { "type": "string", "maxLength": 200 },
+          "fix": { "type": "string", "maxLength": 200 },
+          "acceptance_ref": { "type": ["integer", "null"], "minimum": 1 }
+        }
+      }
+    },
+    "verified": { "type": "array", "items": { "type": "string", "maxLength": 120 } },
+    "not_run": { "type": "array", "items": { "type": "string", "maxLength": 120 } }
+  }
+}

@@ -259,3 +259,22 @@ test("T8 usage parsers read the real shapes and never throw on garbage", () => {
   assert.equal(parseReviewerUsage("no trailer").parse_error, true);
   assert.equal(parseReviewerUsage("").parse_error, true);
 });
+
+test("P8 merge folds the run's I/O event file into the day file and deletes it", async (t) => {
+  const { paths } = await runtime(t);
+  const fixture = await terminalRunFixture(paths);
+  const ioFile = path.join(paths.eventsDir, fixture.run.run_id + ".io.jsonl");
+  await fsp.writeFile(ioFile, [
+    JSON.stringify({ schema_version: 1, run_id: fixture.run.run_id, sequence: 1, event: "task.input", call: 1 }),
+    JSON.stringify({ schema_version: 1, run_id: fixture.run.run_id, sequence: 2, event: "usage", call: 1, tokens: { cache_read: 5 } }),
+  ].join("\n") + "\n");
+  await fsp.mkdir(paths.runLocksDir, { recursive: true });
+  await fsp.writeFile(path.join(paths.runLocksDir, fixture.run.run_id + ".process.json"), "{}");
+  const result = await mergeRun(paths, fixture.run.run_id);
+  const lines = await readArchive(result.archive_file);
+  const io = lines.filter((line) => line.type === "io_event");
+  assert.equal(io.length, 2);
+  assert.equal(io[1].event.event, "usage");
+  assert.equal(await fileExists(ioFile), false);
+  assert.equal(await fileExists(path.join(paths.runLocksDir, fixture.run.run_id + ".process.json")), false);
+});

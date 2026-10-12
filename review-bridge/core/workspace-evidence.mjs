@@ -13,12 +13,19 @@ const excludedRoots = new Set([
   "node_modules",
   "target",
 ]);
-const excludedControllerPaths = [
-  ".claude/review-queue",
-  ".claude/reviews",
-  ".claude/tools/review-bridge",
-  ".claude/work-packages",
-];
+// The controller's own state is never workspace evidence, under either private root name
+// (T0-05: the neutral `.review-bridge/` root was missing here, so a run's queue and record
+// files counted as scope violations).
+const privateRootNames = [".claude", ".review-bridge"];
+const excludedControllerPaths = privateRootNames.flatMap((root) => [
+  root + "/review-queue",
+  root + "/reviews",
+  root + "/tools/review-bridge",
+  root + "/work-packages",
+  root + "/archive",
+  root + "/review-bridge/policy-snapshots",
+  root + "/review-bridge-install.json",
+]);
 const maximumFiles = 20_000;
 const maximumBaselineBytes = 100 * 1024 * 1024;
 

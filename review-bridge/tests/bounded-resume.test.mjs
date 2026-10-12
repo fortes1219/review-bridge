@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { runBoundedResume } from "../core/bounded-resume.mjs";
+import { readIoEvents } from "../core/io-events.mjs";
 import { fileExists, readJson, writeJson } from "../core/io.mjs";
 import { getBridgePaths } from "../core/paths.mjs";
 import { createRunRuntimeState, readRun } from "../core/state-v4.mjs";
@@ -25,13 +26,37 @@ const STALE_JOB_ID = "20000101T000000000Z-0000000000000000";
 const fakeClaudeSource = `
 import fsp from "node:fs/promises";
 import path from "node:path";
-for await (const _ of process.stdin) {}
+let prompt = "";
+for await (const chunk of process.stdin) prompt += chunk;
 const args = process.argv;
 const at = args.indexOf("--session-id") >= 0 ? args.indexOf("--session-id") : args.indexOf("--resume");
 const session = args[at + 1];
 const mode = process.env.T_CLAUDE;
 if (process.env.T_ARGS_OUT) await fsp.writeFile(process.env.T_ARGS_OUT, JSON.stringify(args.slice(2)));
-const ok = { session_id: session, is_error: false, result: "report\\nCODEX_REVIEW_REQUIRED: true" };
+// T0-05: a v4 run asks for a schema; the typed answer is built from the injected task.input.
+const call = Number(/"call": (\\d+)/.exec(prompt)?.[1] || 1);
+const handoffAt = prompt.indexOf("=== HANDOFF ===");
+const addressed = handoffAt >= 0 ? [...prompt.slice(handoffAt).matchAll(/"id": "(F\\d+)"/g)].map((m) => m[1]) : [];
+const writerResult = process.env.T_WRITER === "malformed" ? { event: "writer.result" } : {
+  event: "writer.result", work_order: "s2-04-fixture", call, status: process.env.T_WRITER === "blocked" ? "blocked" : "done",
+  changed: [{ path: "README.md", action: "modified", summary: "fake edit" }], verification: [], unverified: [],
+  needs_human: process.env.T_WRITER === "needs_human" ? [{ question: "which?", options: ["a", "b"] }] : [],
+  addressed_findings: [...new Set(addressed)],
+};
+const typed = args.includes("--json-schema") ? { structured_output: writerResult } : {};
+const ok = { session_id: session, is_error: false, result: "report\\nCODEX_REVIEW_REQUIRED: true", ...typed };
+if (mode === "stream") {
+  const tokens = Number(process.env.T_TOKENS || 1000);
+  const lines = [
+    { type: "system", subtype: "init", session_id: session },
+    { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "README.md" } }] } },
+    { type: "result", subtype: "success", session_id: session, is_error: false, num_turns: 2, total_cost_usd: 0.01,
+      usage: { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: tokens, output_tokens: 3 },
+      result: "report\\nCODEX_REVIEW_REQUIRED: true", ...typed },
+  ];
+  for (const line of lines) process.stdout.write(JSON.stringify(line) + "\\n");
+  process.exit(0);
+}
 if (mode === "stdout_limit") {
   process.stdout.write(JSON.stringify({ session_id: session, is_error: true, result: "Claude AI usage limit reached|1760000000" }));
   process.exit(1);
@@ -59,7 +84,8 @@ process.stdout.write(JSON.stringify(ok));
 
 const fakeCodexSource = `
 import fsp from "node:fs/promises";
-for await (const _ of process.stdin) {}
+let prompt = "";
+for await (const chunk of process.stdin) prompt += chunk;
 const mode = process.env.T_CODEX;
 if (mode === "limit") {
   process.stderr.write(${JSON.stringify(CODEX_LIMIT_STDERR)});
@@ -70,28 +96,47 @@ if (mode === "generic") {
   process.exit(1);
 }
 const out = process.argv[process.argv.indexOf("--output-last-message") + 1];
+if (process.argv.includes("--output-schema")) {
+  // T0-05: typed verdict; the stream is left empty so reviewer usage falls back to parse_error.
+  const call = Number(/"call": (\\d+)/.exec(prompt)?.[1] || 1);
+  const finding = { id: "F1", severity: "HIGH", path: "README.md", line: 1, reach: "r", claim: "c", evidence: "e", fix: "f", acceptance_ref: null };
+  const verdict = mode === "malformed" ? { event: "review.result", gate: "MAYBE" } : {
+    event: "review.result", work_order: "s2-04-fixture", call,
+    gate: mode === "fail" ? "FAIL" : "PASS", hard_stop: false, hard_stop_reason: null,
+    findings: mode === "fail" ? [finding] : [], verified: [], not_run: [],
+  };
+  await fsp.writeFile(out, JSON.stringify(verdict));
+  if (process.env.T_CODEX_TOKENS) {
+    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: Number(process.env.T_CODEX_TOKENS), cached_input_tokens: 0, output_tokens: 1 } }) + "\\n");
+  }
+  process.exit(0);
+}
 await fsp.writeFile(out, "HARD_STOP_REQUIRED: false\\nREVIEW_GATE: " + (mode === "fail" ? "FAIL" : "PASS") + "\\n");
 `;
 
 async function makeRuntime(t, override = { schema_version: 4 }) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-bounded-"));
+  // T0-05 D2.5: anything written inside the repo outside README.md is a scope violation, so the
+  // fake CLIs and their argument dump live next to the repo, not in it.
+  const toolsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-bounded-tools-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
+  t.after(() => fsp.rm(toolsRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot);
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
   });
   await writeJson(paths.policyOverridePath, override);
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# fixture\n", "utf8");
-  const claude = path.join(repoRoot, "fake-claude.mjs");
-  const codex = path.join(repoRoot, "fake-codex.mjs");
+  const claude = path.join(toolsRoot, "fake-claude.mjs");
+  const codex = path.join(toolsRoot, "fake-codex.mjs");
   await fsp.writeFile(claude, fakeClaudeSource, "utf8");
   await fsp.writeFile(codex, fakeCodexSource, "utf8");
-  return { repoRoot, paths, claude, codex };
+  return { repoRoot, toolsRoot, paths, claude, codex };
 }
 
-async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override } = {}) {
+async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0 } = {}) {
   const runtime = await makeRuntime(t, override);
-  const argsOut = path.join(runtime.repoRoot, "claude-args.json");
+  const argsOut = path.join(runtime.toolsRoot, "claude-args.json");
   const planPath = path.join(runtime.paths.queueRoot, "plan.json");
   const plan = await createV4WorkPackagePlan({
     paths: runtime.paths,
@@ -120,6 +165,9 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
           T_CODEX: codexMode,
           T_ARGS_OUT: kind === "claude" ? argsOut : "",
           T_STALE_JOB: staleJob ? path.join(runtime.paths.pendingDir, STALE_JOB_ID + ".json") : "",
+          T_TOKENS: tokens ? String(tokens) : "",
+          T_WRITER: writer,
+          T_CODEX_TOKENS: codexTokens ? String(codexTokens) : "",
         },
       };
     },
@@ -166,10 +214,10 @@ test("reviewer usage limit ends rate_limited as reviewer provider_usage_limit, n
   assert.match(await fsp.readFile(record.evidence.stderr_path, "utf8"), /hit your usage limit/);
   assert.equal(await fileExists(status.latest_state.failed_review_job_path), true);
   const writer = JSON.parse(await fsp.readFile(status.latest_state.claude_stdout_path, "utf8"));
-  assert.match(writer.result, /CODEX_REVIEW_REQUIRED: true/);
+  assert.equal(writer.structured_output.event, "writer.result");
 });
 
-test("an unrelated pending job failure is not attributed to this run", async (t) => {
+test("an unrelated pending job is left alone: a bounded run reviews only its own job", async (t) => {
   const { runtime, exitCode, error, status, run } = await start(t, { staleJob: true });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
@@ -177,7 +225,9 @@ test("an unrelated pending job failure is not attributed to this run", async (t)
   assert.equal(status.latest_state.status, "pass");
   assert.equal(status.latest_state.failed_review_job_path, undefined);
   assert.equal(status.stop_reason?.reason === "provider_usage_limit", false);
-  assert.equal(await fileExists(path.join(runtime.paths.failedDir, STALE_JOB_ID + ".json")), true);
+  // T0-05: the stale job is neither reviewed nor failed by this run; it stays pending for its owner.
+  assert.equal(await fileExists(path.join(runtime.paths.pendingDir, STALE_JOB_ID + ".json")), true);
+  assert.equal(await fileExists(path.join(runtime.paths.failedDir, STALE_JOB_ID + ".json")), false);
   assert.equal(path.basename(status.latest_state.review_path).startsWith(STALE_JOB_ID), false);
 });
 
@@ -267,4 +317,141 @@ test("a malformed writer model override is refused", async (t) => {
     maxMinutes: 1,
     outPath: path.join(runtime.paths.queueRoot, "plan.json"),
   }), /writer model is invalid/);
+});
+
+test("P4 stream output: task.input, read and usage are recorded; the result file stays a single JSON; args carry the limits", async (t) => {
+  const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream" });
+  assert.equal(error, null);
+  assert.equal(exitCode, 0);
+  assert.equal(run.status, "pass");
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.deepEqual(events.map((event) => event.event), ["task.input", "read", "usage", "writer.result", "review.input", "usage", "review.result"]);
+  assert.equal(events[0].work_order, "s2-04-fixture");
+  assert.equal(events[1].path, "README.md");
+  assert.equal(events[1].outside_list, null); // legacy inline task: no read list, nothing to compare against
+  assert.equal(events[2].tokens.cache_read, 1000);
+  assert.equal(events[5].role, "reviewer");
+  assert.equal(events[5].parse_error, true); // this inline fake prints no --json stream and no trailer
+  const writer = JSON.parse(await fsp.readFile(status.latest_state.claude_stdout_path, "utf8"));
+  assert.equal(writer.type, "result");
+  assert.equal(writer.structured_output.event, "writer.result");
+  const args = JSON.parse(await fsp.readFile(path.join(runtime.toolsRoot, "claude-args.json"), "utf8"));
+  assert.ok(args.includes("--session-id"));
+  assert.ok(!args.includes("--resume"));
+  assert.equal(args[args.indexOf("--max-turns") + 1], "20");
+  assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+  assert.ok(args.includes("--verbose"));
+  assert.equal(JSON.parse(args[args.indexOf("--json-schema") + 1]).title, "writer.result");
+});
+
+test("Q2 a writer.result that misses fields ends malformed_writer_result with exit 79 and no review", async (t) => {
+  const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", writer: "malformed" });
+  assert.equal(error, null);
+  assert.equal(exitCode, 79);
+  assert.equal(run.status, "malformed_writer_result");
+  assert.ok(status.latest_state.errors.some((line) => /missing call/.test(line)));
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.at(-1).event, "stop");
+  assert.equal(events.at(-1).status, "malformed_event");
+  assert.equal(events.some((event) => event.event === "review.input"), false);
+});
+
+test("Q3 needs_human or a non-done status ends needs_human with exit 0 and no review", async (t) => {
+  for (const writer of ["needs_human", "blocked"]) {
+    const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", writer });
+    assert.equal(error, null);
+    assert.equal(exitCode, 0);
+    assert.equal(run.status, "needs_human");
+    assert.equal(status.closed_reason, "needs_human");
+    assert.equal(status.latest_state.writer_status, writer === "blocked" ? "blocked" : "done");
+    const events = await readIoEvents(runtime.paths, run.run_id);
+    assert.equal(events.at(-1).status, "needs_human");
+    assert.equal(events.some((event) => event.event === "review.input"), false);
+  }
+});
+
+test("Q5 a review.result that breaks the schema ends malformed_review_result with exit 79", async (t) => {
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", codexMode: "malformed" });
+  assert.equal(error, null);
+  assert.equal(exitCode, 79);
+  assert.equal(run.status, "malformed_review_result");
+  assert.ok(status.latest_state.errors.length > 0);
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.at(-1).status, "malformed_event");
+  assert.equal(events.at(-1).role, "reviewer");
+});
+
+test("Q7 a finding that survives one correction is a loop: hard_stop, no third writer call", async (t) => {
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", codexMode: "fail", maxCalls: 2 });
+  assert.equal(error, null);
+  assert.equal(exitCode, 0);
+  assert.equal(run.status, "hard_stop");
+  assert.equal(status.latest_state.call, 2);
+  assert.equal(status.latest_state.hard_stop_reason, "needs_human_decision");
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.filter((event) => event.event === "task.input").length, 2);
+  const handoff = events.find((event) => event.event === "handoff");
+  assert.equal(handoff.open_findings[0].id, "F1");
+  assert.equal(handoff.open_findings[0].claim, "c");
+  const recheck = events.find((event) => event.event === "recheck");
+  assert.deepEqual(recheck.unresolved, ["F1"]);
+  assert.equal(events.at(-1).detail_ref, "loop:F1");
+  const secondWriter = events.filter((event) => event.event === "writer.result")[1];
+  assert.deepEqual(secondWriter.addressed_findings, ["F1"]);
+});
+
+test("Q8 reviewer usage from the --json stream counts against the per-call ceiling", async (t) => {
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", codexTokens: 2_000_000 });
+  assert.equal(error, null);
+  assert.equal(exitCode, 76);
+  assert.equal(run.status, "token_limit");
+  assert.equal(status.latest_state.token_limit_role, "reviewer");
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  const reviewer = events.find((event) => event.event === "usage" && event.role === "reviewer");
+  assert.equal(reviewer.source, "cli_json");
+  assert.equal(reviewer.tokens.input, 2_000_000);
+  assert.equal(events.at(-1).status, "token_limit");
+  assert.equal(events.at(-1).role, "reviewer");
+});
+
+test("P5 a call over max_tokens_per_call ends token_limit with exit 76, no review, no second call", async (t) => {
+  const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", tokens: 2_000_000, maxCalls: 2, codexMode: "fail" });
+  assert.equal(error, null);
+  assert.equal(exitCode, 76);
+  assert.equal(run.status, "token_limit");
+  assert.equal(status.latest_state.token_limit, "per_call");
+  assert.equal(status.latest_state.tokens_this_call, 2_000_006);
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.filter((event) => event.event === "usage").length, 1);
+  assert.equal(events.at(-1).event, "stop");
+  assert.equal(events.at(-1).status, "token_limit");
+});
+
+test("P5b the per-run ceiling adds up across calls and the second call rotates the session", async (t) => {
+  const { runtime, exitCode, error, run, status } = await start(t, {
+    claudeMode: "stream", tokens: 1000, maxCalls: 2, codexMode: "fail",
+    override: { schema_version: 4, limits: { max_tokens_per_run: 1500 } },
+  });
+  assert.equal(error, null);
+  assert.equal(exitCode, 76);
+  assert.equal(run.status, "token_limit");
+  assert.equal(status.latest_state.token_limit, "per_run");
+  assert.equal(status.latest_state.tokens_this_run, 2012);
+  assert.equal(run.claude_session_ids.length, 2);
+  assert.notEqual(run.claude_session_ids[0], run.claude_session_ids[1]);
+  assert.equal(run.claude_session_id, run.claude_session_ids[1]);
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.filter((event) => event.event === "handoff").length, 1);
+  const handoff = events.find((event) => event.event === "handoff");
+  assert.equal(handoff.reason, "correction");
+  assert.equal(handoff.from.calls_used, 1);
+});
+
+test("P6 a project override may lower max_turns but never raise it", async (t) => {
+  const { runtime, error } = await start(t, { claudeMode: "stream", override: { schema_version: 4, limits: { max_turns: 5 } } });
+  assert.equal(error, null);
+  const args = JSON.parse(await fsp.readFile(path.join(runtime.toolsRoot, "claude-args.json"), "utf8"));
+  assert.equal(args[args.indexOf("--max-turns") + 1], "5");
+  await assert.rejects(start(t, { override: { schema_version: 4, limits: { max_turns: 50 } } }), /only tighten limit: max_turns/);
+  await assert.rejects(start(t, { override: { schema_version: 4, limits: { max_tokens_per_call: 9_000_000 } } }), /only tighten limit: max_tokens_per_call/);
 });

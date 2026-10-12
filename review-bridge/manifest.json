@@ -17,7 +17,8 @@
     "down",
     "ps",
     "prune",
-    "rm"
+    "rm",
+    "stop"
   ],
   "adapters": {
     "win32-x64": {

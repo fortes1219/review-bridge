@@ -2,7 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { parseOptions } from "./args.mjs";
-import { runBoundedResume, validateBoundedResume } from "./bounded-resume.mjs";
+import { runBoundedResume, stopRun, validateBoundedResume } from "./bounded-resume.mjs";
 import { getBridgePaths } from "./paths.mjs";
 import {
   enqueueReview,
@@ -107,6 +107,7 @@ const schemas = {
     "--json": { key: "json", type: "boolean" },
   },
   rm: {},
+  stop: {},
 };
 
 // T0-02 R3: one entry point for every prune trigger (CLI, watch start, daily timer).
@@ -213,8 +214,8 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
 export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName = ".claude" }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
   const migrationAction = command === "migrate-control" ? args[0] : null;
-  const removeTarget = command === "rm" ? args[0] : null;
-  const commandArgs = command === "migrate-control" || command === "rm" ? args.slice(1) : args;
+  const removeTarget = command === "rm" || command === "stop" ? args[0] : null;
+  const commandArgs = ["migrate-control", "rm", "stop"].includes(command) ? args.slice(1) : args;
   const options = parseOptions(commandArgs, schemas[command] || {});
   const isV4 = await fileExists(paths.bridgeConfigPath);
   if (command === "migrate-control") {
@@ -310,6 +311,13 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   if (command === "prune") {
     if (!isV4) throw new Error("prune requires the v4 runtime configuration created by init.");
     return await runPrune(paths, { json: Boolean(options.json) });
+  }
+  if (command === "stop") {
+    if (!isV4) throw new Error("stop requires the v4 runtime configuration created by init.");
+    if (!removeTarget) throw new Error("stop requires a run id.");
+    const result = await stopRun(paths, removeTarget);
+    process.stdout.write(result.line + "\n");
+    return result.exitCode;
   }
   if (command === "rm") {
     if (!isV4) throw new Error("rm requires the v4 runtime configuration created by init.");

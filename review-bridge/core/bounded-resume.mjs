@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   acquireLock,
   assertUnder,
+  ensureDir,
   fileExists,
   listJson,
   parseJson,
@@ -15,7 +17,30 @@ import {
 import { enqueueReview, hasPendingMessageHash } from "./queue.mjs";
 import { runReviewWorker } from "./review.mjs";
 import { parseReviewGate } from "./gate.mjs";
-import { runProcess } from "./process.mjs";
+import { appendIoEvent, readIoEvents, tokenTotal, usageTotalForRun } from "./io-events.mjs";
+import { killProcessTree, runProcess } from "./process.mjs";
+import {
+  buildHandoff,
+  buildReadList,
+  buildTaskInput,
+  composeWriterPrompt,
+  isInReadList,
+  parseClaudeStream,
+  ReferenceChangedError,
+  usageFromResult,
+  verifyAndLoadReferences,
+} from "./prompt.mjs";
+import {
+  loadSchema,
+  MALFORMED_EXIT_CODE,
+  recheckFindings,
+  unknownAddressedFindings,
+  validateReviewResult,
+  validateWriterResult,
+  WRITER_RESULT_SCHEMA,
+  writerResultFromClaudeResult,
+} from "./typed-results.mjs";
+import { consumeRun, readRun } from "./state-v4.mjs";
 import { validateWriterPolicy } from "./policy.mjs";
 import { classificationProfileFromSnapshot } from "./policy-v4.mjs";
 import {
@@ -43,7 +68,7 @@ async function enqueuedJobId(paths, enqueued) {
   return path.basename(matches[0], ".json");
 }
 
-function writerPrefix(control) {
+function legacyWriterPrefix(control) {
   const scope = control.authorized_scope || {};
   return [
     "[REVIEW_BRIDGE_MODE: WRITER_ONLY]",
@@ -106,6 +131,73 @@ async function writeBoundedState(paths, runtimeState, state) {
   return await writeJson(paths.boundedStatePath, state);
 }
 
+// T0-04 D4.1: ceilings come from the policy snapshot; legacy runs use the package defaults.
+export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, max_tokens_per_call: 1_500_000, max_tokens_per_run: 4_000_000, max_output_chars: 4_000 });
+function effectiveLimits(control) {
+  const limits = control?.v4?.policy_snapshot?.effective_policy?.limits || {};
+  return {
+    max_turns: limits.max_turns ?? DEFAULT_LIMITS.max_turns,
+    max_tokens_per_call: limits.max_tokens_per_call ?? DEFAULT_LIMITS.max_tokens_per_call,
+    max_tokens_per_run: limits.max_tokens_per_run ?? DEFAULT_LIMITS.max_tokens_per_run,
+    max_output_chars: DEFAULT_LIMITS.max_output_chars,
+  };
+}
+
+async function recordIo(paths, runId, event) {
+  if (!runId) return null;
+  return await appendIoEvent(paths, runId, event);
+}
+
+function processFile(paths, runId) {
+  return path.join(paths.runLocksDir, runId + ".process.json");
+}
+
+async function recordProcess(paths, runId, record) {
+  if (!runId) return;
+  await ensureDir(paths.runLocksDir);
+  await writeJsonAtomic(processFile(paths, runId), { ...record, started_at: new Date().toISOString() });
+}
+
+async function clearProcess(paths, runId) {
+  if (!runId) return;
+  await fsp.rm(processFile(paths, runId), { force: true });
+}
+
+async function readRunStatus(paths, runId) {
+  if (!runId) return null;
+  return (await readRun(paths, runId).catch(() => null))?.status || null;
+}
+
+async function changedFilesForJob(paths, jobId) {
+  const job = await readJson(path.join(paths.doneDir, jobId + ".json")).catch(() => null);
+  const deltaPath = job?.workspace_evidence?.delta_path;
+  if (!deltaPath) return [];
+  const delta = await readJson(deltaPath).catch(() => null);
+  return (delta?.changed_files || []).map((entry) => ({ path: entry.path, change: entry.change }));
+}
+
+const ACTIVE_RUN_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
+
+// T0-04 D5.2: mark the run stopped first so the writer loop sees it, then kill the process tree.
+export async function stopRun(paths, runId) {
+  const run = await readRun(paths, runId).catch(() => null);
+  if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
+  if (!ACTIVE_RUN_STATUSES.has(run.status)) return { exitCode: 1, line: "已經結束：" + run.status, reason: "terminal" };
+  const record = await readJson(processFile(paths, runId)).catch(() => null);
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try { await consumeRun(paths, runId, "stopped", null); lastError = null; break; } catch (error) { lastError = error; await new Promise((resolve) => setTimeout(resolve, 300)); }
+  }
+  if (lastError) throw lastError;
+  const killed = record?.pid ? await killProcessTree(record.pid) : { killed: false, reason: "no_process" };
+  await appendIoEvent(paths, runId, {
+    event: "stop", status: "stopped", role: record?.role || null, provider: record?.provider || null,
+    detail_ref: record ? "pid:" + record.pid + ":" + killed.reason : "no_process",
+  });
+  await fsp.rm(processFile(paths, runId), { force: true });
+  return { exitCode: 0, line: "已停止 " + runId, reason: killed.reason };
+}
+
 export async function validateBoundedResume({
   paths,
   control,
@@ -153,10 +245,14 @@ export async function runBoundedResume({
   const release = await acquireLock(paths.boundedLockPath);
   try {
     const claude = await adapter.resolveExecutable("claude");
-    const sessionId = validation.session_id;
+    let sessionId = validation.session_id;
     const writerModel = validation.model;
     let currentPromptPath = validation.prompt_path;
     let currentControl = control;
+    let lastFindings = [];
+    let lastGate = null;
+    let lastChangedFiles = [];
+    const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
 
     for (let call = 1; call <= maxCalls; call += 1) {
       currentControl = await loadLiveControl(paths, runtimeState);
@@ -166,31 +262,116 @@ export async function runBoundedResume({
       }
       const stamp = timestampId();
       const stdoutPath = path.join(paths.queueRoot, stamp + "-claude.stdout.json");
+      const streamPath = path.join(paths.queueRoot, stamp + "-claude.stream.jsonl");
       const stderrPath = path.join(paths.queueRoot, stamp + "-claude.stderr.log");
       const payloadPath = path.join(paths.queueRoot, stamp + "-stop-payload.json");
       const effectivePromptPath = path.join(paths.queueRoot, stamp + "-writer-only-prompt.txt");
-      const requested = await fsp.readFile(currentPromptPath, "utf8");
-      const effectivePrompt = writerPrefix(currentControl) + requested;
+      const workPackage = currentControl.v4?.work_package || null;
+      const runId = runtimeState?.runId || null;
+      const limits = effectiveLimits(currentControl);
+      // D2.1: every call is a fresh session; the run records the rotation.
+      if (call > 1 && runtimeState) {
+        sessionId = randomUUID();
+        await runtimeState.rotateSession(sessionId);
+        control.active_claude_session = sessionId;
+        currentControl = await loadLiveControl(paths, runtimeState);
+        currentControl.v4_runtime_state = runtimeState;
+      }
+      let effectivePrompt;
+      let readList = [];
+      if (workPackage) {
+        let references;
+        try {
+          references = await verifyAndLoadReferences(paths, workPackage);
+        } catch (error) {
+          if (!(error instanceof ReferenceChangedError)) throw error;
+          await writeBoundedState(paths, runtimeState, {
+            writer_model: writerModel, status: "reference_changed", session_id: sessionId, call,
+            updated_at: new Date().toISOString(), changed_path: error.path, error: error.message,
+          });
+          await recordIo(paths, runId, { event: "stop", status: "reference_changed", role: "controller", provider: null, detail_ref: error.path });
+          await consumeAuthorization(paths, control, "reference_changed");
+          return 78;
+        }
+        readList = buildReadList({ references, findings: lastFindings });
+        const taskInput = buildTaskInput({ workPackage, call, readList, limits });
+        const handoff = call > 1 ? buildHandoff({
+          workPackage, call, reason: "correction", ioEvents: runId ? await readIoEvents(paths, runId) : [],
+          openFindings: lastFindings, lastGate, changedFiles: lastChangedFiles, readList,
+        }) : null;
+        if (handoff) await recordIo(paths, runId, handoff);
+        effectivePrompt = composeWriterPrompt({
+          workPackage, control: currentControl, runId: runId || "legacy", call, taskInput, references, handoff,
+          rulesText: workPackage.rules?.text || "",
+        });
+        await recordIo(paths, runId, {
+          ...taskInput,
+          injected: references.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes, inlined: file.text !== null })),
+        });
+      } else {
+        // Legacy CONTROL.json runs keep the old prefix-plus-prompt-file shape.
+        effectivePrompt = legacyWriterPrefix(currentControl) + await fsp.readFile(currentPromptPath, "utf8");
+      }
       await writeText(effectivePromptPath, effectivePrompt);
 
       const claudeArgs = [
         "-p",
-        startNewSession && call === 1 ? "--session-id" : "--resume", sessionId,
+        (call === 1 || runtimeState) ? "--session-id" : "--resume", sessionId,
         "--permission-mode", "auto",
         "--disallowedTools", "Agent",
         "--model", writerModel,
         "--effort", "low",
-        "--output-format", "json",
+        "--max-turns", String(limits.max_turns),
+        "--output-format", "stream-json",
+        "--verbose",
+        // T0-05 D1.1: the CLI is asked for a writer.result-shaped answer; legacy runs keep prose.
+        ...(workPackage ? ["--json-schema", writerSchemaArg] : []),
       ];
       const invocation = adapter.buildInvocation("claude", claude, claudeArgs);
+      const callStartedAt = Date.now();
       const processResult = await runProcess({
         invocation,
         cwd: paths.repoRoot,
         input: effectivePrompt,
-        stdoutPath,
+        stdoutPath: streamPath,
         stderrPath,
         timeoutMs: maxMinutes * 60_000,
+        onSpawn: (pid) => recordProcess(paths, runId, { pid, role: "writer", provider: "claude", call }),
       });
+      await clearProcess(paths, runId);
+      // D5.3: stopped from outside; nothing more is classified or written.
+      if ((await readRunStatus(paths, runId)) === "stopped") return 130;
+      // D3.3: the final result object keeps the legacy single-JSON file for everything downstream.
+      const stream = parseClaudeStream(await fsp.readFile(streamPath, "utf8").catch(() => ""));
+      if (stream.result) await writeJson(stdoutPath, stream.result);
+      for (const read of stream.reads) {
+        await recordIo(paths, runId, {
+          event: "read", call, ...read,
+          ...(read.path ? { outside_list: readList.length ? !isInReadList(read.path, readList) : null } : {}),
+        });
+      }
+      if (stream.result && !processResult.timedOut) {
+        const usage = usageFromResult(stream.result, { call, durationMs: Date.now() - callStartedAt });
+        await recordIo(paths, runId, usage);
+        const callTotal = tokenTotal(usage.tokens);
+        const runTotal = runId ? await usageTotalForRun(paths, runId) : callTotal;
+        if (callTotal > limits.max_tokens_per_call || runTotal > limits.max_tokens_per_run) {
+          const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
+          await writeBoundedState(paths, runtimeState, {
+            writer_model: writerModel, status: "token_limit", session_id: sessionId, call, updated_at: new Date().toISOString(),
+            token_limit: which, tokens_this_call: callTotal, tokens_this_run: runTotal, claude_stdout_path: stdoutPath,
+          });
+          await recordIo(paths, runId, {
+            event: "stop", status: "token_limit", role: "writer", provider: "claude",
+            detail_ref: which + ":" + (which === "per_call" ? callTotal : runTotal),
+          });
+          await consumeAuthorization(paths, control, "token_limit");
+          return 76;
+        }
+        if (stream.result.subtype === "error_max_turns") {
+          await recordIo(paths, runId, { event: "stop", status: "max_turns", role: "writer", provider: "claude", detail_ref: String(limits.max_turns) });
+        }
+      }
       if (processResult.timedOut) {
         const timeout = await writeFailureRecord(paths, paths.queueRoot, stamp + "-claude", classifyProviderFailure({
           role: "writer", provider: "claude", phase: "write", exitCode: processResult.exitCode, timedOut: true,
@@ -253,7 +434,32 @@ export async function runBoundedResume({
         await consumeAuthorization(paths, control, limited ? "rate_limited" : "claude_failed");
         return limited ? 75 : 1;
       }
-      if (!/^\s*CODEX_REVIEW_REQUIRED\s*:\s*true\s*$/im.test(resultText)) {
+      let writerResult = null;
+      if (workPackage) {
+        // T0-05 D1: the typed answer is checked by the harness; prose is never read.
+        writerResult = writerResultFromClaudeResult(claudeResult);
+        const check = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call });
+        if (!check.ok) {
+          await writeBoundedState(paths, runtimeState, {
+            writer_model: writerModel, status: "malformed_writer_result", session_id: sessionId, call,
+            updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), claude_stdout_path: stdoutPath,
+          });
+          await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "writer", provider: "claude", detail_ref: check.errors[0] || "writer.result" });
+          await consumeAuthorization(paths, control, "malformed_writer_result");
+          return MALFORMED_EXIT_CODE;
+        }
+        await recordIo(paths, runId, { ...writerResult, unknown_addressed_findings: unknownAddressedFindings(writerResult, lastFindings) });
+        if (writerResult.needs_human.length || writerResult.status !== "done") {
+          // D1.4: the writer asked for a decision or declared itself blocked; no review, back to the owner.
+          await writeBoundedState(paths, runtimeState, {
+            writer_model: writerModel, status: "needs_human", session_id: sessionId, call, updated_at: new Date().toISOString(),
+            writer_status: writerResult.status, needs_human: writerResult.needs_human, claude_stdout_path: stdoutPath,
+          });
+          await recordIo(paths, runId, { event: "stop", status: "needs_human", role: "writer", provider: "claude", detail_ref: writerResult.status });
+          await consumeAuthorization(paths, control, "needs_human");
+          return 0;
+        }
+      } else if (!/^\s*CODEX_REVIEW_REQUIRED\s*:\s*true\s*$/im.test(resultText)) {
         throw new Error("Claude result is missing CODEX_REVIEW_REQUIRED: true.");
       }
       currentControl = await loadLiveControl(paths, runtimeState);
@@ -266,7 +472,7 @@ export async function runBoundedResume({
         session_id: sessionId,
         cwd: paths.repoRoot,
         stop_hook_active: false,
-        last_assistant_message: resultText,
+        last_assistant_message: writerResult ? JSON.stringify(writerResult) : resultText,
       };
       await writeJson(payloadPath, payload);
       const enqueued = await enqueueReview({
@@ -276,6 +482,9 @@ export async function runBoundedResume({
         classificationProfile: currentControl.v4
           ? classificationProfileFromSnapshot(currentControl.v4.policy_snapshot)
           : null,
+        writerResult,
+        call,
+        openFindings: lastFindings,
       });
       const hookQueuedDuplicate = enqueued.accepted
         && enqueued.duplicate
@@ -285,7 +494,7 @@ export async function runBoundedResume({
       }
       const ownJobId = await enqueuedJobId(paths, enqueued);
       const reviewOutcomes = await runReviewWorker({
-        paths, control: currentControl, adapter, noNotification: true,
+        paths, control: currentControl, adapter, noNotification: true, only: workPackage ? ownJobId : null,
       });
       // Other pending jobs may run in the same worker pass; only this run's job is attributed here.
       const ownOutcomes = (reviewOutcomes || []).filter((outcome) => outcome.job_id === ownJobId);
@@ -321,22 +530,78 @@ export async function runBoundedResume({
       assertUnder(latestReviewPath, paths.reviewsRoot, "Latest review");
       if (!(await fileExists(latestReviewPath))) throw new Error("Codex review result is missing.");
       const review = await fsp.readFile(latestReviewPath, "utf8");
+      lastChangedFiles = await changedFilesForJob(paths, ownJobId);
       let gate;
-      try {
-        gate = parseReviewGate(review);
-      } catch (error) {
-        await writeBoundedState(paths, runtimeState, {
-          writer_model: writerModel,
-          status: "malformed_review_gate",
-          session_id: sessionId,
-          call,
-          updated_at: new Date().toISOString(),
-          review_path: latestReviewPath,
-          claude_stdout_path: stdoutPath,
-          error: error.message,
+      if (workPackage) {
+        // T0-05 D3: the typed verdict is checked against the fixed rules; prose is not read.
+        let reviewResult = null;
+        try { reviewResult = parseJson(review); } catch { reviewResult = null; }
+        // A controller-decided verdict (D2.5) is the harness's own; only a reviewer's answer is checked.
+        const check = ownOutcome.controller_decided ? { ok: true, errors: [] } : await validateReviewResult(reviewResult, {
+          workOrder: workPackage.work_package_id, call, repoRoot: paths.repoRoot,
+          previousFindings: lastFindings, deltaPaths: call > 1 ? lastChangedFiles.map((entry) => entry.path) : null,
         });
-        await consumeAuthorization(paths, control, "malformed_review_gate");
-        throw error;
+        if (!check.ok) {
+          await writeBoundedState(paths, runtimeState, {
+            writer_model: writerModel, status: "malformed_review_result", session_id: sessionId, call,
+            updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+          });
+          await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "reviewer", provider: "codex", detail_ref: check.errors[0] || "review.result" });
+          await consumeAuthorization(paths, control, "malformed_review_result");
+          return MALFORMED_EXIT_CODE;
+        }
+        await recordIo(paths, runId, { ...reviewResult });
+        // D5.3: the reviewer's call is measured against the same ceilings as the writer's.
+        if (ownOutcome.usage && !ownOutcome.controller_decided) {
+          const callTotal = tokenTotal(ownOutcome.usage.tokens);
+          const runTotal = runId ? await usageTotalForRun(paths, runId) : callTotal;
+          if (callTotal > limits.max_tokens_per_call || runTotal > limits.max_tokens_per_run) {
+            const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
+            await writeBoundedState(paths, runtimeState, {
+              writer_model: writerModel, status: "token_limit", session_id: sessionId, call, updated_at: new Date().toISOString(),
+              token_limit: which, token_limit_role: "reviewer", tokens_this_call: callTotal, tokens_this_run: runTotal,
+              review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+            });
+            await recordIo(paths, runId, {
+              event: "stop", status: "token_limit", role: "reviewer", provider: "codex",
+              detail_ref: which + ":" + (which === "per_call" ? callTotal : runTotal),
+            });
+            await consumeAuthorization(paths, control, "token_limit");
+            return 76;
+          }
+        }
+        // D4.3 / D4.4: ids that survive a correction are unresolved; one survival on FAIL is a loop.
+        const recheck = call > 1 ? recheckFindings(lastFindings, reviewResult.findings) : null;
+        if (recheck) await recordIo(paths, runId, { event: "recheck", call, ...recheck });
+        const loop = recheck && reviewResult.gate === "FAIL" && recheck.unresolved.length ? recheck.unresolved[0] : null;
+        gate = {
+          review_gate: reviewResult.gate,
+          hard_stop_required: reviewResult.hard_stop || Boolean(loop),
+          hard_stop_reason: loop ? "needs_human_decision" : reviewResult.hard_stop_reason,
+          findings: reviewResult.findings.length,
+        };
+        if (loop) {
+          await recordIo(paths, runId, { event: "stop", status: "hard_stop", role: "controller", provider: null, detail_ref: "loop:" + loop });
+        }
+        lastFindings = reviewResult.findings;
+        lastGate = reviewResult.gate;
+      } else {
+        try {
+          gate = parseReviewGate(review);
+        } catch (error) {
+          await writeBoundedState(paths, runtimeState, {
+            writer_model: writerModel,
+            status: "malformed_review_gate",
+            session_id: sessionId,
+            call,
+            updated_at: new Date().toISOString(),
+            review_path: latestReviewPath,
+            claude_stdout_path: stdoutPath,
+            error: error.message,
+          });
+          await consumeAuthorization(paths, control, "malformed_review_gate");
+          throw error;
+        }
       }
       await writeBoundedState(paths, runtimeState, {
         writer_model: writerModel,
@@ -375,6 +640,7 @@ export async function runBoundedResume({
         return 76;
       }
 
+      if (!currentControl.v4) {
       const nextPromptPath = path.join(paths.queueRoot, stamp + "-bounded-correction.txt");
       await writeText(nextPromptPath, [
         "[AUTO-BOUNDED-CORRECTION]",
@@ -389,6 +655,7 @@ export async function runBoundedResume({
         "CODEX_REVIEW_REQUIRED: true",
       ].join("\n") + "\n");
       currentPromptPath = nextPromptPath;
+      }
       currentControl = await loadLiveControl(paths, runtimeState);
       if (runtimeState) currentControl.v4_runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
@@ -403,6 +670,7 @@ export async function runBoundedResume({
     await consumeAuthorization(paths, control, "call_budget_exhausted");
     return 76;
   } catch (error) {
+    if (runtimeState && (await readRunStatus(paths, runtimeState.runId)) === "stopped") return 130;
     let currentState = runtimeState ? await runtimeState.getState().catch(() => null) : null;
     if (!runtimeState && await fileExists(paths.boundedStatePath)) {
       currentState = await readJson(paths.boundedStatePath).catch(() => null);

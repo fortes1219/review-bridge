@@ -10,14 +10,28 @@ import {
   writeJson,
   writeText,
 } from "./io.mjs";
+import { appendIoEvent } from "./io-events.mjs";
 import { runProcess } from "./process.mjs";
 import { validateJobPolicy } from "./policy.mjs";
+import { buildReadList } from "./prompt.mjs";
 import {
   classifyProviderFailure,
   codexDiagnosticTrailer,
   readEvidenceTail,
   writeFailureRecord,
 } from "./provider-failure.mjs";
+import { parseReviewerUsage } from "./retention.mjs";
+import {
+  controllerScopeResult,
+  parseCodexJsonl,
+  pathFromCommand,
+  REVIEW_RESULT_SCHEMA,
+  reviewerUsageEvent,
+  writerClaimMismatch,
+} from "./typed-results.mjs";
+
+export const REVIEW_INPUT_OPEN = "=== review.input ===";
+export const REVIEW_INPUT_CLOSE = "=== end review.input ===";
 
 function renderPrompt(template, values) {
   let output = template;
@@ -51,12 +65,52 @@ export async function validateReviewWorker({ paths, control, adapter }) {
   };
 }
 
+// T0-05 D2.2: the packet the reviewer gets. Zero model: card text, typed claims, delta hashes.
+export async function buildReviewInput({ job, control }) {
+  const workPackage = control.v4?.work_package || {};
+  const order = workPackage.work_order || null;
+  const delta = job.workspace_evidence?.delta_path ? await readJson(job.workspace_evidence.delta_path).catch(() => null) : null;
+  const changed = (delta?.changed_files || []).map((entry) => ({
+    path: entry.path, change: entry.change, before_sha256: entry.before_sha256 ?? null, after_sha256: entry.after_sha256 ?? null,
+  }));
+  const openFindings = Array.isArray(job.open_findings) ? job.open_findings : [];
+  return {
+    event: "review.input",
+    work_order: workPackage.work_package_id,
+    call: job.call,
+    level: job.review_level,
+    work: order ? order.work : workPackage.task,
+    acceptance: order ? order.acceptance : [],
+    scope: {
+      change_types: workPackage.scope?.change_types || [],
+      allowed_paths: workPackage.scope?.allowed_paths || [],
+      forbidden_paths: workPackage.scope?.forbidden_paths || [],
+    },
+    writer_result: job.writer_result,
+    delta: changed,
+    scope_violations: job.workspace_evidence?.scope_violations || [],
+    writer_claim_mismatch: writerClaimMismatch(job.writer_result, changed),
+    open_findings: openFindings,
+    read_list: buildReadList({ deltaPaths: changed.map((entry) => entry.path), findings: openFindings }),
+    output_schema: "review.result",
+  };
+}
+
+function reviewerReadEvents(commands, readList) {
+  return commands.map((command) => {
+    const relative = pathFromCommand(command);
+    const inList = relative ? readList.some((entry) => relative === entry.path || relative.startsWith(entry.path + "/")) : null;
+    return { tool: "command", command, ...(relative ? { path: relative } : {}), outside_list: relative ? !inList : null };
+  });
+}
+
 export async function runReviewWorker({
   paths,
   control,
   adapter,
   dryRun = false,
   noNotification = false,
+  only = null,
 }) {
   const reviewPromptPath = await resolveReviewPromptPath(paths);
   for (const directory of [
@@ -81,6 +135,8 @@ export async function runReviewWorker({
     for (const pendingPath of jobs) {
       const name = path.basename(pendingPath);
       const jobId = path.basename(name, ".json");
+      // T0-05: a bounded run reviews its own job only; other pending jobs wait for their owner.
+      if (only && jobId !== only) continue;
       const runningPath = path.join(paths.runningDir, name);
       const donePath = path.join(paths.doneDir, name);
       const failedPath = path.join(paths.failedDir, name);
@@ -108,7 +164,14 @@ export async function runReviewWorker({
         validateJobPolicy(job, control);
         await writeJson(metadataPath, job);
         await writeText(reportPath, String(job.last_assistant_message));
+        const typed = Boolean(job.writer_result);
+        const runId = job.authorization?.run_id || null;
         const template = await fsp.readFile(reviewPromptPath, "utf8");
+        let reviewInput = null;
+        if (typed) {
+          reviewInput = await buildReviewInput({ job, control });
+          if (runId) await appendIoEvent(paths, runId, reviewInput);
+        }
         const prompt = renderPrompt(template, {
           JOB_PATH: metadataPath,
           REPORT_PATH: reportPath,
@@ -116,11 +179,19 @@ export async function runReviewWorker({
           REVIEW_LEVEL: job.review_level,
           REASONING_EFFORT: job.reasoning_effort,
           CLASSIFICATION_REASONS: (job.classification_reasons || []).join("; "),
+          RULES: typed ? String(control.v4?.work_package?.rules?.text || "").trim() : "",
+          REVIEW_INPUT: typed
+            ? [REVIEW_INPUT_OPEN, JSON.stringify(reviewInput, null, 2), REVIEW_INPUT_CLOSE].join("\n")
+            : "Job metadata: " + metadataPath + "\nWriter report: " + reportPath,
         });
         await writeText(promptPath, prompt);
 
         let exitCode = 0;
         let timedOut = false;
+        let usage = null;
+        let reads = [];
+        let controllerDecided = false;
+        const startedAt = Date.now();
         if (dryRun) {
           await writeText(resultPath, [
             "# Review Bridge Dry Run",
@@ -133,6 +204,12 @@ export async function runReviewWorker({
             "",
             "No Codex model call was made.",
           ].join("\n") + "\n");
+        } else if (typed && reviewInput.scope_violations.length) {
+          // D2.5: out-of-scope changes are decided here; the reviewer is not asked.
+          controllerDecided = true;
+          await writeJson(resultPath, controllerScopeResult({
+            workOrder: reviewInput.work_order, call: job.call, scopeViolations: reviewInput.scope_violations,
+          }));
         } else {
           const codexArgs = [
             "--ask-for-approval", "never",
@@ -141,6 +218,7 @@ export async function runReviewWorker({
             "--ephemeral",
             "--sandbox", "read-only",
             "--cd", paths.repoRoot,
+            ...(typed ? ["--output-schema", REVIEW_RESULT_SCHEMA, "--json"] : []),
             "--output-last-message", resultPath,
             "-",
           ];
@@ -154,6 +232,19 @@ export async function runReviewWorker({
           });
           exitCode = processResult.exitCode;
           timedOut = Boolean(processResult.timedOut);
+          if (typed) {
+            // D5: usage and commands from the JSONL stream; the stderr trailer is the fallback.
+            const stream = parseCodexJsonl(await fsp.readFile(stdoutPath, "utf8").catch(() => ""));
+            const trailer = parseReviewerUsage(await fsp.readFile(stderrPath, "utf8").catch(() => ""), { jobId });
+            usage = reviewerUsageEvent({
+              usage: stream.usage, trailerTokens: trailer.tokens_used, call: job.call, durationMs: Date.now() - startedAt,
+            });
+            reads = reviewerReadEvents(stream.commands, reviewInput.read_list);
+            if (runId) {
+              for (const read of reads) await appendIoEvent(paths, runId, { event: "read", role: "reviewer", call: job.call, ...read });
+              await appendIoEvent(paths, runId, usage);
+            }
+          }
         }
 
         if (exitCode !== 0 || !(await fileExists(resultPath)) || (await fsp.stat(resultPath)).size === 0) {
@@ -179,11 +270,15 @@ export async function runReviewWorker({
           completed_at: new Date().toISOString(),
           result_path: resultPath,
           codex_exit_code: exitCode,
+          ...(typed ? { controller_decided: controllerDecided } : {}),
         };
         await writeJson(runningPath, completed);
         await writeJson(metadataPath, completed);
         await fsp.rename(runningPath, donePath);
-        outcomes.push({ job_id: jobId, status: "done", result_path: resultPath });
+        outcomes.push({
+          job_id: jobId, status: "done", result_path: resultPath,
+          ...(typed ? { typed: true, controller_decided: controllerDecided, usage, reads, review_input: reviewInput } : {}),
+        });
         if (!dryRun) await writeText(paths.latestPath, resultPath + "\n");
         if (!noNotification) await adapter.notify("Codex review complete", resultPath);
       } catch (error) {

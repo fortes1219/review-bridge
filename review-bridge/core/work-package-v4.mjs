@@ -275,6 +275,9 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     scope: plan.scope,
     budget: plan.budget,
     breakpoint: plan.breakpoint,
+    work_order: plan.work_order || null,
+    rules: plan.rules || null,
+    references: plan.references || [],
   }, () => Date.parse(plan.created_at));
   const authorization = await createAuthorization(paths, {
     authorizationId: "plan-" + plan.plan_sha256,

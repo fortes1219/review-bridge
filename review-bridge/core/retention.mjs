@@ -244,7 +244,14 @@ export async function collectRunArtifacts(paths, run) {
       if (path.basename(file).startsWith("delta-")) add("evidence_delta", file);
     }
   }
-  return { eventFile, eventsPresent: present, events, artifacts, directories: [...directories], jobs };
+  const ioFile = path.join(paths.eventsDir, runId + ".io.jsonl");
+  const ioText = await readOptionalText(ioFile);
+  const ioEvents = [];
+  for (const line of (ioText || "").split("\n")) {
+    if (!line.trim()) continue;
+    try { ioEvents.push(JSON.parse(line)); } catch { ioEvents.push({ unparsable: line }); }
+  }
+  return { eventFile, eventsPresent: present, events, artifacts, directories: [...directories], jobs, ioFile, ioPresent: ioText !== null, ioEvents };
 }
 
 async function artifactLine(kind, file) {
@@ -288,17 +295,21 @@ export async function mergeRun(paths, runId, { clock = Date.now } = {}) {
   const base = { schema_version: ARCHIVE_SCHEMA_VERSION, archived_at: archivedAt, run_id: runId };
   const lines = [{ ...base, type: "run", terminal_at: terminalAt, run: { ...run } }];
   for (const event of collected.events) lines.push({ ...base, type: "event", event });
+  for (const event of collected.ioEvents) lines.push({ ...base, type: "io_event", event });
+  // T0-05 D5.4: when the run recorded usage as I/O events those are the usage lines;
+  // the transcript and stderr-trailer parsers are only the fallback for runs without them.
+  const ioUsageRoles = new Set(collected.ioEvents.filter((event) => event.event === "usage" && !event.parse_error).map((event) => event.role));
   let call = 0;
   for (const [file, kind] of collected.artifacts) {
     if (!(await fileExists(file))) { collected.artifacts.delete(file); continue; } // recorded path already gone
     if (kind === "writer_stdout") {
       call += 1;
-      lines.push({ ...base, type: "usage", ...parseWriterUsage(await fsp.readFile(file, "utf8"), { call }) });
+      if (!ioUsageRoles.has("writer")) lines.push({ ...base, type: "usage", ...parseWriterUsage(await fsp.readFile(file, "utf8"), { call }) });
       continue; // R1.7: the full transcript is not archived, only its usage.
     }
     const line = await artifactLine(kind, file);
     lines.push({ ...base, ...line });
-    if (kind === "reviewer_stderr") {
+    if (kind === "reviewer_stderr" && !ioUsageRoles.has("reviewer")) {
       const jobId = path.basename(file).replace(/-codex\.stderr\.log$/, "");
       lines.push({ ...base, type: "usage", ...parseReviewerUsage(line.text || "", { jobId }) });
     }
@@ -323,6 +334,8 @@ export async function mergeRun(paths, runId, { clock = Date.now } = {}) {
     if (await fileExists(directory)) { await fsp.rm(directory, { recursive: true, force: true }); deleted += 1; }
   }
   if (collected.eventsPresent) { await fsp.rm(collected.eventFile, { force: true }); deleted += 1; }
+  if (collected.ioPresent) { await fsp.rm(collected.ioFile, { force: true }); deleted += 1; }
+  await fsp.rm(path.join(paths.runLocksDir, runId + ".process.json"), { force: true });
   return { run_id: runId, archive_file: archiveFile, already_archived: false, lines: lines.length, deleted };
 }
 

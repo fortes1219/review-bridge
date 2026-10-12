@@ -49,12 +49,23 @@ export function validateHookPayload(payload) {
   return { valid: invalidFields.length === 0, invalid_fields: invalidFields };
 }
 
+// T0-05 D2.4: the classifier reads the work text and the writer's typed claims, not prose.
+function classificationText(control, writerResult) {
+  const order = control.v4?.work_package?.work_order;
+  const work = order ? order.work : control.v4?.work_package?.task || "";
+  const claims = (writerResult.changed || []).map((entry) => entry.path + " " + entry.summary);
+  return [work, ...claims].join("\n");
+}
+
 export async function enqueueReview({
   payload,
   paths,
   control,
   classificationProfile = null,
   validateOnly = false,
+  writerResult = null,
+  call = null,
+  openFindings = [],
 }) {
   const shape = validateHookPayload(payload);
   if (!shape.valid) {
@@ -74,13 +85,17 @@ export async function enqueueReview({
   }
   const message = payload.last_assistant_message;
   if (!message.trim()) return { accepted: false, reason: "empty_message" };
-  const marker = detectMarker(message);
-  if (!marker.explicit && !marker.legacy && !marker.handoff) {
+  // T0-05 D1.6: a v4 run is driven by the harness; a Stop-hook message is not a submission.
+  if (control.v4 && !writerResult) return { accepted: false, reason: "harness_driven" };
+  const marker = writerResult
+    ? { explicit: false, legacy: false, handoff: false, typed: true }
+    : { ...detectMarker(message), typed: false };
+  if (!marker.typed && !marker.explicit && !marker.legacy && !marker.handoff) {
     return { accepted: false, reason: "no_review_marker" };
   }
 
   const profile = classificationProfile || await readJson(paths.classificationProfilePath);
-  const policy = classifyReview(message, control, profile);
+  const policy = classifyReview(writerResult ? classificationText(control, writerResult) : message, control, profile);
   const sessionId = String(payload.session_id || "");
   const hash = createHash("sha256").update(sessionId + "\n" + message, "utf8").digest("hex");
   const shortHash = hash.slice(0, 16);
@@ -119,7 +134,8 @@ export async function enqueueReview({
     cwd: paths.repoRoot,
     enqueued_at: new Date().toISOString(),
     message_sha256: hash,
-    trigger: marker.explicit ? "explicit-marker" : marker.handoff ? "handoff-label" : "legacy-report-marker",
+    trigger: marker.typed ? "writer_result" : marker.explicit ? "explicit-marker" : marker.handoff ? "handoff-label" : "legacy-report-marker",
+    ...(writerResult ? { call, writer_result: writerResult, open_findings: openFindings } : {}),
     authorization: {
       plan_sha256: control.authorization_plan_sha256 || null,
       work_package: control.work_package || null,

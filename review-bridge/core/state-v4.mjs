@@ -23,6 +23,8 @@ const activeStatuses = new Set(["running", "review_pending", "correction_pending
 const terminalStatuses = new Set([
   "pass", "hard_stop", "rate_limited", "cancelled", "policy_failure",
   "call_budget_exhausted", "claude_timeout", "claude_failed", "reviewer_failed", "controller_failure",
+  "token_limit", "stopped", "reference_changed",
+  "needs_human", "malformed_writer_result", "malformed_review_result",
 ]);
 
 function nowIso(clock) {
@@ -259,6 +261,10 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     scope: structuredClone(input.scope),
     budget: structuredClone(input.budget),
     breakpoint: String(input.breakpoint || ""),
+    // T0-03/T0-04: what the writer will be shown travels with the immutable package.
+    ...(input.work_order !== undefined ? { work_order: structuredClone(input.work_order) } : {}),
+    ...(input.rules !== undefined ? { rules: structuredClone(input.rules) } : {}),
+    ...(input.references !== undefined ? { references: structuredClone(input.references) } : {}),
     created_at: nowIso(clock),
   };
   if (!record.task.trim() || !record.breakpoint.trim()) throw new Error("Work package task and breakpoint are required.");
@@ -524,6 +530,16 @@ export async function consumeRun(paths, runId, reason, gate = null, options = {}
   }, options);
 }
 
+// T0-04 D2.1: every writer call runs in a fresh Claude session; the run records each one.
+export async function rotateRunSession(paths, runId, sessionId, options = {}) {
+  return await mutateRun(paths, runId, "session_rotated", { session_id: sessionId }, (run) => {
+    const history = Array.isArray(run.claude_session_ids) ? run.claude_session_ids : [run.claude_session_id];
+    run.claude_session_ids = [...history, assertId(sessionId, "Session id")];
+    run.claude_session_id = assertId(sessionId, "Session id");
+    return run;
+  }, { ...options, substantive: false });
+}
+
 export async function incrementRunIteration(paths, runId, options = {}) {
   return await mutateRun(paths, runId, "iteration_incremented", {}, (run) => {
     run.iteration = Number(run.iteration || 0) + 1;
@@ -672,6 +688,9 @@ export function createRunRuntimeState(paths, runId) {
     },
     async incrementIteration() {
       return await incrementRunIteration(paths, runId);
+    },
+    async rotateSession(sessionId) {
+      return await rotateRunSession(paths, runId, sessionId);
     },
     async getState() {
       return (await readRun(paths, runId)).last_state;
