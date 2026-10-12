@@ -25,7 +25,9 @@ Rules of evidence (fixed):
 3. Read the files in `read_list` first: the changed files in full, then their direct callers,
    consumers, and tests (two hops from a changed line). Do not read beyond that unless a
    finding cannot be decided without it.
-4. Do not rerun the whole test suite. Run only the smallest command that decides one finding.
+4. `gate_a_result` is the controller's own run of the project's existing tests, made after the
+   writer finished; it is test evidence. Do not rerun the whole suite. Run only the smallest
+   command that decides one finding.
 5. Without evidence there is no FAIL. A finding must land on a line of code; a contradiction
    between `work` and the delta is itself a finding on the contradicting line.
 6. On a recheck (`open_findings` non-empty): report an open id again only if it is still

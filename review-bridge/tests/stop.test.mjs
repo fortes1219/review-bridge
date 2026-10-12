@@ -16,7 +16,8 @@ const packageRoot = path.resolve(runtimeSource, "..");
 // A neutral install made by the real init in fake mode, so work-start --fake-cli is usable.
 async function install(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-stop-"));
-  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo", dependencies: { express: "4.0.0" } }));
+  // T0-06: a code work order needs an approved test entry point; the script exits 0 unless FAKE_GATE_EXIT says otherwise.
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(Number(process.env.FAKE_GATE_EXIT||0))\"" } }));
   const port = await freePort();
   const init = spawnSync(process.execPath, [
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(port),
@@ -105,6 +106,23 @@ test("P7 stop: unknown and finished runs exit 1; a running writer is killed and 
 test("live: a fake work-start leaves task.input, read and usage events and an injected prompt", async (t) => {
   const { root, bridge, paths } = await install(t);
   const { plan, planArg } = await planFakeWork(root, bridge);
+  // T0-06 R1/R3 on the CLI: the plain summary names the sealed command; JSON carries it; no entry point refuses.
+  assert.equal(plan.gate_a.command, "npm test");
+  const plainOut = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-plain",
+    "--breakpoint", "return after review", "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2",
+    "--out", ".review-bridge/review-queue/stop-plain.plan.json", "--plain"]);
+  assert.equal(plainOut.status, 0, plainOut.stderr);
+  assert.match(plainOut.stdout, /驗收：會跑 npm test（profile 核准）/);
+  const manifest = await fsp.readFile(path.join(root, "package.json"), "utf8");
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo" }));
+  const refused = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-refused",
+    "--breakpoint", "return after review", "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2",
+    "--out", ".review-bridge/review-queue/stop-refused.plan.json", "--plain"]);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stdout, /沒找到 profile 核准的測試入口/);
+  assert.match(refused.stdout, /npm test：package\.json 沒有 scripts\.test/);
+  assert.equal(await fsp.stat(path.join(root, ".review-bridge", "review-queue", "stop-refused.plan.json")).catch(() => null), null);
+  await fsp.writeFile(path.join(root, "package.json"), manifest);
   const started = bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli"]);
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const events = await readIoEvents(paths, plan.proposed_run_id);
@@ -118,7 +136,10 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   const usage = events.find((event) => event.event === "usage");
   assert.equal(usage.tokens.cache_read, 150346);
   // T0-05: typed results on both sides, the reviewer packet, and the reviewer's own usage and read.
-  assert.deepEqual(kinds.filter((kind) => /result|input$/.test(kind)), ["task.input", "writer.result", "review.input", "review.result"]);
+  assert.deepEqual(kinds.filter((kind) => /result|input$/.test(kind)), ["task.input", "writer.result", "gate_a_result", "review.input", "review.result"]);
+  const gateEvent = events.find((event) => event.event === "gate_a_result");
+  assert.equal(gateEvent.command, "npm test");
+  assert.equal(gateEvent.passed, true);
   const writerResult = events.find((event) => event.event === "writer.result");
   assert.equal(writerResult.work_order, "stop-1");
   assert.equal(writerResult.status, "done");

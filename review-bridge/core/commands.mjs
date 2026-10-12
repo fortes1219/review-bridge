@@ -3,6 +3,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { parseOptions } from "./args.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./bounded-resume.mjs";
+import { GateAError } from "./gate-a.mjs";
 import { getBridgePaths } from "./paths.mjs";
 import {
   enqueueReview,
@@ -351,7 +352,9 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   const control = isV4 ? null : await readJson(paths.controlPath);
   if (command === "work-plan") {
     if (!options.outPath) throw new Error("work-plan requires --out.");
-    const plan = await (isV4 ? createV4WorkPackagePlan : createWorkPackagePlan)({
+    let plan;
+    try {
+      plan = await (isV4 ? createV4WorkPackagePlan : createWorkPackagePlan)({
       paths,
       ...(isV4 ? {} : { control }),
       task: options.task,
@@ -365,6 +368,14 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       maxMinutes: options.maxMinutes ?? 8,
       outPath: options.outPath,
     });
+    } catch (error) {
+      // T0-06 G2.3: no approved test entry point for non-docs work; nothing is written.
+      if (!(error instanceof GateAError)) throw error;
+      process.stdout.write(options.plain
+        ? error.plain() + "\n"
+        : JSON.stringify({ valid: false, reason: error.reason, checked: error.checked }, null, 2) + "\n");
+      return 1;
+    }
     // JSON stays the default because the installer and tests read it; --plain is the human summary (C5.2).
     if (isV4 && options.plain) {
       const order = plan.work_order;
@@ -374,6 +385,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
         ...(order && (order.product || order.version) ? ["產品／版本：" + [order.product, order.version].filter(Boolean).join(" / ")] : []),
         "範圍：" + ({ default: "預設（整個專案減禁改清單）", references: "參考資料收緊", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
         ...(order ? ["參考資料：" + order.references.length + " 條（" + pathRefs + " 個路徑）"] : []),
+        "驗收：" + (plan.gate_a?.kind === "command" ? "會跑 " + plan.gate_a.command + "（profile 核准）" : plan.gate_a?.label || "未定"),
         "plan：" + plan.plan_path,
         "sha：" + plan.plan_sha256,
         "下一步：work-start --plan " + plan.plan_path + " --approve " + plan.plan_sha256,
@@ -388,6 +400,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       owner: plan.owner,
       breakpoint: plan.breakpoint,
       scope: plan.scope,
+      ...(isV4 ? { gate_a: plan.gate_a } : {}),
       budget: plan.budget,
       next_command: isV4
         ? "work-start --plan <plan_path>"

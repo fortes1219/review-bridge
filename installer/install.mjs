@@ -272,11 +272,13 @@ export function projectPolicyOverride(profile) {
   };
 }
 
-function bridgeConfig(profileId) {
+function bridgeConfig(profileId, profile = null) {
   return {
     schema_version: 4,
     state_contract: "v4",
     profile_id: profileId,
+    // T0-06 G1.3: the profile-approved verification rules; work-plan picks Gate A from here.
+    gate_a: { profile_id: profileId, rules: structuredClone(profile?.verification_rules || []) },
     default_policy_ref: ".claude/tools/review-bridge/config/default-policy.json",
     project_override_ref: ".claude/review-bridge/policy.override.json",
     active_runs: "derive_from_run_projections",
@@ -396,7 +398,8 @@ export async function detectProject(target, profile) {
     }
   }
   verificationCommands.push(...(profile.verification_candidates || []));
-  for (const rule of profile.verification_rules || []) {
+  // T0-06: Gate A reads verification_rules only; lint_rules stay here for the detection summary.
+  for (const rule of [...(profile.verification_rules || []), ...(profile.lint_rules || [])]) {
     const filesAny = rule.files_any || [];
     const filesNone = rule.files_none || [];
     const anyPresent = filesAny.length === 0
@@ -870,7 +873,7 @@ async function installOrUpgrade(target, plan, rollbackPoint) {
   const settingsPath = path.join(target, managed.settings);
   await writeJson(settingsPath, mergeHook((await readJsonOptional(settingsPath)) || {}));
   if (!(await exists(path.join(target, managed.bridgeConfig)))) {
-    await writeJson(path.join(target, managed.bridgeConfig), bridgeConfig(plan.profile.id));
+    await writeJson(path.join(target, managed.bridgeConfig), bridgeConfig(plan.profile.id, await loadProfile(plan.profile.id)));
     seeded.push({ path: managed.bridgeConfig, seed_sha256: await hashFile(path.join(target, managed.bridgeConfig)) });
   }
   if (!(await exists(path.join(target, managed.policyOverride)))) {

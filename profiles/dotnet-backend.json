@@ -2,18 +2,62 @@
   "schema_version": 2,
   "profile_id": "dotnet-backend",
   "display_name": ".NET and C# backend",
-  "required_root_globs_any": ["*.sln", "*.csproj"],
-  "auto_detection": { "root_globs_any": ["*.sln", "*.csproj"] },
-  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
-  "verification_candidates": ["dotnet build", "dotnet test"],
+  "required_root_globs_any": [
+    "*.sln",
+    "*.csproj"
+  ],
+  "auto_detection": {
+    "root_globs_any": [
+      "*.sln",
+      "*.csproj"
+    ]
+  },
+  "source_of_truth_candidates": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/docs/SESSION_HANDOFF_NEXT.md"
+  ],
+  "verification_rules": [
+    {
+      "command": "dotnet test",
+      "root_globs_any": [
+        "*.sln",
+        "*.csproj"
+      ]
+    }
+  ],
   "semantic_reference_tool": "roslyn-language-server",
   "structural_search_tool": "sg",
   "capability_patterns": [
-    { "name": "aspnet-core", "file": "Directory.Packages.props", "patterns": ["Microsoft\\.AspNetCore"] },
-    { "name": "entity-framework-core", "file": "Directory.Packages.props", "patterns": ["Microsoft\\.EntityFrameworkCore"] }
+    {
+      "name": "aspnet-core",
+      "file": "Directory.Packages.props",
+      "patterns": [
+        "Microsoft\\.AspNetCore"
+      ]
+    },
+    {
+      "name": "entity-framework-core",
+      "file": "Directory.Packages.props",
+      "patterns": [
+        "Microsoft\\.EntityFrameworkCore"
+      ]
+    }
   ],
   "review_terms": {
-    "security": ["authentication", "authorization", "policy", "credential", "antiforgery"],
-    "full": ["API contract", "entity model", "migration", "transaction boundary", "hosted service lifecycle"]
+    "security": [
+      "authentication",
+      "authorization",
+      "policy",
+      "credential",
+      "antiforgery"
+    ],
+    "full": [
+      "API contract",
+      "entity model",
+      "migration",
+      "transaction boundary",
+      "hosted service lifecycle"
+    ]
   }
 }

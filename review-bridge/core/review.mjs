@@ -90,6 +90,8 @@ export async function buildReviewInput({ job, control }) {
     delta: changed,
     scope_violations: job.workspace_evidence?.scope_violations || [],
     writer_claim_mismatch: writerClaimMismatch(job.writer_result, changed),
+    // T0-06 G3.4: the controller's own test run, as evidence; the reviewer does not rerun it.
+    gate_a_result: job.gate_a_result || null,
     open_findings: openFindings,
     read_list: buildReadList({ deltaPaths: changed.map((entry) => entry.path), findings: openFindings }),
     output_schema: "review.result",

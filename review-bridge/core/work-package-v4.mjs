@@ -16,6 +16,7 @@ import {
 } from "./state-v4.mjs";
 import { hasWorkOrderMarkers, MESSAGES as ORDER_MESSAGES, parseWorkOrder, WorkOrderError } from "./work-order.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspace-evidence.mjs";
+import { recheckGateA, selectGateA } from "./gate-a.mjs";
 
 // T0-03 C2.1: fixed, in code, listed in every plan. Never from a model.
 export const FORBIDDEN_PATHS = Object.freeze([
@@ -209,6 +210,9 @@ export async function createV4WorkPackagePlan({
   const scope = await resolveScope({ paths, workOrder, allowedPaths });
   const rules = workOrder ? await snapshotRules(paths) : null;
   const references = workOrder ? await snapshotReferences(paths, workOrder) : [];
+  const changeTypeList = parseChangeTypes(changeTypes);
+  // T0-06 G2: the verification is decided here, from the installed rules, and sealed for approval.
+  const gateA = await selectGateA({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})), changeTypes: changeTypeList });
   const plan = {
     schema_version: 4,
     operation: "start_work_package",
@@ -225,9 +229,10 @@ export async function createV4WorkPackagePlan({
     rules,
     references,
     scope: {
-      change_types: parseChangeTypes(changeTypes),
+      change_types: changeTypeList,
       ...scope,
     },
+    gate_a: gateA,
     budget,
     effective_policy_sha256: snapshot.effective_policy_sha256,
     authorization_expires_at: new Date(
@@ -268,6 +273,11 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
       throw new Error("批准後 " + (changed ? changed.path : "參考資料") + " 變了，重新建 plan");
     }
   }
+  // T0-06 G2.5: the sealed test entry point must still exist when the human approves.
+  if (plan.gate_a) {
+    const recheck = await recheckGateA(paths.repoRoot, plan.gate_a);
+    if (!recheck.ok) throw new Error("批准後專案的測試入口變了（" + recheck.reasons.join("；") + "），重新建 plan");
+  }
   const workPackage = await createImmutableWorkPackage(paths, {
     work_package_id: plan.work_package_id,
     task: plan.task,
@@ -278,6 +288,7 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     work_order: plan.work_order || null,
     rules: plan.rules || null,
     references: plan.references || [],
+    gate_a: plan.gate_a || null,
   }, () => Date.parse(plan.created_at));
   const authorization = await createAuthorization(paths, {
     authorizationId: "plan-" + plan.plan_sha256,

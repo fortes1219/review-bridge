@@ -66,6 +66,7 @@ export async function enqueueReview({
   writerResult = null,
   call = null,
   openFindings = [],
+  gateAResult = null,
 }) {
   const shape = validateHookPayload(payload);
   if (!shape.valid) {
@@ -135,7 +136,7 @@ export async function enqueueReview({
     enqueued_at: new Date().toISOString(),
     message_sha256: hash,
     trigger: marker.typed ? "writer_result" : marker.explicit ? "explicit-marker" : marker.handoff ? "handoff-label" : "legacy-report-marker",
-    ...(writerResult ? { call, writer_result: writerResult, open_findings: openFindings } : {}),
+    ...(writerResult ? { call, writer_result: writerResult, open_findings: openFindings, gate_a_result: gateAResult } : {}),
     authorization: {
       plan_sha256: control.authorization_plan_sha256 || null,
       work_package: control.work_package || null,

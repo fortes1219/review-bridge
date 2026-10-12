@@ -82,6 +82,8 @@ export function buildTaskInput({ workPackage, call, readList, limits }) {
       forbidden_paths: workPackage.scope.forbidden_paths || [],
     },
     ...(readList.length ? { read_list: readList } : {}),
+    // T0-06: the sealed verification, shown so the writer knows what will be run after it.
+    ...(workPackage.gate_a ? { gate_a: { kind: workPackage.gate_a.kind, label: workPackage.gate_a.label } } : {}),
     limits: { max_turns: limits.max_turns, max_output_chars: limits.max_output_chars },
     output_schema: "writer.result",
   };
@@ -96,13 +98,15 @@ const SEVERITY_ORDER = { HIGH: 3, MEDIUM: 2, LOW: 1 };
 
 // D2: the Controller writes the handoff from records; the model never writes it.
 // T0-05 D4.1: `open_findings` are the typed findings of the last review.result.
-export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFindings = [], lastGate = null, changedFiles = [], readList = [] }) {
+export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFindings = [], lastGate = null, changedFiles = [], readList = [], gateAResult = null }) {
   const progress = [];
   for (const event of ioEvents) {
     if (event.event === "usage" && event.role === "writer") {
       progress.push(clip("第 " + event.call + " 次呼叫：" + event.turns + " 輪，" + (event.tokens?.cache_read ?? 0) + " cache read", MAX_PROGRESS_LINE_CHARS));
     } else if (event.event === "review.result") {
       progress.push(clip("第 " + event.call + " 次審查：" + event.gate + "，" + (event.findings || []).length + " 條 findings", MAX_PROGRESS_LINE_CHARS));
+    } else if (event.event === "gate_a_result" && event.kind === "command") {
+      progress.push(clip("第 " + event.call + " 次驗收：" + (event.passed ? "現有測試通過" : "現有測試失敗，exit " + event.exit_code + (event.timed_out ? "（逾時）" : "")), MAX_PROGRESS_LINE_CHARS));
     } else if (event.event === "stop") {
       progress.push(clip("停點：" + event.status, MAX_PROGRESS_LINE_CHARS));
     }
@@ -125,9 +129,11 @@ export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFin
     },
     progress: progress.slice(-MAX_PROGRESS_LINES),
     open_findings: findings,
+    // T0-06 G3.5: a failed Gate A travels as the controller's result, never as a finding.
+    ...(gateAResult ? { gate_a_result: { command: gateAResult.command, exit_code: gateAResult.exit_code, timed_out: gateAResult.timed_out, stdout_tail: clip(gateAResult.stdout_tail, 1200), stderr_tail: clip(gateAResult.stderr_tail, 1200) } } : {}),
     workspace: { mode: "snapshot", changed: changedFiles.map((entry) => ({ path: entry.path, change: entry.change })) },
     read_list: readList,
-    next: clip("修正上列 findings，維持範圍；做完回 writer.result，addressed_findings 列出處理過的 id。", MAX_NEXT_CHARS),
+    next: clip(reason === "gate_a_failed" ? "現有測試失敗（見 gate_a_result），修到它通過，維持範圍；做完回 writer.result。" : "修正上列 findings，維持範圍；做完回 writer.result，addressed_findings 列出處理過的 id。", MAX_NEXT_CHARS),
   };
   // D2.3 / T0-05 D4.2: trim the changed-file list first (the delta is on disk anyway), then
   // findings from LOW upward, then old progress lines; work and acceptance are never cut.

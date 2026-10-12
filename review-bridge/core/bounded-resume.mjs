@@ -41,6 +41,8 @@ import {
   writerResultFromClaudeResult,
 } from "./typed-results.mjs";
 import { consumeRun, readRun } from "./state-v4.mjs";
+import { runGateA, sameDelta } from "./gate-a.mjs";
+import { createWorkspaceDelta } from "./workspace-evidence.mjs";
 import { validateWriterPolicy } from "./policy.mjs";
 import { classificationProfileFromSnapshot } from "./policy-v4.mjs";
 import {
@@ -252,6 +254,9 @@ export async function runBoundedResume({
     let lastFindings = [];
     let lastGate = null;
     let lastChangedFiles = [];
+    let lastGateAResult = null;
+    let lastGateADelta = null;
+    let handoffReason = "correction";
     const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
 
     for (let call = 1; call <= maxCalls; call += 1) {
@@ -296,8 +301,9 @@ export async function runBoundedResume({
         readList = buildReadList({ references, findings: lastFindings });
         const taskInput = buildTaskInput({ workPackage, call, readList, limits });
         const handoff = call > 1 ? buildHandoff({
-          workPackage, call, reason: "correction", ioEvents: runId ? await readIoEvents(paths, runId) : [],
+          workPackage, call, reason: handoffReason, ioEvents: runId ? await readIoEvents(paths, runId) : [],
           openFindings: lastFindings, lastGate, changedFiles: lastChangedFiles, readList,
+          gateAResult: handoffReason === "gate_a_failed" ? lastGateAResult : null,
         }) : null;
         if (handoff) await recordIo(paths, runId, handoff);
         effectivePrompt = composeWriterPrompt({
@@ -462,6 +468,62 @@ export async function runBoundedResume({
       } else if (!/^\s*CODEX_REVIEW_REQUIRED\s*:\s*true\s*$/im.test(resultText)) {
         throw new Error("Claude result is missing CODEX_REVIEW_REQUIRED: true.");
       }
+      // T0-06 G3: the sealed verification runs after the writer and before any review.
+      let gateAResult = null;
+      if (workPackage && workPackage.gate_a) {
+        gateAResult = await runGateA({
+          paths, gateA: workPackage.gate_a,
+          stdoutPath: path.join(paths.queueRoot, stamp + "-gate-a.stdout.log"),
+          stderrPath: path.join(paths.queueRoot, stamp + "-gate-a.stderr.log"),
+          timeoutMs: limits.gate_a_minutes * 60_000,
+          onSpawn: (pid) => recordProcess(paths, runId, { pid, role: "controller", provider: "gate_a", call }),
+        });
+        await clearProcess(paths, runId);
+        if ((await readRunStatus(paths, runId)) === "stopped") return 130;
+        await recordIo(paths, runId, { ...gateAResult, call });
+        if (gateAResult.kind === "command" && !gateAResult.passed) {
+          // G3.5: the controller's result goes back to the writer as fix.input; no reviewer call.
+          const delta = currentControl.workspace_evidence?.baseline_path
+            ? await createWorkspaceDelta({ paths, baselinePath: currentControl.workspace_evidence.baseline_path, deltaId: "gate-a-" + stamp })
+            : null;
+          const changed = delta ? (await readJson(delta.delta_path)).changed_files : [];
+          lastChangedFiles = changed.map((entry) => ({ path: entry.path, change: entry.change, after_sha256: entry.after_sha256 }));
+          const gateState = {
+            writer_model: writerModel, status: "gate_a_failed", session_id: sessionId, call, updated_at: new Date().toISOString(),
+            gate_a_passed: false, gate_a_command: gateAResult.command, gate_a_exit_code: gateAResult.exit_code, gate_a_timed_out: gateAResult.timed_out,
+            claude_stdout_path: stdoutPath,
+          };
+          // G3.6: the same command failing twice on an unchanged delta means nothing was fixed.
+          if (lastGateAResult && lastGateADelta && sameDelta(lastGateADelta, lastChangedFiles)) {
+            const stopGate = { review_gate: "FAIL", hard_stop_required: true, hard_stop_reason: "needs_human_decision" };
+            await writeBoundedState(paths, runtimeState, { ...gateState, status: "hard_stop", ...stopGate });
+            await recordIo(paths, runId, { event: "stop", status: "hard_stop", role: "controller", provider: null, detail_ref: "gate_a_loop" });
+            await consumeAuthorization(paths, control, "review_hard_stop", stopGate);
+            return 0;
+          }
+          lastGateAResult = gateAResult;
+          lastGateADelta = lastChangedFiles;
+          handoffReason = "gate_a_failed";
+          lastFindings = [];
+          await writeBoundedState(paths, runtimeState, gateState);
+          if (call >= maxCalls) {
+            await writeBoundedState(paths, runtimeState, {
+              ...gateState, status: "call_budget_exhausted", failure: failureSummary(budgetStop({ phase: "correction", maxCalls })),
+            });
+            await consumeAuthorization(paths, control, "call_budget_exhausted");
+            return 76;
+          }
+          await recordIo(paths, runId, {
+            event: "fix.input", work_order: workPackage.work_package_id, call: call + 1, reason: "gate_a_failed",
+            gate_a_result: { command: gateAResult.command, exit_code: gateAResult.exit_code, timed_out: gateAResult.timed_out, stdout_tail: gateAResult.stdout_tail, stderr_tail: gateAResult.stderr_tail },
+            read_list: buildReadList({ deltaPaths: lastChangedFiles.map((entry) => entry.path) }),
+            limits: { max_turns: limits.max_turns, max_output_chars: limits.max_output_chars },
+          });
+          if (runtimeState) await runtimeState.incrementIteration();
+          continue;
+        }
+        handoffReason = "correction";
+      }
       currentControl = await loadLiveControl(paths, runtimeState);
       if (runtimeState) currentControl.v4_runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
@@ -485,6 +547,7 @@ export async function runBoundedResume({
         writerResult,
         call,
         openFindings: lastFindings,
+        gateAResult,
       });
       const hookQueuedDuplicate = enqueued.accepted
         && enqueued.duplicate
@@ -611,6 +674,8 @@ export async function runBoundedResume({
         session_id: sessionId,
         call,
         updated_at: new Date().toISOString(),
+        // G3.7: PASS is both halves; the gate half is recorded beside the reviewer's.
+        ...(gateAResult ? { gate_a_passed: gateAResult.kind === "command" ? gateAResult.passed : null } : {}),
         ...gate,
         review_path: latestReviewPath,
         claude_stdout_path: stdoutPath,
@@ -631,6 +696,7 @@ export async function runBoundedResume({
           session_id: sessionId,
           call,
           updated_at: new Date().toISOString(),
+          ...(gateAResult ? { gate_a_passed: gateAResult.kind === "command" ? gateAResult.passed : null } : {}),
           ...gate,
           review_path: latestReviewPath,
           claude_stdout_path: stdoutPath,

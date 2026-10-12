@@ -124,9 +124,12 @@ async function makeRuntime(t, override = { schema_version: 4 }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot);
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
+    gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
   await writeJson(paths.policyOverridePath, override);
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# fixture\n", "utf8");
+  // T0-06: a real `npm test` entry point; it exits with FAKE_GATE_EXIT (default 0) and prints a marker line.
+  await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({ name: "bounded-fixture", scripts: { test: "node -e \"console.log('GATE-A-RAN');process.exit(Number(process.env.FAKE_GATE_EXIT||0))\"" } }), "utf8");
   const claude = path.join(toolsRoot, "fake-claude.mjs");
   const codex = path.join(toolsRoot, "fake-codex.mjs");
   await fsp.writeFile(claude, fakeClaudeSource, "utf8");
@@ -134,7 +137,7 @@ async function makeRuntime(t, override = { schema_version: 4 }) {
   return { repoRoot, toolsRoot, paths, claude, codex };
 }
 
-async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0 } = {}) {
+async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, changeTypes = "docs", gateExit = 0 } = {}) {
   const runtime = await makeRuntime(t, override);
   const argsOut = path.join(runtime.toolsRoot, "claude-args.json");
   const planPath = path.join(runtime.paths.queueRoot, "plan.json");
@@ -144,7 +147,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     owner: "Human Owner",
     workPackage: "s2-04-fixture",
     breakpoint: "return after review",
-    changeTypes: "docs",
+    changeTypes,
     allowedPaths: "README.md",
     maxCalls,
     maxMinutes: 1,
@@ -168,6 +171,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
           T_TOKENS: tokens ? String(tokens) : "",
           T_WRITER: writer,
           T_CODEX_TOKENS: codexTokens ? String(codexTokens) : "",
+          FAKE_GATE_EXIT: String(gateExit),
         },
       };
     },
@@ -176,6 +180,9 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
   const runId = authorization.run.run_id;
   let exitCode;
   let error = null;
+  // Gate A runs through the real shell with the controller's environment, not the adapter's.
+  const previousGateExit = process.env.FAKE_GATE_EXIT;
+  process.env.FAKE_GATE_EXIT = String(gateExit);
   try {
     exitCode = await runBoundedResume({
       paths: runtime.paths,
@@ -189,6 +196,9 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     });
   } catch (caught) {
     error = caught;
+  } finally {
+    if (previousGateExit === undefined) delete process.env.FAKE_GATE_EXIT;
+    else process.env.FAKE_GATE_EXIT = previousGateExit;
   }
   const status = await v4WorkPackageStatus(runtime.paths, runId);
   const claudeArgs = await fileExists(argsOut) ? JSON.parse(await fsp.readFile(argsOut, "utf8")) : null;
@@ -325,13 +335,14 @@ test("P4 stream output: task.input, read and usage are recorded; the result file
   assert.equal(exitCode, 0);
   assert.equal(run.status, "pass");
   const events = await readIoEvents(runtime.paths, run.run_id);
-  assert.deepEqual(events.map((event) => event.event), ["task.input", "read", "usage", "writer.result", "review.input", "usage", "review.result"]);
+  assert.deepEqual(events.map((event) => event.event), ["task.input", "read", "usage", "writer.result", "gate_a_result", "review.input", "usage", "review.result"]);
   assert.equal(events[0].work_order, "s2-04-fixture");
   assert.equal(events[1].path, "README.md");
   assert.equal(events[1].outside_list, null); // legacy inline task: no read list, nothing to compare against
   assert.equal(events[2].tokens.cache_read, 1000);
-  assert.equal(events[5].role, "reviewer");
-  assert.equal(events[5].parse_error, true); // this inline fake prints no --json stream and no trailer
+  assert.equal(events[4].kind, "not_applicable"); // docs-only: Gate A is recorded, nothing runs
+  assert.equal(events[6].role, "reviewer");
+  assert.equal(events[6].parse_error, true); // this inline fake prints no --json stream and no trailer
   const writer = JSON.parse(await fsp.readFile(status.latest_state.claude_stdout_path, "utf8"));
   assert.equal(writer.type, "result");
   assert.equal(writer.structured_output.event, "writer.result");
@@ -454,4 +465,85 @@ test("P6 a project override may lower max_turns but never raise it", async (t) =
   assert.equal(args[args.indexOf("--max-turns") + 1], "5");
   await assert.rejects(start(t, { override: { schema_version: 4, limits: { max_turns: 50 } } }), /only tighten limit: max_turns/);
   await assert.rejects(start(t, { override: { schema_version: 4, limits: { max_tokens_per_call: 9_000_000 } } }), /only tighten limit: max_tokens_per_call/);
+});
+
+test("R5 Gate A runs after the writer and before the review; its result reaches review.input and the run", async (t) => {
+  const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code" });
+  assert.equal(error, null);
+  assert.equal(exitCode, 0);
+  assert.equal(run.status, "pass");
+  assert.equal(run.gate_a_passed, true);
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  const kinds = events.map((event) => event.event);
+  assert.ok(kinds.indexOf("writer.result") < kinds.indexOf("gate_a_result"));
+  assert.ok(kinds.indexOf("gate_a_result") < kinds.indexOf("review.input"));
+  const gate = events.find((event) => event.event === "gate_a_result");
+  assert.equal(gate.command, "npm test");
+  assert.equal(gate.exit_code, 0);
+  assert.equal(gate.passed, true);
+  assert.match(gate.stdout_tail, /GATE-A-RAN/);
+  const reviewInput = events.find((event) => event.event === "review.input");
+  assert.equal(reviewInput.gate_a_result.command, "npm test");
+  assert.equal(reviewInput.gate_a_result.exit_code, 0);
+  assert.equal(events.find((event) => event.event === "task.input").gate_a.label, "跑現有測試：npm test");
+});
+
+test("R5b docs-only work records not_applicable and runs nothing", async (t) => {
+  const { runtime, exitCode, run } = await start(t, { claudeMode: "stream" });
+  assert.equal(exitCode, 0);
+  assert.equal(run.gate_a_passed, null);
+  const gate = (await readIoEvents(runtime.paths, run.run_id)).find((event) => event.event === "gate_a_result");
+  assert.equal(gate.kind, "not_applicable");
+  assert.equal(gate.label, "不跑測試（純文件）");
+});
+
+test("R6 a failed Gate A skips the review and goes back to the writer as fix.input; the budget still ends the run", async (t) => {
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 3, maxCalls: 1 });
+  assert.equal(error, null);
+  assert.equal(exitCode, 76);
+  assert.equal(run.status, "call_budget_exhausted");
+  assert.equal(status.latest_state.gate_a_passed, false);
+  assert.equal(status.latest_state.gate_a_exit_code, 3);
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.some((event) => event.event === "review.input"), false);
+  assert.equal(events.some((event) => event.event === "review.result"), false);
+  assert.equal(events.find((event) => event.event === "gate_a_result").passed, false);
+});
+
+test("R6b the second writer call gets the Gate A result in its handoff, not a finding", async (t) => {
+  const { runtime, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 3, maxCalls: 2 });
+  assert.equal(error, null);
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  const fix = events.find((event) => event.event === "fix.input");
+  assert.equal(fix.reason, "gate_a_failed");
+  assert.equal(fix.call, 2);
+  assert.equal(fix.gate_a_result.exit_code, 3);
+  const handoff = events.find((event) => event.event === "handoff");
+  assert.equal(handoff.reason, "gate_a_failed");
+  assert.equal(handoff.gate_a_result.command, "npm test");
+  assert.deepEqual(handoff.open_findings, []);
+  assert.match(handoff.next, /現有測試失敗/);
+  assert.equal(events.filter((event) => event.event === "task.input").length, 2);
+});
+
+test("R7 two Gate A failures on an unchanged delta are a loop: hard_stop, no third writer call", async (t) => {
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2 });
+  assert.equal(error, null);
+  assert.equal(exitCode, 0);
+  assert.equal(run.status, "hard_stop");
+  assert.equal(status.latest_state.hard_stop_reason, "needs_human_decision");
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.filter((event) => event.event === "task.input").length, 2);
+  assert.equal(events.at(-1).detail_ref, "gate_a_loop");
+  assert.equal(events.some((event) => event.event === "review.input"), false);
+});
+
+test("R9 Gate A passed but the reviewer failed: correction_pending with gate_a_passed still true", async (t) => {
+  const { runtime, exitCode, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", codexMode: "fail", maxCalls: 1 });
+  assert.equal(exitCode, 76);
+  assert.equal(status.latest_state.gate_a_passed, true);
+  assert.equal(status.latest_state.review_gate, "FAIL");
+  assert.equal(run.gate_a_passed, true);
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.find((event) => event.event === "review.result").gate, "FAIL");
 });

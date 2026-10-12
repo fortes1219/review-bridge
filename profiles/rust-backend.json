@@ -2,22 +2,85 @@
   "schema_version": 2,
   "profile_id": "rust-backend",
   "display_name": "Rust backend",
-  "required_files_any": ["Cargo.toml"],
-  "auto_detection": { "files_any": ["Cargo.toml"] },
-  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
-  "verification_candidates": ["cargo fmt --check", "cargo check", "cargo test"],
+  "required_files_any": [
+    "Cargo.toml"
+  ],
+  "auto_detection": {
+    "files_any": [
+      "Cargo.toml"
+    ]
+  },
+  "source_of_truth_candidates": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/docs/SESSION_HANDOFF_NEXT.md"
+  ],
+  "verification_rules": [
+    {
+      "command": "cargo test --workspace",
+      "files_any": [
+        "Cargo.toml"
+      ]
+    }
+  ],
   "semantic_reference_tool": "rust-analyzer",
   "structural_search_tool": "sg",
   "capability_patterns": [
-    { "name": "tokio", "file": "Cargo.toml", "patterns": ["(^|\\n)\\s*tokio\\s*="] },
-    { "name": "sqlx", "file": "Cargo.toml", "patterns": ["(^|\\n)\\s*sqlx\\s*="] },
-    { "name": "postgres", "file": "Cargo.toml", "patterns": ["(^|\\n)\\s*(tokio-postgres|postgres)\\s*="] },
-    { "name": "axum", "file": "Cargo.toml", "patterns": ["(^|\\n)\\s*axum\\s*="] },
-    { "name": "actix-web", "file": "Cargo.toml", "patterns": ["(^|\\n)\\s*actix-web\\s*="] },
-    { "name": "socketioxide", "file": "Cargo.toml", "patterns": ["(^|\\n)\\s*socketioxide\\s*="] }
+    {
+      "name": "tokio",
+      "file": "Cargo.toml",
+      "patterns": [
+        "(^|\\n)\\s*tokio\\s*="
+      ]
+    },
+    {
+      "name": "sqlx",
+      "file": "Cargo.toml",
+      "patterns": [
+        "(^|\\n)\\s*sqlx\\s*="
+      ]
+    },
+    {
+      "name": "postgres",
+      "file": "Cargo.toml",
+      "patterns": [
+        "(^|\\n)\\s*(tokio-postgres|postgres)\\s*="
+      ]
+    },
+    {
+      "name": "axum",
+      "file": "Cargo.toml",
+      "patterns": [
+        "(^|\\n)\\s*axum\\s*="
+      ]
+    },
+    {
+      "name": "actix-web",
+      "file": "Cargo.toml",
+      "patterns": [
+        "(^|\\n)\\s*actix-web\\s*="
+      ]
+    },
+    {
+      "name": "socketioxide",
+      "file": "Cargo.toml",
+      "patterns": [
+        "(^|\\n)\\s*socketioxide\\s*="
+      ]
+    }
   ],
   "review_terms": {
-    "security": ["tenant boundary", "credential", "csrf", "request cancel(lation)?"],
-    "full": ["database schema", "migration contract", "transaction state", "cross-module architecture"]
+    "security": [
+      "tenant boundary",
+      "credential",
+      "csrf",
+      "request cancel(lation)?"
+    ],
+    "full": [
+      "database schema",
+      "migration contract",
+      "transaction state",
+      "cross-module architecture"
+    ]
   }
 }

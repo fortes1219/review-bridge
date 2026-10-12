@@ -69,6 +69,7 @@ export function validateDefaultPolicy(policy) {
     "max_turns",
     "max_tokens_per_call",
     "max_tokens_per_run",
+    "gate_a_minutes",
     "authorization_ttl_seconds",
     "recovery_window_seconds",
     "heartbeat_interval_seconds",

@@ -2,31 +2,103 @@
   "schema_version": 2,
   "profile_id": "vue-frontend",
   "display_name": "Vue and TypeScript frontend",
-  "required_files_any": ["package.json"],
+  "required_files_any": [
+    "package.json"
+  ],
   "auto_detection": {
-    "files_any": ["package.json"],
-    "content_any": [{ "file": "package.json", "patterns": ["\\\"vue\\\"\\s*:"] }]
+    "files_any": [
+      "package.json"
+    ],
+    "content_any": [
+      {
+        "file": "package.json",
+        "patterns": [
+          "\\\"vue\\\"\\s*:"
+        ]
+      }
+    ]
   },
-  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
-  "verification_script_candidates": ["format:check", "lint", "typecheck", "typecheck:test", "test:run", "test", "build"],
+  "verification_rules": [
+    {
+      "command": "npm test",
+      "package_script": "test"
+    }
+  ],
+  "source_of_truth_candidates": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/docs/SESSION_HANDOFF_NEXT.md"
+  ],
+  "verification_script_candidates": [
+    "format:check",
+    "lint",
+    "typecheck",
+    "typecheck:test",
+    "test:run",
+    "test",
+    "build"
+  ],
   "semantic_reference_tool": "vue-language-server",
   "structural_search_tool": "sg-limited-by-parser-scope",
   "dependency_manifest": {
     "file": "package.json",
-    "sections": ["dependencies", "devDependencies"],
+    "sections": [
+      "dependencies",
+      "devDependencies"
+    ],
     "script_section": "scripts",
     "script_runner": "npm run",
     "capabilities": [
-      { "name": "vue", "dependencies": ["vue"] },
-      { "name": "typescript", "dependencies": ["typescript"] },
-      { "name": "vite", "dependencies": ["vite"] },
-      { "name": "vitest", "dependencies": ["vitest"] },
-      { "name": "zod", "dependencies": ["zod"] },
-      { "name": "socket.io-client", "dependencies": ["socket.io-client"] }
+      {
+        "name": "vue",
+        "dependencies": [
+          "vue"
+        ]
+      },
+      {
+        "name": "typescript",
+        "dependencies": [
+          "typescript"
+        ]
+      },
+      {
+        "name": "vite",
+        "dependencies": [
+          "vite"
+        ]
+      },
+      {
+        "name": "vitest",
+        "dependencies": [
+          "vitest"
+        ]
+      },
+      {
+        "name": "zod",
+        "dependencies": [
+          "zod"
+        ]
+      },
+      {
+        "name": "socket.io-client",
+        "dependencies": [
+          "socket.io-client"
+        ]
+      }
     ]
   },
   "review_terms": {
-    "security": ["xss", "csrf", "content security policy", "credential"],
-    "full": ["state management contract", "router contract", "API contract", "cross-module architecture"]
+    "security": [
+      "xss",
+      "csrf",
+      "content security policy",
+      "credential"
+    ],
+    "full": [
+      "state management contract",
+      "router contract",
+      "API contract",
+      "cross-module architecture"
+    ]
   }
 }

@@ -269,6 +269,7 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     ...(input.work_order !== undefined ? { work_order: structuredClone(input.work_order) } : {}),
     ...(input.rules !== undefined ? { rules: structuredClone(input.rules) } : {}),
     ...(input.references !== undefined ? { references: structuredClone(input.references) } : {}),
+    ...(input.gate_a !== undefined ? { gate_a: structuredClone(input.gate_a) } : {}),
     created_at: nowIso(clock),
   };
   if (!record.task.trim() || !record.breakpoint.trim()) throw new Error("Work package task and breakpoint are required.");
@@ -512,7 +513,9 @@ async function mutateRun(paths, runId, type, details, mutator, { substantive = t
 export async function recordRunState(paths, runId, state, options = {}) {
   return await mutateRun(paths, runId, "state_recorded", { status: state.status }, (run) => {
     run.last_state = structuredClone(state);
-    if (state.status === "correction_required") run.status = "correction_pending";
+    // T0-06 G3.7: both halves of PASS are kept on the run, not only the reviewer's.
+    if (typeof state.gate_a_passed === "boolean" || state.gate_a_passed === null) run.gate_a_passed = state.gate_a_passed;
+    if (state.status === "correction_required" || state.status === "gate_a_failed") run.status = "correction_pending";
     else if (state.status === "pass") run.status = "pass";
     else if (state.status === "hard_stop") run.status = "hard_stop";
     else if (state.status === "rate_limited") run.status = "rate_limited";

@@ -160,7 +160,8 @@ test("Vue install structurally preserves permissions and unrelated hooks", async
   t.after(() => removeFixture(target));
   const install = await createPlan(target, "vue-frontend");
   assert.equal(install.result.status, 0, install.result.stderr);
-  assert.deepEqual(install.plan.detection.verification_commands, ["npm run lint", "npm run test:run", "npm run build"]);
+  // T0-06: the profile rule `npm test` joins the script candidates in the detection summary.
+  assert.deepEqual(install.plan.detection.verification_commands, ["npm run lint", "npm run test:run", "npm run build", "npm test"]);
   const applied = await applyPlan("apply", target, install.planPath, install.plan);
   assert.equal(applied.status, 0, applied.stderr);
   const settings = JSON.parse(await fsp.readFile(path.join(target, ".claude", "settings.local.json"), "utf8"));
@@ -204,7 +205,7 @@ test("auto profile registry recognizes common backend and frontend stacks", asyn
       id: "rust-backend",
       files: { "Cargo.toml": "[package]\nname='fixture'\nversion='0.1.0'\n[dependencies]\ntokio='1'\n" },
       capability: "tokio",
-      verification: "cargo test",
+      verification: "cargo test --workspace",
     },
     {
       id: "vue-frontend",

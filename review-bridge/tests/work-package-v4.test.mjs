@@ -18,7 +18,11 @@ async function runtime(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-wp-v4-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot);
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections" });
+  await writeJson(paths.bridgeConfigPath, {
+    schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
+    gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
+  });
+  await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({ name: "wp", scripts: { test: "node -e \"process.exit(0)\"" } }));
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
   await fsp.mkdir(path.join(repoRoot, "src", "game"), { recursive: true });
