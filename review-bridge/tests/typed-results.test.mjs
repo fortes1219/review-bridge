@@ -58,10 +58,11 @@ test("Q1 writer.result: the schema and the call identity are checked, nothing el
   assert.equal((await validateWriterResult(writerResult({ addressed_findings: ["H-1"] }), { workOrder: "wo-1", call: 1 })).ok, false);
 });
 
-test("Q1b the typed answer comes from structured_output, or from a result text that is the object", () => {
+test("Q1b the typed answer comes only from structured_output; a result text that is the object is not accepted", () => {
   assert.equal(writerResultFromClaudeResult({ structured_output: writerResult(), result: "ignored" }).event, "writer.result");
-  assert.equal(writerResultFromClaudeResult({ result: JSON.stringify(writerResult()) }).call, 1);
+  assert.equal(writerResultFromClaudeResult({ result: JSON.stringify(writerResult()) }), null);
   assert.equal(writerResultFromClaudeResult({ result: "prose\nCODEX_REVIEW_REQUIRED: true" }), null);
+  assert.equal(writerResultFromClaudeResult({ structured_output: [1] }), null);
   assert.equal(writerResultFromClaudeResult(null), null);
 });
 
@@ -79,7 +80,19 @@ test("Q5 review.result: schema, FAIL needs a finding, PASS carries no HIGH, path
   assert.deepEqual((await validateReviewResult(reviewResult({ gate: "PASS" }), base)).errors, ["$.findings: PASS cannot carry a HIGH finding"]);
   assert.equal((await validateReviewResult(reviewResult({ gate: "PASS", findings: [finding("F1", { severity: "MEDIUM" })] }), base)).ok, true);
   assert.deepEqual((await validateReviewResult(reviewResult({ hard_stop: true }), base)).errors, ["$.hard_stop_reason: required when hard_stop is true"]);
+  assert.deepEqual((await validateReviewResult(reviewResult({ hard_stop_reason: "release_action" }), base)).errors, ["$.hard_stop_reason: must be null when hard_stop is false"]);
+  // A PASS that also asks for a hard stop is a contradiction, never a pass.
+  const passStop = await validateReviewResult(reviewResult({ gate: "PASS", findings: [], hard_stop: true, hard_stop_reason: "release_action" }), base);
+  assert.deepEqual(passStop.errors, ["$.hard_stop: PASS cannot request a hard stop"]);
   assert.match((await validateReviewResult(reviewResult({ findings: [finding("F1", { path: "src/none.js" })] }), base)).errors[0], /not in workspace/);
+  // The path must be a relative file inside the workspace: no `..`, no absolute, no directory.
+  const escaped = path.basename(repoRoot) + "/../" + path.basename(repoRoot) + "/src/a.js";
+  for (const [bad, reason] of [
+    ["../" + escaped, /escapes/], [repoRoot.replaceAll("\\", "/") + "/src/a.js", /not a relative path/], ["src", /not a file/],
+    ["/src/a.js", /not a relative path/], ["src/./a.js", /not normalized/], ["./src/a.js", /not normalized/], ["src\\a.js", /not normalized/], ["src/a.js/.", /not normalized/],
+  ]) {
+    assert.match((await validateReviewResult(reviewResult({ findings: [finding("F1", { path: bad })] }), base)).errors[0], reason, bad);
+  }
   assert.match((await validateReviewResult(reviewResult({ findings: [finding("F1"), finding("F1")] }), base)).errors[0], /duplicate F1/);
   assert.match((await validateReviewResult(reviewResult({ gate: "MAYBE" }), base)).errors[0], /gate: must be one of/);
   assert.match((await validateReviewResult(reviewResult({ findings: [finding("F1", { line: 0 })] }), base)).errors[0], /line: below 1/);
@@ -121,6 +134,16 @@ test("Q8 the codex --json stream gives usage and commands; cached tokens are not
   const usage = reviewerUsageEvent({ usage: stream.usage, trailerTokens: 9, call: 1, durationMs: 5 });
   assert.deepEqual(usage.tokens, { input: 600, cache_write: 0, cache_read: 400, output: 50 });
   assert.equal(usage.source, "cli_json");
+  // The real codex-cli 0.162 shape (2026-10-13 sample), with a non-zero cache write added.
+  // Both cache parts sit inside input_tokens, so plain input is the remainder and the total is counted once.
+  const real = reviewerUsageEvent({ usage: { input_tokens: 15573, cached_input_tokens: 12544, output_tokens: 5, cache_write_input_tokens: 700, reasoning_output_tokens: 0 }, call: 1, durationMs: 5 });
+  assert.deepEqual(real.tokens, { input: 2329, cache_write: 700, cache_read: 12544, output: 5 });
+  assert.equal(real.anomaly, undefined);
+  // Parts larger than the total are recorded as an anomaly, not floored in silence.
+  const odd = reviewerUsageEvent({ usage: { input_tokens: 100, cached_input_tokens: 90, cache_write_input_tokens: 20, output_tokens: 1 }, call: 1, durationMs: 5 });
+  assert.deepEqual(odd.tokens, { input: 0, cache_write: 20, cache_read: 90, output: 1 });
+  assert.equal(odd.anomaly, "cache_parts_exceed_input_tokens");
+  assert.equal(odd.raw_usage.input_tokens, 100);
   const trailer = reviewerUsageEvent({ usage: null, trailerTokens: 65580, call: 1, durationMs: 5 });
   assert.equal(trailer.source, "cli_trailer");
   assert.equal(trailer.tokens.input, 65580);

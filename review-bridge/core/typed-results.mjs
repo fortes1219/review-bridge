@@ -59,14 +59,11 @@ export function validateAgainstSchema(value, schema, at = "$", errors = []) {
   return errors;
 }
 
-// D1.1: the CLI puts the schema-shaped answer in `structured_output`; a result text
-// that is itself the object is accepted so a CLI that names the field differently
-// does not turn every run into malformed_writer_result.
+// D1.1 / D1.5: the CLI puts the schema-shaped answer in `structured_output` (verified
+// against Claude Code 2.1.280 on 2026-10-13); anything else is malformed_writer_result.
 export function writerResultFromClaudeResult(result) {
-  if (result && typeof result.structured_output === "object" && result.structured_output !== null) return result.structured_output;
-  const text = String(result?.result || "").trim();
-  if (text.startsWith("{")) {
-    try { return JSON.parse(text); } catch { return null; }
+  if (result && typeof result.structured_output === "object" && result.structured_output !== null && !Array.isArray(result.structured_output)) {
+    return result.structured_output;
   }
   return null;
 }
@@ -101,9 +98,23 @@ export function unknownAddressedFindings(writerResult, openFindings) {
   return (writerResult?.addressed_findings || []).filter((id) => !known.has(id));
 }
 
-async function pathExists(repoRoot, relative) {
-  const absolute = path.resolve(repoRoot, ...normalizePath(relative).split("/"));
-  return await fsp.stat(absolute).then(() => true, () => false);
+// A finding must name a file inside the workspace: relative, no `..`, no drive or root,
+// and an existing regular file (Codex finding 2026-10-13: `..` used to pass the stat).
+export async function workspaceFileProblem(repoRoot, relative) {
+  const raw = String(relative || "");
+  // Checked on the raw string, before normalization strips a leading `./`.
+  if (raw.includes("\\") || /(^|\/)\.(\/|$)/.test(raw)) return "path escapes or is not normalized";
+  const candidate = normalizePath(raw);
+  if (!candidate || path.isAbsolute(candidate) || /^[A-Za-z]:/.test(candidate) || candidate.startsWith("/")) return "not a relative path";
+  const segments = candidate.split("/");
+  if (segments.some((segment) => segment === ".." || segment === "." || segment === "")) return "path escapes or is not normalized";
+  const absolute = path.resolve(repoRoot, ...segments);
+  const relation = path.relative(path.resolve(repoRoot), absolute);
+  if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) return "outside the workspace";
+  const stat = await fsp.stat(absolute).catch(() => null);
+  if (!stat) return "not in workspace";
+  if (!stat.isFile()) return "not a file";
+  return null;
 }
 
 // D3.3: schema first, then the fixed rules; any failure is malformed_review_result.
@@ -116,7 +127,10 @@ export async function validateReviewResult(value, { workOrder, call, repoRoot, p
   if (value.call !== call) errors.push("$.call: expected " + call);
   if (value.gate === "FAIL" && value.findings.length === 0) errors.push("$.findings: FAIL needs at least one finding");
   if (value.gate === "PASS" && value.findings.some((finding) => finding.severity === "HIGH")) errors.push("$.findings: PASS cannot carry a HIGH finding");
+  // Codex finding 2026-10-13: a PASS must not carry a hard-stop signal; the two contradict.
+  if (value.gate === "PASS" && value.hard_stop) errors.push("$.hard_stop: PASS cannot request a hard stop");
   if (value.hard_stop && !value.hard_stop_reason) errors.push("$.hard_stop_reason: required when hard_stop is true");
+  if (!value.hard_stop && value.hard_stop_reason) errors.push("$.hard_stop_reason: must be null when hard_stop is false");
   const ids = new Set();
   const previousIds = new Set(previousFindings.map((finding) => finding.id));
   const delta = deltaPaths ? new Set(deltaPaths.map(normalizePath)) : null;
@@ -124,7 +138,8 @@ export async function validateReviewResult(value, { workOrder, call, repoRoot, p
     const at = "$.findings[" + index + "]";
     if (ids.has(finding.id)) errors.push(at + ".id: duplicate " + finding.id);
     ids.add(finding.id);
-    if (!(await pathExists(repoRoot, finding.path))) errors.push(at + ".path: not in workspace: " + finding.path);
+    const problem = await workspaceFileProblem(repoRoot, finding.path);
+    if (problem) errors.push(at + ".path: " + problem + ": " + finding.path);
     // D4.3: on a recheck a new id may only land on a file the delta changed.
     if (delta && !previousIds.has(finding.id) && !delta.has(normalizePath(finding.path))) {
       errors.push(at + ".path: new finding outside the delta: " + finding.path);
@@ -202,11 +217,23 @@ export function reviewerUsageEvent({ usage, trailerTokens, call, durationMs }) {
   const number = (value) => (Number.isFinite(value) ? value : 0);
   const base = { event: "usage", role: "reviewer", provider: "codex", call, turns: null, duration_ms: durationMs };
   if (usage) {
-    // Codex counts cached tokens inside input_tokens; split them so the total is not doubled.
+    // Codex's input_tokens is the total; cached_input_tokens and cache_write_input_tokens are
+    // parts of it (OpenAI usage shape; field names verified against codex-cli 0.162 on 2026-10-13).
+    // The parts are split out so the ceiling total counts each token once. Parts larger than the
+    // total are a data anomaly: recorded as such, never silently floored.
+    const total = number(usage.input_tokens);
     const cached = number(usage.cached_input_tokens);
+    const cacheWrite = number(usage.cache_write_input_tokens);
+    const plain = total - cached - cacheWrite;
     return {
       ...base,
-      tokens: { input: Math.max(0, number(usage.input_tokens) - cached), cache_write: 0, cache_read: cached, output: number(usage.output_tokens) },
+      tokens: {
+        input: Math.max(0, plain),
+        cache_write: cacheWrite,
+        cache_read: cached,
+        output: number(usage.output_tokens),
+      },
+      ...(plain < 0 ? { anomaly: "cache_parts_exceed_input_tokens", raw_usage: usage } : {}),
       cost_usd: null,
       source: "cli_json",
     };

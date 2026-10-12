@@ -10,17 +10,17 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import { ensureDir, fileExists, listJson, readJson, writeJsonAtomicDurable } from "./io.mjs";
+import { ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES } from "./state-v4.mjs";
 
 export const DEFAULT_RETENTION_DAYS = 15;
 export const ARCHIVE_SCHEMA_VERSION = 1;
 const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
 const DAY_MS = 86_400_000;
 
-const terminalStatuses = new Set([
-  "pass", "hard_stop", "rate_limited", "cancelled", "policy_failure",
-  "call_budget_exhausted", "claude_timeout", "claude_failed", "reviewer_failed", "controller_failure",
-]);
-const activeStatuses = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
+// One status list for the whole runtime (Codex finding 2026-10-13: this copy had lost the
+// terminal statuses added since T0-04, so those runs were never archived or pruned).
+const terminalStatuses = new Set(TERMINAL_RUN_STATUSES);
+const activeStatuses = new Set(ACTIVE_RUN_STATUSES);
 
 // Files directly in the queue or reviews root that are part of the Bridge's own
 // control surface; never archived as orphans.

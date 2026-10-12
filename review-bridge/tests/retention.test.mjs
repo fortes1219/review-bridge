@@ -18,6 +18,7 @@ import {
   RetentionConfigError,
   retentionDays,
 } from "../core/retention.mjs";
+import { TERMINAL_RUN_STATUSES } from "../core/state-v4.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DAY_MS = 86_400_000;
@@ -277,4 +278,18 @@ test("P8 merge folds the run's I/O event file into the day file and deletes it",
   assert.equal(io[1].event.event, "usage");
   assert.equal(await fileExists(ioFile), false);
   assert.equal(await fileExists(path.join(paths.runLocksDir, fixture.run.run_id + ".process.json")), false);
+});
+
+test("P9 every terminal status the state machine knows is archivable; the list is shared, not copied", async (t) => {
+  const { paths } = await runtime(t);
+  assert.ok(TERMINAL_RUN_STATUSES.includes("stopped") && TERMINAL_RUN_STATUSES.includes("token_limit") && TERMINAL_RUN_STATUSES.includes("needs_human"));
+  for (const status of TERMINAL_RUN_STATUSES) {
+    const fixture = await terminalRunFixture(paths, { status });
+    const result = await mergeRun(paths, fixture.run.run_id);
+    assert.equal(result.already_archived, false, status);
+    const lines = await readArchive(result.archive_file);
+    assert.ok(lines.some((line) => line.type === "run" && line.run_id === fixture.run.run_id && line.run.status === status), status);
+  }
+  const active = await terminalRunFixture(paths, { status: "review_pending" });
+  await assert.rejects(mergeRun(paths, active.run.run_id), /still active/);
 });

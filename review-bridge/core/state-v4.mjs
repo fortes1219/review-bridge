@@ -19,13 +19,17 @@ import {
   loadOrCreatePolicySnapshot,
 } from "./policy-v4.mjs";
 
-const activeStatuses = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
-const terminalStatuses = new Set([
+// The one list of run statuses; retention and the CLI read it from here so a new terminal
+// status cannot be forgotten by the archive again.
+export const ACTIVE_RUN_STATUSES = Object.freeze(["running", "review_pending", "correction_pending", "interrupted"]);
+export const TERMINAL_RUN_STATUSES = Object.freeze([
   "pass", "hard_stop", "rate_limited", "cancelled", "policy_failure",
   "call_budget_exhausted", "claude_timeout", "claude_failed", "reviewer_failed", "controller_failure",
   "token_limit", "stopped", "reference_changed",
   "needs_human", "malformed_writer_result", "malformed_review_result",
 ]);
+const activeStatuses = new Set(ACTIVE_RUN_STATUSES);
+const terminalStatuses = new Set(TERMINAL_RUN_STATUSES);
 
 function nowIso(clock) {
   return new Date(clock()).toISOString();
