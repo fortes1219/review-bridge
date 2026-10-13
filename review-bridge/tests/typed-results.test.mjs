@@ -124,7 +124,7 @@ test("Q8 the codex --json stream gives usage and commands; cached tokens are not
     "not json",
     JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "bash -lc 'sed -n 1,40p src/a.js'" } }),
     JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "x" } }),
-    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 50 } }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, cached_input_tokens: 400, cache_write_input_tokens: 0, output_tokens: 50 } }),
   ].join("\n");
   const stream = parseCodexJsonl(text);
   assert.equal(stream.unparsable_lines, 1);
@@ -156,4 +156,27 @@ test("Q10 a Stop-hook message during a v4 run is not a submission: harness_drive
   const payload = { session_id: "s-1", cwd: repoRoot, stop_hook_active: false, last_assistant_message: "CODEX_REVIEW_REQUIRED: true\nreport" };
   const result = await enqueueReview({ payload, paths: { repoRoot }, control });
   assert.deepEqual(result, { accepted: false, reason: "harness_driven" });
+});
+
+test("Q8b a missing or partial usage object is unknown, never zero", async () => {
+  const { usageFromResult } = await import("../core/prompt.mjs");
+  const none = usageFromResult({ type: "result", num_turns: 1 }, { call: 1, durationMs: 1 });
+  assert.equal(none.parse_error, true);
+  assert.deepEqual(none.missing, ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]);
+  const partial = usageFromResult({ usage: { input_tokens: 5, cache_creation_input_tokens: 1, output_tokens: 2 } }, { call: 1, durationMs: 1 });
+  assert.deepEqual(partial.missing, ["cache_read_input_tokens"]);
+  const full = usageFromResult({ usage: { input_tokens: 2, cache_creation_input_tokens: 28212, cache_read_input_tokens: 0, output_tokens: 4 } }, { call: 1, durationMs: 1 });
+  assert.equal(full.parse_error, undefined);
+  const empty = reviewerUsageEvent({ usage: {}, call: 1, durationMs: 1 });
+  assert.equal(empty.parse_error, true);
+  assert.equal(empty.missing.length, 4);
+  const noWrite = reviewerUsageEvent({ usage: { input_tokens: 10, cached_input_tokens: 4, output_tokens: 1 }, call: 1, durationMs: 1 });
+  assert.deepEqual(noWrite.missing, ["cache_write_input_tokens"]);
+  const real = reviewerUsageEvent({ usage: { input_tokens: 15573, cached_input_tokens: 12544, output_tokens: 5, cache_write_input_tokens: 0, reasoning_output_tokens: 0 }, call: 1, durationMs: 1 });
+  assert.equal(real.parse_error, undefined);
+  // The token table treats both as unknown.
+  const { tokenRows } = await import("../core/result-file.mjs");
+  const rows = tokenRows([{ event: "task.input", call: 1 }, none, { event: "review.input", call: 1 }, { event: "review.result", call: 1 }, empty]);
+  assert.equal(rows.writer.complete, false);
+  assert.equal(rows.reviewer.complete, false);
 });

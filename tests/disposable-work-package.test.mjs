@@ -125,6 +125,7 @@ test("installed no-Git Vue workspace completes every public fake scenario", asyn
         "--plan", planPath,
         "--fake-cli",
         "--fake-scenario", scenario.name,
+        "--json",
       ];
       const started = index === 0
         ? spawnSync(process.execPath, startArgs, {

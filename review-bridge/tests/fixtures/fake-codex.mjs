@@ -78,6 +78,6 @@ const events = [
   { type: "turn.started" },
   { type: "item.completed", item: { id: "item_0", type: "command_execution", command: "bash -lc 'cat " + deltaPath + "'", exit_code: 0, status: "completed" } },
   { type: "item.completed", item: { id: "item_1", type: "agent_message", text: "review.result submitted" } },
-  { type: "turn.completed", usage: { input_tokens: tokens, cached_input_tokens: Math.floor(tokens / 2), output_tokens: 410 } },
+  { type: "turn.completed", usage: { input_tokens: tokens, cached_input_tokens: Math.floor(tokens / 2), cache_write_input_tokens: 0, output_tokens: 410, reasoning_output_tokens: 0 } },
 ];
 for (const event of events) process.stdout.write(JSON.stringify(event) + "\n");

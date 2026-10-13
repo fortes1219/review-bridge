@@ -213,9 +213,14 @@ export function parseClaudeStream(text) {
   return { result, reads, unparsable_lines: unparsable };
 }
 
+// The four token fields Claude Code 2.1.280 was verified to put in result.usage (2026-10-13).
+export const CLAUDE_USAGE_FIELDS = Object.freeze(["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]);
+
 export function usageFromResult(result, { call, durationMs }) {
-  const usage = result?.usage || {};
+  const usage = result?.usage && typeof result.usage === "object" ? result.usage : {};
   const number = (value) => (Number.isFinite(value) ? value : 0);
+  // Codex 2026-10-14: a missing or non-numeric field is unknown, never zero.
+  const missing = CLAUDE_USAGE_FIELDS.filter((field) => !Number.isFinite(usage[field]));
   return {
     event: "usage",
     role: "writer",
@@ -231,5 +236,6 @@ export function usageFromResult(result, { call, durationMs }) {
     },
     cost_usd: Number.isFinite(result?.total_cost_usd) ? result.total_cost_usd : null,
     source: "cli_json",
+    ...(missing.length ? { parse_error: true, missing } : {}),
   };
 }

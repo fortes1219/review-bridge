@@ -4,6 +4,7 @@ import readline from "node:readline/promises";
 import { parseOptions } from "./args.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./bounded-resume.mjs";
 import { GateAError } from "./gate-a.mjs";
+import { deliverOutcome, stdoutLines } from "./result-file.mjs";
 import { getBridgePaths } from "./paths.mjs";
 import {
   enqueueReview,
@@ -80,6 +81,8 @@ const schemas = {
     "--yes": { key: "yes", type: "boolean" },
     "--fake-cli": { key: "fakeCli", type: "boolean" },
     "--fake-scenario": { key: "fakeScenario", type: "string" },
+    // T0-07 V3.3: the status JSON is opt-in; the default is three plain lines.
+    "--json": { key: "json", type: "boolean" },
   },
   "work-cancel": {
     "--reason": { key: "reason", type: "string" },
@@ -112,7 +115,7 @@ const schemas = {
 };
 
 // T0-02 R3: one entry point for every prune trigger (CLI, watch start, daily timer).
-async function runPrune(paths, { json = false, out = process.stdout } = {}) {
+async function runPrune(paths, { json = false, out = process.stdout, adapter = null } = {}) {
   const config = (await fileExists(paths.bridgeConfigPath)) ? await readJson(paths.bridgeConfigPath).catch(() => ({})) : {};
   let ttlSeconds = 86_400;
   for (const file of [paths.defaultPolicyPath, paths.policyOverridePath]) {
@@ -120,7 +123,12 @@ async function runPrune(paths, { json = false, out = process.stdout } = {}) {
     if (Number.isInteger(policy?.limits?.authorization_ttl_seconds)) ttlSeconds = policy.limits.authorization_ttl_seconds;
   }
   try {
-    const summary = await prune(paths, { config, ttlSeconds });
+    // T0-07: every prune (command, watch start, daily timer) delivers pending results first; prune
+    // itself refuses to fold a run that has none.
+    const summary = await prune(paths, {
+      config, ttlSeconds,
+      deliver: (runId) => deliverOutcome({ paths, runId, adapter, notify: false }),
+    });
     out.write(json ? JSON.stringify(summary, null, 2) + "\n" : formatPruneSummary(summary) + "\n");
     return summary.merge_errors.length ? 1 : 0;
   } catch (error) {
@@ -195,9 +203,9 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
   });
   await fsp.writeFile(serviceFiles(paths).urlPath, watch.url + "\n", "utf8");
   // T0-02 R3.4: prune at start and once a day while the service runs.
-  await runPrune(paths).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
+  await runPrune(paths, { adapter }).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
   const pruneTimer = setInterval(() => {
-    runPrune(paths).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
+    runPrune(paths, { adapter }).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
   }, 86_400_000);
   pruneTimer.unref();
   process.stdout.write("Review Bridge setup page: " + watch.url + "\n"
@@ -311,20 +319,38 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   }
   if (command === "prune") {
     if (!isV4) throw new Error("prune requires the v4 runtime configuration created by init.");
-    return await runPrune(paths, { json: Boolean(options.json) });
+    return await runPrune(paths, { json: Boolean(options.json), adapter });
   }
   if (command === "stop") {
     if (!isV4) throw new Error("stop requires the v4 runtime configuration created by init.");
     if (!removeTarget) throw new Error("stop requires a run id.");
     const result = await stopRun(paths, removeTarget);
     process.stdout.write(result.line + "\n");
+    // T0-07 V2.8 (b): if the work-start process is gone, the stop command delivers.
+    if (result.exitCode === 0) {
+      try {
+        const delivery = await deliverOutcome({ paths, runId: removeTarget, adapter, notify: true });
+        if (!delivery.already) process.stdout.write(stdoutLines(delivery).join("\n") + "\n");
+      } catch (error) {
+        process.stderr.write("delivery failed: " + String(error?.message || error) + "\n");
+      }
+    }
     return result.exitCode;
   }
   if (command === "rm") {
     if (!isV4) throw new Error("rm requires the v4 runtime configuration created by init.");
     if (!removeTarget) throw new Error("rm requires a run id.");
+    // rm folds the run into the archive; a run without a result gets one first. If that fails the
+    // human's removal still happens, but the day file marks it and the output says why.
+    let deliveryError = null;
+    await deliverOutcome({ paths, runId: removeTarget, adapter, notify: false })
+      .then((delivery) => { if (delivery?.skipped) deliveryError = delivery.reason; })
+      .catch((error) => { deliveryError = String(error?.message || error); });
     const result = await removeRun(paths, removeTarget);
     process.stdout.write(result.line + "\n");
+    if (result.undelivered) {
+      process.stdout.write("結果沒交付成功：" + (deliveryError || "原因不明") + "，已標記未交付後移除\n");
+    }
     return result.exitCode;
   }
   if (command === "status") {
@@ -424,26 +450,45 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       executionMode: options.fakeCli ? "fake_cli" : "native",
       authorizedVia: options.approval ? "approve_flag" : options.yes ? "yes_flag" : "terminal",
     });
-    const exitCode = await runBoundedResume({
-      paths,
-      control: authorization.control,
-      adapter,
-      promptPath: authorization.promptPath,
-      maxCalls: authorization.plan.budget.max_claude_calls,
-      maxMinutes: authorization.plan.budget.max_claude_minutes_per_call,
-      startNewSession: true,
-      runtimeState: isV4 ? createRunRuntimeState(paths, authorization.run.run_id) : null,
-    });
-    process.stdout.write(JSON.stringify(
-      isV4 ? await v4WorkPackageStatus(paths, authorization.run.run_id) : await workPackageStatus(paths),
-      null,
-      2,
-    ) + "\n");
+    let exitCode;
+    try {
+      exitCode = await runBoundedResume({
+        paths,
+        control: authorization.control,
+        adapter,
+        promptPath: authorization.promptPath,
+        maxCalls: authorization.plan.budget.max_claude_calls,
+        maxMinutes: authorization.plan.budget.max_claude_minutes_per_call,
+        startNewSession: true,
+        runtimeState: isV4 ? createRunRuntimeState(paths, authorization.run.run_id) : null,
+      });
+    } finally {
+      // T0-07 V2.8 (a): every way out of a v4 run delivers once; a failure here never masks the run's own exit.
+      if (isV4) {
+        try {
+          const delivery = await deliverOutcome({ paths, runId: authorization.run.run_id, adapter, notify: true });
+          if (!options.json) process.stdout.write(stdoutLines(delivery).join("\n") + "\n");
+        } catch (error) {
+          process.stderr.write("delivery failed: " + String(error?.message || error) + "\n");
+        }
+      }
+    }
+    if (options.json || !isV4) {
+      process.stdout.write(JSON.stringify(
+        isV4 ? await v4WorkPackageStatus(paths, authorization.run.run_id) : await workPackageStatus(paths),
+        null,
+        2,
+      ) + "\n");
+    }
     return exitCode;
   }
   if (command === "work-cancel") {
-    if (isV4) await cancelV4WorkPackage({ paths, reason: options.reason });
-    else await cancelWorkPackage({ paths, reason: options.reason });
+    if (isV4) {
+      const cancelled = await cancelV4WorkPackage({ paths, reason: options.reason });
+      // Codex 2026-10-14: the cancel itself delivers; the result reflects the workspace at this moment.
+      await deliverOutcome({ paths, runId: cancelled.run_id, adapter, notify: true })
+        .catch((error) => process.stderr.write("delivery failed: " + String(error?.message || error) + "\n"));
+    } else await cancelWorkPackage({ paths, reason: options.reason });
     process.stdout.write(JSON.stringify(
       isV4 ? await v4WorkPackageStatus(paths) : await workPackageStatus(paths),
       null,

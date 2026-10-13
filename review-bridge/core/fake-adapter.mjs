@@ -34,6 +34,15 @@ export function createFakeAdapter(bridgeRoot, requestedScenario = "PASS") {
         },
       };
     },
-    async notify() {},
+    // T0-07: no desktop notification in fake mode; a test may capture or fail it through the environment.
+    async notify(title, message) {
+      if (process.env.FAKE_NOTIFY_FAIL === "1") throw new Error("fake notification failure");
+      if (process.env.FAKE_NOTIFY_FILE) {
+        const fs = await import("node:fs/promises");
+        await fs.appendFile(process.env.FAKE_NOTIFY_FILE, JSON.stringify({ title, message, at: new Date().toISOString() }) + "\n");
+        return { sent: true, channel: "fake_file" };
+      }
+      return { sent: false, reason: "fake_cli" };
+    },
   };
 }

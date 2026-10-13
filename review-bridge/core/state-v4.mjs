@@ -79,8 +79,15 @@ function guardFile(paths, runId) {
   return path.join(paths.reconcileGuardsDir, assertId(runId, "Run id") + ".json");
 }
 
+// Read, and treat a file that is gone (or, on Windows, being deleted) as absent. A check-then-read
+// left a window in which a released lock made the read throw (found by the T0-07 lock race test).
 async function readOptional(file) {
-  return await fileExists(file) ? await readJson(file) : null;
+  try {
+    return await readJson(file);
+  } catch (error) {
+    if (error?.code === "ENOENT" || (process.platform === "win32" && error?.code === "EPERM")) return null;
+    throw error;
+  }
 }
 
 async function pidAlive(pid) {
@@ -135,14 +142,21 @@ async function acquireReconcileGuard(paths, runId, policy, { clock }) {
         },
       };
     } catch (error) {
+      if (isTransientCreateError(error)) { await new Promise((resolve) => setTimeout(resolve, 25)); continue; }
       if (error.code !== "EEXIST") throw error;
-      const existing = await readJson(file);
+      // The holder may release between our failed create and this read; that is a free guard, so try again.
+      const existing = await readOptional(file);
+      if (!existing) continue;
       if (Date.parse(existing.expires_at) > clock()) throw new Error("Run reconciliation is already in progress.");
       const moved = await moveExpiredRecord(file, existing.guard_nonce || "unknown");
       if (!moved) continue;
     }
   }
   throw new Error("Could not acquire the reconcile guard.");
+}
+
+function isTransientCreateError(error) {
+  return process.platform === "win32" && ["EPERM", "ENOENT", "EBUSY"].includes(error?.code);
 }
 
 async function heartbeatLock(file, lease, clock) {
@@ -160,6 +174,7 @@ export async function acquireRunLock(paths, runId, policy, {
   if (await fileExists(paths.upgradeMarkerPath)) throw new Error("Runtime upgrade is in progress.");
   await ensureDir(paths.runLocksDir);
   const file = lockFile(paths, runId);
+  let lastTransient = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const acquiredAt = nowIso(clock);
     const record = {
@@ -191,8 +206,13 @@ export async function acquireRunLock(paths, runId, policy, {
         },
       };
     } catch (error) {
+      // On Windows a lock file that is being deleted can refuse an exclusive create with EPERM,
+      // ENOENT or EBUSY instead of EEXIST; that is a lock in transit, not a failure.
+      if (isTransientCreateError(error)) { lastTransient = error.code; await new Promise((resolve) => setTimeout(resolve, 25)); continue; }
       if (error.code !== "EEXIST") throw error;
-      const existing = await readJson(file);
+      // The holder may release between our failed create and this read; that is a free lock, so try again.
+      const existing = await readOptional(file);
+      if (!existing) continue;
       const heartbeatExpired = clock() - Date.parse(existing.heartbeat_at)
         >= policy.limits.lock_stale_seconds * 1000;
       const live = await pidAlive(Number(existing.pid)) && !heartbeatExpired;
@@ -215,7 +235,7 @@ export async function acquireRunLock(paths, runId, policy, {
       }
     }
   }
-  throw new Error("Could not acquire the run lock.");
+  throw new Error("Could not acquire the run lock." + (lastTransient ? " (" + lastTransient + ")" : ""));
 }
 
 export async function withRunLock(paths, runId, policy, callback, options) {
@@ -270,6 +290,7 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     ...(input.rules !== undefined ? { rules: structuredClone(input.rules) } : {}),
     ...(input.references !== undefined ? { references: structuredClone(input.references) } : {}),
     ...(input.gate_a !== undefined ? { gate_a: structuredClone(input.gate_a) } : {}),
+    ...(input.task_file !== undefined ? { task_file: input.task_file } : {}),
     created_at: nowIso(clock),
   };
   if (!record.task.trim() || !record.breakpoint.trim()) throw new Error("Work package task and breakpoint are required.");
@@ -507,6 +528,33 @@ async function mutateRun(paths, runId, type, details, mutator, { substantive = t
     const next = await mutator(structuredClone(current));
     await lease.assertOwner();
     return await appendProjectionEvent(paths, current, next, type, details, clock, substantive);
+  });
+}
+
+// T0-07 V2.7: delivery has its own locked path. Inside the lease: a run that already has an
+// outcome returns at once with no event and no file written; otherwise `build` writes the
+// result files and exactly one `run_delivered` projection event records them.
+export async function deliverRun(paths, runId, build, { clock = Date.now } = {}) {
+  const { snapshot } = await loadOrCreatePolicySnapshot(paths);
+  return await withRunLock(paths, runId, snapshot.effective_policy, async (lease) => {
+    await lease.assertOwner();
+    const current = await reconcileRunProjection(paths, runId);
+    if (current.outcome) return { already: true, run: current };
+    if (!terminalStatuses.has(current.status)) throw new Error("Run is still active: " + runId);
+    const written = await build(structuredClone(current));
+    await lease.assertOwner();
+    const next = {
+      ...current,
+      outcome: written.outcome,
+      result_path: written.result_path,
+      latest_result_path: written.latest_path,
+      latest_result_written: written.latest_written !== false,
+      result_sha256: written.sha256,
+    };
+    const projected = await appendProjectionEvent(paths, current, next, "run_delivered", {
+      outcome: written.outcome, result_path: written.result_path, sha256: written.sha256,
+    }, clock, false);
+    return { already: false, run: projected };
   });
 }
 

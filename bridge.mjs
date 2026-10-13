@@ -136,6 +136,7 @@ async function runFakeScenarios(target, privateName = ".claude") {
       "--yes",
       "--fake-cli",
       "--fake-scenario", scenario.name,
+      "--json",
     ], { cwd: target, expected: scenario.expectedExit }), scenario.name + " self-test");
     if (completed.latest_state?.status !== scenario.status) {
       throw new Error(scenario.name + " self-test returned unexpected status.");

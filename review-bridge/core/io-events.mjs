@@ -11,6 +11,7 @@ export const IO_EVENT_TYPES = Object.freeze([
   "task.input", "handoff", "read", "usage", "stop",
   "writer.result", "review.input", "review.result", "recheck",
   "gate_a_result", "fix.input",
+  "notified", "delivery_skipped",
 ]);
 
 export function ioEventFile(paths, runId) {

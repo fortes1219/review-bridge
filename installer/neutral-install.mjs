@@ -233,6 +233,8 @@ async function applyNeutralInstallLocked(plan, claimed) {
       requires_human_authorization: true,
       watch: { port: plan.watch.port, strict_port: plan.watch.strict_port },
       retention: { days: plan.retention?.days ?? DEFAULT_RETENTION_DAYS },
+      // T0-07 V4.2: the language pack for result files, notifications and the stdout summary.
+      locale: "zh-TW",
       // T0-06 G1.3: the profile-approved verification rules; work-plan picks Gate A from here.
       gate_a: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
       readiness: { reviewer_readonly_proven: "not_run" },

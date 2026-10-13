@@ -107,7 +107,7 @@ if (process.argv.includes("--output-schema")) {
   };
   await fsp.writeFile(out, JSON.stringify(verdict));
   if (process.env.T_CODEX_TOKENS) {
-    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: Number(process.env.T_CODEX_TOKENS), cached_input_tokens: 0, output_tokens: 1 } }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: Number(process.env.T_CODEX_TOKENS), cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1 } }) + "\\n");
   }
   process.exit(0);
 }

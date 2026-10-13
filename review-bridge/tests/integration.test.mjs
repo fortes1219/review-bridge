@@ -792,7 +792,7 @@ test("work-plan and work-start CLI commands complete the first work package", as
 
     const started = await captureStdout(() => dispatchCommand({
       command: "work-start",
-      args: ["--plan", planPath, "--approve", summary.plan_sha256, "--fake-cli", "--fake-scenario", "PASS"],
+      args: ["--plan", planPath, "--approve", summary.plan_sha256, "--fake-cli", "--fake-scenario", "PASS", "--json"],
       repoRoot: runtime.repoRoot,
       bridgeRoot,
       adapter: makeAdapter("PASS"),

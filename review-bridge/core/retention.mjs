@@ -228,6 +228,8 @@ export async function collectRunArtifacts(paths, run) {
       if (stamp && stamps.has(stamp)) add(writerKind(path.basename(file)), file);
     }
   }
+  // T0-07 V2.1: the per-run result file is archived with the run (its text is under the 256 KB cap).
+  if (run.result_path) add("result", run.result_path);
   const jobs = await reviewJobsForRun(paths, runId);
   for (const { file, job, jobId } of jobs) {
     add("review_job", file);
@@ -281,7 +283,7 @@ function runTerminalAt(run) {
 }
 
 // R2: fold one terminal run into its day file, then delete what was folded.
-export async function mergeRun(paths, runId, { clock = Date.now } = {}) {
+export async function mergeRun(paths, runId, { clock = Date.now, undelivered = false } = {}) {
   const projectionFile = path.join(paths.runsDir, runId + ".json");
   const run = await readOptionalJson(projectionFile);
   if (!run) throw new Error("Run does not exist: " + runId);
@@ -293,7 +295,7 @@ export async function mergeRun(paths, runId, { clock = Date.now } = {}) {
   const terminalAt = runTerminalAt(run);
   const archiveFile = archiveFileForDate(paths, terminalAt);
   const base = { schema_version: ARCHIVE_SCHEMA_VERSION, archived_at: archivedAt, run_id: runId };
-  const lines = [{ ...base, type: "run", terminal_at: terminalAt, run: { ...run } }];
+  const lines = [{ ...base, type: "run", terminal_at: terminalAt, run: { ...run }, ...(undelivered ? { undelivered: true } : {}) }];
   for (const event of collected.events) lines.push({ ...base, type: "event", event });
   for (const event of collected.ioEvents) lines.push({ ...base, type: "io_event", event });
   // T0-05 D5.4: when the run recorded usage as I/O events those are the usage lines;
@@ -361,7 +363,7 @@ async function activeReferences(paths, runs) {
   return { stamps, jobIds };
 }
 
-export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_400 } = {}) {
+export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_400, deliver = null } = {}) {
   const days = retentionDays(config); // RetentionConfigError here means nothing is deleted
   const now = clock();
   const summary = {
@@ -373,6 +375,8 @@ export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_4
     authorizations_deleted: 0,
     job_files_deleted: 0,
     orphans_archived: 0,
+    undelivered: [],
+    undelivered_archived: 0,
   };
   const runs = [];
   for (const file of await listJson(paths.runsDir)) {
@@ -384,10 +388,24 @@ export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_4
   // 1. Fold every terminal run that is not folded yet.
   for (const run of runs) {
     if (!isTerminalRun(run) || run.archived_at) continue;
+    // T0-07 (Codex 2026-10-14): a run is folded only after its result was delivered, whoever calls
+    // prune (the prune command, watch at start, the daily timer). A run that still cannot be
+    // delivered waits; once it is older than the retention window it is folded anyway, marked.
+    let current = run;
+    if (!current.outcome && deliver) {
+      try { await deliver(run.run_id); } catch { /* reported below as undelivered */ }
+      current = (await readOptionalJson(path.join(paths.runsDir, run.run_id + ".json"))) || run;
+    }
+    let undelivered = false;
+    if (!current.outcome) {
+      if (!olderThan(runTerminalAt(current), days, now)) { summary.undelivered.push(run.run_id); continue; }
+      undelivered = true;
+    }
     try {
-      await mergeRun(paths, run.run_id, { clock });
+      await mergeRun(paths, run.run_id, { clock, undelivered });
       run.archived_at = new Date(now).toISOString();
       summary.merged_runs += 1;
+      if (undelivered) summary.undelivered_archived += 1;
     } catch (error) {
       summary.merge_errors.push({ run_id: run.run_id, error: String(error.message || error) });
     }
@@ -486,8 +504,10 @@ export function formatPruneSummary(summary) {
   if (summary.authorizations_deleted) parts.push(summary.authorizations_deleted + " 個過期授權");
   if (summary.job_files_deleted) parts.push(summary.job_files_deleted + " 個過期審查檔");
   if (summary.orphans_archived) parts.push(summary.orphans_archived + " 個殘留檔");
+  if (summary.undelivered_archived) parts.push(summary.undelivered_archived + " 條超過保留天數仍沒交付，已歸檔並標記");
   const line = parts.length ? parts.join("、") : "沒有要清的";
   const errors = summary.merge_errors.map((entry) => "合併失敗 " + entry.run_id + "：" + entry.error);
+  if (summary.undelivered?.length) errors.push(summary.undelivered.length + " 條還沒交付結果，這次不歸檔：" + summary.undelivered.join("、"));
   return [line + "（保留 " + summary.days + " 天）", ...errors].join("\n");
 }
 
@@ -500,9 +520,16 @@ export async function removeRun(paths, runId, { clock = Date.now } = {}) {
   if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
   if (isActiveRun(run)) return { exitCode: 1, line: "進行中，先 stop", reason: "active" };
   let merged = null;
-  if (!run.archived_at) merged = await mergeRun(paths, runId, { clock });
+  // Codex 2026-10-14: a run removed without a result is marked, never lost silently. A run folded
+  // earlier keeps its old day-file line; today's day file gets a line saying it was removed undelivered.
+  const undelivered = !run.outcome;
+  if (!run.archived_at) merged = await mergeRun(paths, runId, { clock, undelivered });
+  else if (undelivered) await appendArchiveLine(paths, { type: "removed", run_id: runId, undelivered: true, archive_file: run.archive_file || null }, clock);
   for (const directory of [paths.runsDir, paths.runLocksDir, paths.reconcileGuardsDir]) {
     await fsp.rm(path.join(directory, runId + ".json"), { force: true });
   }
-  return { exitCode: 0, line: "已移除 " + runId, reason: merged ? "merged_and_removed" : "removed", archive_file: (merged || run).archive_file };
+  return {
+    exitCode: 0, line: "已移除 " + runId, reason: merged ? "merged_and_removed" : "removed",
+    archive_file: (merged || run).archive_file, undelivered,
+  };
 }

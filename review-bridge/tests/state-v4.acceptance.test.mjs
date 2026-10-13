@@ -617,7 +617,7 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     assert.equal(Object.hasOwn(workPlan, "plan_sha256"), false);
     const startArgs = [
       bootstrap, "work-start", "--plan", planPath, "--yes",
-      "--fake-cli", "--fake-scenario", "PASS",
+      "--fake-cli", "--fake-scenario", "PASS", "--json",
     ];
     const first = spawnSync(process.execPath, startArgs, { cwd: target, encoding: "utf8" });
     assert.equal(first.status, 0, first.stderr);

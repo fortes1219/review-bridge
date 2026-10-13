@@ -9,6 +9,7 @@ import { dispatchCommand } from "../core/commands.mjs";
 import { fileExists, writeJson } from "../core/io.mjs";
 import { getBridgePaths } from "../core/paths.mjs";
 import {
+  formatPruneSummary,
   localDateKey,
   mergeRun,
   parseReviewerUsage,
@@ -41,7 +42,7 @@ function iso(offsetMs = 0) {
 
 // One terminal run laid out the way rc.2 wrote it: flat per-call files, a review job,
 // review files, evidence with a before snapshot and a delta.
-async function terminalRunFixture(paths, { runId = "run-" + Math.random().toString(16).slice(2, 10), closedAt = iso(), status = "pass" } = {}) {
+async function terminalRunFixture(paths, { runId = "run-" + Math.random().toString(16).slice(2, 10), closedAt = iso(), status = "pass", outcome = "delivered" } = {}) {
   fixtureCount += 1;
   const serial = String(fixtureCount).padStart(3, "0");
   const PLAN_SHA = serial.repeat(2) + BASE_SHA.slice(6);
@@ -50,7 +51,7 @@ async function terminalRunFixture(paths, { runId = "run-" + Math.random().toStri
   const stdoutPath = path.join(paths.queueRoot, stamp + "-claude.stdout.json");
   const lastState = { status: "pass", call: 1, claude_stdout_path: stdoutPath, stderr_path: path.join(paths.queueRoot, stamp + "-claude.stderr.log") };
   const run = {
-    run_id: runId, status, closed_at: closedAt, updated_at: closedAt, created_at: closedAt,
+    run_id: runId, status, closed_at: closedAt, updated_at: closedAt, created_at: closedAt, ...(outcome ? { outcome } : {}),
     authorization_ids: ["plan-" + PLAN_SHA], work_package: "demo", last_event_sequence: 2, last_state: lastState,
   };
   await writeJson(path.join(paths.runsDir, runId + ".json"), run);
@@ -292,4 +293,42 @@ test("P9 every terminal status the state machine knows is archivable; the list i
   }
   const active = await terminalRunFixture(paths, { status: "review_pending" });
   await assert.rejects(mergeRun(paths, active.run.run_id), /still active/);
+});
+
+test("P10 prune never folds an undelivered run inside the window; it delivers first when it can, and marks the ones it folds anyway", async (t) => {
+  const { paths } = await runtime(t);
+  const recent = await terminalRunFixture(paths, { outcome: null });
+  const stale = await terminalRunFixture(paths, { outcome: null, closedAt: iso(-20 * 86_400_000) });
+  const deliverable = await terminalRunFixture(paths, { outcome: null });
+  const broken = await terminalRunFixture(paths, { outcome: null });
+  const calls = [];
+  const summary = await prune(paths, {
+    config: { retention: { days: 15 } },
+    deliver: async (runId) => {
+      calls.push(runId);
+      if (runId === broken.run.run_id) throw new Error("cannot build the result");
+      if (runId === deliverable.run.run_id) {
+        const file = path.join(paths.runsDir, runId + ".json");
+        await writeJson(file, { ...JSON.parse(await fsp.readFile(file, "utf8")), outcome: "delivered" });
+      }
+    },
+  });
+  assert.ok(calls.includes(recent.run.run_id) && calls.includes(broken.run.run_id) && calls.includes(deliverable.run.run_id));
+  assert.deepEqual(summary.undelivered.sort(), [recent.run.run_id, broken.run.run_id].sort());
+  assert.equal(summary.undelivered_archived, 1);
+  const read = async (id) => JSON.parse(await fsp.readFile(path.join(paths.runsDir, id + ".json"), "utf8").catch(() => "null"));
+  assert.equal((await read(recent.run.run_id)).archived_at, undefined);
+  assert.equal((await read(broken.run.run_id)).archived_at, undefined);
+  assert.ok((await read(deliverable.run.run_id)).archived_at);
+  // Past the window it was folded (and, being expired, its record and day file are gone in the same pass).
+  assert.equal(await read(stale.run.run_id), null);
+  // The mark itself: a run folded without a result says so in its day-file line.
+  const marked = await terminalRunFixture(paths, { outcome: null });
+  const merged = await mergeRun(paths, marked.run.run_id, { undelivered: true });
+  const lines = await readArchive(merged.archive_file);
+  assert.equal(lines.find((line) => line.type === "run" && line.run_id === marked.run.run_id).undelivered, true);
+  assert.match(formatPruneSummary(summary), /2 條還沒交付結果，這次不歸檔/);
+  // Without a deliverer (any caller), an undelivered run inside the window is still left alone.
+  const again = await prune(paths, { config: { retention: { days: 15 } } });
+  assert.ok(again.undelivered.includes(recent.run.run_id));
 });

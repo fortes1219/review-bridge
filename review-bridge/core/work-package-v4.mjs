@@ -194,10 +194,13 @@ export async function createV4WorkPackagePlan({
 }) {
   if (Boolean(task) === Boolean(taskFile)) throw new Error("Provide exactly one of --task or --task-file.");
   let taskText = task;
+  let taskFileRelative = null;
   if (taskFile) {
     const resolved = assertUnder(path.resolve(taskFile), paths.privateRoot, "Task file");
     if (!(await fileExists(resolved))) throw new Error("Task file is missing.");
     taskText = await fsp.readFile(resolved, "utf8");
+    // T0-07 V2.1: the result file is written beside this path later.
+    taskFileRelative = path.relative(paths.repoRoot, resolved).split(path.sep).join("/");
   }
   taskText = requiredText(taskText, "Task", 40_000);
   // A human work order (from a file, or any text carrying rb: markers) is parsed by fixed rules;
@@ -225,6 +228,7 @@ export async function createV4WorkPackagePlan({
     breakpoint: requiredText(breakpoint, "Breakpoint", 160),
     task: taskText,
     task_sha256: digest(taskText),
+    task_file: taskFileRelative,
     work_order: workOrder,
     rules,
     references,
@@ -289,6 +293,7 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     rules: plan.rules || null,
     references: plan.references || [],
     gate_a: plan.gate_a || null,
+    task_file: plan.task_file || null,
   }, () => Date.parse(plan.created_at));
   const authorization = await createAuthorization(paths, {
     authorizationId: "plan-" + plan.plan_sha256,

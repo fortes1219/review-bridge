@@ -213,6 +213,9 @@ export function pathFromCommand(command) {
   return match ? normalizePath(match[1]) : null;
 }
 
+// The four token fields codex-cli 0.162 was verified to put in turn.completed.usage (2026-10-13).
+export const CODEX_USAGE_FIELDS = Object.freeze(["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens"]);
+
 export function reviewerUsageEvent({ usage, trailerTokens, call, durationMs }) {
   const number = (value) => (Number.isFinite(value) ? value : 0);
   const base = { event: "usage", role: "reviewer", provider: "codex", call, turns: null, duration_ms: durationMs };
@@ -225,8 +228,11 @@ export function reviewerUsageEvent({ usage, trailerTokens, call, durationMs }) {
     const cached = number(usage.cached_input_tokens);
     const cacheWrite = number(usage.cache_write_input_tokens);
     const plain = total - cached - cacheWrite;
+    // Codex 2026-10-14: an empty or partial usage object is unknown, never zero.
+    const missing = CODEX_USAGE_FIELDS.filter((field) => !Number.isFinite(usage[field]));
     return {
       ...base,
+      ...(missing.length ? { parse_error: true, missing } : {}),
       tokens: {
         input: Math.max(0, plain),
         cache_write: cacheWrite,
