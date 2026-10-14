@@ -154,7 +154,7 @@ async function service(t, { runner, version = () => "codex-cli 1.0.0", roles = {
   };
 }
 
-test("one click is one call, in-flight clicks are rejected, and native stays closed", async (t) => {
+test("one click is one call, in-flight clicks are rejected, and a proof opens the proof half of native readiness", async (t) => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   const { calls, wrapped } = counted(async (request) => { await gate; return scenarios.denied(request); });
@@ -168,8 +168,9 @@ test("one click is one call, in-flight clicks are rejected, and native stays clo
   assert.equal(calls.length, 1);
   const status = await probe.status();
   assert.equal(status.reviewer_readonly_proven, true);
-  assert.equal(status.native_ready, false);
-  assert.equal(status.native_blocked_reason, "human_authorization_not_implemented");
+  // T0-08 N7: the proof is the page's half; work-start still needs an interactive terminal confirmation.
+  assert.equal(status.native_ready, true);
+  assert.equal(status.native_blocked_reason, null);
   assert.equal(calls.length, 1, "status refresh does not invoke the model");
 });
 

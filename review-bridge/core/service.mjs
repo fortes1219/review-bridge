@@ -104,7 +104,7 @@ export async function checkService(paths) {
   if (probe.body.service_id !== session.service_id || probe.body.pid !== session.pid) {
     return { running: false, reason: "wrong_service", url: session.url, session };
   }
-  return { running: true, reason: "running", url: session.url, session };
+  return { running: true, reason: "running", url: session.url, session, status: probe.body };
 }
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

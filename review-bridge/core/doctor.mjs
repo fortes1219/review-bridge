@@ -110,7 +110,7 @@ export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = pr
         // and never reads the editable audit file or a stored Boolean as proof.
         reviewer_readonly_proven: "not_run",
         reviewer_readonly_authority: "watch_session_only",
-        reason: "Stage 2 UV-backed authorization is not installed yet.",
+        reason: "Native work-start needs an interactive terminal confirmation and a reviewer read-only check passed in the running Bridge page; doctor cannot see that proof.",
       } : null,
       state_filesystem: inspectStateFilesystem(paths.repoRoot),
       platform: {

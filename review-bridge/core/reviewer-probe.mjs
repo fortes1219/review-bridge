@@ -305,8 +305,9 @@ export function createReviewerProbeService({
       probe_supported: supported,
       probe_available: supported && !inFlight && reviewer.cli_present && reviewer.authenticated === true,
       probe_in_flight: inFlight,
-      native_ready: false,
-      native_blocked_reason: "human_authorization_not_implemented",
+      // T0-08: native work-start also requires terminal confirmation; this is the proof half.
+      native_ready: readonly.state === "proven",
+      native_blocked_reason: readonly.state === "proven" ? null : "reviewer_readonly_" + readonly.state,
     };
   }
 

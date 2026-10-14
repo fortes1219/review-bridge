@@ -4,6 +4,7 @@ import readline from "node:readline/promises";
 import { parseOptions } from "./args.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./bounded-resume.mjs";
 import { GateAError } from "./gate-a.mjs";
+import { assertNativeAllowed, assertReviewerProof } from "./native-gate.mjs";
 import { deliverOutcome, stdoutLines } from "./result-file.mjs";
 import { getBridgePaths } from "./paths.mjs";
 import {
@@ -414,7 +415,8 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
         "驗收：" + (plan.gate_a?.kind === "command" ? "會跑 " + plan.gate_a.command + "（profile 核准）" : plan.gate_a?.label || "未定"),
         "plan：" + plan.plan_path,
         "sha：" + plan.plan_sha256,
-        "下一步：work-start --plan " + plan.plan_path + " --approve " + plan.plan_sha256,
+        // T0-08: native work-start refuses --approve; the human confirms the card at the terminal.
+        "下一步：work-start --plan " + plan.plan_path + "，在終端機看完卡片後輸入 y",
       ].join("\n") + "\n");
       return 0;
     }
@@ -439,6 +441,9 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     if (options.fakeScenario && !options.fakeCli) {
       throw new Error("--fake-scenario requires --fake-cli.");
     }
+    // T0-08: the same gate again, because dispatchCommand can be called without bootstrap.
+    assertNativeAllowed({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
+    if (!options.fakeCli) await assertReviewerProof(paths);
     const approval = isV4
       ? options.approval || await confirmV4WorkStart(paths, options.planPath, Boolean(options.yes))
       : options.approval;

@@ -151,20 +151,25 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
   assert.equal(doctor.status, 0, doctor.stderr);
   assert.equal(JSON.parse(doctor.stdout).native_readiness.ready, false);
   assert.equal(JSON.parse(doctor.stdout).native_readiness.reviewer_readonly_proven, "not_run");
-  for (const args of [
-    ["work-start", "--plan", "anything", "--approve", "anything", "--yes"],
-    ["review"],
-    ["bounded-resume"],
-    ["enqueue", "--no-start"],
+  // T0-08 G2: native work-start only at an interactive terminal; every other model entry point closed.
+  for (const { args, input, reason } of [
+    { args: ["work-start", "--plan", "anything", "--approve", "anything"], reason: /with --approve or --yes/ },
+    { args: ["work-start", "--plan", "anything", "--yes"], reason: /with --approve or --yes/ },
+    { args: ["work-start", "--plan", "anything"], input: "y\n", reason: /must run at an interactive terminal/ },
+    { args: ["review"], reason: /for review: only work-start/ },
+    { args: ["bounded-resume"], reason: /for bounded-resume: only work-start/ },
+    { args: ["enqueue", "--no-start"], reason: /for enqueue: only work-start/ },
   ]) {
     const blocked = spawnSync(process.execPath, [bootstrap, ...args], {
       cwd: root,
       encoding: "utf8",
       env: isolatedEnv(),
       windowsHide: true,
+      ...(input ? { input } : {}),
     });
-    assert.equal(blocked.status, 2, `${args[0]} should reject native execution`);
-    assert.match(blocked.stderr, /Native execution is unavailable until Stage 2 human authorization is verified/);
+    assert.equal(blocked.status, 2, `${args.join(" ")} should reject native execution`);
+    assert.match(blocked.stderr, /Native execution is unavailable/);
+    assert.match(blocked.stderr, reason);
   }
   assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "review-queue", "authorizations")), []);
 });

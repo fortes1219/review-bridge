@@ -13,6 +13,7 @@ import { inspectDoctor } from "./core/doctor.mjs";
 import { createFakeAdapter } from "./core/fake-adapter.mjs";
 import { readJson } from "./core/io.mjs";
 import { getBridgePaths } from "./core/paths.mjs";
+import { assertReviewerProof, nativeGateDecision } from "./core/native-gate.mjs";
 
 const bridgeRoot = bridgeRootFrom(import.meta.url);
 const repoRoot = path.resolve(bridgeRoot, "../../..");
@@ -62,11 +63,14 @@ async function main() {
     throw new Error("Unsupported review bridge command: " + command);
   }
   const fakeRequested = args.includes("--fake-cli");
-  // Stage 2 has no UV-backed authorization issuer yet. Keep every native model
-  // entrypoint closed while fake acceptance and model-free inspection remain usable.
-  if (!fakeRequested && ["work-start", "review", "bounded-resume", "enqueue"].includes(command)) {
-    throw new Error("Native execution is unavailable until Stage 2 human authorization is verified.");
-  }
+  // T0-08: native model calls are allowed only for work-start confirmed at an interactive terminal
+  // (no --approve, no --yes, stdin and stdout both a TTY). This is an operating restriction, not
+  // proof of a human: an agent under the same OS account can still drive a terminal. Every other
+  // model entry point (review, bounded-resume, enqueue) stays closed in native mode.
+  const gate = nativeGateDecision({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
+  if (!gate.allowed) throw new Error(gate.message);
+  // N7: and only after the reviewer read-only check passed in the running page service.
+  if (gate.mode === "native_terminal") await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
   const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "migrate-control", "up", "down", "ps", "prune", "rm", "stop"]);

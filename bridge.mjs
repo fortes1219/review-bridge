@@ -189,7 +189,7 @@ async function inspectNativeReadiness(roles) {
     ready: false,
     cli_available: missing.length === 0,
     authorization_ready: false,
-    reason: "Stage 2 UV-backed human authorization is not implemented yet.",
+    reason: "Run up, open the page and pass the reviewer read-only check; then start work at an interactive terminal.",
     platform: targetKey,
     adapter_status: definition.status,
     runtime_verified: definition.runtime_verified === true,
