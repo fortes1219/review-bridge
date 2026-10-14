@@ -13,6 +13,7 @@ import {
   listRuns,
   loadControlView,
   readRun,
+  recordRunState,
 } from "./state-v4.mjs";
 import { hasWorkOrderMarkers, MESSAGES as ORDER_MESSAGES, parseWorkOrder, WorkOrderError } from "./work-order.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspace-evidence.mjs";
@@ -318,6 +319,8 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     executionMode,
     workspaceEvidence,
   });
+  // T0-09 M2: maintenance (uninstall or upgrade) may have begun after the claim checked the marker.
+  await cancelIfMaintenance(paths, started.run.run_id);
   const promptPath = path.join(paths.queueRoot, "authorized-" + authorization.authorization_id + ".txt");
   await writeText(promptPath, plan.task);
   return {
@@ -327,6 +330,17 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     control: await loadControlView(paths, started.run.run_id),
     promptPath,
   };
+}
+
+// T0-09 M2: a run claimed while the maintenance marker appeared is closed as cancelled before any
+// model call, so an uninstall or upgrade that checks runs after writing its marker never races it.
+export async function cancelIfMaintenance(paths, runId) {
+  if (!(await fileExists(paths.upgradeMarkerPath))) return false;
+  await recordRunState(paths, runId, {
+    status: "maintenance_blocked", reason: "maintenance_in_progress", updated_at: new Date().toISOString(),
+  }, { duringMaintenance: true });
+  await consumeRun(paths, runId, "cancelled", null, { duringMaintenance: true });
+  throw new Error("Bridge maintenance (uninstall or upgrade) started while this work was being authorized; the run was cancelled before any model call (maintenance_in_progress).");
 }
 
 export async function cancelV4WorkPackage({ paths, runId = null, reason = "cancelled_by_human_owner" }) {

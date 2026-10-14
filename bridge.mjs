@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/core/filesystem-v4.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
-import { applyNeutralInstall, planNeutralInstall, rollbackFreshNeutralInstall, verifyNeutralInstall } from "./installer/neutral-install.mjs";
+import { applyNeutralInstall, applyNeutralUninstall, planNeutralInstall, planNeutralUninstall, rollbackFreshNeutralInstall, verifyNeutralInstall } from "./installer/neutral-install.mjs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 
@@ -342,6 +342,72 @@ async function startService(target, fakeCli) {
   return { started: check.running, url: check.running ? check.url : null, reason: check.reason, notice };
 }
 
+// T0-09 U1: what the human approves. Every line comes from the sealed plan.
+function formatUninstallPlan(plan) {
+  if (plan.kind === "cancel") {
+    return [
+      "上一次解除安裝在開始刪除前中斷，沒有刪任何檔。",
+      "這次會：取消那筆解除安裝" + (plan.restart_service ? "、重新啟動網頁服務" : "") + (plan.remove_marker ? "、拿掉維護標記" : "") + "。",
+    ].join("\n") + "\n";
+  }
+  if (plan.kind === "finish") {
+    return "上一次解除安裝已刪完 .review-bridge/，只剩還原 git 排除與最後檢查。\n";
+  }
+  if (plan.kind === "continue") {
+    return [
+      "上一次解除安裝刪到一半中斷。",
+      "還剩 " + (plan.remaining_same.length + plan.remaining_newer.length) + " 個檔：" + plan.remaining_same.length + " 個與備份相同，照刪；"
+        + plan.remaining_newer.length + " 個比備份新，先追加備份再刪：",
+      ...plan.remaining_newer.slice(0, 20).map(([name]) => "  " + name),
+    ].join("\n") + "\n";
+  }
+  return [
+    "解除安裝 Review Bridge：" + plan.target,
+    ...(plan.service_running ? ["會先停掉網頁服務。"] : []),
+    ".review-bridge/ 共 " + plan.file_count + " 個檔，其中你建立或改過的 " + plan.user_file_count + " 個：",
+    ...plan.user_files.map((name) => "  " + name),
+    ...(plan.user_file_count > plan.user_files.length ? ["  …另外 " + (plan.user_file_count - plan.user_files.length) + " 個"] : []),
+    "整份先備份到專案外，核對後才刪：" + plan.backup_root,
+    ...(plan.git_exclusion?.present ? ["會從 " + plan.git_exclusion.path + " 拿掉安裝時加的這一行：" + plan.git_exclusion.pattern] : []),
+  ].join("\n") + "\n";
+}
+
+function formatUninstallResult(result) {
+  if (result.kind === "cancel") return "已取消上一次的解除安裝" + (result.service_restarted ? "，網頁服務已重新啟動" : "") + "。\n";
+  return [
+    "已解除安裝",
+    "備份在：" + result.backup_dir + (result.file_count ? "（" + result.file_count + " 個檔，含你的 " + (result.user_file_count ?? 0) + " 個）" : ""),
+    "要找回工單或結果，從備份資料夾複製回來",
+  ].join("\n") + "\n";
+}
+
+async function uninstall(options) {
+  await verifyReleaseIntegrity();
+  if (options.yes) throw new Error("uninstall has no --yes. Use --plan-out <file>, then --plan <file> --approve <sha>, or confirm at an interactive terminal.");
+  const target = path.resolve(options.target || process.cwd());
+  if (options.plan) {
+    if (!options.approve) throw new Error("--plan needs --approve <sha>.");
+    const plan = JSON.parse(await fsp.readFile(path.resolve(options.plan), "utf8"));
+    if (path.resolve(plan.target || "") !== target) throw new Error("The plan is for another project.");
+    return await applyNeutralUninstall(plan, options.approve);
+  }
+  const plan = await planNeutralUninstall({ target, backupRoot: options["backup-root"] || null });
+  if (options["plan-out"]) {
+    await fsp.writeFile(path.resolve(options["plan-out"]), JSON.stringify(plan, null, 2) + "\n", "utf8");
+    return { plan_written: path.resolve(options["plan-out"]), plan_sha256: plan.plan_sha256, kind: plan.kind };
+  }
+  if (!process.stdin.isTTY) throw new Error("No terminal to confirm at. Use --plan-out <file>, then --plan <file> --approve <sha>.");
+  process.stdout.write(formatUninstallPlan(plan));
+  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await terminal.question("要繼續嗎？[y/N] ");
+    if (!/^y(?:es)?$/i.test(answer.trim())) throw new Error("Uninstall cancelled by user.");
+  } finally {
+    terminal.close();
+  }
+  return await applyNeutralUninstall(plan, plan.plan_sha256);
+}
+
 function formatInitResult(result) {
   return [
     ...(result.service_notice ? [result.service_notice] : []),
@@ -355,13 +421,20 @@ async function main() {
   const [command, ...rest] = process.argv.slice(2);
   if (!command || ["-h", "--help"].includes(command)) {
     process.stdout.write("Usage: node bridge.mjs init [--target <workspace>] [--profile auto] [--writer claude|codex] [--reviewer claude|codex] [--port <n>] [--yes] [--json]\n"
-      + "       node bridge.mjs roles-check [--writer claude|codex] [--reviewer claude|codex] [--json]\n");
+      + "       node bridge.mjs roles-check [--writer claude|codex] [--reviewer claude|codex] [--json]\n"
+      + "       node bridge.mjs uninstall [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n");
     return command ? 0 : 2;
   }
   if (command === "roles-check") {
     const options = parseArgs(rest);
     const result = await rolesCheck(options);
     process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n" : formatRoleCheck(result));
+    return 0;
+  }
+  if (command === "uninstall") {
+    const options = parseArgs(rest);
+    const result = await uninstall(options);
+    process.stdout.write(options.json || result.plan_written ? JSON.stringify(result, null, 2) + "\n" : formatUninstallResult(result));
     return 0;
   }
   if (command !== "init") throw new Error("Unsupported command: " + command);
@@ -374,6 +447,7 @@ async function main() {
 try {
   process.exitCode = await main();
 } catch (error) {
-  process.stderr.write("Review Bridge init failed closed: " + error.message + "\n");
+  const failed = process.argv[2] === "uninstall" ? "uninstall" : "init";
+  process.stderr.write("Review Bridge " + failed + " failed closed: " + error.message + "\n");
   process.exitCode = 2;
 }

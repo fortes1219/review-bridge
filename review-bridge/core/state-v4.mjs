@@ -170,8 +170,10 @@ export async function acquireRunLock(paths, runId, policy, {
   allowReconcile = true,
   clock = Date.now,
   sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  // T0-09 M2: only the step that closes a run caught by maintenance may lock while the marker exists.
+  duringMaintenance = false,
 } = {}) {
-  if (await fileExists(paths.upgradeMarkerPath)) throw new Error("Runtime upgrade is in progress.");
+  if (!duringMaintenance && await fileExists(paths.upgradeMarkerPath)) throw new Error("Runtime upgrade is in progress.");
   await ensureDir(paths.runLocksDir);
   const file = lockFile(paths, runId);
   let lastTransient = null;
@@ -520,7 +522,7 @@ export async function reconcileRunProjection(paths, runId) {
   return latest;
 }
 
-async function mutateRun(paths, runId, type, details, mutator, { substantive = true, clock = Date.now } = {}) {
+async function mutateRun(paths, runId, type, details, mutator, { substantive = true, clock = Date.now, duringMaintenance = false } = {}) {
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   return await withRunLock(paths, runId, snapshot.effective_policy, async (lease) => {
     await lease.assertOwner();
@@ -528,7 +530,7 @@ async function mutateRun(paths, runId, type, details, mutator, { substantive = t
     const next = await mutator(structuredClone(current));
     await lease.assertOwner();
     return await appendProjectionEvent(paths, current, next, type, details, clock, substantive);
-  });
+  }, { duringMaintenance });
 }
 
 // T0-07 V2.7: delivery has its own locked path. Inside the lease: a run that already has an
@@ -751,6 +753,11 @@ export function createRunRuntimeState(paths, runId) {
       return (await readRun(paths, runId)).last_state;
     },
   };
+}
+
+// T0-09 M1: the maintenance marker is the upgrade marker with an `operation` field.
+export async function readMaintenanceMarker(paths) {
+  return await readOptional(paths.upgradeMarkerPath);
 }
 
 export async function beginUpgrade(paths, metadata) {
