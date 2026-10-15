@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -17,11 +18,14 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const bridge = path.join(packageRoot, "bridge.mjs");
 
 // Every default backup root points into a temporary folder; nothing touches the real user profile.
-const defaultBase = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-default-backups-"));
+// One default backup root per test process. Test files that share a process (--test-isolation=none)
+// set LOCALAPPDATA to the same value, and it goes only when the process exits (Codex 2026-10-15).
+const defaultBase = path.join(os.tmpdir(), "rb-default-backups-" + process.pid);
+await fsp.mkdir(defaultBase, { recursive: true });
 process.env.LOCALAPPDATA = defaultBase;
 process.env.XDG_DATA_HOME = defaultBase;
 if (process.platform === "darwin") process.env.HOME = defaultBase;
-test.after(() => fsp.rm(defaultBase, { recursive: true, force: true }));
+process.on("exit", () => fs.rmSync(defaultBase, { recursive: true, force: true }));
 const childEnv = { ...process.env };
 
 const sha = (data) => createHash("sha256").update(data).digest("hex");
@@ -321,6 +325,25 @@ test("V8c / V8g a newer original stops deletion; the continue plan backs it up f
   assert.equal(await exists(path.join(root, ".review-bridge")), false);
   assert.equal(await fsp.readFile(path.join(result.backup_dir, "newer", "work-packages", "farm.md"), "utf8"), newerContent);
   assert.notEqual(await fsp.readFile(path.join(result.backup_dir, "files", "work-packages", "farm.md"), "utf8"), newerContent);
+});
+
+test("V8m a file rewritten after its hash was checked and before it was deleted is kept; the continue plan backs it up", async (t) => {
+  const root = await workspace(t);
+  await install(root);
+  await addUserData(root);
+  const workOrder = path.join(root, ".review-bridge", "work-packages", "farm.md");
+  const original = await fsp.readFile(workOrder, "utf8");
+  await assert.rejects(uninstall(root, {}, {
+    afterDeleteCheck: async (name, file) => { if (name === "work-packages/farm.md") await fsp.writeFile(file, "檢查之後才寫的新內容\n"); },
+  }), /work-packages\/farm\.md/);
+  assert.equal(await fsp.readFile(workOrder, "utf8"), "檢查之後才寫的新內容\n", "the new content is still in the project");
+  const plan = await planNeutralUninstall({ target: root });
+  assert.equal(plan.kind, "continue");
+  assert.deepEqual(plan.remaining_newer.map(([name]) => name), ["work-packages/farm.md"]);
+  const result = await applyNeutralUninstall(plan, plan.plan_sha256);
+  assert.equal(await exists(path.join(root, ".review-bridge")), false, "the project is emptied");
+  assert.equal(await fsp.readFile(path.join(result.backup_dir, "newer", "work-packages", "farm.md"), "utf8"), "檢查之後才寫的新內容\n");
+  assert.equal(await fsp.readFile(path.join(result.backup_dir, "files", "work-packages", "farm.md"), "utf8"), original);
 });
 
 test("V8d an uninstall interrupted mid-deletion continues under a new plan; a stale lock from the crash is taken over", async (t) => {

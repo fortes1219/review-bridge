@@ -11,7 +11,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/core/filesystem-v4.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
-import { applyNeutralInstall, applyNeutralUninstall, planNeutralInstall, planNeutralUninstall, rollbackFreshNeutralInstall, verifyNeutralInstall } from "./installer/neutral-install.mjs";
+import {
+  applyNeutralInstall, applyNeutralUninstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult,
+  formatUpgradeRollbackPlan, formatUpgradeRollbackResult, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
+  rollbackFreshNeutralInstall, verifyNeutralInstall,
+} from "./installer/neutral-install.mjs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,7 +44,7 @@ function parseArgs(values) {
   const options = {};
   for (let index = 0; index < values.length; index += 1) {
     const token = values[index];
-    if (token === "--yes" || token === "--json" || token === "--fake-cli") {
+    if (token === "--yes" || token === "--json" || token === "--fake-cli" || token === "--rollback") {
       options[token.slice(2)] = true;
       continue;
     }
@@ -408,6 +412,37 @@ async function uninstall(options) {
   return await applyNeutralUninstall(plan, plan.plan_sha256);
 }
 
+// T0-10 P1.3 / P1.4: the same three routes as uninstall, for the upgrade and for its rollback.
+async function upgrade(options) {
+  await verifyReleaseIntegrity();
+  if (options.yes) throw new Error("upgrade has no --yes. Use --plan-out <file>, then --plan <file> --approve <sha>, or confirm at an interactive terminal.");
+  const target = path.resolve(options.target || process.cwd());
+  const rollback = options.rollback === true;
+  if (options.plan) {
+    if (!options.approve) throw new Error("--plan needs --approve <sha>.");
+    const plan = JSON.parse(await fsp.readFile(path.resolve(options.plan), "utf8"));
+    if (path.resolve(plan.target || "") !== target) throw new Error("The plan is for another project.");
+    if (rollback !== (plan.operation === "upgrade_rollback")) throw new Error(rollback ? "That is not an upgrade rollback plan." : "That is an upgrade rollback plan; add --rollback.");
+    return rollback ? await applyNeutralUpgradeRollback(plan, options.approve) : await applyNeutralUpgrade(plan, options.approve);
+  }
+  const plan = rollback ? await planNeutralUpgradeRollback({ target }) : await planNeutralUpgrade({ target, backupRoot: options["backup-root"] || null });
+  if (plan.up_to_date) return plan;
+  if (options["plan-out"]) {
+    await fsp.writeFile(path.resolve(options["plan-out"]), JSON.stringify(plan, null, 2) + "\n", "utf8");
+    return { plan_written: path.resolve(options["plan-out"]), plan_sha256: plan.plan_sha256, operation: plan.operation, kind: plan.kind };
+  }
+  if (!process.stdin.isTTY) throw new Error("No terminal to confirm at. Use --plan-out <file>, then --plan <file> --approve <sha>.");
+  process.stdout.write(rollback ? formatUpgradeRollbackPlan(plan) : formatUpgradePlan(plan));
+  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await terminal.question("要繼續嗎？[y/N] ");
+    if (!/^y(?:es)?$/i.test(answer.trim())) throw new Error((rollback ? "Upgrade rollback" : "Upgrade") + " cancelled by user.");
+  } finally {
+    terminal.close();
+  }
+  return rollback ? await applyNeutralUpgradeRollback(plan, plan.plan_sha256) : await applyNeutralUpgrade(plan, plan.plan_sha256);
+}
+
 function formatInitResult(result) {
   return [
     ...(result.service_notice ? [result.service_notice] : []),
@@ -422,7 +457,8 @@ async function main() {
   if (!command || ["-h", "--help"].includes(command)) {
     process.stdout.write("Usage: node bridge.mjs init [--target <workspace>] [--profile auto] [--writer claude|codex] [--reviewer claude|codex] [--port <n>] [--yes] [--json]\n"
       + "       node bridge.mjs roles-check [--writer claude|codex] [--reviewer claude|codex] [--json]\n"
-      + "       node bridge.mjs uninstall [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n");
+      + "       node bridge.mjs uninstall [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
+      + "       node bridge.mjs upgrade [--rollback] [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n");
     return command ? 0 : 2;
   }
   if (command === "roles-check") {
@@ -437,6 +473,13 @@ async function main() {
     process.stdout.write(options.json || result.plan_written ? JSON.stringify(result, null, 2) + "\n" : formatUninstallResult(result));
     return 0;
   }
+  if (command === "upgrade") {
+    const options = parseArgs(rest);
+    const result = await upgrade(options);
+    process.stdout.write(options.json || result.plan_written ? JSON.stringify(result, null, 2) + "\n"
+      : result.operation === "upgrade_rollback" ? formatUpgradeRollbackResult(result) : formatUpgradeResult(result));
+    return 0;
+  }
   if (command !== "init") throw new Error("Unsupported command: " + command);
   const options = parseArgs(rest);
   const result = await init(options);
@@ -447,7 +490,7 @@ async function main() {
 try {
   process.exitCode = await main();
 } catch (error) {
-  const failed = process.argv[2] === "uninstall" ? "uninstall" : "init";
+  const failed = ["uninstall", "upgrade"].includes(process.argv[2]) ? process.argv[2] : "init";
   process.stderr.write("Review Bridge " + failed + " failed closed: " + error.message + "\n");
   process.exitCode = 2;
 }

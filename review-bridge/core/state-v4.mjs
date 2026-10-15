@@ -277,7 +277,14 @@ async function appendProjectionEvent(paths, previous, next, type, details, clock
   return projected;
 }
 
+// T0-10 W4: during an upgrade or uninstall a new start writes nothing into the project, not even
+// the package and authorization that come before the claim.
+async function assertNoMaintenance(paths) {
+  if (await fileExists(paths.upgradeMarkerPath)) throw new Error("Runtime upgrade is in progress.");
+}
+
 export async function createImmutableWorkPackage(paths, input, clock = Date.now) {
+  await assertNoMaintenance(paths);
   const record = {
     schema_version: 4,
     work_package_id: assertId(input.work_package_id, "Work package id"),
@@ -318,6 +325,7 @@ export async function createAuthorization(paths, {
   sourceEvidence = null,
   sourcePlanSha256 = null,
 }, clock = Date.now) {
+  await assertNoMaintenance(paths);
   if (!['start', 'budget_extension', 'rollback'].includes(kind)) throw new Error("Unsupported authorization kind.");
   const resolvedAuthorizationId = authorizationId
     ? assertId(authorizationId, "Authorization id")
@@ -408,7 +416,7 @@ export async function claimStartAuthorization(paths, authorizationId, {
   if (Date.parse(authorization.expires_at) <= clock()) throw new Error("Authorization is expired.");
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   if (snapshot.effective_policy_sha256 !== authorization.effective_policy_sha256) {
-    throw new Error("Authorization policy snapshot is not current.");
+    throw new Error("Authorization policy snapshot is not current: Bridge was upgraded or its policy changed. Make a new plan with work-plan.");
   }
   const workPackage = await findWorkPackageBySha(paths, authorization.work_package_sha256);
   const claim = {
@@ -775,8 +783,28 @@ export async function completeUpgrade(paths) {
   await fsp.rm(paths.upgradeMarkerPath, { force: true });
 }
 
+// T0-10: the policy identity an unclaimed authorization must still match after an upgrade.
+export function policyIdentity(defaults) {
+  return { policy_schema_version: defaults.policy_schema_version, package_default_policy_sha256: digest(defaults) };
+}
+
 export async function reportUpgradeInvalidations(paths, { clock = Date.now } = {}) {
   const { snapshot: current } = await loadOrCreatePolicySnapshot(paths);
+  const { records, report } = await planUpgradeInvalidations(paths, current, { clock });
+  for (const { authorization_id: id, record } of records) {
+    await ensureDir(paths.authorizationInvalidationsDir);
+    const target = path.join(paths.authorizationInvalidationsDir, id + ".json");
+    if (!(await fileExists(target))) await writeJsonExclusiveDurable(target, record);
+  }
+  await ensureDir(paths.upgradeReportsDir);
+  await writeJsonExclusiveDurable(path.join(paths.upgradeReportsDir, report.report_id + ".json"), report);
+  return report;
+}
+
+// T0-10 D5: what an upgrade invalidates, computed without writing anything, so the neutral
+// upgrade can record each file it is about to write before it writes it.
+export async function planUpgradeInvalidations(paths, current, { clock = Date.now } = {}) {
+  const records = [];
   const invalidated = [];
   for (const file of await listJson(paths.authorizationsDir)) {
     const authorization = await readJson(file);
@@ -797,9 +825,7 @@ export async function reportUpgradeInvalidations(paths, { clock = Date.now } = {
       active_policy_schema_version: current.policy_schema_version,
       active_package_default_policy_sha256: current.package_default_policy_sha256,
     };
-    await ensureDir(paths.authorizationInvalidationsDir);
-    const target = path.join(paths.authorizationInvalidationsDir, authorization.authorization_id + ".json");
-    if (!(await fileExists(target))) await writeJsonExclusiveDurable(target, record);
+    records.push({ authorization_id: authorization.authorization_id, record });
     invalidated.push(authorization.authorization_id);
   }
   const report = {
@@ -809,7 +835,5 @@ export async function reportUpgradeInvalidations(paths, { clock = Date.now } = {
     invalidated_authorization_ids: invalidated.sort(),
     invalidated_count: invalidated.length,
   };
-  await ensureDir(paths.upgradeReportsDir);
-  await writeJsonExclusiveDurable(path.join(paths.upgradeReportsDir, report.report_id + ".json"), report);
-  return report;
+  return { records, report };
 }

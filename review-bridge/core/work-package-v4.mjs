@@ -263,7 +263,7 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
   if (digest(plan.task) !== plan.task_sha256) throw new Error("Task checksum is invalid.");
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   if (snapshot.effective_policy_sha256 !== plan.effective_policy_sha256) {
-    throw new Error("Work plan is stale because effective policy changed.");
+    throw new Error("Work plan is stale because effective policy changed: Bridge was upgraded or its policy changed. Make a new plan with work-plan.");
   }
   validateBudget(snapshot.effective_policy, plan.budget.max_claude_calls, plan.budget.max_claude_minutes_per_call);
   // C3.7: what the model will be shown must still be what the Owner approved.
