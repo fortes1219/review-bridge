@@ -86,16 +86,83 @@ export function defaultProbeRunner({ invocation, cwd, input, timeoutMs }) {
   });
 }
 
-function redact(text, probeDir, sentinelName) {
-  return String(text ?? "")
-    .split(probeDir).join("<probe-dir>")
-    .split(sentinelName).join("<sentinel>")
-    .replace(/[A-Za-z]:\\[^\s"']+|\/(?:Users|home|tmp|var)\/[^\s"']+/g, "<path>")
-    .slice(0, 300);
-}
-
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// T0-11 A2: where an absolute path begins (drive, UNC, or a POSIX home/system root), including
+// what is left of one after a known folder was already replaced (<path>\Desktop\...).
+const PATH_START = /[A-Za-z]:[\\/]|\\\\[^\\\s]|\/(?:Users|home|tmp|var|private|root|mnt|opt|etc)\/|<path>[\\/]/;
+const OPEN_QUOTES = new Map([["'", "'"], ['"', '"'], ["‘", "’"], ["“", "”"]]);
+
+function replaceEverywhere(text, needle, token) {
+  if (!needle) return text;
+  let out = text;
+  for (const variant of new Set([needle, needle.replaceAll("\\", "/"), needle.replaceAll("/", "\\")])) {
+    out = out.replace(new RegExp(escapeRegExp(variant), "gi"), token);
+  }
+  return out;
+}
+
+// The end of a quoted path, chosen conservatively: the LAST matching quote in the rest of the
+// text that is followed by whitespace, punctuation or the end. A quote inside the path, even one
+// followed by a space (D:\O' Brien\x), cannot end it early; the price is that text between two
+// quoted paths may be hidden too (Codex 2026-10-15). No such quote: the path runs to the end.
+function closingQuote(text, from, close) {
+  for (let index = text.lastIndexOf(close); index >= from; index = text.lastIndexOf(close, index - 1)) {
+    if (index + 1 >= text.length || /[\s.,;:)\]]/.test(text[index + 1])) return index;
+    if (index === 0) break;
+  }
+  return -1;
+}
+
+// T0-11 A2: the probe's write target stays recognisable as <sentinel-path>; every other path
+// becomes <path>. Known paths go first, in any case and either slash. A path that is still left
+// is replaced whole: inside quotes up to the real closing quote, even across a wrapped line;
+// without quotes to the end of the text, because a space or a wrap may still belong to it. Only
+// paths are handled; this does not claim to remove every other sensitive string.
+export function redactProbeText(text, { probeDir, sentinelName, home = os.homedir(), limit = 400 }) {
+  let out = String(text ?? "")
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+  if (probeDir && sentinelName) out = replaceEverywhere(out, path.join(probeDir, sentinelName), "<sentinel-path>");
+  out = replaceEverywhere(out, sentinelName, "<sentinel-path>");
+  for (const known of [probeDir, home].filter(Boolean).sort((left, right) => right.length - left.length)) {
+    out = replaceEverywhere(out, known, "<path>");
+  }
+  const mark = (removed) => "<path>" + (removed.includes("<sentinel-path>") ? "…<sentinel-path>" : "");
+  let result = "";
+  let index = 0;
+  while (index < out.length) {
+    const rest = out.slice(index);
+    const found = PATH_START.exec(rest);
+    if (!found) { result += rest; break; }
+    const start = index + found.index;
+    // Quoted only when the path begins right after an opening quote; anything else runs to the end.
+    const quoteAt = start > index && OPEN_QUOTES.has(out[start - 1]) ? start - 1 : -1;
+    if (quoteAt >= 0) {
+      const close = closingQuote(out, start, OPEN_QUOTES.get(out[quoteAt]));
+      const end = close < 0 ? out.length : close;
+      result += out.slice(index, quoteAt + 1) + mark(out.slice(quoteAt + 1, end));
+      index = end;
+    } else {
+      result += out.slice(index, start) + mark(out.slice(start));
+      index = out.length;
+    }
+  }
+  return result.slice(0, limit);
+}
+
+const EXCERPT_LIMIT = 400;
+
+function excerptOf(output, context) {
+  const whole = redactProbeText(output, { ...context, limit: Infinity });
+  return { output_excerpt: whole.slice(0, EXCERPT_LIMIT), output_truncated: whole.length > EXCERPT_LIMIT };
+}
+
+function redact(text, probeDir, sentinelName) {
+  return redactProbeText(text, { probeDir, sentinelName, limit: 300 });
 }
 
 // The only recognised attempt is the fixed prompt command, optionally wrapped by
@@ -172,7 +239,7 @@ function codexEvents(stdout) {
 // Positive proof needs: a zero CLI exit with one complete ordered turn, exactly one command
 // event that is the fixed write to the unique sentinel, a failed non-zero exit with
 // an OS/sandbox denial message, no file change, and an absent sentinel.
-export function evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries }) {
+export function evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries, home = os.homedir() }) {
   const base = { proven: "unknown", reason: "unknown", evidence: { adapter_id: PROBE_ADAPTERS[provider]?.id || null } };
   if (sentinelPresent || unexpectedEntries.length > 0) {
     return { ...base, proven: false, reason: "write_allowed",
@@ -182,6 +249,8 @@ export function evaluateProbe({ provider, result, sentinelName, probeDir, sentin
   if (result.timedOut) return { ...base, reason: "timeout" };
   if (result.error) return { ...base, reason: "invocation_error" };
   const events = codexEvents(result.stdout);
+  // T0-11 A3: counts only, never text, for every outcome that got as far as the event stream.
+  base.evidence.events = { commands: events.commands.length, file_changes: events.fileChanges.length, unknown: events.unknown };
   if (events.fileChanges.some((item) => item.status === "completed")) {
     return { ...base, proven: false, reason: "write_allowed" };
   }
@@ -202,6 +271,10 @@ export function evaluateProbe({ provider, result, sentinelName, probeDir, sentin
       status: typeof item.status === "string" ? item.status : null,
       denial,
       denied: exitCode !== null && exitCode !== 0 && item.status === "failed" && denial !== null,
+      // T0-11 A1: for the human only. The decision above reads the unredacted output, never this.
+      // output_truncated tells the human the excerpt is not the whole output (card 第 3 關: stop).
+      ...excerptOf(output, { probeDir, sentinelName, home }),
+      output_sha256: sha256(output),
     };
   });
   base.evidence.attempts = observed;

@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildProbeArgs, createReviewerProbeService, isFixedWriteAttempt, runReviewerProbe } from "../core/reviewer-probe.mjs";
+import { createHash } from "node:crypto";
+import { buildProbeArgs, createReviewerProbeService, isFixedWriteAttempt, redactProbeText, runReviewerProbe } from "../core/reviewer-probe.mjs";
 
 const signedIn = (executable) => executable.endsWith("codex")
   ? { status: 0, stdout: "", stderr: "Logged in using ChatGPT\n" }
@@ -296,4 +297,118 @@ test("reviewer that is not signed in is rejected before any model call", async (
   const unknown = await service(t, { runner: wrapped, statusProbe: () => { throw new Error("no status"); } });
   await assert.rejects(unknown.make().run(), (error) => error.code === "reviewer_not_ready");
   assert.equal(calls.length, 0);
+});
+
+// T0-11 甲段: what the 2026-10-15 dogfood probe may have looked like, with real paths in it.
+function windowsDenial(cwd, sentinel) {
+  const target = path.join(cwd, sentinel);
+  return "Out-File : Access to the path '" + target + "' is denied.\n"
+    + "At line:1 char:1\n+ echo probe > " + sentinel + "\n"
+    + "    + CategoryInfo          : OpenError: (" + target + ":String) [Out-File], UnauthorizedAccessException\n";
+}
+
+test("T0-11 V1/V2 the audit keeps a redacted excerpt and hash of the fixed write's output; the decision is unchanged", async (t) => {
+  const raw = {};
+  const homeFile = path.join(os.homedir(), "secret folder", "notes.txt");
+  const runner = async ({ cwd, input }) => {
+    const sentinel = sentinelFrom(input);
+    raw.output = windowsDenial(cwd, sentinel) + "See '" + homeFile + "'.\n";
+    raw.cwd = cwd;
+    raw.sentinel = sentinel;
+    return ok([THREAD_START, TURN_START,
+      commandEvent(`"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command 'echo probe > ${sentinel}'`, 1, raw.output),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "MODEL-REPLY-TEXT" } }),
+      TURN_DONE].join("\n"));
+  };
+  const { make, auditPath } = await service(t, { runner });
+  const result = await make().run();
+  // V2: this sentence is not a recognised denial in 甲段; the result stays unknown.
+  assert.equal(result.proven, "unknown");
+  assert.equal(result.reason, "denial_not_evidenced");
+  const audit = JSON.parse(await fsp.readFile(auditPath, "utf8"));
+  const [attempt] = audit.evidence.attempts;
+  assert.match(attempt.output_excerpt, /^Out-File : Access to the path '<sentinel-path>' is denied\.\nAt line:1 char:1\n\+ echo probe > <sentinel-path>\n/);
+  assert.ok(attempt.output_excerpt.length <= 400);
+  assert.equal(attempt.output_truncated, false);
+  assert.equal(attempt.output_sha256, createHash("sha256").update(raw.output).digest("hex"));
+  assert.equal(attempt.command, "\"<path>\" -Command 'echo probe > <sentinel-path>'");
+  const text = JSON.stringify(audit);
+  for (const leak of [raw.cwd, raw.sentinel, os.homedir(), "secret folder", "Program Files", "PowerShell", "MODEL-REPLY-TEXT", "review-bridge-probe-"]) {
+    assert.equal(text.toLowerCase().includes(leak.toLowerCase().replaceAll("\\", "\\\\")), false, "audit must not contain " + leak);
+  }
+  assert.deepEqual(audit.evidence.events, { commands: 1, file_changes: 0, unknown: 0 });
+});
+
+test("T0-11 V1 only the fixed write's output is kept; another command's output is not", async () => {
+  const runner = async ({ cwd, input }) => ok([TURN_START,
+    commandEvent("dir", 1, "OTHER-COMMAND-OUTPUT"),
+    commandEvent(`echo probe > ${sentinelFrom(input)}`, 1, windowsDenial(cwd, sentinelFrom(input))),
+    TURN_DONE].join("\n"));
+  const result = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner });
+  assert.equal(result.reason, "ambiguous_output");
+  assert.equal(result.evidence.attempts.length, 1);
+  assert.doesNotMatch(JSON.stringify(result.evidence), /OTHER-COMMAND-OUTPUT/);
+  assert.deepEqual(result.evidence.events, { commands: 2, file_changes: 0, unknown: 0 });
+});
+
+test("T0-11 V1 an output longer than the excerpt is marked truncated, so 第 3 關 can stop on it", async () => {
+  const runner = async ({ cwd, input }) => ok([TURN_START,
+    commandEvent(`echo probe > ${sentinelFrom(input)}`, 1, windowsDenial(cwd, sentinelFrom(input)) + "x".repeat(600)),
+    TURN_DONE].join("\n"));
+  const result = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner });
+  const [attempt] = result.evidence.attempts;
+  assert.equal(attempt.output_excerpt.length, 400);
+  assert.equal(attempt.output_truncated, true);
+  assert.equal(result.reason, "denial_not_evidenced");
+});
+
+test("T0-11 V3 with no write command the audit keeps only the reason and event counts, no text", async () => {
+  const result = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner: scenarios.refused });
+  assert.equal(result.reason, "no_write_attempt");
+  assert.deepEqual(result.evidence.events, { commands: 0, file_changes: 0, unknown: 0 });
+  assert.equal(result.evidence.attempts, undefined);
+  assert.doesNotMatch(JSON.stringify(result.evidence), /won't write/);
+});
+
+test("T0-11 A2 paths with spaces, quotes, apostrophes, wraps or no quotes leave no fragment", () => {
+  const probeDir = "C:\\Users\\Someone\\AppData\\Local\\Temp\\review-bridge-probe-AbC123";
+  const sentinelName = "rb-sentinel-11111111-2222-3333-4444-555555555555.txt";
+  const home = "C:\\Users\\Someone";
+  const r = (text) => redactProbeText(text, { probeDir, sentinelName, home });
+  // The probe's own target, in any case or slash, stays recognisable.
+  assert.equal(r("Access to the path '" + probeDir + "\\" + sentinelName + "' is denied."), "Access to the path '<sentinel-path>' is denied.");
+  assert.equal(r("open '" + (probeDir + "/" + sentinelName).toLowerCase().replaceAll("\\", "/") + "' failed"), "open '<sentinel-path>' failed");
+  assert.equal(r("bash: " + sentinelName + ": Read-only file system"), "bash: <sentinel-path>: Read-only file system");
+  const cases = [
+    ["Access to the path 'D:\\Program Files\\My App\\data.txt' is denied.", "Access to the path '<path>' is denied.", ["Program", "Files", "My App", "data"]],
+    ["Access to the path 'D:\\Users\\O'Brien\\file.txt' is denied.", "Access to the path '<path>' is denied.", ["Brien", "file"]],
+    ["Access to the path 'D:\\very\\long\\fol\nder\\x.txt' is denied.", "Access to the path '<path>' is denied.", ["der", "fol", "long"]],
+    ["Access to the path \"E:\\a b\\c\" is denied.", "Access to the path \"<path>\" is denied.", ["a b"]],
+    ["Access to the path \u2018F:\\x y\\z\u2019 is denied.", "Access to the path \u2018<path>\u2019 is denied.", ["x y"]],
+    ["cannot open D:\\My Docs\\x.txt now", "cannot open <path>", ["Docs", "now"]],
+    ["denied: '\\\\server\\share\\dir\\f.txt'.", "denied: '<path>'.", ["server", "share"]],
+    ["bash: /home/someone/x y/z: Read-only file system", "bash: <path>", ["someone", "x y"]],
+    ["see 'C:\\Users\\Someone\\Desktop\\a.txt' and C:\\Users\\Someone\\My Docs\\b", "see '<path>' and <path>", ["Desktop", "My Docs"]],
+    ["\u001b[31mred\u001b[0m\u0007 text\r\nnext", "red text\nnext", []],
+  ];
+  // Case 8: the home folder goes first; what is left of a path after it is still a path and goes too.
+  for (const [input, expected, absent] of cases) {
+    const out = r(input);
+    assert.equal(out, expected, input);
+    for (const piece of absent) assert.equal(out.includes(piece), false, piece + " leaked from " + JSON.stringify(input));
+  }
+  // Codex 2026-10-15: an apostrophe followed by a space inside a quoted path is not its end.
+  for (const input of [
+    "Access to the path 'D:\\Users\\O' Brien\\secret.txt' is denied.",
+    "Access to the path 'D:\\Users\\O' Brien\\sec\nret.txt' is denied.",
+    "Access to the path 'D:\\a\\b' c\\d' is denied.\nAt line:1 char:1",
+  ]) {
+    const out = r(input);
+    for (const piece of ["Brien", "secret", "sec", "ret.txt", "c\\d", "\\d"]) assert.equal(out.includes(piece), false, piece + " leaked from " + JSON.stringify(input) + " as " + JSON.stringify(out));
+    assert.match(out, /^Access to the path '<path>/);
+  }
+  // A sentinel path broken by a wrap is still replaced whole, without a fragment of the folder.
+  const wrapped = r("Access to the path '" + probeDir.slice(0, 30) + "\n" + probeDir.slice(30) + "\\" + sentinelName + "' is denied.");
+  assert.equal(wrapped, "Access to the path '<path>…<sentinel-path>' is denied.");
+  assert.equal(r("x".repeat(500)).length, 400);
 });
