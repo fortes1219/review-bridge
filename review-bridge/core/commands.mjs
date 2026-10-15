@@ -23,7 +23,7 @@ import {
 } from "./migration-v4.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { createReviewerProbeService } from "./reviewer-probe.mjs";
-import { formatPruneSummary, prune, removeRun, RetentionConfigError } from "./retention.mjs";
+import { formatPruneSummary, probeAuditDir, prune, removeRun, RetentionConfigError, retentionDays } from "./retention.mjs";
 import { removeServiceSession, serviceDown, serviceFiles, serviceStatus, serviceUp, writeServiceSession } from "./service.mjs";
 import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watch.mjs";
 import {
@@ -183,8 +183,11 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
     adapterId,
     adapterConfig: adapterDefinition || null,
     adapterSource,
-    // Audit only: the watch process memory is the sole source of a current proof.
-    auditPath: path.join(paths.configRoot, "reviewer-probe-audit.json"),
+    // Audit only: the watch process memory is the sole source of a current proof. T0-11 C3: one
+    // day file per local day, kept as long as the run archive.
+    auditDir: probeAuditDir(paths),
+    // T0-11 F9: an invalid retention setting is passed on as null (clean nothing), never as 15.
+    retentionDays: (() => { try { return retentionDays(config); } catch { return null; } })(),
   });
   const watch = await startWatchServer({
     service,

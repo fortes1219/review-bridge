@@ -1,10 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { DEFAULT_RETENTION_DAYS, localDateKey, pruneProbeRecords } from "./retention.mjs";
 import { inspectRoleReadiness } from "./role-readiness.mjs";
 
 // Only adapters that run the reviewer under a provider-enforced sandbox and emit
@@ -67,20 +68,24 @@ export function defaultProbeRunner({ invocation, cwd, input, timeoutMs }) {
     let timedOut = false;
     let settled = false;
     const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+    // T0-11 F5: `started` is true only once the reviewer CLI process exists; a spawn that fails
+    // (missing executable) is not a model call.
+    let started = false;
     let child;
     try {
       child = spawn(invocation.command, invocation.args, {
         cwd, env: invocation.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
-      finish({ status: null, stdout, stderr, timedOut, error: error.message });
+      finish({ status: null, stdout, stderr, timedOut, error: error.message, started });
       return;
     }
+    child.on("spawn", () => { started = true; });
     const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
     child.stdout.on("data", (chunk) => { if (stdout.length < MAX_OUTPUT) stdout += chunk; });
     child.stderr.on("data", (chunk) => { if (stderr.length < MAX_OUTPUT) stderr += chunk; });
-    child.on("error", (error) => { clearTimeout(timer); finish({ status: null, stdout, stderr, timedOut, error: error.message }); });
-    child.on("close", (status) => { clearTimeout(timer); finish({ status, stdout, stderr, timedOut, error: null }); });
+    child.on("error", (error) => { clearTimeout(timer); finish({ status: null, stdout, stderr, timedOut, error: error.message, started }); });
+    child.on("close", (status) => { clearTimeout(timer); finish({ status, stdout, stderr, timedOut, error: null, started }); });
     child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
@@ -290,20 +295,33 @@ export async function runReviewerProbe({
   provider, executable, adapter, runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot = os.tmpdir(),
 }) {
   if (!PROBE_ADAPTERS[provider]?.supported) {
-    return { proven: "unknown", reason: "unsupported_provider", evidence: { adapter_id: PROBE_ADAPTERS[provider]?.id || null }, model_calls: 0 };
+    return { proven: "unknown", reason: "unsupported_provider", evidence: { adapter_id: PROBE_ADAPTERS[provider]?.id || null }, cli_launches: 0 };
   }
-  const probeDir = await fsp.realpath(await fsp.mkdtemp(path.join(tmpRoot, "review-bridge-probe-")));
-  const sentinelName = "rb-sentinel-" + randomUUID() + ".txt";
+  // T0-11 F3/F4: where it stopped decides what may be said: "before" (no CLI was started),
+  // "runner" (the runner itself failed: not known) or "after" (the CLI ran).
+  let stage = "before";
+  let started = false;
+  let probeDir = null;
   try {
+    probeDir = await fsp.realpath(await fsp.mkdtemp(path.join(tmpRoot, "review-bridge-probe-")));
+    const sentinelName = "rb-sentinel-" + randomUUID() + ".txt";
     await fsp.writeFile(path.join(probeDir, "README.txt"), "Disposable reviewer write-denial probe.\n", "utf8");
     const invocation = adapter.buildInvocation(provider, executable, buildProbeArgs(provider, probeDir));
     // Exactly one invocation per call; the result is never retried.
+    stage = "runner";
     const result = await runner({ invocation, cwd: probeDir, input: probePrompt(sentinelName), timeoutMs });
+    started = result?.started !== false;
+    stage = "after";
     const sentinelPresent = Boolean(await fsp.lstat(path.join(probeDir, sentinelName)).catch(() => null));
     const unexpectedEntries = (await fsp.readdir(probeDir)).filter((name) => name !== "README.txt");
-    return { ...evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries }), model_calls: 1 };
+    // F5: counted only when the CLI process started. It is a launch (an attempt), not proof that a
+    // model was reached: the CLI can still fail or hit a limit before calling one.
+    return { ...evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries }), cli_launches: started ? 1 : 0 };
+  } catch (error) {
+    error.modelCall = stage === "before" ? "no" : stage === "runner" ? "unknown" : started ? "yes" : "no";
+    throw error;
   } finally {
-    await fsp.rm(probeDir, { recursive: true, force: true }).catch(() => {});
+    if (probeDir) await fsp.rm(probeDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -319,9 +337,18 @@ async function fileDigest(file) {
 // The proof lives only in this watch Controller process. The JSON file is an
 // audit trail that is never read back, so editing it cannot set readiness and a
 // restarted watch starts at not_run.
+// T0-11 C1: what was observed when a check did not pass; booleans and counts only, never text.
+function observedEvidence(evidence = {}) {
+  return {
+    sentinel_present: evidence.sentinel_present === true,
+    unexpected_entries: Number(evidence.unexpected_entries || 0),
+    file_changes: Number(evidence.events?.file_changes || 0),
+  };
+}
+
 export function createReviewerProbeService({
-  roles, adapter, adapterId, adapterConfig = null, adapterSource, probeSource = PROBE_SOURCE, auditPath,
-  statusProbe, versionProbe = defaultVersionProbe,
+  roles, adapter, adapterId, adapterConfig = null, adapterSource, probeSource = PROBE_SOURCE, auditDir,
+  retentionDays = DEFAULT_RETENTION_DAYS, statusProbe, versionProbe = defaultVersionProbe,
   runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot, now = () => new Date(),
 }) {
   let inFlight = false;
@@ -359,14 +386,25 @@ export function createReviewerProbeService({
 
   async function status() {
     const roleReadiness = await readiness();
-    let readonly = { state: "not_run", reason: null, checked_at: null, authority: "watch_session_memory" };
+    let readonly = {
+      state: "not_run", reason: null, checked_at: null, authority: "watch_session_memory",
+      diagnostic_id: null, cli_launches: null, observed: null, audit_recorded: null, audit_cleanup: null,
+    };
     if (sessionProof) {
       // Recomputed on every refresh so a configuration change invalidates the proof.
       const current = await fingerprint();
+      // T0-11 C4: the number of calls and the diagnostic id come from this memory, never from the audit.
+      // F7: an id is shown only when its record was written.
+      const record = {
+        checked_at: sessionProof.checked_at, cli_launches: sessionProof.cli_launches,
+        diagnostic_id: sessionProof.audit_recorded ? sessionProof.diagnostic_id : null,
+        audit_recorded: sessionProof.audit_recorded, audit_cleanup: sessionProof.audit_cleanup,
+      };
       readonly = !current || sessionProof.fingerprint !== current
-        ? { ...readonly, state: "stale", reason: "configuration_changed", checked_at: sessionProof.checked_at }
-        : { ...readonly, state: sessionProof.proven === true ? "proven" : sessionProof.proven === false ? "failed" : "unknown",
-          reason: sessionProof.reason, checked_at: sessionProof.checked_at };
+        // Codex 2026-10-16: an identity that cannot be computed right now is not a proven change.
+        ? { ...readonly, ...record, state: "stale", reason: current ? "configuration_changed" : "fingerprint_unavailable" }
+        : { ...readonly, ...record, state: sessionProof.proven === true ? "proven" : sessionProof.proven === false ? "failed" : "unknown",
+          reason: sessionProof.reason, observed: sessionProof.proven === true ? null : sessionProof.observed };
     }
     const reviewer = roleReadiness.checks.reviewer;
     const supported = PROBE_ADAPTERS[roles.reviewer]?.supported === true;
@@ -398,33 +436,86 @@ export function createReviewerProbeService({
       if (PROBE_ADAPTERS[provider]?.supported !== true) {
         refuse("unsupported_reviewer", "The selected reviewer cannot provide sandbox evidence.");
       }
-      const reviewer = (await readiness()).checks.reviewer;
-      if (!reviewer.cli_present || reviewer.authenticated !== true) {
-        refuse("reviewer_not_ready", "Reviewer CLI is not installed and signed in.");
+      let current;
+      let executable;
+      try {
+        const reviewer = (await readiness()).checks.reviewer;
+        if (!reviewer.cli_present || reviewer.authenticated !== true) {
+          refuse("reviewer_not_ready", "Reviewer CLI is not installed and signed in.");
+        }
+        current = await fingerprint();
+        if (!current) refuse("reviewer_not_ready", "Reviewer CLI or adapter identity cannot be established.");
+        executable = await adapter.resolveExecutable(provider);
+      } catch (error) {
+        // T0-11 F3: nothing was started; say so with a code the page can trust.
+        if (error.code) throw error;
+        refuse("probe_not_started", "The reviewer check did not start: " + error.message);
       }
-      const current = await fingerprint();
-      if (!current) refuse("reviewer_not_ready", "Reviewer CLI or adapter identity cannot be established.");
-      const executable = await adapter.resolveExecutable(provider);
-      const outcome = await runReviewerProbe({ provider, executable, adapter, runner, timeoutMs, tmpRoot });
-      const checkedAt = now().toISOString();
-      sessionProof = { proven: outcome.proven, reason: outcome.reason, fingerprint: current, checked_at: checkedAt };
-      if (auditPath) {
+      let outcome;
+      try {
+        outcome = await runReviewerProbe({ provider, executable, adapter, runner, timeoutMs, tmpRoot });
+      } catch (error) {
+        if (error.modelCall === "no") refuse("probe_not_started", "The reviewer check did not start: " + error.message);
+        // T0-11 F4: the CLI was started (or it is not known whether it was): an unknown result,
+        // recorded like any other, with the call counted only when it is known.
+        outcome = {
+          proven: "unknown",
+          reason: error.modelCall === "yes" ? "probe_error_after_start" : "probe_error_unclear",
+          evidence: { adapter_id: PROBE_ADAPTERS[provider]?.id || null },
+          cli_launches: error.modelCall === "yes" ? 1 : null,
+        };
+      }
+      const checkedDate = now();
+      const checkedAt = checkedDate.toISOString();
+      // T0-11 C3: a short id the person can hand to a maintainer; it names this check's audit line.
+      const diagnosticId = "RBP-" + randomBytes(4).toString("hex").toUpperCase();
+      const observed = observedEvidence(outcome.evidence);
+      sessionProof = {
+        proven: outcome.proven, reason: outcome.reason, fingerprint: current, checked_at: checkedAt,
+        diagnostic_id: diagnosticId, cli_launches: outcome.cli_launches, observed,
+        audit_recorded: false, audit_cleanup: null,
+      };
+      if (auditDir) {
         const audit = {
-          schema_version: 2,
+          schema_version: 3,
           authoritative: false,
           note: "Audit only. Readiness is held in the watch process memory; editing this file has no effect.",
+          diagnostic_id: diagnosticId,
           provider,
           proven: outcome.proven,
           reason: outcome.reason,
-          model_calls: outcome.model_calls,
+          cli_launches: outcome.cli_launches,
           fingerprint: current,
           checked_at: checkedAt,
           evidence: outcome.evidence,
         };
-        await fsp.mkdir(path.dirname(auditPath), { recursive: true }).catch(() => {});
-        await fsp.writeFile(auditPath, JSON.stringify(audit, null, 2) + "\n", "utf8").catch(() => {});
+        // One day file per local day, one line per check. The audit is a record only; failing to
+        // write it never changes the result, but then no diagnostic id is shown (T0-11 F7).
+        try {
+          await fsp.mkdir(auditDir, { recursive: true });
+          await fsp.appendFile(path.join(auditDir, localDateKey(checkedDate) + ".jsonl"), JSON.stringify(audit) + "\n", "utf8");
+          sessionProof.audit_recorded = true;
+        } catch {
+          sessionProof.audit_recorded = false;
+        }
+        // F9: an invalid retention setting is not replaced by a default; nothing is cleaned.
+        if (!Number.isInteger(retentionDays) || retentionDays < 1) {
+          sessionProof.audit_cleanup = "skipped_invalid_retention";
+        } else {
+          try {
+            await pruneProbeRecords(auditDir, retentionDays, checkedDate.getTime());
+            sessionProof.audit_cleanup = "done";
+          } catch {
+            sessionProof.audit_cleanup = "failed";
+          }
+        }
+      } else {
+        sessionProof.audit_recorded = false;
       }
-      return { proven: outcome.proven, reason: outcome.reason, model_calls: outcome.model_calls, checked_at: checkedAt };
+      return {
+        proven: outcome.proven, reason: outcome.reason, cli_launches: outcome.cli_launches, checked_at: checkedAt,
+        diagnostic_id: sessionProof.audit_recorded ? diagnosticId : null, audit_recorded: sessionProof.audit_recorded, observed,
+      };
     } finally {
       inFlight = false;
     }

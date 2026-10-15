@@ -14,6 +14,7 @@ import {
   mergeRun,
   parseReviewerUsage,
   parseWriterUsage,
+  probeAuditDir,
   prune,
   removeRun,
   RetentionConfigError,
@@ -331,4 +332,33 @@ test("P10 prune never folds an undelivered run inside the window; it delivers fi
   // Without a deliverer (any caller), an undelivered run inside the window is still left alone.
   const again = await prune(paths, { config: { retention: { days: 15 } } });
   assert.ok(again.undelivered.includes(recent.run.run_id));
+});
+
+test("T0-11 C3 prune also drops reviewer check day files past the window and keeps the recent ones and today", async (t) => {
+  const { paths } = await runtime(t);
+  const now = Date.now();
+  const dir = probeAuditDir(paths);
+  await fsp.mkdir(dir, { recursive: true });
+  const keys = { old: localDateKey(now - 16 * DAY_MS), recent: localDateKey(now - 14 * DAY_MS), today: localDateKey(now) };
+  for (const key of Object.values(keys)) await fsp.writeFile(path.join(dir, key + ".jsonl"), "{}\n");
+  const summary = await prune(paths, { config: { retention: { days: 15 } }, clock: () => now });
+  assert.equal(summary.probe_audit_files_deleted, 1);
+  assert.equal(await fileExists(path.join(dir, keys.old + ".jsonl")), false);
+  assert.equal(await fileExists(path.join(dir, keys.recent + ".jsonl")), true);
+  assert.equal(await fileExists(path.join(dir, keys.today + ".jsonl")), true);
+  assert.match(formatPruneSummary(summary), /清掉 1 天份設定檢查紀錄/);
+});
+
+test("T0-11 E3 prune retires the old single reviewer record by age and refuses an invalid setting", async (t) => {
+  const { paths } = await runtime(t);
+  const now = Date.now();
+  const legacy = path.join(paths.configRoot, "reviewer-probe-audit.json");
+  await fsp.writeFile(legacy, "{}\n");
+  const old = new Date(now - 16 * DAY_MS);
+  await fsp.utimes(legacy, old, old);
+  await assert.rejects(prune(paths, { config: { retention: { days: 0 } }, clock: () => now }), RetentionConfigError);
+  assert.equal(await fileExists(legacy), true, "an invalid setting deletes nothing");
+  const summary = await prune(paths, { config: { retention: { days: 15 } }, clock: () => now });
+  assert.equal(summary.probe_audit_files_deleted, 1);
+  assert.equal(await fileExists(legacy), false);
 });

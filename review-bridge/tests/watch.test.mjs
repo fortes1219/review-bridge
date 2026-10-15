@@ -22,7 +22,7 @@ function fakeService() {
       state.inFlight = true;
       if (state.release === null) await new Promise((resolve) => { state.release = resolve; });
       state.inFlight = false;
-      return { proven: "unknown", reason: "no_write_attempt", model_calls: 1 };
+      return { proven: "unknown", reason: "no_write_attempt", cli_launches: 1 };
     },
     isInFlight: () => state.inFlight,
   };
@@ -74,8 +74,8 @@ test("page and status load without a model call and show the cost notice", async
   const host = new URL(watch.url).host;
   const page = await request(watch, { headers: { Host: host } });
   assert.equal(page.status, 200);
-  assert.match(page.body, /將使用一次模型呼叫確認 reviewer 無法寫入/);
-  assert.match(page.body, /會花費一次模型呼叫/);
+  assert.match(page.body, /確認 reviewer 無法寫入（最多啟動一次 reviewer CLI，可能消耗模型額度）/);
+  assert.match(page.body, /每次按下最多啟動一次 reviewer CLI；可能消耗模型額度，實際模型請求次數與 token 無法預先保證；不會自動重試。/);
   assert.ok(page.body.includes(watch.token));
   assert.equal(page.headers["access-control-allow-origin"], undefined);
   assert.equal(page.headers["set-cookie"], undefined);
@@ -228,4 +228,18 @@ test("bump notice names the occupier when known and omits it otherwise", () => {
   assert.equal(portBumpNotice(9100, "http://localhost:9101/", "node.exe"), "9100 被 node.exe 占用，改用 http://localhost:9101/");
   assert.equal(portBumpNotice(9100, "http://localhost:9101/", null), "9100 被占用，改用 http://localhost:9101/");
   assert.equal(findPortOwner(9100, "linux"), null);
+});
+
+test("T0-11 E1 probe_not_started is a 409 the page may call 'no model used'; any other failure is a 500 probe_failed", async (t) => {
+  const service = fakeService();
+  service.run = async () => { const error = new Error("no temp folder"); error.code = "probe_not_started"; throw error; };
+  const watch = await startWatchServer({ service, uiRoot });
+  t.after(() => watch.close());
+  const notStarted = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch), body: probeBody("0123456789abcdef-0101") });
+  assert.equal(notStarted.status, 409);
+  assert.equal(JSON.parse(notStarted.body).error, "probe_not_started");
+  service.run = async () => { throw new Error("something after the call"); };
+  const failed = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch), body: probeBody("0123456789abcdef-0102") });
+  assert.equal(failed.status, 500);
+  assert.equal(JSON.parse(failed.body).error, "probe_failed");
 });

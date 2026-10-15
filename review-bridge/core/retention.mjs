@@ -60,6 +60,36 @@ export function archiveFileForDate(paths, value) {
   return path.join(paths.archiveDir, localDateKey(value) + ".jsonl");
 }
 
+// T0-11 C3: reviewer read-only check records, one day file per local day like the run archive.
+export function probeAuditDir(paths) {
+  return path.join(paths.configRoot, "reviewer-probe-audit");
+}
+
+// The reviewer check records: the day files, and the single file versions before T0-11 wrote
+// (reviewer-probe-audit.json next to the folder), which goes once it is older than the window.
+export async function pruneProbeRecords(auditDir, days, now) {
+  let deleted = await pruneDayFiles(auditDir, days, now);
+  const legacy = path.join(path.dirname(auditDir), "reviewer-probe-audit.json");
+  const stat = await fsp.stat(legacy).catch(() => null);
+  if (stat?.isFile() && now - stat.mtimeMs > days * DAY_MS) {
+    await fsp.rm(legacy, { force: true });
+    deleted += 1;
+  }
+  return deleted;
+}
+
+// Deletes <YYYY-MM-DD>.jsonl day files whose whole day ended more than `days` ago; never today's.
+export async function pruneDayFiles(directory, days, now) {
+  const today = localDateKey(now);
+  let deleted = 0;
+  for (const file of await listFiles(directory)) {
+    const key = path.basename(file, ".jsonl");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || key === today || !file.endsWith(".jsonl")) continue;
+    if (olderThan(key + "T23:59:59", days, now)) { await fsp.rm(file, { force: true }); deleted += 1; }
+  }
+  return deleted;
+}
+
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
@@ -371,6 +401,7 @@ export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_4
     merged_runs: 0,
     merge_errors: [],
     archive_files_deleted: 0,
+    probe_audit_files_deleted: 0,
     run_records_deleted: 0,
     authorizations_deleted: 0,
     job_files_deleted: 0,
@@ -411,13 +442,9 @@ export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_4
     }
   }
 
-  // 2. Day files older than the window; never today's.
-  const today = localDateKey(now);
-  for (const file of await listFiles(paths.archiveDir)) {
-    const key = path.basename(file, ".jsonl");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || key === today) continue;
-    if (olderThan(key + "T23:59:59", days, now)) { await fsp.rm(file, { force: true }); summary.archive_files_deleted += 1; }
-  }
+  // 2. Day files older than the window; never today's. The reviewer check records too (T0-11 C3).
+  summary.archive_files_deleted = await pruneDayFiles(paths.archiveDir, days, now);
+  summary.probe_audit_files_deleted = await pruneProbeRecords(probeAuditDir(paths), days, now);
 
   // 3. Small per-run records of runs that ended more than `days` ago.
   const expiredRunIds = new Set();
@@ -500,6 +527,7 @@ export function formatPruneSummary(summary) {
   const parts = [];
   if (summary.merged_runs) parts.push("合併 " + summary.merged_runs + " 條紀錄");
   if (summary.archive_files_deleted) parts.push("清掉 " + summary.archive_files_deleted + " 天份紀錄");
+  if (summary.probe_audit_files_deleted) parts.push("清掉 " + summary.probe_audit_files_deleted + " 天份設定檢查紀錄");
   if (summary.run_records_deleted) parts.push(summary.run_records_deleted + " 個過期 run 記錄");
   if (summary.authorizations_deleted) parts.push(summary.authorizations_deleted + " 個過期授權");
   if (summary.job_files_deleted) parts.push(summary.job_files_deleted + " 個過期審查檔");

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createHash } from "node:crypto";
 import { buildProbeArgs, createReviewerProbeService, isFixedWriteAttempt, redactProbeText, runReviewerProbe } from "../core/reviewer-probe.mjs";
+import { localDateKey } from "../core/retention.mjs";
 
 const signedIn = (executable) => executable.endsWith("codex")
   ? { status: 0, stdout: "", stderr: "Logged in using ChatGPT\n" }
@@ -139,18 +140,25 @@ test("refusal, unexplained failure, write, timeout, rate limit, and unsupported 
 async function service(t, { runner, version = () => "codex-cli 1.0.0", roles = { writer: "claude", reviewer: "codex" }, statusProbe = signedIn } = {}) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-probe-state-"));
   t.after(() => fsp.rm(dir, { recursive: true, force: true }));
-  const auditPath = path.join(dir, "reviewer-probe-audit.json");
+  const auditDir = path.join(dir, "reviewer-probe-audit");
+  // T0-11 C3: one day file per local day, one line per check.
+  const dayFile = (date = new Date()) => path.join(auditDir, localDateKey(date) + ".jsonl");
+  const auditLines = async (date) => (await fsp.readFile(dayFile(date), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  const latestAudit = async (date) => (await auditLines(date)).at(-1);
   const adapterSource = path.join(dir, "adapter.mjs");
   const probeSource = path.join(dir, "reviewer-probe.mjs");
   await fsp.writeFile(adapterSource, "export const id = 1;\n");
   await fsp.writeFile(probeSource, "export const probe = 1;\n");
   return {
-    auditPath,
+    auditDir,
+    dayFile,
+    auditLines,
+    latestAudit,
     adapterSource,
     probeSource,
     make: (overrides = {}) => createReviewerProbeService({
       roles, adapter, adapterId: "win32-node", adapterConfig: ADAPTER_CONFIG,
-      adapterSource, probeSource, auditPath, statusProbe, versionProbe: version, runner, ...overrides,
+      adapterSource, probeSource, auditDir, statusProbe, versionProbe: version, runner, ...overrides,
     }),
   };
 }
@@ -185,13 +193,13 @@ test("failed probe is not retried automatically", async (t) => {
 
 test("proof is held only in watch memory; a new service starts not_run", async (t) => {
   const { calls, wrapped } = counted(scenarios.denied);
-  const { make, auditPath } = await service(t, { runner: wrapped });
+  const { make, latestAudit } = await service(t, { runner: wrapped });
   const probe = make();
   await probe.run();
   const status = await probe.status();
   assert.equal(status.reviewer_readonly_proven, true);
   assert.equal(status.reviewer_readonly.authority, "watch_session_memory");
-  const audit = JSON.parse(await fsp.readFile(auditPath, "utf8"));
+  const audit = await latestAudit();
   assert.equal(audit.authoritative, false);
   assert.doesNotMatch(JSON.stringify(audit), /secret-session|probe-bin/);
   assert.equal((await make().status()).reviewer_readonly_proven, "not_run", "restart is not_run");
@@ -200,15 +208,15 @@ test("proof is held only in watch memory; a new service starts not_run", async (
 
 test("editing the audit JSON from failed to proven cannot set readiness", async (t) => {
   const { wrapped } = counted(scenarios.refused);
-  const { make, auditPath } = await service(t, { runner: wrapped });
+  const { make, latestAudit, dayFile } = await service(t, { runner: wrapped });
   const probe = make();
   await probe.run();
   assert.equal((await probe.status()).reviewer_readonly_proven, false);
-  const audit = JSON.parse(await fsp.readFile(auditPath, "utf8"));
+  const audit = await latestAudit();
   assert.equal(audit.proven, "unknown");
-  await fsp.writeFile(auditPath, JSON.stringify({
+  await fsp.writeFile(dayFile(), JSON.stringify({
     ...audit, schema_version: 1, authoritative: true, proven: true, reason: "sandbox_denied_write",
-  }));
+  }) + "\n");
   assert.equal((await probe.status()).reviewer_readonly_proven, false, "running service ignores the file");
   const fresh = await make().status();
   assert.equal(fresh.reviewer_readonly_proven, "not_run", "new service ignores the file");
@@ -258,7 +266,7 @@ test("adapter id, adapter config and sandbox arguments are bound into the finger
   const fingerprints = [];
   for (const overrides of [{}, { adapterConfig: { ...ADAPTER_CONFIG, status: "candidate" } }, { adapterId: "other" }]) {
     await env.make(overrides).run();
-    fingerprints.push(JSON.parse(await fsp.readFile(env.auditPath, "utf8")).fingerprint);
+    fingerprints.push((await env.latestAudit()).fingerprint);
   }
   assert.equal(new Set(fingerprints).size, 3);
   assert.equal(buildProbeArgs("codex", "<d>")[buildProbeArgs("codex", "<d>").indexOf("--sandbox") + 1], "read-only");
@@ -320,12 +328,12 @@ test("T0-11 V1/V2 the audit keeps a redacted excerpt and hash of the fixed write
       JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "MODEL-REPLY-TEXT" } }),
       TURN_DONE].join("\n"));
   };
-  const { make, auditPath } = await service(t, { runner });
+  const { make, latestAudit } = await service(t, { runner });
   const result = await make().run();
   // V2: this sentence is not a recognised denial in 甲段; the result stays unknown.
   assert.equal(result.proven, "unknown");
   assert.equal(result.reason, "denial_not_evidenced");
-  const audit = JSON.parse(await fsp.readFile(auditPath, "utf8"));
+  const audit = await latestAudit();
   const [attempt] = audit.evidence.attempts;
   assert.match(attempt.output_excerpt, /^Out-File : Access to the path '<sentinel-path>' is denied\.\nAt line:1 char:1\n\+ echo probe > <sentinel-path>\n/);
   assert.ok(attempt.output_excerpt.length <= 400);
@@ -411,4 +419,158 @@ test("T0-11 A2 paths with spaces, quotes, apostrophes, wraps or no quotes leave 
   const wrapped = r("Access to the path '" + probeDir.slice(0, 30) + "\n" + probeDir.slice(30) + "\\" + sentinelName + "' is denied.");
   assert.equal(wrapped, "Access to the path '<path>…<sentinel-path>' is denied.");
   assert.equal(r("x".repeat(500)).length, 400);
+});
+
+// T0-11 甲 2 D3 / D4: a diagnostic id per check, records gathered per day, release only from memory.
+test("T0-11 D3 two checks on one day: two ids, one day file with two lines; status gives the latest from memory", async (t) => {
+  const { make, auditLines, dayFile, auditDir } = await service(t, { runner: scenarios.silentFailure });
+  const probe = make();
+  const first = await probe.run();
+  const second = await probe.run();
+  assert.match(first.diagnostic_id, /^RBP-[0-9A-F]{8}$/);
+  assert.notEqual(first.diagnostic_id, second.diagnostic_id);
+  assert.deepEqual((await fsp.readdir(auditDir)).sort(), [path.basename(dayFile())]);
+  assert.deepEqual((await auditLines()).map((line) => line.diagnostic_id), [first.diagnostic_id, second.diagnostic_id]);
+  const status = await probe.status();
+  assert.equal(status.reviewer_readonly.state, "unknown");
+  assert.equal(status.reviewer_readonly.diagnostic_id, second.diagnostic_id);
+  assert.equal(status.reviewer_readonly.cli_launches, 1);
+});
+
+test("T0-11 D3 a new record deletes day files older than the retention window and keeps the rest", async (t) => {
+  const day = 86_400_000;
+  const clock = new Date(2026, 9, 15, 12, 0, 0);
+  const { make, auditDir } = await service(t, { runner: scenarios.silentFailure });
+  await fsp.mkdir(auditDir, { recursive: true });
+  const old = localDateKey(new Date(clock.getTime() - 16 * day)) + ".jsonl";
+  const recent = localDateKey(new Date(clock.getTime() - 14 * day)) + ".jsonl";
+  await fsp.writeFile(path.join(auditDir, old), "{}\n");
+  await fsp.writeFile(path.join(auditDir, recent), "{}\n");
+  await make({ now: () => clock, retentionDays: 15 }).run();
+  assert.deepEqual((await fsp.readdir(auditDir)).sort(), [recent, localDateKey(clock) + ".jsonl"].sort());
+});
+
+test("T0-11 D4 editing or deleting the day file changes nothing; a new service starts not_run with no id", async (t) => {
+  const { make, dayFile, latestAudit } = await service(t, { runner: scenarios.silentFailure });
+  const probe = make();
+  await probe.run();
+  const before = await probe.status();
+  const audit = await latestAudit();
+  await fsp.writeFile(dayFile(), JSON.stringify({ ...audit, proven: true, reason: "sandbox_denied_write", diagnostic_id: "RBP-00000000" }) + "\n");
+  assert.deepEqual(await probe.status(), before);
+  await fsp.rm(dayFile());
+  assert.deepEqual(await probe.status(), before);
+  assert.equal(before.native_ready, false);
+  const fresh = (await make().status()).reviewer_readonly;
+  assert.equal(fresh.state, "not_run");
+  assert.equal(fresh.diagnostic_id, null);
+  assert.equal(fresh.cli_launches, null);
+});
+
+// T0-11 甲 3 E1: where a failure happened decides what is known about the model call.
+test("T0-11 E1 a failure before the CLI starts is probe_not_started with no call and no change in memory", async (t) => {
+  const missingRoot = path.join(os.tmpdir(), "rb-probe-missing-" + process.pid, "nope");
+  const { calls, wrapped } = counted(scenarios.denied);
+  const { make } = await service(t, { runner: wrapped });
+  const probe = make({ tmpRoot: missingRoot });
+  await assert.rejects(probe.run(), (error) => error.code === "probe_not_started");
+  assert.equal(calls.length, 0);
+  assert.equal((await probe.status()).reviewer_readonly.state, "not_run");
+});
+
+test("T0-11 E1 a failure after the CLI started is an unknown result with one recorded call", async (t) => {
+  const runner = async ({ cwd, input }) => {
+    const result = ok(deniedStdout(input));
+    await fsp.rm(cwd, { recursive: true, force: true });
+    return result;
+  };
+  const { make } = await service(t, { runner });
+  const probe = make();
+  const result = await probe.run();
+  assert.equal(result.reason, "probe_error_after_start");
+  const readonly = (await probe.status()).reviewer_readonly;
+  assert.equal(readonly.state, "unknown");
+  assert.equal(readonly.cli_launches, 1);
+});
+
+test("T0-11 E1 a runner that throws leaves the call count unknown", async (t) => {
+  const { make } = await service(t, { runner: async () => { throw new Error("runner broke"); } });
+  const probe = make();
+  assert.equal((await probe.run()).reason, "probe_error_unclear");
+  assert.equal((await probe.status()).reviewer_readonly.cli_launches, null);
+});
+
+test("T0-11 E1 a CLI that never started counts as zero calls", async () => {
+  const missing = { ...adapter, buildInvocation: () => ({ command: path.join(os.tmpdir(), "rb-no-such-cli-" + process.pid + ".exe"), args: [], env: {} }) };
+  const result = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter: missing });
+  assert.equal(result.reason, "invocation_error");
+  assert.equal(result.cli_launches, 0);
+});
+
+test("T0-11 E2 when the record cannot be written the status carries no diagnostic id", async (t) => {
+  const { make, auditDir } = await service(t, { runner: scenarios.silentFailure });
+  await fsp.mkdir(path.dirname(auditDir), { recursive: true });
+  await fsp.writeFile(auditDir, "a file where the folder should be\n");
+  const probe = make();
+  const result = await probe.run();
+  assert.equal(result.diagnostic_id, null);
+  assert.equal(result.audit_recorded, false);
+  const readonly = (await probe.status()).reviewer_readonly;
+  assert.equal(readonly.state, "unknown");
+  assert.equal(readonly.diagnostic_id, null);
+  assert.equal(readonly.audit_recorded, false);
+});
+
+test("T0-11 E3 an invalid retention setting cleans nothing; a valid one also retires the old single file", async (t) => {
+  const day = 86_400_000;
+  const clock = new Date(2026, 9, 16, 12, 0, 0);
+  const { make, auditDir } = await service(t, { runner: scenarios.silentFailure });
+  await fsp.mkdir(auditDir, { recursive: true });
+  const oldDay = path.join(auditDir, localDateKey(new Date(clock.getTime() - 16 * day)) + ".jsonl");
+  const legacy = path.join(path.dirname(auditDir), "reviewer-probe-audit.json");
+  await fsp.writeFile(oldDay, "{}\n");
+  await fsp.writeFile(legacy, "{}\n");
+  const oldTime = new Date(clock.getTime() - 16 * day);
+  await fsp.utimes(legacy, oldTime, oldTime);
+  const invalid = make({ now: () => clock, retentionDays: null });
+  await invalid.run();
+  assert.equal((await invalid.status()).reviewer_readonly.audit_cleanup, "skipped_invalid_retention");
+  assert.ok(await fsp.stat(oldDay), "nothing cleaned with an invalid setting");
+  assert.ok(await fsp.stat(legacy));
+  const recent = new Date(clock.getTime() - 14 * day);
+  const valid = make({ now: () => clock, retentionDays: 15 });
+  await valid.run();
+  assert.equal((await valid.status()).reviewer_readonly.audit_cleanup, "done");
+  assert.equal(await fsp.stat(oldDay).catch(() => null), null);
+  assert.equal(await fsp.stat(legacy).catch(() => null), null, "the old single file is retired by age too");
+  await fsp.writeFile(legacy, "{}\n");
+  await fsp.utimes(legacy, recent, recent);
+  await valid.run();
+  assert.ok(await fsp.stat(legacy), "a recent old single file stays");
+});
+
+test("A4 a CLI that started but got no model result counts one launch, not a proven model call", async (t) => {
+  // The CLI ran and exited without any event: e.g. a quota or sign-in failure before a model answered.
+  const runner = async () => ({ status: 1, timedOut: false, error: null, stdout: "", stderr: "quota exceeded", started: true });
+  const { make } = await service(t, { runner });
+  const probe = make();
+  const result = await probe.run();
+  assert.equal(result.cli_launches, 1);
+  assert.equal(Object.hasOwn(result, "model_calls"), false);
+  const readonly = (await probe.status()).reviewer_readonly;
+  assert.equal(readonly.state, "unknown");
+  assert.equal(readonly.cli_launches, 1);
+});
+
+test("A4 an identity that cannot be computed is fingerprint_unavailable, not configuration_changed", async (t) => {
+  let version = "codex-cli 1.0.0";
+  const env = await service(t, { runner: scenarios.denied });
+  const probe = env.make({ versionProbe: () => version });
+  await probe.run();
+  version = null;
+  const unreadable = (await probe.status()).reviewer_readonly;
+  assert.equal(unreadable.state, "stale");
+  assert.equal(unreadable.reason, "fingerprint_unavailable");
+  version = "codex-cli 2.0.0";
+  assert.equal((await probe.status()).reviewer_readonly.reason, "configuration_changed");
 });

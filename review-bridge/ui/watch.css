@@ -11,3 +11,6 @@ dd { margin: .25rem 0 0 0; }
 .bad { color: #b42318; }
 button { font-size: 1rem; padding: .5rem 1rem; margin-top: .5rem; }
 button[disabled] { opacity: .5; }
+details { margin-top: .75rem; }
+summary { cursor: pointer; color: #555; }
+[hidden] { display: none !important; }
