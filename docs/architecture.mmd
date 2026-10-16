@@ -7,8 +7,8 @@ flowchart TD
     U[("Mutable run projection<br/>session / budget / current status")]
     E[("Append-only per-run events<br/>fsync before projection")]
     K["Controller<br/>locks / recovery / queue / gates"]
-    CW["Claude Code<br/>bounded writer session"]
-    X["Codex CLI<br/>ephemeral read-only review"]
+    CW["Writer CLI<br/>provider assigned by the owner<br/>bounded writer session"]
+    X["Reviewer CLI<br/>provider assigned by the owner<br/>separate session, read-only review"]
     G{"REVIEW_GATE<br/>HARD_STOP_REQUIRED"}
     B["Human breakpoint<br/>terminal run or new decision"]
 
