@@ -24,6 +24,7 @@ This private repository is the canonical source for the generic review bridge ru
 - `project-templates/`: generic installed policy files.
 - `tests/`: installer lifecycle tests.
 - `docs/`: architecture and installer contract.
+- `ARCHITECTURE.md`: how the runtime and installer are layered today, and what is not finished.
 
 ## Public And Private Data
 
