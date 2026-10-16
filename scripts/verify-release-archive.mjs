@@ -8,7 +8,7 @@ const MAX_EOCD_SEARCH = 65_557;
 const REQUIRED_ENTRIES = [
   "bridge.mjs",
   "docs/architecture.mmd",
-  "review-bridge/core/commands.mjs",
+  "review-bridge/router/index.mjs",
 ];
 
 function findEndOfCentralDirectory(buffer) {

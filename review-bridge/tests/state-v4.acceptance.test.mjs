@@ -7,11 +7,11 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { assertSupportedStateFilesystem, inspectStateFilesystem } from "../core/filesystem-v4.mjs";
-import { fileExists, readJson, writeJson, writeText } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
+import { assertSupportedStateFilesystem, inspectStateFilesystem } from "../utils/filesystem.mjs";
+import { fileExists, readJson, writeJson, writeText } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
 import { applyNeutralInstall, planNeutralInstall } from "../../installer/neutral-install.mjs";
-import { digest, loadOrCreatePolicySnapshot, mergePolicy } from "../core/policy-v4.mjs";
+import { digest, loadOrCreatePolicySnapshot, mergePolicy } from "../service/records/policySnapshots.mjs";
 import {
   acquireRunLock,
   applyBudgetExtension,
@@ -23,7 +23,7 @@ import {
   listRuns,
   readRun,
   reconcileRunProjection,
-} from "../core/state-v4.mjs";
+} from "../service/records/runStore.mjs";
 
 const testRoot = path.dirname(fileURLToPath(import.meta.url));
 const sourceBridgeRoot = path.resolve(testRoot, "..");

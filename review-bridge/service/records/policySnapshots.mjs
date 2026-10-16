@@ -7,7 +7,7 @@ import {
   fileExists,
   readJson,
   writeJsonExclusiveDurable,
-} from "./io.mjs";
+} from "./fileStore.mjs";
 
 const levelRank = new Map([
   ["LIGHT", 1],

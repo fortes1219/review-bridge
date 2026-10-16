@@ -7,13 +7,13 @@ import {
   bridgeRootFrom,
   resolveAdapterModule,
   selectAdapter,
-} from "./core/platform.mjs";
-import { dispatchCommand } from "./core/commands.mjs";
-import { inspectDoctor } from "./core/doctor.mjs";
-import { createFakeAdapter } from "./core/fake-adapter.mjs";
-import { readJson } from "./core/io.mjs";
-import { getBridgePaths } from "./core/paths.mjs";
-import { assertReviewerProof, nativeGateDecision } from "./core/native-gate.mjs";
+} from "./router/platform.mjs";
+import { dispatchCommand } from "./router/index.mjs";
+import { inspectDoctor } from "./features/doctor/index.mjs";
+import { createFakeAdapter } from "./service/agentCli/fakeAdapter.mjs";
+import { readJson } from "./service/records/fileStore.mjs";
+import { getBridgePaths } from "./utils/paths.mjs";
+import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
 
 const bridgeRoot = bridgeRootFrom(import.meta.url);
 const repoRoot = path.resolve(bridgeRoot, "../../..");

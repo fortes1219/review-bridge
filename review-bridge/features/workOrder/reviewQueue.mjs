@@ -10,9 +10,9 @@ import {
   samePath,
   timestampId,
   writeJsonAtomic,
-} from "./io.mjs";
-import { classifyReview } from "./policy.mjs";
-import { createWorkspaceDelta } from "./workspace-evidence.mjs";
+} from "../../service/records/fileStore.mjs";
+import { classifyReview } from "../../policy/policyChecks.mjs";
+import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
 export function validateHookPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {

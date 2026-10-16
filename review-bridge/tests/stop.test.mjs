@@ -6,9 +6,9 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { readIoEvents } from "../core/io-events.mjs";
-import { readJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
+import { readIoEvents } from "../service/records/ioEvents.mjs";
+import { readJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
 
 const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(runtimeSource, "..");

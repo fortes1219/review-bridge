@@ -87,7 +87,7 @@ test("a signed-out CLI gets a sign-in action and a thrown probe remains unknown"
 
 test("installer and installed runtime share one readiness implementation", async () => {
   const installer = await import("../installer/role-readiness.mjs");
-  const runtime = await import("../review-bridge/core/role-readiness.mjs");
+  const runtime = await import("../review-bridge/service/agentCli/providers.mjs");
   assert.equal(installer.inspectRoleReadiness, runtime.inspectRoleReadiness);
   assert.equal(installer.validateRoles, runtime.validateRoles);
   assert.equal(installer.PROVIDERS, runtime.PROVIDERS);

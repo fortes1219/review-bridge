@@ -5,16 +5,16 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { dispatchCommand } from "../core/commands.mjs";
-import { appendIoEvent, readIoEvents } from "../core/io-events.mjs";
-import { createTranslator, resolveLocale } from "../core/i18n.mjs";
-import { readJson, writeJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
-import { loadOrCreatePolicySnapshot } from "../core/policy-v4.mjs";
-import { classifyOutcome, composeSections, deliverOutcome, deliverPendingRuns, OUTCOMES, renderResult, RESULT_MAX_BYTES, shellQuote, stdoutLines, tokenRows, windowsArgQuote } from "../core/result-file.mjs";
-import { mergeRun } from "../core/retention.mjs";
-import { consumeRun, readRun, recordRunState, TERMINAL_RUN_STATUSES, withRunLock } from "../core/state-v4.mjs";
-import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../core/work-package-v4.mjs";
+import { dispatchCommand } from "../router/index.mjs";
+import { appendIoEvent, readIoEvents } from "../service/records/ioEvents.mjs";
+import { createTranslator, resolveLocale } from "../features/workOrder/i18n.mjs";
+import { readJson, writeJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
+import { loadOrCreatePolicySnapshot } from "../service/records/policySnapshots.mjs";
+import { classifyOutcome, composeSections, deliverOutcome, deliverPendingRuns, OUTCOMES, renderResult, RESULT_MAX_BYTES, shellQuote, stdoutLines, tokenRows, windowsArgQuote } from "../features/workOrder/delivery.mjs";
+import { mergeRun } from "../features/records/retention.mjs";
+import { consumeRun, readRun, recordRunState, TERMINAL_RUN_STATUSES, withRunLock } from "../service/records/runStore.mjs";
+import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");

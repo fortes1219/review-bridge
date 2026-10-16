@@ -6,12 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { inspectStateFilesystem } from "../review-bridge/core/filesystem-v4.mjs";
-import { getBridgePaths } from "../review-bridge/core/paths.mjs";
-import { canonical } from "../review-bridge/core/policy-v4.mjs";
+import { inspectStateFilesystem } from "../review-bridge/utils/filesystem.mjs";
+import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
+import { canonical } from "../review-bridge/service/records/policySnapshots.mjs";
 import {
   ACTIVE_RUN_STATUSES as RUN_ACTIVE, TERMINAL_RUN_STATUSES as RUN_TERMINAL, planUpgradeInvalidations, policyIdentity,
-} from "../review-bridge/core/state-v4.mjs";
+} from "../review-bridge/service/records/runStore.mjs";
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
 
@@ -587,12 +587,28 @@ function projectKey(project) {
   return path.basename(project).replace(/[^A-Za-z0-9._-]/g, "_") + "-" + sha256(project).slice(0, 12);
 }
 
+// The page-service modules of an installed runtime: this layout first, then the core/ layout of
+// runtimes installed before the feature-based move, so an older install can still be upgraded.
+const INSTALLED_SERVICE_LAYOUTS = Object.freeze([
+  { paths: "utils/paths.mjs", service: "features/setupCheck/pageService.mjs" },
+  { paths: "core/paths.mjs", service: "core/service.mjs" },
+]);
+
+export async function loadInstalledServiceModules(runtimeRoot) {
+  for (const layout of INSTALLED_SERVICE_LAYOUTS) {
+    const serviceFile = path.join(runtimeRoot, ...layout.service.split("/"));
+    if (!(await statOptional(serviceFile))) continue;
+    const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, ...layout.paths.split("/"))).href);
+    return { getBridgePaths, service: await import(pathToFileURL(serviceFile).href) };
+  }
+  return null;
+}
+
 async function runtimeModules(target) {
   const runtimeRoot = path.join(target, privateName, "tools", "review-bridge");
-  if (!(await statOptional(path.join(runtimeRoot, "core", "service.mjs")))) return null;
-  const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, "core", "paths.mjs")).href);
-  const service = await import(pathToFileURL(path.join(runtimeRoot, "core", "service.mjs")).href);
-  return { runtimeRoot, service, paths: getBridgePaths(target, runtimeRoot, { privateRootName: privateName }) };
+  const modules = await loadInstalledServiceModules(runtimeRoot);
+  if (!modules) return null;
+  return { runtimeRoot, service: modules.service, paths: modules.getBridgePaths(target, runtimeRoot, { privateRootName: privateName }) };
 }
 
 async function pageServiceRunning(target) {

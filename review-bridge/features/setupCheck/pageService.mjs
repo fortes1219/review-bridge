@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { fileExists, readJson, writeJsonAtomic } from "./io.mjs";
+import { fileExists, readJson, writeJsonAtomic } from "../../service/records/fileStore.mjs";
 
 // T0-01 contract: "running" means the recorded process answers on its recorded
 // port with its own service id. Nothing here decides from a pid alone, a file's

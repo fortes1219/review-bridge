@@ -5,17 +5,17 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { getBridgePaths } from "../core/paths.mjs";
-import { loadOrCreatePolicySnapshot } from "../core/policy-v4.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
+import { loadOrCreatePolicySnapshot } from "../service/records/policySnapshots.mjs";
 import {
   claimStartAuthorization,
   createAuthorization,
   createImmutableWorkPackage,
-} from "../core/state-v4.mjs";
+} from "../service/records/runStore.mjs";
 import {
   createV4WorkPackagePlan,
   v4WorkPackageStatus,
-} from "../core/work-package-v4.mjs";
+} from "../features/workOrder/workPackage.mjs";
 
 const sourceBridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cleanupRoots = new Set();

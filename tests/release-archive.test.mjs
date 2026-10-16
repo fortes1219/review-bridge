@@ -6,7 +6,7 @@ import { readZipEntryNames, validateReleaseEntryNames } from "../scripts/verify-
 const validEntries = [
   "bridge.mjs",
   "docs/architecture.mmd",
-  "review-bridge/core/commands.mjs",
+  "review-bridge/router/index.mjs",
   "review-bridge/templates/PACKAGE_README.md",
 ];
 

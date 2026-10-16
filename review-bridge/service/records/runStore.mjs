@@ -11,12 +11,12 @@ import {
   readJson,
   writeJsonAtomicDurable,
   writeJsonExclusiveDurable,
-} from "./io.mjs";
+} from "./fileStore.mjs";
 import {
   codexPolicyFromSnapshot,
   digest,
   loadOrCreatePolicySnapshot,
-} from "./policy-v4.mjs";
+} from "./policySnapshots.mjs";
 
 // The one list of run statuses; retention and the CLI read it from here so a new terminal
 // status cannot be forgotten by the archive again.

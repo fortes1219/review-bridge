@@ -5,11 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { dispatchCommand } from "../core/commands.mjs";
-import { writeJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
-import { assertNativeAllowed, checkReviewerProof, NATIVE_MODEL_COMMANDS, nativeGateDecision } from "../core/native-gate.mjs";
-import { writeServiceSession } from "../core/service.mjs";
+import { dispatchCommand } from "../router/index.mjs";
+import { writeJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
+import { assertNativeAllowed, checkReviewerProof, NATIVE_MODEL_COMMANDS, nativeGateDecision } from "../router/guards/nativeGate.mjs";
+import { writeServiceSession } from "../features/setupCheck/pageService.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tty = { stdinIsTTY: true, stdoutIsTTY: true };

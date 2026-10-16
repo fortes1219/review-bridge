@@ -13,11 +13,11 @@ import {
   writeJson,
   writeJsonAtomic,
   writeText,
-} from "./io.mjs";
-import { enqueueReview, hasPendingMessageHash } from "./queue.mjs";
+} from "../../service/records/fileStore.mjs";
+import { enqueueReview, hasPendingMessageHash } from "./reviewQueue.mjs";
 import { runReviewWorker } from "./review.mjs";
-import { appendIoEvent, readIoEvents, tokenTotal, usageTotalForRun } from "./io-events.mjs";
-import { killProcessTree, runProcess } from "./process.mjs";
+import { appendIoEvent, readIoEvents, tokenTotal, usageTotalForRun } from "../../service/records/ioEvents.mjs";
+import { killProcessTree, runProcess } from "../../service/agentCli/process.mjs";
 import {
   buildHandoff,
   buildReadList,
@@ -28,7 +28,7 @@ import {
   ReferenceChangedError,
   usageFromResult,
   verifyAndLoadReferences,
-} from "./prompt.mjs";
+} from "./writerPrompt.mjs";
 import {
   loadSchema,
   MALFORMED_EXIT_CODE,
@@ -38,12 +38,12 @@ import {
   validateWriterResult,
   WRITER_RESULT_SCHEMA,
   writerResultFromClaudeResult,
-} from "./typed-results.mjs";
-import { consumeRun, readRun } from "./state-v4.mjs";
-import { runGateA, sameDelta } from "./gate-a.mjs";
-import { createWorkspaceDelta } from "./workspace-evidence.mjs";
-import { validateWriterPolicy } from "./policy.mjs";
-import { classificationProfileFromSnapshot } from "./policy-v4.mjs";
+} from "./typedResults.mjs";
+import { consumeRun, readRun } from "../../service/records/runStore.mjs";
+import { runGateA, sameDelta } from "./gateA.mjs";
+import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
+import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
+import { classificationProfileFromSnapshot } from "../../service/records/policySnapshots.mjs";
 import {
   budgetStop,
   classifyProviderFailure,
@@ -51,7 +51,7 @@ import {
   failureSummary,
   readEvidenceTail,
   writeFailureRecord,
-} from "./provider-failure.mjs";
+} from "../../service/agentCli/providerFailure.mjs";
 
 const REVIEW_RESUME_LIMITATION = "Review-only resume is not implemented; the writer output is preserved "
   + "and is not re-run. Continuing requires a new human-owner authorization.";

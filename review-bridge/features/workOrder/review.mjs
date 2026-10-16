@@ -9,18 +9,18 @@ import {
   readJson,
   writeJson,
   writeText,
-} from "./io.mjs";
-import { appendIoEvent } from "./io-events.mjs";
-import { runProcess } from "./process.mjs";
-import { validateJobPolicy } from "./policy.mjs";
-import { buildReadList } from "./prompt.mjs";
+} from "../../service/records/fileStore.mjs";
+import { appendIoEvent } from "../../service/records/ioEvents.mjs";
+import { runProcess } from "../../service/agentCli/process.mjs";
+import { validateJobPolicy } from "../../policy/policyChecks.mjs";
+import { buildReadList } from "./writerPrompt.mjs";
 import {
   classifyProviderFailure,
   codexDiagnosticTrailer,
   readEvidenceTail,
   writeFailureRecord,
-} from "./provider-failure.mjs";
-import { parseReviewerUsage } from "./retention.mjs";
+} from "../../service/agentCli/providerFailure.mjs";
+import { parseReviewerUsage } from "../records/retention.mjs";
 import {
   controllerScopeResult,
   parseCodexJsonl,
@@ -28,7 +28,7 @@ import {
   REVIEW_RESULT_SCHEMA,
   reviewerUsageEvent,
   writerClaimMismatch,
-} from "./typed-results.mjs";
+} from "./typedResults.mjs";
 
 export const REVIEW_INPUT_OPEN = "=== review.input ===";
 export const REVIEW_INPUT_CLOSE = "=== end review.input ===";

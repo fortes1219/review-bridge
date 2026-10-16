@@ -1,14 +1,14 @@
 import path from "node:path";
 
-import { fileExists, listJson, readJson } from "./io.mjs";
-import { validateClassificationProfile } from "./policy.mjs";
+import { fileExists, listJson, readJson } from "../../service/records/fileStore.mjs";
+import { validateClassificationProfile } from "../../policy/policyChecks.mjs";
 import {
   classificationProfileFromSnapshot,
   codexPolicyFromSnapshot,
   loadOrCreatePolicySnapshot,
-} from "./policy-v4.mjs";
-import { listRuns } from "./state-v4.mjs";
-import { inspectStateFilesystem } from "./filesystem-v4.mjs";
+} from "../../service/records/policySnapshots.mjs";
+import { listRuns } from "../../service/records/runStore.mjs";
+import { inspectStateFilesystem } from "../../utils/filesystem.mjs";
 
 export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = process.version }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {

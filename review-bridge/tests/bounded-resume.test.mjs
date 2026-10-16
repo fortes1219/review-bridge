@@ -5,16 +5,16 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runBoundedResume } from "../core/bounded-resume.mjs";
-import { readIoEvents } from "../core/io-events.mjs";
-import { fileExists, readJson, writeJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
-import { createRunRuntimeState, readRun } from "../core/state-v4.mjs";
+import { runBoundedResume } from "../features/workOrder/writerLoop.mjs";
+import { readIoEvents } from "../service/records/ioEvents.mjs";
+import { fileExists, readJson, writeJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
+import { createRunRuntimeState, readRun } from "../service/records/runStore.mjs";
 import {
   authorizeV4WorkPackage,
   createV4WorkPackagePlan,
   v4WorkPackageStatus,
-} from "../core/work-package-v4.mjs";
+} from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CODEX_LIMIT_STDERR = "tool output\nERROR: You’ve hit your usage limit. Upgrade to Pro "

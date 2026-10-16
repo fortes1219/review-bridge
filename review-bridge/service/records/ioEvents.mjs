@@ -4,7 +4,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { appendJsonLineDurable } from "./io.mjs";
+import { appendJsonLineDurable } from "./fileStore.mjs";
 
 export const IO_EVENT_SCHEMA_VERSION = 1;
 export const IO_EVENT_TYPES = Object.freeze([

@@ -5,11 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { evaluateRule, GateAError, NOT_APPLICABLE_LABEL, recheckGateA, runGateA, sameDelta, selectGateA } from "../core/gate-a.mjs";
-import { readJson, writeJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
-import { mergePolicy } from "../core/policy-v4.mjs";
-import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../core/work-package-v4.mjs";
+import { evaluateRule, GateAError, NOT_APPLICABLE_LABEL, recheckGateA, runGateA, sameDelta, selectGateA } from "../features/workOrder/gateA.mjs";
+import { readJson, writeJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
+import { mergePolicy } from "../service/records/policySnapshots.mjs";
+import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");
@@ -187,7 +187,7 @@ test("the tail is only the last 4 KB of a large log, read from the end", async (
 
 test("a failed taskkill is reported as a failed tree kill, never as a cleared tree", { skip: process.platform !== "win32" }, async () => {
   const { spawn } = await import("node:child_process");
-  const { killProcessTree } = await import("../core/process.mjs");
+  const { killProcessTree } = await import("../service/agentCli/process.mjs");
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"], { stdio: "ignore", windowsHide: true });
   try {
     const result = await killProcessTree(child.pid, { taskkill: "taskkill-that-does-not-exist.exe", waitMs: 500 });

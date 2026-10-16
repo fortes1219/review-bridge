@@ -11,13 +11,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyNeutralInstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeRollbackPlan,
-  MAINTENANCE_MARKER, planNeutralInstall, planNeutralUpgrade, planNeutralUpgradeRollback, PROOF_LOSS_LINE, TRANSIENT_FILES,
+  loadInstalledServiceModules, MAINTENANCE_MARKER, planNeutralInstall, planNeutralUpgrade, planNeutralUpgradeRollback, PROOF_LOSS_LINE, TRANSIENT_FILES,
 } from "../installer/neutral-install.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bridge = path.join(packageRoot, "bridge.mjs");
 const sourceRuntime = path.join(packageRoot, "review-bridge");
-const sourceModule = (name) => pathToFileURL(path.join(sourceRuntime, "core", name)).href;
+const sourceModule = (relative) => pathToFileURL(path.join(sourceRuntime, ...relative.split("/"))).href;
 
 // Every default backup root points into a temporary folder; nothing touches the real user profile.
 // One default backup root per test process. Test files that share a process (--test-isolation=none)
@@ -76,10 +76,9 @@ async function installWithService(root) {
 
 async function serviceCheck(root) {
   const runtimeRoot = runtimeOf(root);
-  if (!(await exists(path.join(runtimeRoot, "core", "service.mjs")))) return { running: false };
-  const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, "core", "paths.mjs")).href);
-  const { checkService } = await import(pathToFileURL(path.join(runtimeRoot, "core", "service.mjs")).href);
-  return await checkService(getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }));
+  const modules = await loadInstalledServiceModules(runtimeRoot);
+  if (!modules) return { running: false };
+  return await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }));
 }
 
 async function serviceRunning(root) {
@@ -216,12 +215,12 @@ function crashAt(root, hook) {
 }
 
 async function v4(root, runtimeRoot = runtimeOf(root)) {
-  const { getBridgePaths } = await import(sourceModule("paths.mjs"));
+  const { getBridgePaths } = await import(sourceModule("utils/paths.mjs"));
   return {
     paths: getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }),
-    ...(await import(sourceModule("work-package-v4.mjs"))),
-    ...(await import(sourceModule("state-v4.mjs"))),
-    ...(await import(sourceModule("policy-v4.mjs"))),
+    ...(await import(sourceModule("features/workOrder/workPackage.mjs"))),
+    ...(await import(sourceModule("service/records/runStore.mjs"))),
+    ...(await import(sourceModule("service/records/policySnapshots.mjs"))),
   };
 }
 

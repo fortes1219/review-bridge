@@ -5,8 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { createHash } from "node:crypto";
-import { buildProbeArgs, createReviewerProbeService, isFixedWriteAttempt, redactProbeText, runReviewerProbe } from "../core/reviewer-probe.mjs";
-import { localDateKey } from "../core/retention.mjs";
+import { buildProbeArgs, createReviewerProbeService, isFixedWriteAttempt, redactProbeText, runReviewerProbe } from "../features/setupCheck/reviewerProbe.mjs";
+import { localDateKey } from "../features/records/retention.mjs";
 
 const signedIn = (executable) => executable.endsWith("codex")
   ? { status: 0, stdout: "", stderr: "Logged in using ChatGPT\n" }

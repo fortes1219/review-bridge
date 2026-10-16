@@ -5,7 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas");
+const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "schemas");
 
 export const WRITER_RESULT_SCHEMA = path.join(schemasDir, "writer.result.schema.json");
 export const REVIEW_RESULT_SCHEMA = path.join(schemasDir, "review.result.schema.json");

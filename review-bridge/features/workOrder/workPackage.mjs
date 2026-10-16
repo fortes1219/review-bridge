@@ -3,8 +3,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { assertUnder, fileExists, readJson, samePath, writeJson, writeText } from "./io.mjs";
-import { digest, loadOrCreatePolicySnapshot } from "./policy-v4.mjs";
+import { assertUnder, fileExists, readJson, samePath, writeJson, writeText } from "../../service/records/fileStore.mjs";
+import { digest, loadOrCreatePolicySnapshot } from "../../service/records/policySnapshots.mjs";
 import {
   claimStartAuthorization,
   consumeRun,
@@ -14,10 +14,10 @@ import {
   loadControlView,
   readRun,
   recordRunState,
-} from "./state-v4.mjs";
-import { hasWorkOrderMarkers, MESSAGES as ORDER_MESSAGES, parseWorkOrder, WorkOrderError } from "./work-order.mjs";
-import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspace-evidence.mjs";
-import { recheckGateA, selectGateA } from "./gate-a.mjs";
+} from "../../service/records/runStore.mjs";
+import { hasWorkOrderMarkers, MESSAGES as ORDER_MESSAGES, parseWorkOrder, WorkOrderError } from "./workOrderParser.mjs";
+import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspaceEvidence.mjs";
+import { recheckGateA, selectGateA } from "./gateA.mjs";
 
 // T0-03 C2.1: fixed, in code, listed in every plan. Never from a model.
 export const FORBIDDEN_PATHS = Object.freeze([

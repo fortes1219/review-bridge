@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { getBridgePaths } from "../core/paths.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
 import {
   buildHandoff,
   buildReadList,
@@ -17,7 +17,7 @@ import {
   ReferenceChangedError,
   usageFromResult,
   verifyAndLoadReferences,
-} from "../core/prompt.mjs";
+} from "../features/workOrder/writerPrompt.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { createHash } = await import("node:crypto");

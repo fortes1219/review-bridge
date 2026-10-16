@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 
-import { getBridgePaths } from "../review-bridge/core/paths.mjs";
+import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
 
 test("neutral Bridge state is separate from provider-specific directories", () => {
   const target = path.resolve("sample-project");

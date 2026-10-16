@@ -5,15 +5,15 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { readJson, writeJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
+import { readJson, writeJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
 import {
   budgetStop,
   classifyProviderFailure,
   codexDiagnosticTrailer,
   failureReasons,
-} from "../core/provider-failure.mjs";
-import { runReviewWorker } from "../core/review.mjs";
+} from "../service/agentCli/providerFailure.mjs";
+import { runReviewWorker } from "../features/workOrder/review.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 

@@ -5,8 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { fileExists, writeJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
+import { fileExists, writeJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
 import {
   formatPruneSummary,
   localDateKey,
@@ -18,8 +18,8 @@ import {
   removeRun,
   RetentionConfigError,
   retentionDays,
-} from "../core/retention.mjs";
-import { TERMINAL_RUN_STATUSES } from "../core/state-v4.mjs";
+} from "../features/records/retention.mjs";
+import { TERMINAL_RUN_STATUSES } from "../service/records/runStore.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DAY_MS = 86_400_000;

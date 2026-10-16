@@ -7,7 +7,7 @@
 // records that account and authorized_via records how it was confirmed, neither proves who pressed
 // the key. Every other model entry point stays closed in native mode.
 
-import { checkService } from "./service.mjs";
+import { checkService } from "../../features/setupCheck/pageService.mjs";
 
 export const NATIVE_MODEL_COMMANDS = Object.freeze(["work-start", "review", "bounded-resume"]);
 

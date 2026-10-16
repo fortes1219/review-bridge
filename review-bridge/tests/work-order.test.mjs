@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseWorkOrder, WorkOrderError } from "../core/work-order.mjs";
+import { parseWorkOrder, WorkOrderError } from "../features/workOrder/workOrderParser.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 

@@ -1,6 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { assertUnder, fileExists, writeJson } from "./io.mjs";
+import { assertUnder, fileExists, writeJson } from "../records/fileStore.mjs";
 
 export const failureReasons = Object.freeze([
   "provider_usage_limit",

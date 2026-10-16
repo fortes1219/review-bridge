@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { assertLoopbackBind, findPortOwner, portBumpNotice, startWatchServer, TOKEN_HEADER } from "../core/watch.mjs";
+import { assertLoopbackBind, findPortOwner, portBumpNotice, startWatchServer, TOKEN_HEADER } from "../features/setupCheck/watchServer.mjs";
 
 const uiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "ui");
 

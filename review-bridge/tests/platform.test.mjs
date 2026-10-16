@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveAdapterModule, selectAdapter, targetKey } from "../core/platform.mjs";
+import { resolveAdapterModule, selectAdapter, targetKey } from "../router/platform.mjs";
 import * as darwinAdapter from "../platforms/darwin-arm64/adapter.mjs";
 
 const manifest = {

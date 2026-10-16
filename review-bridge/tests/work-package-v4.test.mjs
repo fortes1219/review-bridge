@@ -5,11 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { readJson, writeJson } from "../core/io.mjs";
-import { getBridgePaths } from "../core/paths.mjs";
-import { readRun } from "../core/state-v4.mjs";
-import { authorizeV4WorkPackage, createV4WorkPackagePlan, FORBIDDEN_PATHS } from "../core/work-package-v4.mjs";
-import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath } from "../core/workspace-evidence.mjs";
+import { readJson, writeJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
+import { readRun } from "../service/records/runStore.mjs";
+import { authorizeV4WorkPackage, createV4WorkPackagePlan, FORBIDDEN_PATHS } from "../features/workOrder/workPackage.mjs";
+import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath } from "../features/workOrder/workspaceEvidence.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");

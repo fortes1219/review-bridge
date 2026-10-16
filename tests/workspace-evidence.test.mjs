@@ -4,12 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getBridgePaths } from "../review-bridge/core/paths.mjs";
+import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
 import {
   createWorkspaceBaseline,
   createWorkspaceDelta,
   matchesAllowedPath,
-} from "../review-bridge/core/workspace-evidence.mjs";
+} from "../review-bridge/features/workOrder/workspaceEvidence.mjs";
 
 test("allowed path matching supports files and directory prefixes", () => {
   assert.equal(matchesAllowedPath("src/App.vue", ["src"]), true);

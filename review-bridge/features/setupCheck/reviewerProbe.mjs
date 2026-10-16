@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_RETENTION_DAYS, localDateKey, pruneProbeRecords } from "./retention.mjs";
-import { inspectRoleReadiness } from "./role-readiness.mjs";
+import { DEFAULT_RETENTION_DAYS, localDateKey, pruneProbeRecords } from "../records/retention.mjs";
+import { inspectRoleReadiness } from "../../service/agentCli/providers.mjs";
 
 // Only adapters that run the reviewer under a provider-enforced sandbox and emit
 // per-command evidence can prove write denial. Others stay unproven.

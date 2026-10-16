@@ -2,25 +2,25 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { parseOptions } from "./args.mjs";
-import { runBoundedResume, stopRun, validateBoundedResume } from "./bounded-resume.mjs";
-import { GateAError } from "./gate-a.mjs";
-import { assertNativeAllowed, assertReviewerProof } from "./native-gate.mjs";
-import { deliverOutcome, stdoutLines } from "./result-file.mjs";
-import { getBridgePaths } from "./paths.mjs";
-import { queueStatus, waitForPending } from "./queue.mjs";
-import { assertUnder, fileExists, readJson } from "./io.mjs";
-import { runReviewWorker, validateReviewWorker } from "./review.mjs";
-import { createReviewerProbeService } from "./reviewer-probe.mjs";
-import { formatPruneSummary, probeAuditDir, prune, removeRun, RetentionConfigError, retentionDays } from "./retention.mjs";
-import { removeServiceSession, serviceDown, serviceFiles, serviceStatus, serviceUp, writeServiceSession } from "./service.mjs";
-import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watch.mjs";
+import { runBoundedResume, stopRun, validateBoundedResume } from "../features/workOrder/writerLoop.mjs";
+import { GateAError } from "../features/workOrder/gateA.mjs";
+import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mjs";
+import { deliverOutcome, stdoutLines } from "../features/workOrder/delivery.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
+import { queueStatus, waitForPending } from "../features/workOrder/reviewQueue.mjs";
+import { assertUnder, fileExists, readJson } from "../service/records/fileStore.mjs";
+import { runReviewWorker, validateReviewWorker } from "../features/workOrder/review.mjs";
+import { createReviewerProbeService } from "../features/setupCheck/reviewerProbe.mjs";
+import { formatPruneSummary, probeAuditDir, prune, removeRun, RetentionConfigError, retentionDays } from "../features/records/retention.mjs";
+import { removeServiceSession, serviceDown, serviceFiles, serviceStatus, serviceUp, writeServiceSession } from "../features/setupCheck/pageService.mjs";
+import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "../features/setupCheck/watchServer.mjs";
 import {
   authorizeV4WorkPackage,
   cancelV4WorkPackage,
   createV4WorkPackagePlan,
   v4WorkPackageStatus,
-} from "./work-package-v4.mjs";
-import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "./state-v4.mjs";
+} from "../features/workOrder/workPackage.mjs";
+import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "../service/records/runStore.mjs";
 
 const schemas = {
   review: {

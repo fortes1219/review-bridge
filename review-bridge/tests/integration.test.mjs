@@ -4,8 +4,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { readJson } from "../core/io.mjs";
-import { validateWriterPolicy } from "../core/policy.mjs";
+import { readJson } from "../service/records/fileStore.mjs";
+import { validateWriterPolicy } from "../policy/policyChecks.mjs";
 
 function makeControl(maxCalls = 1) {
   return {

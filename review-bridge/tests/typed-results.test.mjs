@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { enqueueReview } from "../core/queue.mjs";
+import { enqueueReview } from "../features/workOrder/reviewQueue.mjs";
 import {
   controllerScopeResult,
   parseCodexJsonl,
@@ -15,7 +15,7 @@ import {
   validateWriterResult,
   writerClaimMismatch,
   writerResultFromClaudeResult,
-} from "../core/typed-results.mjs";
+} from "../features/workOrder/typedResults.mjs";
 
 function writerResult(overrides = {}) {
   return {
@@ -159,7 +159,7 @@ test("Q10 a Stop-hook message during a v4 run is not a submission: harness_drive
 });
 
 test("Q8b a missing or partial usage object is unknown, never zero", async () => {
-  const { usageFromResult } = await import("../core/prompt.mjs");
+  const { usageFromResult } = await import("../features/workOrder/writerPrompt.mjs");
   const none = usageFromResult({ type: "result", num_turns: 1 }, { call: 1, durationMs: 1 });
   assert.equal(none.parse_error, true);
   assert.deepEqual(none.missing, ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]);
@@ -175,7 +175,7 @@ test("Q8b a missing or partial usage object is unknown, never zero", async () =>
   const real = reviewerUsageEvent({ usage: { input_tokens: 15573, cached_input_tokens: 12544, output_tokens: 5, cache_write_input_tokens: 0, reasoning_output_tokens: 0 }, call: 1, durationMs: 1 });
   assert.equal(real.parse_error, undefined);
   // The token table treats both as unknown.
-  const { tokenRows } = await import("../core/result-file.mjs");
+  const { tokenRows } = await import("../features/workOrder/delivery.mjs");
   const rows = tokenRows([{ event: "task.input", call: 1 }, none, { event: "review.input", call: 1 }, { event: "review.result", call: 1 }, empty]);
   assert.equal(rows.writer.complete, false);
   assert.equal(rows.reviewer.complete, false);

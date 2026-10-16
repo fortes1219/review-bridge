@@ -10,7 +10,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
-  applyNeutralInstall, applyNeutralUninstall, defaultBackupRoot, MAINTENANCE_MARKER,
+  applyNeutralInstall, applyNeutralUninstall, defaultBackupRoot, loadInstalledServiceModules, MAINTENANCE_MARKER,
   planNeutralInstall, planNeutralUninstall,
 } from "../installer/neutral-install.mjs";
 
@@ -72,10 +72,9 @@ async function installWithService(root) {
 
 async function serviceRunning(root) {
   const runtimeRoot = path.join(root, ".review-bridge", "tools", "review-bridge");
-  if (!(await fsp.stat(path.join(runtimeRoot, "core", "service.mjs")).catch(() => null))) return false;
-  const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, "core", "paths.mjs")).href);
-  const { checkService } = await import(pathToFileURL(path.join(runtimeRoot, "core", "service.mjs")).href);
-  return (await checkService(getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }))).running;
+  const modules = await loadInstalledServiceModules(runtimeRoot);
+  if (!modules) return false;
+  return (await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }))).running;
 }
 
 async function addUserData(root) {
@@ -223,9 +222,9 @@ test("V3 maintenance blocks new work, and a run claimed as the marker appears is
   const root = await workspace(t);
   await install(root);
   const runtimeRoot = path.join(root, ".review-bridge", "tools", "review-bridge");
-  const { getBridgePaths } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "core", "paths.mjs")).href);
-  const { createV4WorkPackagePlan, authorizeV4WorkPackage, cancelIfMaintenance } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "core", "work-package-v4.mjs")).href);
-  const { readRun } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "core", "state-v4.mjs")).href);
+  const { getBridgePaths } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "utils", "paths.mjs")).href);
+  const { createV4WorkPackagePlan, authorizeV4WorkPackage, cancelIfMaintenance } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "features", "workOrder", "workPackage.mjs")).href);
+  const { readRun } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "service", "records", "runStore.mjs")).href);
   const paths = getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" });
   const makePlan = async (id) => createV4WorkPackagePlan({
     paths, task: "Update package.json only.", owner: "o", workPackage: id, breakpoint: "b", changeTypes: "docs",

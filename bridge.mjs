@@ -9,11 +9,11 @@ import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { assertSupportedStateFilesystem } from "./review-bridge/core/filesystem-v4.mjs";
+import { assertSupportedStateFilesystem } from "./review-bridge/utils/filesystem.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
 import {
   applyNeutralInstall, applyNeutralUninstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult,
-  formatUpgradeRollbackPlan, formatUpgradeRollbackResult, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
+  formatUpgradeRollbackPlan, formatUpgradeRollbackResult, loadInstalledServiceModules, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
   rollbackFreshNeutralInstall, verifyNeutralInstall,
 } from "./installer/neutral-install.mjs";
 
@@ -336,9 +336,10 @@ async function startService(target, fakeCli) {
   run(process.execPath, [path.join(runtimeRoot, "bootstrap.mjs"), "up", ...(fakeCli ? ["--fake-cli"] : [])], {
     cwd: target, expected: [0, 1, 2],
   });
-  const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, "core", "paths.mjs")).href);
-  const { checkService, serviceFiles } = await import(pathToFileURL(path.join(runtimeRoot, "core", "service.mjs")).href);
-  const paths = getBridgePaths(target, runtimeRoot, { privateRootName: ".review-bridge" });
+  const modules = await loadInstalledServiceModules(runtimeRoot);
+  if (!modules) throw new Error("The installed runtime has no page service module.");
+  const { checkService, serviceFiles } = modules.service;
+  const paths = modules.getBridgePaths(target, runtimeRoot, { privateRootName: ".review-bridge" });
   const check = await checkService(paths);
   // Display only: the port-bump line the watch process logged.
   const stdoutLog = await fsp.readFile(serviceFiles(paths).stdoutPath, "utf8").catch(() => "");
