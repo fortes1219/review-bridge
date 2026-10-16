@@ -52,6 +52,7 @@ if (mode === "stream") {
     { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "README.md" } }] } },
     { type: "result", subtype: "success", session_id: session, is_error: false, num_turns: 2, total_cost_usd: 0.01,
       usage: { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: tokens, output_tokens: 3 },
+      modelUsage: { "fake-opus": { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: tokens, outputTokens: 3 } },
       result: "report\\nCODEX_REVIEW_REQUIRED: true", ...typed },
   ];
   for (const line of lines) process.stdout.write(JSON.stringify(line) + "\\n");
@@ -315,6 +316,15 @@ test("writer invocation passes the default --model opus and the bounded state re
   assert.equal(exitCode, 0);
   assert.equal(claudeArgs[claudeArgs.indexOf("--model") + 1], "opus");
   assert.equal(status.latest_state.writer_model, "opus");
+});
+
+test("the writer may start sub-agents by default; a project override can still disallow Agent", async (t) => {
+  const open = await start(t);
+  assert.equal(open.exitCode, 0);
+  assert.equal(open.claudeArgs.includes("--disallowedTools"), false);
+  const closed = await start(t, { override: { schema_version: 4, writer: { disallowed_tools: ["Agent"] } } });
+  assert.equal(closed.exitCode, 0);
+  assert.equal(closed.claudeArgs[closed.claudeArgs.indexOf("--disallowedTools") + 1], "Agent");
 });
 
 test("project override sets the writer model; failure states record it too", async (t) => {

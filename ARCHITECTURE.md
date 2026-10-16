@@ -80,7 +80,8 @@ Features never import each other. When one flow needs another feature's capabili
 
 | Module | Holds |
 |---|---|
-| `agentCli/process` | Spawning and stopping child processes |
+| `agentCli/process` | Spawning child processes and stopping a whole process tree (`taskkill /T` on Windows; on POSIX the process group of a shell run, or every descendant found with `ps` for a CLI started directly) |
+| `agentCli/codexAppServer` | Codex through `codex app-server`: one thread per call, every sub-agent thread followed, per-thread usage added once, every running turn interrupted on stop. A call is completed only when the root turn completed and every announced sub-agent's turn has ended; an interrupted or failed root ends the call with that status. Usage is complete only when every thread reported its total and every turn completed; otherwise it is recorded as partial. Not yet called by the writer loop (see section 7) |
 | `agentCli/providers` | The provider list, role validation, CLI sign-in status checks |
 | `agentCli/providerFailure` | Reading a CLI failure: usage limits, reset hints, evidence tails |
 | `agentCli/usage` | Token usage from the writer and reviewer CLI output |
@@ -116,7 +117,20 @@ The same entry also re-exports three pure tools for the installer: `getBridgePat
 
 As a result, only writer `claude` with reviewer `codex` runs as configured. With `codex` in both roles, the reviewer check can pass and native start is allowed, but the writer that runs is `claude`. This is an open defect and must be closed before any other pairing is described as supported.
 
-## 8. Checking the structure
+## 8. Sub-agents and usage
+
+The writer may hand parts of one work order to sub-agents in parallel; they share the run's scope and budget, and the writer returns one `writer.result`. A project override can still disallow the `Agent` tool. The reviewer is always a separate session started by the controller; a sub-agent's opinion is never a review. These were measured on 2026-10-17 on Windows with real CLIs:
+
+| | Claude CLI 2.1.280 | Codex CLI 0.162.0-alpha.17.2 |
+|---|---|---|
+| Writer usage source | The final `result`'s `modelUsage`, all models added (it includes sub-agents; `usage` is only the last turn) | `codex app-server`: each thread's latest `thread/tokenUsage/updated` total, added once per thread |
+| Sub-agent threads | Stream messages carry `parent_tool_use_id` | Linked by `subAgentActivity` items and a shared `rootTurnId`; no `thread/started` is sent for them |
+| `codex exec` | — | `--ephemeral` cannot start sub-agents, and `--json` shows neither the spawn nor the sub-agents' usage |
+| Stopping | `taskkill /T` stops the sub-agents' commands | Interrupting the root turn leaves sub-agent turns running; every active turn is interrupted, then the tree is stopped |
+
+A call that ends without a final result (stopped, timed out, interrupted) still records what it spent, from the stream's per-message usage or the threads that reported, marked `partial`. A run with a partial record cannot claim that the token ceilings held exactly. POSIX stopping has not been exercised on a POSIX host.
+
+## 9. Checking the structure
 
 - `npm test` runs the installer tests in `tests/`; `node --test review-bridge/tests/*.test.mjs` runs the runtime tests.
 - The test files have not yet been regrouped by layer.

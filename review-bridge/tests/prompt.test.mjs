@@ -15,6 +15,7 @@ import {
   MAX_HANDOFF_CHARS,
   parseClaudeStream,
   ReferenceChangedError,
+  partialUsageFromStream,
   usageFromResult,
   verifyAndLoadReferences,
 } from "../features/workOrder/writerPrompt.mjs";
@@ -59,6 +60,11 @@ test("P1 the prompt is composed only from the sealed package: header, rules, tas
   const prompt = composeWriterPrompt({ workPackage: pkg, control: { breakpoint: "return after review" }, runId: "run-1", call: 1, taskInput, references, rulesText: pkg.rules.text });
   const lines = prompt.split("\n");
   assert.equal(lines[0], "[REVIEW_BRIDGE_MODE: WRITER_ONLY]");
+  // Sub-agents may implement; the policy's one local consistency pass stays, and it is not a review.
+  assert.match(prompt, /hand separate parts of this work to sub-agents in parallel/);
+  assert.match(prompt, /one bounded local consistency pass/);
+  assert.match(prompt, /That pass is not a review/);
+  assert.match(prompt, /Do not stage, commit, push, deploy or release\./);
   assert.ok(prompt.indexOf("=== RULES") < prompt.indexOf("=== TASK"));
   assert.ok(prompt.indexOf("=== TASK") < prompt.indexOf("=== src/game/farm.js (" + sha("// farm\n").slice(0, 12) + ") ==="));
   assert.match(prompt, /不 commit。/);
@@ -129,7 +135,7 @@ test("P4a stream-json is parsed line by line; a single JSON object is accepted a
     JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "src/game/farm.js" } }] } }),
     "garbage line",
     JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "thinking" }, { type: "tool_use", name: "Grep", input: { pattern: "farm", path: "src" } }] } }),
-    JSON.stringify({ type: "result", subtype: "success", session_id: "s", num_turns: 4, usage: { input_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 3, output_tokens: 4 }, total_cost_usd: 0.1, result: "ok" }),
+    JSON.stringify({ type: "result", subtype: "success", session_id: "s", num_turns: 4, usage: { input_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 3, output_tokens: 4 }, modelUsage: { "m": { inputTokens: 1, cacheReadInputTokens: 2, cacheCreationInputTokens: 3, outputTokens: 4 } }, total_cost_usd: 0.1, result: "ok" }),
   ].join("\n");
   const parsed = parseClaudeStream(stream);
   assert.equal(parsed.unparsable_lines, 1);
@@ -137,9 +143,48 @@ test("P4a stream-json is parsed line by line; a single JSON object is accepted a
   assert.equal(parsed.result.num_turns, 4);
   const usage = usageFromResult(parsed.result, { call: 1, durationMs: 50 });
   assert.deepEqual(usage.tokens, { input: 1, cache_write: 3, cache_read: 2, output: 4 });
-  assert.equal(usage.source, "cli_json");
+  assert.equal(usage.source, "cli_model_usage");
   const legacy = parseClaudeStream(JSON.stringify({ session_id: "s", is_error: false, result: "r" }));
   assert.equal(legacy.result.result, "r");
   assert.deepEqual(legacy.reads, []);
   assert.equal(parseClaudeStream("not json at all").result, null);
+});
+
+// The final result of a real CLI 2.1.280 call (2026-10-17) whose main model started one
+// sub-agent: `usage` (17,993) is only the last turn; `modelUsage` (64,242) is the whole call.
+test("P4c writer usage is the final result's modelUsage, which includes sub-agents; usage alone is the last turn", () => {
+  const measured = {
+    type: "result", num_turns: 1, total_cost_usd: 0.05518155,
+    usage: { input_tokens: 10, cache_creation_input_tokens: 408, cache_read_input_tokens: 17528, output_tokens: 47 },
+    modelUsage: { "claude-haiku-4-5-20251001": { inputTokens: 980, cacheCreationInputTokens: 28229, cacheReadInputTokens: 34633, outputTokens: 400 } },
+  };
+  const usage = usageFromResult(measured, { call: 1, durationMs: 1 });
+  assert.deepEqual(usage.tokens, { input: 980, cache_write: 28229, cache_read: 34633, output: 400 });
+  assert.equal(Object.values(usage.tokens).reduce((a, b) => a + b, 0), 64242);
+  assert.deepEqual(usage.models, ["claude-haiku-4-5-20251001"]);
+  assert.equal(usage.parse_error, undefined);
+  // Two models in one call are added together.
+  const two = usageFromResult({ modelUsage: {
+    a: { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: 3, outputTokens: 4 },
+    b: { inputTokens: 10, cacheCreationInputTokens: 20, cacheReadInputTokens: 30, outputTokens: 40 },
+  } }, { call: 1, durationMs: 1 });
+  assert.deepEqual(two.tokens, { input: 11, cache_write: 22, cache_read: 33, output: 44 });
+});
+
+test("P4d a call with no final result keeps the stream's per-message usage as a partial record", () => {
+  const message = (id, usage, parent = null) => JSON.stringify({ type: "assistant", ...(parent ? { parent_tool_use_id: parent } : {}), message: { id, usage, content: [] } });
+  const stream = [
+    message("m1", { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: 3, output_tokens: 4 }),
+    // The CLI repeats a message once per content block; it counts once.
+    message("m1", { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: 3, output_tokens: 4 }),
+    message("s1", { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 5 }, "toolu_1"),
+  ].join("\n");
+  const parsed = parseClaudeStream(stream);
+  assert.equal(parsed.result, null);
+  assert.deepEqual(parsed.streamUsage, { messages: 2, subagent_messages: 1, tokens: { input: 11, cache_write: 2, cache_read: 3, output: 9 } });
+  const partial = partialUsageFromStream(parsed.streamUsage, { call: 2, durationMs: 5 });
+  assert.equal(partial.partial, true);
+  assert.equal(partial.parse_error, true);
+  assert.deepEqual(partial.missing, ["final_result"]);
+  assert.deepEqual(partial.tokens, { input: 11, cache_write: 2, cache_read: 3, output: 9 });
 });

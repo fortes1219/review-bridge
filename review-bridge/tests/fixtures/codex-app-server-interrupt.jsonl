@@ -1,0 +1,8 @@
+{"root_thread_id":"thread-root","recorded_with":"codex-cli 0.162.0-alpha.17.2","recorded_at":"2026-10-17","ids":"synthetic"}
+{"method":"turn/started","params":{"threadId":"thread-root","turn":{"id":"turn-root","rootTurnId":"turn-root","status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"thread-root","turnId":"turn-root","item":{"type":"subAgentActivity","id":"item-1","kind":"started","agentThreadId":"thread-sleep_task","agentPath":"/root/sleep_task"}}}
+{"method":"item/completed","params":{"threadId":"thread-root","turnId":"turn-root","item":{"type":"subAgentActivity","id":"item-1","kind":"started","agentThreadId":"thread-sleep_task","agentPath":"/root/sleep_task"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-root","turnId":"turn-root","tokenUsage":{"total":{"totalTokens":17194,"inputTokens":17145,"cachedInputTokens":17024,"cacheWriteInputTokens":0,"outputTokens":49,"reasoningOutputTokens":0},"last":{"totalTokens":17194,"inputTokens":17145,"cachedInputTokens":17024,"cacheWriteInputTokens":0,"outputTokens":49,"reasoningOutputTokens":0}}}}
+{"method":"turn/started","params":{"threadId":"thread-sleep_task","turn":{"id":"turn-sleep_task","rootTurnId":"turn-root","status":"inProgress"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-root","turnId":"turn-root","tokenUsage":{"total":{"totalTokens":34431,"inputTokens":34361,"cachedInputTokens":34048,"cacheWriteInputTokens":0,"outputTokens":70,"reasoningOutputTokens":0},"last":{"totalTokens":17237,"inputTokens":17216,"cachedInputTokens":17024,"cacheWriteInputTokens":0,"outputTokens":21,"reasoningOutputTokens":0}}}}
+{"method":"turn/completed","params":{"threadId":"thread-root","turn":{"id":"turn-root","status":"interrupted"}}}

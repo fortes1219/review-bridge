@@ -95,14 +95,45 @@ function isGroupAlive(pgid) {
   }
 }
 
+// Every descendant of `pid` in a `ps -A -o pid= -o ppid=` listing, children before grandchildren.
+export function descendantsOf(pid, rows) {
+  const children = new Map();
+  for (const [child, parent] of rows) {
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(child);
+  }
+  const found = [];
+  const queue = [...(children.get(pid) || [])];
+  while (queue.length) {
+    const next = queue.shift();
+    if (found.includes(next) || next === pid) continue;
+    found.push(next);
+    queue.push(...(children.get(next) || []));
+  }
+  return found;
+}
+
+function posixProcessRows(ps = "ps") {
+  const listed = spawnSync(ps, ["-A", "-o", "pid=", "-o", "ppid="], { encoding: "utf8" });
+  if (listed.error || listed.status !== 0) return null;
+  return listed.stdout.split(/\r?\n/).map((line) => line.trim().split(/\s+/).map(Number))
+    .filter(([child, parent]) => Number.isInteger(child) && Number.isInteger(parent));
+}
+
 // T0-04 D5.2: terminate a recorded process and everything it spawned. On win32 taskkill /T
-// walks the tree. On POSIX the tree is reachable only when `pid` leads its own process group
-// (`group: true`, as shell runs are spawned detached); the wait then covers every member.
-// Verified on win32 (2026-10-13); the POSIX group path has not been exercised on a POSIX host.
-export async function killProcessTree(pid, { platform = process.platform, waitMs = 5_000, group = false, taskkill = "taskkill.exe" } = {}) {
+// walks the tree (verified 2026-10-13, and 2026-10-17 with Claude and Codex sub-agents running
+// commands). On POSIX a shell run leads its own process group (`group: true`) and the group is
+// signalled; a CLI started directly keeps the caller's group, so its descendants are listed with
+// `ps` and signalled before it. Neither POSIX path has been exercised on a POSIX host.
+export async function killProcessTree(pid, { platform = process.platform, waitMs = 5_000, group = false, taskkill = "taskkill.exe", ps = "ps" } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return { killed: false, reason: "invalid_pid" };
   const posixGroup = platform !== "win32" && group;
-  const alive = () => (posixGroup ? isGroupAlive(pid) || isPidAlive(pid) : isPidAlive(pid));
+  const posixTree = platform !== "win32" && !group;
+  const rows = posixTree ? posixProcessRows(ps) : null;
+  const descendants = rows ? descendantsOf(pid, rows) : [];
+  const alive = () => (posixGroup
+    ? isGroupAlive(pid) || isPidAlive(pid)
+    : isPidAlive(pid) || descendants.some((child) => isPidAlive(child)));
   if (!alive()) return { killed: false, reason: "not_running" };
   if (platform === "win32") {
     // Codex finding 2026-10-13: a failed taskkill must not be reported as a cleared tree.
@@ -122,6 +153,7 @@ export async function killProcessTree(pid, { platform = process.platform, waitMs
   } else if (posixGroup) {
     try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} }
   } else {
+    for (const child of [...descendants].reverse()) { try { process.kill(child, "SIGTERM"); } catch {} }
     try { process.kill(pid, "SIGTERM"); } catch {}
   }
   const deadline = Date.now() + waitMs;
@@ -129,10 +161,12 @@ export async function killProcessTree(pid, { platform = process.platform, waitMs
   if (alive()) {
     if (platform !== "win32") {
       if (posixGroup) { try { process.kill(-pid, "SIGKILL"); } catch {} }
+      for (const child of [...descendants].reverse()) { try { process.kill(child, "SIGKILL"); } catch {} }
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
     const hardDeadline = Date.now() + 2_000;
     while (alive() && Date.now() < hardDeadline) await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return { killed: !alive(), reason: alive() ? "still_running" : "killed", scope: platform === "win32" ? "tree" : posixGroup ? "group" : "pid" };
+  const scope = platform === "win32" ? "tree" : posixGroup ? "group" : rows ? "tree" : "pid";
+  return { killed: !alive(), reason: alive() ? "still_running" : "killed", scope };
 }

@@ -20,7 +20,7 @@
     "mode": "writer_only",
     "model": "opus",
     "effort": "low",
-    "disallowed_tools": ["Agent"],
+    "disallowed_tools": [],
     "self_review": "one_local_consistency_pass",
     "independent_reviewer": "Codex"
   },

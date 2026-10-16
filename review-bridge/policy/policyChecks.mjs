@@ -111,7 +111,7 @@ export function validateWriterPolicy(control, maxCalls, maxMinutes) {
     && control.dispatch_transport === "claude_cli_resume_same_session"
     && policy.claude_mode === "writer_only"
     && policy.claude_effort === "low"
-    && (policy.claude_disallowed_tools || []).includes("Agent")
+    && Array.isArray(policy.claude_disallowed_tools)
     && policy.independent_semantic_reviewer === "Codex"
     && policy.claude_self_review === "one_local_consistency_pass"
     && policy.full_reconstruction_on_correction === false

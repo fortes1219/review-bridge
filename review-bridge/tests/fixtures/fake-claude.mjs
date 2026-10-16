@@ -61,7 +61,7 @@ const result = {
   duration_ms: 1200,
   total_cost_usd: 0.42,
   usage: { input_tokens: 94, cache_creation_input_tokens: 454, cache_read_input_tokens: cacheRead, output_tokens: 2352 },
-  modelUsage: { "fake-opus": {} },
+  modelUsage: { "fake-opus": { inputTokens: 94, cacheCreationInputTokens: 454, cacheReadInputTokens: cacheRead, outputTokens: 2352 } },
   result: rateLimited
     ? "usage limit reached; resets soon"
     : typed

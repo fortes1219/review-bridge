@@ -162,10 +162,10 @@ test("Q8b a missing or partial usage object is unknown, never zero", async () =>
   const { usageFromResult } = await import("../features/workOrder/writerPrompt.mjs");
   const none = usageFromResult({ type: "result", num_turns: 1 }, { call: 1, durationMs: 1 });
   assert.equal(none.parse_error, true);
-  assert.deepEqual(none.missing, ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]);
-  const partial = usageFromResult({ usage: { input_tokens: 5, cache_creation_input_tokens: 1, output_tokens: 2 } }, { call: 1, durationMs: 1 });
-  assert.deepEqual(partial.missing, ["cache_read_input_tokens"]);
-  const full = usageFromResult({ usage: { input_tokens: 2, cache_creation_input_tokens: 28212, cache_read_input_tokens: 0, output_tokens: 4 } }, { call: 1, durationMs: 1 });
+  assert.deepEqual(none.missing, ["modelUsage"]);
+  const partial = usageFromResult({ modelUsage: { m: { inputTokens: 5, cacheCreationInputTokens: 1, outputTokens: 2 } } }, { call: 1, durationMs: 1 });
+  assert.deepEqual(partial.missing, ["m.cacheReadInputTokens"]);
+  const full = usageFromResult({ modelUsage: { m: { inputTokens: 2, cacheCreationInputTokens: 28212, cacheReadInputTokens: 0, outputTokens: 4 } } }, { call: 1, durationMs: 1 });
   assert.equal(full.parse_error, undefined);
   const empty = reviewerUsageEvent({ usage: {}, call: 1, durationMs: 1 });
   assert.equal(empty.parse_error, true);

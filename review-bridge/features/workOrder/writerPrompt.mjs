@@ -158,7 +158,9 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     "Forbidden paths: " + (scope.forbidden_paths || []).join(", "),
     "Human breakpoint: " + String(control?.breakpoint || workPackage.breakpoint || ""),
     "Limits: max_turns=" + taskInput.limits.max_turns + ", max_output_chars=" + taskInput.limits.max_output_chars,
-    "Do not invoke Agent or any other reviewer. Do not commit, push, deploy or release.",
+    "You may hand separate parts of this work to sub-agents in parallel; they share this scope and budget, and you integrate their work into the one result.",
+    "After integrating, make one bounded local consistency pass over what changed. That pass is not a review: neither you nor a sub-agent acts as the reviewer; the independent reviewer is started by the controller.",
+    "Do not stage, commit, push, deploy or release.",
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",
     "Your final answer must be one writer.result object that matches the JSON schema given to the CLI; no prose outside it.",
     "Set needs_human when a decision only the owner can make is missing; set status to blocked or out_of_scope instead of guessing.",
@@ -183,9 +185,13 @@ export function parseClaudeStream(text) {
   const reads = [];
   let result = null;
   let unparsable = 0;
+  // Per-message usage, kept for a call that ends without a final result (stopped, timed out).
+  // The CLI repeats an assistant message once per content block, so a message id counts once.
+  const messageUsage = new Map();
   const trimmed = source.trim();
   if (trimmed.startsWith("{") && !trimmed.includes("\n{")) {
-    try { return { result: JSON.parse(trimmed), reads, unparsable_lines: 0 }; } catch { return { result: null, reads, unparsable_lines: 1 }; }
+    const streamUsage = { messages: 0, subagent_messages: 0, tokens: emptyTokens() };
+    try { return { result: JSON.parse(trimmed), reads, streamUsage, unparsable_lines: 0 }; } catch { return { result: null, reads, streamUsage, unparsable_lines: 1 }; }
   }
   for (const line of source.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -193,6 +199,10 @@ export function parseClaudeStream(text) {
     try { record = JSON.parse(line); } catch { unparsable += 1; continue; }
     if (record?.type === "result") { result = record; continue; }
     if (record?.type === "assistant") {
+      const subagent = Boolean(record.parent_tool_use_id);
+      if (record.message?.usage && !messageUsage.has(record.message.id ?? messageUsage.size)) {
+        messageUsage.set(record.message.id ?? messageUsage.size, { subagent, usage: record.message.usage });
+      }
       const content = record.message?.content;
       for (const block of Array.isArray(content) ? content : []) {
         if (block?.type !== "tool_use") continue;
@@ -205,37 +215,81 @@ export function parseClaudeStream(text) {
             ...(input.pattern ? { pattern: String(input.pattern) } : {}),
             ...(input.path ? { path: String(input.path) } : {}),
             ...(input.command ? { command: String(input.command).slice(0, 200) } : {}),
+            ...(subagent ? { subagent: true } : {}),
           });
         }
       }
     }
   }
-  return { result, reads, unparsable_lines: unparsable };
+  const streamUsage = { messages: messageUsage.size, subagent_messages: 0, tokens: emptyTokens() };
+  for (const { subagent, usage } of messageUsage.values()) {
+    if (subagent) streamUsage.subagent_messages += 1;
+    streamUsage.tokens.input += finite(usage.input_tokens);
+    streamUsage.tokens.cache_write += finite(usage.cache_creation_input_tokens);
+    streamUsage.tokens.cache_read += finite(usage.cache_read_input_tokens);
+    streamUsage.tokens.output += finite(usage.output_tokens);
+  }
+  return { result, reads, streamUsage, unparsable_lines: unparsable };
+}
+
+function emptyTokens() {
+  return { input: 0, cache_write: 0, cache_read: 0, output: 0 };
+}
+
+function finite(value) {
+  return Number.isFinite(value) ? value : 0;
 }
 
 // The four token fields Claude Code 2.1.280 was verified to put in result.usage (2026-10-13).
-export const CLAUDE_USAGE_FIELDS = Object.freeze(["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]);
+// Measured 2026-10-17 on CLI 2.1.280: `usage` covers only the main model's last turn, while
+// `modelUsage` covers the whole call, every model, sub-agents included. With background sub-agents
+// the CLI emits more than one result; the last one carries the cumulative total.
+export const MODEL_USAGE_FIELDS = Object.freeze(["inputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "outputTokens"]);
 
 export function usageFromResult(result, { call, durationMs }) {
-  const usage = result?.usage && typeof result.usage === "object" ? result.usage : {};
-  const number = (value) => (Number.isFinite(value) ? value : 0);
+  const models = result?.modelUsage && typeof result.modelUsage === "object" ? Object.entries(result.modelUsage) : [];
   // Codex 2026-10-14: a missing or non-numeric field is unknown, never zero.
-  const missing = CLAUDE_USAGE_FIELDS.filter((field) => !Number.isFinite(usage[field]));
+  const missing = models.length
+    ? models.flatMap(([model, usage]) => MODEL_USAGE_FIELDS.filter((field) => !Number.isFinite(usage?.[field])).map((field) => model + "." + field))
+    : ["modelUsage"];
+  const sum = (field) => models.reduce((total, [, usage]) => total + finite(usage?.[field]), 0);
   return {
     event: "usage",
     role: "writer",
     provider: "claude",
     call,
-    turns: number(result?.num_turns),
+    turns: finite(result?.num_turns),
     duration_ms: durationMs,
     tokens: {
-      input: number(usage.input_tokens),
-      cache_write: number(usage.cache_creation_input_tokens),
-      cache_read: number(usage.cache_read_input_tokens),
-      output: number(usage.output_tokens),
+      input: sum("inputTokens"),
+      cache_write: sum("cacheCreationInputTokens"),
+      cache_read: sum("cacheReadInputTokens"),
+      output: sum("outputTokens"),
     },
+    models: models.map(([model]) => model),
     cost_usd: Number.isFinite(result?.total_cost_usd) ? result.total_cost_usd : null,
-    source: "cli_json",
+    source: "cli_model_usage",
     ...(missing.length ? { parse_error: true, missing } : {}),
+  };
+}
+
+// A call that ended without a final result (stopped, timed out, crashed): what the stream showed
+// is spent and is recorded, but it is a lower bound, so the record is marked partial and the
+// token table treats it as incomplete.
+export function partialUsageFromStream(streamUsage, { call, durationMs }) {
+  return {
+    event: "usage",
+    role: "writer",
+    provider: "claude",
+    call,
+    duration_ms: durationMs,
+    tokens: { ...(streamUsage?.tokens || emptyTokens()) },
+    messages: streamUsage?.messages || 0,
+    subagent_messages: streamUsage?.subagent_messages || 0,
+    cost_usd: null,
+    source: "cli_stream_messages",
+    partial: true,
+    parse_error: true,
+    missing: ["final_result"],
   };
 }

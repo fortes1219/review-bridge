@@ -106,6 +106,11 @@ test("P7 stop: unknown and finished runs exit 1; a running writer is killed and 
   assert.equal(stop.status, "stopped");
   assert.match(stop.detail_ref, /^pid:\d+:killed$/);
   assert.ok(events.some((event) => event.event === "task.input"));
+  // The stopped call has no final result; what it spent is still recorded, marked partial.
+  const spent = events.filter((event) => event.event === "usage" && event.role === "writer");
+  assert.equal(spent.length, 1);
+  assert.equal(spent[0].partial, true);
+  assert.deepEqual(spent[0].missing, ["final_result"]);
 
   const again = bridge(["stop", runId]);
   assert.equal(again.status, 1);

@@ -35,6 +35,7 @@ import {
   isInReadList,
   parseClaudeStream,
   ReferenceChangedError,
+  partialUsageFromStream,
   usageFromResult,
   verifyAndLoadReferences,
 } from "./writerPrompt.mjs";
@@ -182,7 +183,7 @@ export async function validateBoundedResume({
     valid: true,
     session_id: String(control.active_claude_session),
     transport: control.dispatch_transport,
-    disallowed_tools: ["Agent"],
+    disallowed_tools: [...(control.token_policy?.claude_disallowed_tools || [])],
     mode: "writer_only",
     model: writerModelFor(control),
     effort: "low",
@@ -279,7 +280,8 @@ export async function runBoundedResume({
         "-p",
         "--session-id", sessionId,
         "--permission-mode", "auto",
-        "--disallowedTools", "Agent",
+        // Sub-agents are allowed for implementation; a project override can still disallow tools.
+        ...(validation.disallowed_tools.length ? ["--disallowedTools", validation.disallowed_tools.join(",")] : []),
         "--model", writerModel,
         "--effort", "low",
         "--max-turns", String(limits.max_turns),
@@ -300,10 +302,14 @@ export async function runBoundedResume({
         onSpawn: (pid) => recordProcess(paths, runId, { pid, role: "writer", provider: "claude", call }),
       });
       await clearProcess(paths, runId);
-      // D5.3: stopped from outside; nothing more is classified or written.
-      if ((await readRunStatus(paths, runId)) === "stopped") return 130;
       // D3.3: the final result object keeps the legacy single-JSON file for everything downstream.
       const stream = parseClaudeStream(await fsp.readFile(streamPath, "utf8").catch(() => ""));
+      // Tokens spent by a call with no final result still count; the record says it is partial.
+      if (!stream.result || processResult.timedOut) {
+        await recordIo(paths, runId, partialUsageFromStream(stream.streamUsage, { call, durationMs: Date.now() - callStartedAt }));
+      }
+      // D5.3: stopped from outside; nothing more is classified (the spent tokens above are accounting).
+      if ((await readRunStatus(paths, runId)) === "stopped") return 130;
       if (stream.result) await writeJson(stdoutPath, stream.result);
       for (const read of stream.reads) {
         await recordIo(paths, runId, {
