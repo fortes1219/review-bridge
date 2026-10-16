@@ -9,7 +9,7 @@
 
 import { checkService } from "./service.mjs";
 
-export const NATIVE_MODEL_COMMANDS = Object.freeze(["work-start", "review", "bounded-resume", "enqueue"]);
+export const NATIVE_MODEL_COMMANDS = Object.freeze(["work-start", "review", "bounded-resume"]);
 
 const PREFIX = "Native execution is unavailable";
 

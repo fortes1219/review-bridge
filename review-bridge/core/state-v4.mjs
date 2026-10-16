@@ -13,7 +13,6 @@ import {
   writeJsonExclusiveDurable,
 } from "./io.mjs";
 import {
-  classificationProfileFromSnapshot,
   codexPolicyFromSnapshot,
   digest,
   loadOrCreatePolicySnapshot,
@@ -699,13 +698,6 @@ export async function loadControlView(paths, runId) {
   };
 }
 
-export async function loadControlViewBySession(paths, sessionId) {
-  const matches = (await listRuns(paths, { activeOnly: true }))
-    .filter((run) => run.claude_session_id === sessionId);
-  if (matches.length !== 1) throw new Error("Expected exactly one active run for the Claude session.");
-  return await loadControlView(paths, matches[0].run_id);
-}
-
 export async function loadSingleActiveControlView(paths) {
   const runs = await listRuns(paths, { activeOnly: true });
   if (runs.length !== 1) throw new Error("Expected exactly one active run.");
@@ -733,10 +725,6 @@ export async function assertRunResumable(paths, runId, { clock = Date.now } = {}
     throw new Error("Run policy identity is not current; human hard stop required.");
   }
   return run;
-}
-
-export async function currentClassificationProfile(paths, control) {
-  return classificationProfileFromSnapshot(control.v4.policy_snapshot);
 }
 
 export function createRunRuntimeState(paths, runId) {
@@ -768,37 +756,9 @@ export async function readMaintenanceMarker(paths) {
   return await readOptional(paths.upgradeMarkerPath);
 }
 
-export async function beginUpgrade(paths, metadata) {
-  const marker = {
-    schema_version: 4,
-    upgrade_id: randomUUID(),
-    started_at: new Date().toISOString(),
-    ...metadata,
-  };
-  await writeJsonExclusiveDurable(paths.upgradeMarkerPath, marker);
-  return marker;
-}
-
-export async function completeUpgrade(paths) {
-  await fsp.rm(paths.upgradeMarkerPath, { force: true });
-}
-
 // T0-10: the policy identity an unclaimed authorization must still match after an upgrade.
 export function policyIdentity(defaults) {
   return { policy_schema_version: defaults.policy_schema_version, package_default_policy_sha256: digest(defaults) };
-}
-
-export async function reportUpgradeInvalidations(paths, { clock = Date.now } = {}) {
-  const { snapshot: current } = await loadOrCreatePolicySnapshot(paths);
-  const { records, report } = await planUpgradeInvalidations(paths, current, { clock });
-  for (const { authorization_id: id, record } of records) {
-    await ensureDir(paths.authorizationInvalidationsDir);
-    const target = path.join(paths.authorizationInvalidationsDir, id + ".json");
-    if (!(await fileExists(target))) await writeJsonExclusiveDurable(target, record);
-  }
-  await ensureDir(paths.upgradeReportsDir);
-  await writeJsonExclusiveDurable(path.join(paths.upgradeReportsDir, report.report_id + ".json"), report);
-  return report;
 }
 
 // T0-10 D5: what an upgrade invalidates, computed without writing anything, so the neutral

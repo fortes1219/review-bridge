@@ -28,7 +28,6 @@ function printUsage() {
       "Usage: node bootstrap.mjs <command> [options]",
       "",
       "Commands:",
-      "  enqueue          Enqueue a Claude report from hook stdin",
       "  review           Run the Codex review worker",
       "  bounded-resume   Resume the authorized Claude writer session",
       "  work-plan       Create a checksum-gated first/next work package plan",
@@ -45,7 +44,6 @@ function printUsage() {
       "  prune            Fold finished runs into day files and drop records past retention",
       "  rm <run_id>      Remove one finished run (folds it first)",
       "  stop <run_id>    Stop a running work package: kill its model process and close the run",
-      "  migrate-control  Plan/apply/rollback a legacy v2/v3 CONTROL migration",
       "",
     ].join("\n"),
   );
@@ -66,14 +64,14 @@ async function main() {
   // T0-08: native model calls are allowed only for work-start confirmed at an interactive terminal
   // (no --approve, no --yes, stdin and stdout both a TTY). This is an operating restriction, not
   // proof of a human: an agent under the same OS account can still drive a terminal. Every other
-  // model entry point (review, bounded-resume, enqueue) stays closed in native mode.
+  // model entry point (review, bounded-resume) stays closed in native mode.
   const gate = nativeGateDecision({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
   if (!gate.allowed) throw new Error(gate.message);
   // N7: and only after the reviewer read-only check passed in the running page service.
   if (gate.mode === "native_terminal") await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "migrate-control", "up", "down", "ps", "prune", "rm", "stop"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "up", "down", "ps", "prune", "rm", "stop"]);
   let adapterDefinition = null;
   let implementation = {};
   let adapterSource = null;

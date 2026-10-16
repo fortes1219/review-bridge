@@ -166,14 +166,10 @@ export async function runReviewWorker({
         validateJobPolicy(job, control);
         await writeJson(metadataPath, job);
         await writeText(reportPath, String(job.last_assistant_message));
-        const typed = Boolean(job.writer_result);
         const runId = job.authorization?.run_id || null;
         const template = await fsp.readFile(reviewPromptPath, "utf8");
-        let reviewInput = null;
-        if (typed) {
-          reviewInput = await buildReviewInput({ job, control });
-          if (runId) await appendIoEvent(paths, runId, reviewInput);
-        }
+        const reviewInput = await buildReviewInput({ job, control });
+        if (runId) await appendIoEvent(paths, runId, reviewInput);
         const prompt = renderPrompt(template, {
           JOB_PATH: metadataPath,
           REPORT_PATH: reportPath,
@@ -181,10 +177,8 @@ export async function runReviewWorker({
           REVIEW_LEVEL: job.review_level,
           REASONING_EFFORT: job.reasoning_effort,
           CLASSIFICATION_REASONS: (job.classification_reasons || []).join("; "),
-          RULES: typed ? String(control.v4?.work_package?.rules?.text || "").trim() : "",
-          REVIEW_INPUT: typed
-            ? [REVIEW_INPUT_OPEN, JSON.stringify(reviewInput, null, 2), REVIEW_INPUT_CLOSE].join("\n")
-            : "Job metadata: " + metadataPath + "\nWriter report: " + reportPath,
+          RULES: String(control.v4?.work_package?.rules?.text || "").trim(),
+          REVIEW_INPUT: [REVIEW_INPUT_OPEN, JSON.stringify(reviewInput, null, 2), REVIEW_INPUT_CLOSE].join("\n"),
         });
         await writeText(promptPath, prompt);
 
@@ -206,7 +200,7 @@ export async function runReviewWorker({
             "",
             "No Codex model call was made.",
           ].join("\n") + "\n");
-        } else if (typed && reviewInput.scope_violations.length) {
+        } else if (reviewInput.scope_violations.length) {
           // D2.5: out-of-scope changes are decided here; the reviewer is not asked.
           controllerDecided = true;
           await writeJson(resultPath, controllerScopeResult({
@@ -220,7 +214,7 @@ export async function runReviewWorker({
             "--ephemeral",
             "--sandbox", "read-only",
             "--cd", paths.repoRoot,
-            ...(typed ? ["--output-schema", REVIEW_RESULT_SCHEMA, "--json"] : []),
+            "--output-schema", REVIEW_RESULT_SCHEMA, "--json",
             "--output-last-message", resultPath,
             "-",
           ];
@@ -234,18 +228,16 @@ export async function runReviewWorker({
           });
           exitCode = processResult.exitCode;
           timedOut = Boolean(processResult.timedOut);
-          if (typed) {
-            // D5: usage and commands from the JSONL stream; the stderr trailer is the fallback.
-            const stream = parseCodexJsonl(await fsp.readFile(stdoutPath, "utf8").catch(() => ""));
-            const trailer = parseReviewerUsage(await fsp.readFile(stderrPath, "utf8").catch(() => ""), { jobId });
-            usage = reviewerUsageEvent({
-              usage: stream.usage, trailerTokens: trailer.tokens_used, call: job.call, durationMs: Date.now() - startedAt,
-            });
-            reads = reviewerReadEvents(stream.commands, reviewInput.read_list);
-            if (runId) {
-              for (const read of reads) await appendIoEvent(paths, runId, { event: "read", role: "reviewer", call: job.call, ...read });
-              await appendIoEvent(paths, runId, usage);
-            }
+          // D5: usage and commands from the JSONL stream; the stderr trailer is the fallback.
+          const stream = parseCodexJsonl(await fsp.readFile(stdoutPath, "utf8").catch(() => ""));
+          const trailer = parseReviewerUsage(await fsp.readFile(stderrPath, "utf8").catch(() => ""), { jobId });
+          usage = reviewerUsageEvent({
+            usage: stream.usage, trailerTokens: trailer.tokens_used, call: job.call, durationMs: Date.now() - startedAt,
+          });
+          reads = reviewerReadEvents(stream.commands, reviewInput.read_list);
+          if (runId) {
+            for (const read of reads) await appendIoEvent(paths, runId, { event: "read", role: "reviewer", call: job.call, ...read });
+            await appendIoEvent(paths, runId, usage);
           }
         }
 
@@ -272,14 +264,14 @@ export async function runReviewWorker({
           completed_at: new Date().toISOString(),
           result_path: resultPath,
           codex_exit_code: exitCode,
-          ...(typed ? { controller_decided: controllerDecided } : {}),
+          controller_decided: controllerDecided,
         };
         await writeJson(runningPath, completed);
         await writeJson(metadataPath, completed);
         await fsp.rename(runningPath, donePath);
         outcomes.push({
           job_id: jobId, status: "done", result_path: resultPath,
-          ...(typed ? { typed: true, controller_decided: controllerDecided, usage, reads, review_input: reviewInput } : {}),
+          typed: true, controller_decided: controllerDecided, usage, reads, review_input: reviewInput,
         });
         if (!dryRun) await writeText(paths.latestPath, resultPath + "\n");
         if (!noNotification) await adapter.notify("Codex review complete", resultPath);

@@ -36,7 +36,7 @@ test("G1 every other model entry point is closed in native mode, even at a termi
     assert.equal(decision.reason, "entry_point");
     assert.match(decision.message, new RegExp("for " + command + ": only work-start"));
   }
-  assert.deepEqual([...NATIVE_MODEL_COMMANDS].sort(), ["bounded-resume", "enqueue", "review", "work-start"]);
+  assert.deepEqual([...NATIVE_MODEL_COMMANDS].sort(), ["bounded-resume", "review", "work-start"]);
 });
 
 test("G1 fake mode and model-free commands are unchanged", () => {

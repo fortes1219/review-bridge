@@ -2,7 +2,6 @@
   "schema_version": 2,
   "entrypoint": "bootstrap.mjs",
   "commands": [
-    "enqueue",
     "review",
     "bounded-resume",
     "work-plan",
@@ -11,7 +10,6 @@
     "work-cancel",
     "status",
     "wait",
-    "migrate-control",
     "watch",
     "up",
     "down",

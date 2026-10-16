@@ -11,23 +11,8 @@ import {
   timestampId,
   writeJsonAtomic,
 } from "./io.mjs";
-import { appendArchiveLine } from "./retention.mjs";
 import { classifyReview } from "./policy.mjs";
 import { createWorkspaceDelta } from "./workspace-evidence.mjs";
-
-export function detectMarker(message) {
-  const explicit = /^\s*CODEX_REVIEW_REQUIRED\s*:\s*true\s*$/im.test(message);
-  const legacyHeader = /^\s*\[\s*Claude\s*(?:->|\u2192)\s*Codex[^\]]*\]/im.test(message);
-  const reviewWords = /(submit|handoff|report|review|re-review|Codex review|\u4ea4\u4ed8|\u56de\u5831|\u5be9\u67e5|\u4fee\u6b63)/i;
-  const handoffPattern = /^\s*\u53efhandoff\u7d66codex\s*:/im;
-  const handoffLabel = handoffPattern.test(message);
-  const handoffBody = message.replace(handoffPattern, "");
-  return {
-    explicit,
-    legacy: legacyHeader && reviewWords.test(message),
-    handoff: handoffLabel && reviewWords.test(handoffBody),
-  };
-}
 
 export function validateHookPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -61,8 +46,7 @@ export async function enqueueReview({
   payload,
   paths,
   control,
-  classificationProfile = null,
-  validateOnly = false,
+  classificationProfile,
   writerResult = null,
   call = null,
   openFindings = [],
@@ -86,30 +70,13 @@ export async function enqueueReview({
   }
   const message = payload.last_assistant_message;
   if (!message.trim()) return { accepted: false, reason: "empty_message" };
-  // T0-05 D1.6: a v4 run is driven by the harness; a Stop-hook message is not a submission.
-  if (control.v4 && !writerResult) return { accepted: false, reason: "harness_driven" };
-  const marker = writerResult
-    ? { explicit: false, legacy: false, handoff: false, typed: true }
-    : { ...detectMarker(message), typed: false };
-  if (!marker.typed && !marker.explicit && !marker.legacy && !marker.handoff) {
-    return { accepted: false, reason: "no_review_marker" };
-  }
+  // T0-05 D1.6: a v4 run is driven by the harness; only its typed writer result is a submission.
+  if (!writerResult) return { accepted: false, reason: "harness_driven" };
 
-  const profile = classificationProfile || await readJson(paths.classificationProfilePath);
-  const policy = classifyReview(writerResult ? classificationText(control, writerResult) : message, control, profile);
+  const policy = classifyReview(classificationText(control, writerResult), control, classificationProfile);
   const sessionId = String(payload.session_id || "");
   const hash = createHash("sha256").update(sessionId + "\n" + message, "utf8").digest("hex");
   const shortHash = hash.slice(0, 16);
-  const validation = {
-    accepted: true,
-    explicit_marker: marker.explicit,
-    legacy_marker: marker.legacy,
-    handoff_marker: marker.handoff,
-    repo_root: paths.repoRoot,
-    message_hash: shortHash,
-    ...policy,
-  };
-  if (validateOnly) return validation;
 
   for (const directory of [paths.pendingDir, paths.runningDir, paths.doneDir]) {
     const jobs = await listJson(directory);
@@ -129,14 +96,17 @@ export async function enqueueReview({
   const jobId = timestampId() + "-" + shortHash;
   const jobPath = assertUnder(path.join(paths.pendingDir, jobId + ".json"), paths.queueRoot, "Queue job");
   const job = {
-    schema_version: control.schema_version === 4 ? 4 : 2,
+    schema_version: 4,
     job_id: jobId,
     session_id: sessionId,
     cwd: paths.repoRoot,
     enqueued_at: new Date().toISOString(),
     message_sha256: hash,
-    trigger: marker.typed ? "writer_result" : marker.explicit ? "explicit-marker" : marker.handoff ? "handoff-label" : "legacy-report-marker",
-    ...(writerResult ? { call, writer_result: writerResult, open_findings: openFindings, gate_a_result: gateAResult } : {}),
+    trigger: "writer_result",
+    call,
+    writer_result: writerResult,
+    open_findings: openFindings,
+    gate_a_result: gateAResult,
     authorization: {
       plan_sha256: control.authorization_plan_sha256 || null,
       work_package: control.work_package || null,
@@ -153,25 +123,6 @@ export async function enqueueReview({
   };
   await writeJsonAtomic(jobPath, job);
   return { accepted: true, duplicate: false, job, jobPath };
-}
-
-// Hook errors are lines in the day file (T0-02 R5.2); there is no separate log.
-export async function writeHookError(paths, error) {
-  await appendArchiveLine(paths, { type: "hook_error", level: "error", message: String(error?.message || error) });
-}
-
-export async function writeHookWarning(paths, result) {
-  const safeFields = Array.isArray(result?.invalid_fields)
-    ? result.invalid_fields.filter((field) => [
-      "payload", "session_id", "cwd", "last_assistant_message", "stop_hook_active",
-    ].includes(field))
-    : [];
-  const suffix = safeFields.length ? " fields=" + safeFields.join(",") : "";
-  await appendArchiveLine(paths, {
-    type: "hook_error",
-    level: "warning",
-    message: "enqueue_rejected reason=" + String(result?.reason || "unknown") + suffix,
-  });
 }
 
 export async function queueStatus(paths) {

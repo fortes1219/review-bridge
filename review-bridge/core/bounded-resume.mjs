@@ -16,7 +16,6 @@ import {
 } from "./io.mjs";
 import { enqueueReview, hasPendingMessageHash } from "./queue.mjs";
 import { runReviewWorker } from "./review.mjs";
-import { parseReviewGate } from "./gate.mjs";
 import { appendIoEvent, readIoEvents, tokenTotal, usageTotalForRun } from "./io-events.mjs";
 import { killProcessTree, runProcess } from "./process.mjs";
 import {
@@ -70,28 +69,6 @@ async function enqueuedJobId(paths, enqueued) {
   return path.basename(matches[0], ".json");
 }
 
-function legacyWriterPrefix(control) {
-  const scope = control.authorized_scope || {};
-  return [
-    "[REVIEW_BRIDGE_MODE: WRITER_ONLY]",
-    "",
-    "This mode is injected by the local bounded review controller.",
-    "Claude is the writer only. Codex is the only independent semantic reviewer.",
-    "Human-authorized work package: " + String(control.work_package || ""),
-    "Allowed change types: " + (scope.change_types || []).join(", "),
-    "Allowed workspace paths: " + (scope.allowed_paths || []).join(", "),
-    "Human breakpoint: " + String(control.breakpoint || ""),
-    "Do not edit outside the allowed paths or perform an unapproved change type.",
-    "Do not invoke Agent, subagents, fresh reviewers, ultrareview, or any equivalent reviewer.",
-    "Do not perform full reconstruction, broad negative-space review, or repeat a completed review task.",
-    "Read only the task, specified canonical sections, direct dependencies, and unavoidable minimal propagation.",
-    "After writing, perform one bounded local consistency pass over changed sections and the actual workspace delta.",
-    "Stop if full reconstruction, a new human-owner decision, scope expansion, or another work package is required.",
-    "Return a concise delta report of at most 80 lines, ending exactly with CODEX_REVIEW_REQUIRED: true.",
-    "",
-  ].join("\n");
-}
-
 function sameAuthorization(current, expected) {
   return current.authorization_status === "active"
     && current.active_claude_session === expected.active_claude_session
@@ -100,40 +77,25 @@ function sameAuthorization(current, expected) {
 }
 
 async function consumeAuthorization(paths, expected, reason, gate = null) {
-  if (expected.v4_runtime_state) {
-    await expected.v4_runtime_state.consume(reason, gate);
-    return;
-  }
-  const control = await readJson(paths.controlPath);
-  if (!sameAuthorization(control, expected)) return;
-  control.authorization_status = "consumed";
-  control.closed_at = new Date().toISOString();
-  control.closed_by_breakpoint = String(control.breakpoint || "");
-  control.closed_reason = reason;
-  if (gate) {
-    control.closed_review_gate = gate.review_gate;
-    control.closed_hard_stop_required = gate.hard_stop_required;
-  }
-  await writeJsonAtomic(paths.controlPath, control);
+  await expected.v4_runtime_state.consume(reason, gate);
 }
 
 async function loadLiveControl(paths, runtimeState) {
-  return runtimeState ? await runtimeState.loadControl() : await readJson(paths.controlPath);
+  return await runtimeState.loadControl();
 }
 
 export const DEFAULT_WRITER_MODEL = "opus";
 
-// The policy snapshot pins the model for v4 runs; legacy controls use the package default.
+// The policy snapshot pins the model; a snapshot without one uses the package default.
 export function writerModelFor(control) {
   return control?.v4?.policy_snapshot?.effective_policy?.writer?.model || DEFAULT_WRITER_MODEL;
 }
 
 async function writeBoundedState(paths, runtimeState, state) {
-  if (runtimeState) return await runtimeState.recordState(state);
-  return await writeJson(paths.boundedStatePath, state);
+  return await runtimeState.recordState(state);
 }
 
-// T0-04 D4.1: ceilings come from the policy snapshot; legacy runs use the package defaults.
+// T0-04 D4.1: ceilings come from the policy snapshot; missing ones use the package defaults.
 export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, max_tokens_per_call: 1_500_000, max_tokens_per_run: 4_000_000, max_output_chars: 4_000 });
 function effectiveLimits(control) {
   const limits = control?.v4?.policy_snapshot?.effective_policy?.limits || {};
@@ -237,9 +199,9 @@ export async function runBoundedResume({
   maxCalls,
   maxMinutes,
   startNewSession = false,
-  runtimeState = null,
+  runtimeState,
 }) {
-  if (runtimeState) control.v4_runtime_state = runtimeState;
+  control.v4_runtime_state = runtimeState;
   const invocationStartedAt = Date.now();
   const validation = await validateBoundedResume({
     paths, control, adapter, promptPath, maxCalls, maxMinutes,
@@ -249,7 +211,6 @@ export async function runBoundedResume({
     const claude = await adapter.resolveExecutable("claude");
     let sessionId = validation.session_id;
     const writerModel = validation.model;
-    let currentPromptPath = validation.prompt_path;
     let currentControl = control;
     let lastFindings = [];
     let lastGate = null;
@@ -261,7 +222,7 @@ export async function runBoundedResume({
 
     for (let call = 1; call <= maxCalls; call += 1) {
       currentControl = await loadLiveControl(paths, runtimeState);
-      if (runtimeState) currentControl.v4_runtime_state = runtimeState;
+      currentControl.v4_runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization is no longer active.");
       }
@@ -271,58 +232,51 @@ export async function runBoundedResume({
       const stderrPath = path.join(paths.queueRoot, stamp + "-claude.stderr.log");
       const payloadPath = path.join(paths.queueRoot, stamp + "-stop-payload.json");
       const effectivePromptPath = path.join(paths.queueRoot, stamp + "-writer-only-prompt.txt");
-      const workPackage = currentControl.v4?.work_package || null;
-      const runId = runtimeState?.runId || null;
+      const workPackage = currentControl.v4.work_package;
+      const runId = runtimeState.runId;
       const limits = effectiveLimits(currentControl);
       // D2.1: every call is a fresh session; the run records the rotation.
-      if (call > 1 && runtimeState) {
+      if (call > 1) {
         sessionId = randomUUID();
         await runtimeState.rotateSession(sessionId);
         control.active_claude_session = sessionId;
         currentControl = await loadLiveControl(paths, runtimeState);
         currentControl.v4_runtime_state = runtimeState;
       }
-      let effectivePrompt;
-      let readList = [];
-      if (workPackage) {
-        let references;
-        try {
-          references = await verifyAndLoadReferences(paths, workPackage);
-        } catch (error) {
-          if (!(error instanceof ReferenceChangedError)) throw error;
-          await writeBoundedState(paths, runtimeState, {
-            writer_model: writerModel, status: "reference_changed", session_id: sessionId, call,
-            updated_at: new Date().toISOString(), changed_path: error.path, error: error.message,
-          });
-          await recordIo(paths, runId, { event: "stop", status: "reference_changed", role: "controller", provider: null, detail_ref: error.path });
-          await consumeAuthorization(paths, control, "reference_changed");
-          return 78;
-        }
-        readList = buildReadList({ references, findings: lastFindings });
-        const taskInput = buildTaskInput({ workPackage, call, readList, limits });
-        const handoff = call > 1 ? buildHandoff({
-          workPackage, call, reason: handoffReason, ioEvents: runId ? await readIoEvents(paths, runId) : [],
-          openFindings: lastFindings, lastGate, changedFiles: lastChangedFiles, readList,
-          gateAResult: handoffReason === "gate_a_failed" ? lastGateAResult : null,
-        }) : null;
-        if (handoff) await recordIo(paths, runId, handoff);
-        effectivePrompt = composeWriterPrompt({
-          workPackage, control: currentControl, runId: runId || "legacy", call, taskInput, references, handoff,
-          rulesText: workPackage.rules?.text || "",
+      let references;
+      try {
+        references = await verifyAndLoadReferences(paths, workPackage);
+      } catch (error) {
+        if (!(error instanceof ReferenceChangedError)) throw error;
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel, status: "reference_changed", session_id: sessionId, call,
+          updated_at: new Date().toISOString(), changed_path: error.path, error: error.message,
         });
-        await recordIo(paths, runId, {
-          ...taskInput,
-          injected: references.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes, inlined: file.text !== null })),
-        });
-      } else {
-        // Legacy CONTROL.json runs keep the old prefix-plus-prompt-file shape.
-        effectivePrompt = legacyWriterPrefix(currentControl) + await fsp.readFile(currentPromptPath, "utf8");
+        await recordIo(paths, runId, { event: "stop", status: "reference_changed", role: "controller", provider: null, detail_ref: error.path });
+        await consumeAuthorization(paths, control, "reference_changed");
+        return 78;
       }
+      const readList = buildReadList({ references, findings: lastFindings });
+      const taskInput = buildTaskInput({ workPackage, call, readList, limits });
+      const handoff = call > 1 ? buildHandoff({
+        workPackage, call, reason: handoffReason, ioEvents: await readIoEvents(paths, runId),
+        openFindings: lastFindings, lastGate, changedFiles: lastChangedFiles, readList,
+        gateAResult: handoffReason === "gate_a_failed" ? lastGateAResult : null,
+      }) : null;
+      if (handoff) await recordIo(paths, runId, handoff);
+      const effectivePrompt = composeWriterPrompt({
+        workPackage, control: currentControl, runId, call, taskInput, references, handoff,
+        rulesText: workPackage.rules?.text || "",
+      });
+      await recordIo(paths, runId, {
+        ...taskInput,
+        injected: references.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes, inlined: file.text !== null })),
+      });
       await writeText(effectivePromptPath, effectivePrompt);
 
       const claudeArgs = [
         "-p",
-        (call === 1 || runtimeState) ? "--session-id" : "--resume", sessionId,
+        "--session-id", sessionId,
         "--permission-mode", "auto",
         "--disallowedTools", "Agent",
         "--model", writerModel,
@@ -330,8 +284,8 @@ export async function runBoundedResume({
         "--max-turns", String(limits.max_turns),
         "--output-format", "stream-json",
         "--verbose",
-        // T0-05 D1.1: the CLI is asked for a writer.result-shaped answer; legacy runs keep prose.
-        ...(workPackage ? ["--json-schema", writerSchemaArg] : []),
+        // T0-05 D1.1: the CLI is asked for a writer.result-shaped answer.
+        "--json-schema", writerSchemaArg,
       ];
       const invocation = adapter.buildInvocation("claude", claude, claudeArgs);
       const callStartedAt = Date.now();
@@ -360,7 +314,7 @@ export async function runBoundedResume({
         const usage = usageFromResult(stream.result, { call, durationMs: Date.now() - callStartedAt });
         await recordIo(paths, runId, usage);
         const callTotal = tokenTotal(usage.tokens);
-        const runTotal = runId ? await usageTotalForRun(paths, runId) : callTotal;
+        const runTotal = await usageTotalForRun(paths, runId);
         if (callTotal > limits.max_tokens_per_call || runTotal > limits.max_tokens_per_run) {
           const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
           await writeBoundedState(paths, runtimeState, {
@@ -440,37 +394,32 @@ export async function runBoundedResume({
         await consumeAuthorization(paths, control, limited ? "rate_limited" : "claude_failed");
         return limited ? 75 : 1;
       }
-      let writerResult = null;
-      if (workPackage) {
-        // T0-05 D1: the typed answer is checked by the harness; prose is never read.
-        writerResult = writerResultFromClaudeResult(claudeResult);
-        const check = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call });
-        if (!check.ok) {
-          await writeBoundedState(paths, runtimeState, {
-            writer_model: writerModel, status: "malformed_writer_result", session_id: sessionId, call,
-            updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), claude_stdout_path: stdoutPath,
-          });
-          await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "writer", provider: "claude", detail_ref: check.errors[0] || "writer.result" });
-          await consumeAuthorization(paths, control, "malformed_writer_result");
-          return MALFORMED_EXIT_CODE;
-        }
-        await recordIo(paths, runId, { ...writerResult, unknown_addressed_findings: unknownAddressedFindings(writerResult, lastFindings) });
-        if (writerResult.needs_human.length || writerResult.status !== "done") {
-          // D1.4: the writer asked for a decision or declared itself blocked; no review, back to the owner.
-          await writeBoundedState(paths, runtimeState, {
-            writer_model: writerModel, status: "needs_human", session_id: sessionId, call, updated_at: new Date().toISOString(),
-            writer_status: writerResult.status, needs_human: writerResult.needs_human, claude_stdout_path: stdoutPath,
-          });
-          await recordIo(paths, runId, { event: "stop", status: "needs_human", role: "writer", provider: "claude", detail_ref: writerResult.status });
-          await consumeAuthorization(paths, control, "needs_human");
-          return 0;
-        }
-      } else if (!/^\s*CODEX_REVIEW_REQUIRED\s*:\s*true\s*$/im.test(resultText)) {
-        throw new Error("Claude result is missing CODEX_REVIEW_REQUIRED: true.");
+      // T0-05 D1: the typed answer is checked by the harness; prose is never read.
+      const writerResult = writerResultFromClaudeResult(claudeResult);
+      const writerCheck = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call });
+      if (!writerCheck.ok) {
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel, status: "malformed_writer_result", session_id: sessionId, call,
+          updated_at: new Date().toISOString(), errors: writerCheck.errors.slice(0, 20), claude_stdout_path: stdoutPath,
+        });
+        await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "writer", provider: "claude", detail_ref: writerCheck.errors[0] || "writer.result" });
+        await consumeAuthorization(paths, control, "malformed_writer_result");
+        return MALFORMED_EXIT_CODE;
+      }
+      await recordIo(paths, runId, { ...writerResult, unknown_addressed_findings: unknownAddressedFindings(writerResult, lastFindings) });
+      if (writerResult.needs_human.length || writerResult.status !== "done") {
+        // D1.4: the writer asked for a decision or declared itself blocked; no review, back to the owner.
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel, status: "needs_human", session_id: sessionId, call, updated_at: new Date().toISOString(),
+          writer_status: writerResult.status, needs_human: writerResult.needs_human, claude_stdout_path: stdoutPath,
+        });
+        await recordIo(paths, runId, { event: "stop", status: "needs_human", role: "writer", provider: "claude", detail_ref: writerResult.status });
+        await consumeAuthorization(paths, control, "needs_human");
+        return 0;
       }
       // T0-06 G3: the sealed verification runs after the writer and before any review.
       let gateAResult = null;
-      if (workPackage && workPackage.gate_a) {
+      if (workPackage.gate_a) {
         gateAResult = await runGateA({
           paths, gateA: workPackage.gate_a,
           stdoutPath: path.join(paths.queueRoot, stamp + "-gate-a.stdout.log"),
@@ -519,13 +468,13 @@ export async function runBoundedResume({
             read_list: buildReadList({ deltaPaths: lastChangedFiles.map((entry) => entry.path) }),
             limits: { max_turns: limits.max_turns, max_output_chars: limits.max_output_chars },
           });
-          if (runtimeState) await runtimeState.incrementIteration();
+          await runtimeState.incrementIteration();
           continue;
         }
         handoffReason = "correction";
       }
       currentControl = await loadLiveControl(paths, runtimeState);
-      if (runtimeState) currentControl.v4_runtime_state = runtimeState;
+      currentControl.v4_runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization was cancelled before review enqueue.");
       }
@@ -534,16 +483,14 @@ export async function runBoundedResume({
         session_id: sessionId,
         cwd: paths.repoRoot,
         stop_hook_active: false,
-        last_assistant_message: writerResult ? JSON.stringify(writerResult) : resultText,
+        last_assistant_message: JSON.stringify(writerResult),
       };
       await writeJson(payloadPath, payload);
       const enqueued = await enqueueReview({
         payload,
         paths,
         control: currentControl,
-        classificationProfile: currentControl.v4
-          ? classificationProfileFromSnapshot(currentControl.v4.policy_snapshot)
-          : null,
+        classificationProfile: classificationProfileFromSnapshot(currentControl.v4.policy_snapshot),
         writerResult,
         call,
         openFindings: lastFindings,
@@ -557,7 +504,7 @@ export async function runBoundedResume({
       }
       const ownJobId = await enqueuedJobId(paths, enqueued);
       const reviewOutcomes = await runReviewWorker({
-        paths, control: currentControl, adapter, noNotification: true, only: workPackage ? ownJobId : null,
+        paths, control: currentControl, adapter, noNotification: true, only: ownJobId,
       });
       // Other pending jobs may run in the same worker pass; only this run's job is attributed here.
       const ownOutcomes = (reviewOutcomes || []).filter((outcome) => outcome.job_id === ownJobId);
@@ -594,78 +541,58 @@ export async function runBoundedResume({
       if (!(await fileExists(latestReviewPath))) throw new Error("Codex review result is missing.");
       const review = await fsp.readFile(latestReviewPath, "utf8");
       lastChangedFiles = await changedFilesForJob(paths, ownJobId);
-      let gate;
-      if (workPackage) {
-        // T0-05 D3: the typed verdict is checked against the fixed rules; prose is not read.
-        let reviewResult = null;
-        try { reviewResult = parseJson(review); } catch { reviewResult = null; }
-        // A controller-decided verdict (D2.5) is the harness's own; only a reviewer's answer is checked.
-        const check = ownOutcome.controller_decided ? { ok: true, errors: [] } : await validateReviewResult(reviewResult, {
-          workOrder: workPackage.work_package_id, call, repoRoot: paths.repoRoot,
-          previousFindings: lastFindings, deltaPaths: call > 1 ? lastChangedFiles.map((entry) => entry.path) : null,
+      // T0-05 D3: the typed verdict is checked against the fixed rules; prose is not read.
+      let reviewResult = null;
+      try { reviewResult = parseJson(review); } catch { reviewResult = null; }
+      // A controller-decided verdict (D2.5) is the harness's own; only a reviewer's answer is checked.
+      const check = ownOutcome.controller_decided ? { ok: true, errors: [] } : await validateReviewResult(reviewResult, {
+        workOrder: workPackage.work_package_id, call, repoRoot: paths.repoRoot,
+        previousFindings: lastFindings, deltaPaths: call > 1 ? lastChangedFiles.map((entry) => entry.path) : null,
+      });
+      if (!check.ok) {
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel, status: "malformed_review_result", session_id: sessionId, call,
+          updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), review_path: latestReviewPath, claude_stdout_path: stdoutPath,
         });
-        if (!check.ok) {
+        await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "reviewer", provider: "codex", detail_ref: check.errors[0] || "review.result" });
+        await consumeAuthorization(paths, control, "malformed_review_result");
+        return MALFORMED_EXIT_CODE;
+      }
+      await recordIo(paths, runId, { ...reviewResult });
+      // D5.3: the reviewer's call is measured against the same ceilings as the writer's.
+      if (ownOutcome.usage && !ownOutcome.controller_decided) {
+        const callTotal = tokenTotal(ownOutcome.usage.tokens);
+        const runTotal = await usageTotalForRun(paths, runId);
+        if (callTotal > limits.max_tokens_per_call || runTotal > limits.max_tokens_per_run) {
+          const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
           await writeBoundedState(paths, runtimeState, {
-            writer_model: writerModel, status: "malformed_review_result", session_id: sessionId, call,
-            updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+            writer_model: writerModel, status: "token_limit", session_id: sessionId, call, updated_at: new Date().toISOString(),
+            token_limit: which, token_limit_role: "reviewer", tokens_this_call: callTotal, tokens_this_run: runTotal,
+            review_path: latestReviewPath, claude_stdout_path: stdoutPath,
           });
-          await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "reviewer", provider: "codex", detail_ref: check.errors[0] || "review.result" });
-          await consumeAuthorization(paths, control, "malformed_review_result");
-          return MALFORMED_EXIT_CODE;
-        }
-        await recordIo(paths, runId, { ...reviewResult });
-        // D5.3: the reviewer's call is measured against the same ceilings as the writer's.
-        if (ownOutcome.usage && !ownOutcome.controller_decided) {
-          const callTotal = tokenTotal(ownOutcome.usage.tokens);
-          const runTotal = runId ? await usageTotalForRun(paths, runId) : callTotal;
-          if (callTotal > limits.max_tokens_per_call || runTotal > limits.max_tokens_per_run) {
-            const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
-            await writeBoundedState(paths, runtimeState, {
-              writer_model: writerModel, status: "token_limit", session_id: sessionId, call, updated_at: new Date().toISOString(),
-              token_limit: which, token_limit_role: "reviewer", tokens_this_call: callTotal, tokens_this_run: runTotal,
-              review_path: latestReviewPath, claude_stdout_path: stdoutPath,
-            });
-            await recordIo(paths, runId, {
-              event: "stop", status: "token_limit", role: "reviewer", provider: "codex",
-              detail_ref: which + ":" + (which === "per_call" ? callTotal : runTotal),
-            });
-            await consumeAuthorization(paths, control, "token_limit");
-            return 76;
-          }
-        }
-        // D4.3 / D4.4: ids that survive a correction are unresolved; one survival on FAIL is a loop.
-        const recheck = call > 1 ? recheckFindings(lastFindings, reviewResult.findings) : null;
-        if (recheck) await recordIo(paths, runId, { event: "recheck", call, ...recheck });
-        const loop = recheck && reviewResult.gate === "FAIL" && recheck.unresolved.length ? recheck.unresolved[0] : null;
-        gate = {
-          review_gate: reviewResult.gate,
-          hard_stop_required: reviewResult.hard_stop || Boolean(loop),
-          hard_stop_reason: loop ? "needs_human_decision" : reviewResult.hard_stop_reason,
-          findings: reviewResult.findings.length,
-        };
-        if (loop) {
-          await recordIo(paths, runId, { event: "stop", status: "hard_stop", role: "controller", provider: null, detail_ref: "loop:" + loop });
-        }
-        lastFindings = reviewResult.findings;
-        lastGate = reviewResult.gate;
-      } else {
-        try {
-          gate = parseReviewGate(review);
-        } catch (error) {
-          await writeBoundedState(paths, runtimeState, {
-            writer_model: writerModel,
-            status: "malformed_review_gate",
-            session_id: sessionId,
-            call,
-            updated_at: new Date().toISOString(),
-            review_path: latestReviewPath,
-            claude_stdout_path: stdoutPath,
-            error: error.message,
+          await recordIo(paths, runId, {
+            event: "stop", status: "token_limit", role: "reviewer", provider: "codex",
+            detail_ref: which + ":" + (which === "per_call" ? callTotal : runTotal),
           });
-          await consumeAuthorization(paths, control, "malformed_review_gate");
-          throw error;
+          await consumeAuthorization(paths, control, "token_limit");
+          return 76;
         }
       }
+      // D4.3 / D4.4: ids that survive a correction are unresolved; one survival on FAIL is a loop.
+      const recheck = call > 1 ? recheckFindings(lastFindings, reviewResult.findings) : null;
+      if (recheck) await recordIo(paths, runId, { event: "recheck", call, ...recheck });
+      const loop = recheck && reviewResult.gate === "FAIL" && recheck.unresolved.length ? recheck.unresolved[0] : null;
+      const gate = {
+        review_gate: reviewResult.gate,
+        hard_stop_required: reviewResult.hard_stop || Boolean(loop),
+        hard_stop_reason: loop ? "needs_human_decision" : reviewResult.hard_stop_reason,
+        findings: reviewResult.findings.length,
+      };
+      if (loop) {
+        await recordIo(paths, runId, { event: "stop", status: "hard_stop", role: "controller", provider: null, detail_ref: "loop:" + loop });
+      }
+      lastFindings = reviewResult.findings;
+      lastGate = reviewResult.gate;
       await writeBoundedState(paths, runtimeState, {
         writer_model: writerModel,
         status: gate.review_gate === "PASS"
@@ -706,41 +633,18 @@ export async function runBoundedResume({
         return 76;
       }
 
-      if (!currentControl.v4) {
-      const nextPromptPath = path.join(paths.queueRoot, stamp + "-bounded-correction.txt");
-      await writeText(nextPromptPath, [
-        "[AUTO-BOUNDED-CORRECTION]",
-        "",
-        "Continue in the same Claude session. Codex review failed without a human-owner hard stop.",
-        "Read the authoritative review at: " + latestReviewPath,
-        "",
-        "Fix only the named findings and unavoidable propagation within the current work package.",
-        "The controller will inject REVIEW_BRIDGE_MODE: WRITER_ONLY again on the next call.",
-        "Keep all CONTROL hard stops and repository boundaries.",
-        "Return one concise delta report ending exactly with:",
-        "CODEX_REVIEW_REQUIRED: true",
-      ].join("\n") + "\n");
-      currentPromptPath = nextPromptPath;
-      }
       currentControl = await loadLiveControl(paths, runtimeState);
-      if (runtimeState) currentControl.v4_runtime_state = runtimeState;
+      currentControl.v4_runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization was cancelled before correction.");
       }
-      if (runtimeState) await runtimeState.incrementIteration();
-      else {
-        currentControl.iteration = Number(currentControl.iteration || 0) + 1;
-        await writeJsonAtomic(paths.controlPath, currentControl);
-      }
+      await runtimeState.incrementIteration();
     }
     await consumeAuthorization(paths, control, "call_budget_exhausted");
     return 76;
   } catch (error) {
-    if (runtimeState && (await readRunStatus(paths, runtimeState.runId)) === "stopped") return 130;
-    let currentState = runtimeState ? await runtimeState.getState().catch(() => null) : null;
-    if (!runtimeState && await fileExists(paths.boundedStatePath)) {
-      currentState = await readJson(paths.boundedStatePath).catch(() => null);
-    }
+    if ((await readRunStatus(paths, runtimeState.runId)) === "stopped") return 130;
+    const currentState = await runtimeState.getState().catch(() => null);
     const stateBelongsToThisInvocation = currentState?.session_id === validation.session_id
       && Number.isFinite(Date.parse(currentState?.updated_at))
       && Date.parse(currentState.updated_at) >= invocationStartedAt;

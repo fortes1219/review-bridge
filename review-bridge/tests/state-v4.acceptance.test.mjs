@@ -9,33 +9,25 @@ import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem, inspectStateFilesystem } from "../core/filesystem-v4.mjs";
 import { fileExists, readJson, writeJson, writeText } from "../core/io.mjs";
-import {
-  applyLegacyControlMigration,
-  planLegacyControlMigration,
-  rollbackLegacyControlMigration,
-} from "../core/migration-v4.mjs";
 import { getBridgePaths } from "../core/paths.mjs";
+import { applyNeutralInstall, planNeutralInstall } from "../../installer/neutral-install.mjs";
 import { digest, loadOrCreatePolicySnapshot, mergePolicy } from "../core/policy-v4.mjs";
 import {
   acquireRunLock,
   applyBudgetExtension,
   assertRunResumable,
-  beginUpgrade,
   claimStartAuthorization,
-  completeUpgrade,
   consumeRun,
   createAuthorization,
   createImmutableWorkPackage,
   listRuns,
   readRun,
   reconcileRunProjection,
-  reportUpgradeInvalidations,
 } from "../core/state-v4.mjs";
 
 const testRoot = path.dirname(fileURLToPath(import.meta.url));
 const sourceBridgeRoot = path.resolve(testRoot, "..");
 const packageRoot = path.resolve(sourceBridgeRoot, "..");
-const installerPath = path.join(packageRoot, "installer", "install.mjs");
 const cleanupRoots = new Set();
 
 after(async () => {
@@ -120,43 +112,6 @@ async function createUnclaimed(runtime, { calls = 1, clock = Date.now, ttlSecond
     ttlSeconds: ttlSeconds ?? snapshot.effective_policy.limits.authorization_ttl_seconds,
   }, clock);
   return { snapshot, workPackage, authorization };
-}
-
-async function treeBytes(root) {
-  const output = new Map();
-  async function walk(current, relative = "") {
-    for (const entry of await fsp.readdir(current, { withFileTypes: true }).catch(() => [])) {
-      const next = path.join(current, entry.name);
-      const key = path.posix.join(relative, entry.name);
-      if (entry.isDirectory()) await walk(next, key);
-      else if (entry.isFile()) output.set(key, await fsp.readFile(next));
-    }
-  }
-  await walk(root);
-  return output;
-}
-
-function assertByteMapsEqual(actual, expected) {
-  assert.deepEqual([...actual.keys()].sort(), [...expected.keys()].sort());
-  for (const [key, bytes] of expected) assert.deepEqual(actual.get(key), bytes, key);
-}
-
-function runInstaller(args, options = {}) {
-  return spawnSync(process.execPath, [installerPath, ...args], {
-    cwd: packageRoot,
-    encoding: "utf8",
-    ...options,
-  });
-}
-
-async function installerPlan(target, operation, extra = []) {
-  const out = path.join(target, ".plan-" + operation + ".json");
-  const result = runInstaller([
-    "plan", "--target", target, "--profile", "vue-frontend", "--operation", operation,
-    "--backup-root", target + "-backups", "--out", out, "--fake-cli", "--json", ...extra,
-  ]);
-  assert.equal(result.status, 0, result.stderr);
-  return { out, plan: JSON.parse(await fsp.readFile(out, "utf8")) };
 }
 
 describe("AC-01 work-package copies do not create authorization", () => {
@@ -311,22 +266,6 @@ describe("AC-08 tighten-only policy merge rejects protected weakening", () => {
   });
 });
 
-describe("AC-09 policy upgrade invalidates unclaimed authorization with audit", () => {
-  it("reports IDs and preserves immutable authorization bytes", async () => {
-    const runtime = await makeRuntime();
-    const { authorization } = await createUnclaimed(runtime);
-    const file = path.join(runtime.paths.authorizationsDir, authorization.authorization_id + ".json");
-    const before = await fsp.readFile(file);
-    const defaults = await readJson(runtime.paths.defaultPolicyPath);
-    defaults.package_policy_id += "-upgrade";
-    await writeJson(runtime.paths.defaultPolicyPath, defaults);
-    const report = await reportUpgradeInvalidations(runtime.paths);
-    assert.deepEqual(report.invalidated_authorization_ids, [authorization.authorization_id]);
-    assert.deepEqual(await fsp.readFile(file), before);
-    assert.equal(await fileExists(path.join(runtime.paths.authorizationInvalidationsDir, authorization.authorization_id + ".json")), true);
-  });
-});
-
 describe("AC-10 historical evidence uses its snapshot but old active run cannot execute", () => {
   it("preserves historical validation and converts identity mismatch to human hard stop", async () => {
     const runtime = await makeRuntime();
@@ -353,36 +292,6 @@ describe("AC-11 active runs are derived from run projections", () => {
   });
 });
 
-describe("AC-12 installer transaction rollback preserves audit bytes", () => {
-  it("restores authorizations, claims, runs, events, reviews, and evidence after injected failure", async () => {
-    const target = await fsp.mkdtemp(path.join(os.tmpdir(), "ac12-installer-"));
-    cleanupRoots.add(target);
-    cleanupRoots.add(target + "-backups");
-    await writeJson(path.join(target, "package.json"), {
-      private: true, scripts: { build: "vite build" }, dependencies: { vue: "latest" },
-    });
-    const install = await installerPlan(target, "install");
-    const applied = runInstaller(["apply", "--target", target, "--plan", install.out, "--approve", install.plan.plan_sha256]);
-    assert.equal(applied.status, 0, applied.stderr);
-    for (const [relative, value] of Object.entries({
-      "review-queue/authorizations/a.json": "auth",
-      "review-queue/authorization-claims/a.json": "claim",
-      "review-queue/runs/r.json": "run",
-      "review-queue/events/r.jsonl": "event\n",
-      "reviews/r.md": "review",
-      "review-queue/workspace-evidence/r.json": "evidence",
-    })) await writeText(path.join(target, ".claude", relative), value);
-    const before = await treeBytes(path.join(target, ".claude"));
-    const upgrade = await installerPlan(target, "upgrade");
-    const failed = runInstaller(
-      ["upgrade", "--target", target, "--plan", upgrade.out, "--approve", upgrade.plan.plan_sha256],
-      { env: { ...process.env, REVIEW_BRIDGE_INSTALLER_TEST_FAULT: "after-write" } },
-    );
-    assert.equal(failed.status, 2);
-    assertByteMapsEqual(await treeBytes(path.join(target, ".claude")), before);
-  });
-});
-
 describe("AC-13 run rollback requires a compensating package and authorization", () => {
   it("creates rollback evidence without mutating the source audit", async () => {
     const runtime = await makeRuntime();
@@ -401,54 +310,6 @@ describe("AC-13 run rollback requires a compensating package and authorization",
     assert.equal(rollback.authorization.kind, "rollback");
     assert.notEqual(rollback.run.work_package_sha256, source.run.work_package_sha256);
     assert.deepEqual(await fsp.readFile(path.join(runtime.paths.eventsDir, source.run.run_id + ".jsonl")), sourceEvents);
-  });
-});
-
-describe("AC-14 legacy migration fails active and round-trips inactive bytes", () => {
-  it("migrates supported inactive v2/v3 without creating authorization", async () => {
-    const runtime = await makeRuntime();
-    await writeJson(runtime.paths.controlPath, { schema_version: 3, authorization_status: "active" });
-    await assert.rejects(planLegacyControlMigration(runtime.paths), /inactive or consumed/);
-    const original = Buffer.from('{"schema_version":3,"authorization_status":"consumed","closed_reason":"done"}\r\n');
-    await fsp.writeFile(runtime.paths.controlPath, original);
-    const plan = await planLegacyControlMigration(runtime.paths);
-    const report = await applyLegacyControlMigration(runtime.paths, plan, plan.plan_sha256);
-    assert.equal(report.created_authorizations, 0);
-    assert.equal((await fsp.readdir(runtime.paths.authorizationsDir).catch(() => [])).length, 0);
-    await rollbackLegacyControlMigration(runtime.paths, plan.legacy_control_sha256);
-    assert.deepEqual(await fsp.readFile(runtime.paths.controlPath), original);
-  });
-
-  it("exposes checksum-gated plan, apply, and rollback through the installed CLI", async () => {
-    const target = await fsp.mkdtemp(path.join(os.tmpdir(), "ac14-cli-"));
-    cleanupRoots.add(target);
-    cleanupRoots.add(target + "-backups");
-    await writeJson(path.join(target, "package.json"), {
-      private: true, scripts: { build: "vite build" }, dependencies: { vue: "latest" },
-    });
-    const install = await installerPlan(target, "install");
-    const applied = runInstaller(["apply", "--target", target, "--plan", install.out, "--approve", install.plan.plan_sha256]);
-    assert.equal(applied.status, 0, applied.stderr);
-    const controlPath = path.join(target, ".claude", "review-queue", "CONTROL.json");
-    const original = Buffer.from('{"schema_version":2,"authorization_status":"inactive"}\n');
-    await fsp.writeFile(controlPath, original);
-    const bootstrap = path.join(target, ".claude", "tools", "review-bridge", "bootstrap.mjs");
-    const planPath = path.join(target, ".claude", "review-queue", "migration.plan.json");
-    const planned = spawnSync(process.execPath, [bootstrap, "migrate-control", "plan", "--out", planPath], {
-      cwd: target, encoding: "utf8",
-    });
-    assert.equal(planned.status, 0, planned.stderr);
-    const plan = JSON.parse(planned.stdout);
-    const migrated = spawnSync(process.execPath, [
-      bootstrap, "migrate-control", "apply", "--plan", planPath, "--approve", plan.plan_sha256,
-    ], { cwd: target, encoding: "utf8" });
-    assert.equal(migrated.status, 0, migrated.stderr);
-    assert.equal(await fileExists(controlPath), false);
-    const restored = spawnSync(process.execPath, [
-      bootstrap, "migrate-control", "rollback", "--legacy-sha256", plan.legacy_control_sha256,
-    ], { cwd: target, encoding: "utf8" });
-    assert.equal(restored.status, 0, restored.stderr);
-    assert.deepEqual(await fsp.readFile(controlPath), original);
   });
 });
 
@@ -537,68 +398,20 @@ describe("AC-18 protected SECURITY paths cannot be removed, bypassed, or shadowe
   });
 });
 
-describe("AC-19 upgrade crash follows current-only identity rule", () => {
-  it("allows recovery before activation and hard-stops after identity activation without audit loss", async () => {
-    const runtime = await makeRuntime();
-    const started = await startFixture(runtime);
-    const eventFile = path.join(runtime.paths.eventsDir, started.run.run_id + ".jsonl");
-    const eventBefore = await fsp.readFile(eventFile);
-    await beginUpgrade(runtime.paths, { target_policy_schema_version: 4 });
-    await assert.rejects(assertRunResumable(runtime.paths, started.run.run_id), /upgrade is in progress/);
-    await completeUpgrade(runtime.paths);
-    assert.equal((await assertRunResumable(runtime.paths, started.run.run_id)).run_id, started.run.run_id);
-    const defaults = await readJson(runtime.paths.defaultPolicyPath);
-    defaults.package_policy_id += "-activated";
-    await writeJson(runtime.paths.defaultPolicyPath, defaults);
-    await assert.rejects(assertRunResumable(runtime.paths, started.run.run_id), /human hard stop/);
-    const final = await readRun(runtime.paths, started.run.run_id);
-    assert.equal(final.status, "hard_stop");
-    const eventAfter = await fsp.readFile(eventFile);
-    assert.equal(eventAfter.subarray(0, eventBefore.length).equals(eventBefore), true);
-    assert.equal(await fileExists(path.join(runtime.paths.authorizationClaimsDir, started.authorization.authorization_id + ".json")), true);
-  });
-
-  it("restores the previous installed runtime when activation fails", async () => {
-    const target = await fsp.mkdtemp(path.join(os.tmpdir(), "ac19-installer-"));
-    cleanupRoots.add(target);
-    cleanupRoots.add(target + "-backups");
-    await writeJson(path.join(target, "package.json"), {
-      private: true, scripts: { build: "vite build" }, dependencies: { vue: "latest" },
-    });
-    const install = await installerPlan(target, "install");
-    const applied = runInstaller(["apply", "--target", target, "--plan", install.out, "--approve", install.plan.plan_sha256]);
-    assert.equal(applied.status, 0, applied.stderr);
-    const runtimeRoot = path.join(target, ".claude", "tools", "review-bridge");
-    const before = await treeBytes(runtimeRoot);
-    const upgrade = await installerPlan(target, "upgrade");
-    const failed = runInstaller(
-      ["upgrade", "--target", target, "--plan", upgrade.out, "--approve", upgrade.plan.plan_sha256],
-      { env: { ...process.env, REVIEW_BRIDGE_INSTALLER_TEST_FAULT: "upgrade-after-runtime-activation" } },
-    );
-    assert.equal(failed.status, 2);
-    assertByteMapsEqual(await treeBytes(runtimeRoot), before);
-    assert.equal(await fileExists(path.join(target, ".claude", "review-queue", "upgrade-in-progress.json")), false);
-    const verified = runInstaller(["verify", "--target", target, "--fake-cli"]);
-    assert.equal(verified.status, 0, verified.stderr);
-  });
-});
-
 describe("AC-20 / R2 the same approved plan cannot start twice", () => {
   it("rejects the second work-start before changing event bytes", async () => {
     const target = await fsp.mkdtemp(path.join(os.tmpdir(), "ac20-plan-replay-"));
     cleanupRoots.add(target);
-    cleanupRoots.add(target + "-backups");
     await writeJson(path.join(target, "package.json"), {
       private: true, scripts: { build: "vite build" }, dependencies: { vue: "latest" },
     });
     await writeText(path.join(target, "README.md"), "# AC-20 fixture\n");
-    const install = await installerPlan(target, "install");
-    const applied = runInstaller(["apply", "--target", target, "--plan", install.out, "--approve", install.plan.plan_sha256]);
-    assert.equal(applied.status, 0, applied.stderr);
+    const install = await planNeutralInstall({ target, roles: { writer: "claude", reviewer: "codex" } });
+    await applyNeutralInstall(install, install.plan_sha256);
 
-    const bootstrap = path.join(target, ".claude", "tools", "review-bridge", "bootstrap.mjs");
-    const taskPath = path.join(target, ".claude", "work-packages", "ac20.md");
-    const planPath = path.join(target, ".claude", "review-queue", "ac20.plan.json");
+    const bootstrap = path.join(target, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+    const taskPath = path.join(target, ".review-bridge", "work-packages", "ac20.md");
+    const planPath = path.join(target, ".review-bridge", "review-queue", "ac20.plan.json");
     await writeText(taskPath, "Update `README.md`.\n\tKeep the task multiline.\n");
     const planned = spawnSync(process.execPath, [
       bootstrap, "work-plan",
@@ -622,7 +435,7 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     const first = spawnSync(process.execPath, startArgs, { cwd: target, encoding: "utf8" });
     assert.equal(first.status, 0, first.stderr);
     const firstStatus = JSON.parse(first.stdout);
-    const eventsPath = path.join(target, ".claude", "review-queue", "events", firstStatus.run_id + ".jsonl");
+    const eventsPath = path.join(target, ".review-bridge", "review-queue", "events", firstStatus.run_id + ".jsonl");
     const before = await fsp.readFile(eventsPath);
     const beforeSha = sha256(before);
 
@@ -630,6 +443,6 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     assert.equal(second.status, 2);
     assert.match(second.stderr, /plan already consumed, generate a new plan/i);
     assert.equal(sha256(await fsp.readFile(eventsPath)), beforeSha);
-    assert.deepEqual((await fsp.readdir(path.join(target, ".claude", "review-queue", "runs"))).length, 1);
+    assert.deepEqual((await fsp.readdir(path.join(target, ".review-bridge", "review-queue", "runs"))).length, 1);
   });
 });

@@ -7,51 +7,22 @@ import { GateAError } from "./gate-a.mjs";
 import { assertNativeAllowed, assertReviewerProof } from "./native-gate.mjs";
 import { deliverOutcome, stdoutLines } from "./result-file.mjs";
 import { getBridgePaths } from "./paths.mjs";
-import {
-  enqueueReview,
-  queueStatus,
-  waitForPending,
-  writeHookError,
-  writeHookWarning,
-} from "./queue.mjs";
-import { fileExists, parseJson, readJson, readStdin } from "./io.mjs";
-import { assertUnder, writeJson } from "./io.mjs";
-import {
-  applyLegacyControlMigration,
-  planLegacyControlMigration,
-  rollbackLegacyControlMigration,
-} from "./migration-v4.mjs";
+import { queueStatus, waitForPending } from "./queue.mjs";
+import { assertUnder, fileExists, readJson } from "./io.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { createReviewerProbeService } from "./reviewer-probe.mjs";
 import { formatPruneSummary, probeAuditDir, prune, removeRun, RetentionConfigError, retentionDays } from "./retention.mjs";
 import { removeServiceSession, serviceDown, serviceFiles, serviceStatus, serviceUp, writeServiceSession } from "./service.mjs";
 import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watch.mjs";
 import {
-  authorizeWorkPackage,
-  cancelWorkPackage,
-  createWorkPackagePlan,
-  workPackageStatus,
-} from "./work-package.mjs";
-import {
   authorizeV4WorkPackage,
   cancelV4WorkPackage,
   createV4WorkPackagePlan,
   v4WorkPackageStatus,
 } from "./work-package-v4.mjs";
-import {
-  assertRunResumable,
-  createRunRuntimeState,
-  currentClassificationProfile,
-  loadControlViewBySession,
-  loadSingleActiveControlView,
-} from "./state-v4.mjs";
+import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "./state-v4.mjs";
 
 const schemas = {
-  enqueue: {
-    "--payload": { key: "payloadPath", type: "string" },
-    "--no-start": { key: "noStart", type: "boolean" },
-    "--validate-only": { key: "validateOnly", type: "boolean" },
-  },
   review: {
     "--dry-run": { key: "dryRun", type: "boolean" },
     "--validate-only": { key: "validateOnly", type: "boolean" },
@@ -90,12 +61,6 @@ const schemas = {
   },
   "work-status": {},
   status: {},
-  "migrate-control": {
-    "--out": { key: "outPath", type: "string" },
-    "--plan": { key: "planPath", type: "string" },
-    "--approve": { key: "approval", type: "string" },
-    "--legacy-sha256": { key: "legacySha256", type: "string" },
-  },
   wait: {
     "--timeout-minutes": { key: "timeoutMinutes", type: "number" },
   },
@@ -114,6 +79,8 @@ const schemas = {
   rm: {},
   stop: {},
 };
+
+const CONFIG_FREE_COMMANDS = new Set(["status", "wait"]);
 
 // T0-02 R3: one entry point for every prune trigger (CLI, watch start, daily timer).
 async function runPrune(paths, { json = false, out = process.stdout, adapter = null } = {}) {
@@ -226,92 +193,17 @@ async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapte
 
 export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName = ".claude" }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
-  const migrationAction = command === "migrate-control" ? args[0] : null;
   const removeTarget = command === "rm" || command === "stop" ? args[0] : null;
-  const commandArgs = ["migrate-control", "rm", "stop"].includes(command) ? args.slice(1) : args;
+  const commandArgs = ["rm", "stop"].includes(command) ? args.slice(1) : args;
   const options = parseOptions(commandArgs, schemas[command] || {});
-  const isV4 = await fileExists(paths.bridgeConfigPath);
-  if (command === "migrate-control") {
-    if (!isV4) throw new Error("migrate-control requires the v4 runtime configuration.");
-    if (migrationAction === "plan") {
-      if (!options.outPath) throw new Error("migrate-control plan requires --out.");
-      const plan = await planLegacyControlMigration(paths);
-      const target = assertUnder(path.resolve(options.outPath), paths.privateRoot, "Migration plan");
-      await writeJson(target, plan);
-      process.stdout.write(JSON.stringify({ ...plan, plan_path: target }, null, 2) + "\n");
-      return 0;
-    }
-    if (migrationAction === "apply") {
-      if (!options.planPath || !options.approval) {
-        throw new Error("migrate-control apply requires --plan and --approve.");
-      }
-      const planPath = assertUnder(path.resolve(options.planPath), paths.privateRoot, "Migration plan");
-      const result = await applyLegacyControlMigration(paths, await readJson(planPath), options.approval);
-      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-      return 0;
-    }
-    if (migrationAction === "rollback") {
-      if (!options.legacySha256) throw new Error("migrate-control rollback requires --legacy-sha256.");
-      const result = await rollbackLegacyControlMigration(paths, options.legacySha256);
-      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-      return 0;
-    }
-    throw new Error("migrate-control requires plan, apply, or rollback.");
+  // status and wait only read the review queue; every other command needs the v4 configuration.
+  if (!CONFIG_FREE_COMMANDS.has(command) && !(await fileExists(paths.bridgeConfigPath))) {
+    throw new Error(command + " requires the v4 runtime configuration created by init.");
   }
-  if (command === "enqueue") {
-    const manualPayload = Boolean(options.payloadPath);
-    try {
-      const input = options.payloadPath
-        ? await fsp.readFile(options.payloadPath, "utf8")
-        : await readStdin();
-      if (!input.trim()) return 0;
-      const payload = parseJson(input);
-      const control = isV4
-        ? await loadControlViewBySession(paths, payload.session_id)
-        : await readJson(paths.controlPath);
-      const classificationProfile = isV4
-        ? await currentClassificationProfile(paths, control)
-        : null;
-      const result = await enqueueReview({
-        payload,
-        paths,
-        control,
-        classificationProfile,
-        validateOnly: Boolean(options.validateOnly),
-      });
-      if (options.validateOnly) {
-        process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-      }
-      const diagnosticFailure = [
-        "invalid_payload",
-        "cwd_mismatch",
-        "empty_message",
-        "authorization_inactive",
-        "session_mismatch",
-      ].includes(result.reason);
-      if (!result.accepted && diagnosticFailure) {
-        await writeHookWarning(paths, result).catch(() => {});
-        if (manualPayload) return 2;
-      }
-      if (result.accepted && !result.duplicate && !options.noStart && !options.validateOnly) {
-        await runReviewWorker({ paths, control, adapter });
-      }
-      return 0;
-    } catch (error) {
-      // T0-02 R5.1: a Claude session with no Bridge run is the normal case for every
-      // other session in the repo; it is not an error and is not logged.
-      if (/Expected exactly one active run/.test(String(error?.message || ""))) return manualPayload ? 2 : 0;
-      await writeHookError(paths, error).catch(() => {});
-      return manualPayload ? 2 : 0;
-    }
-  }
-
   if (command === "watch") {
-    if (!isV4) throw new Error("watch requires the v4 runtime configuration created by init.");
     return await startWatch({ paths, adapter, adapterId, adapterDefinition, adapterSource, port: options.port });
   }
   if (["up", "down", "ps"].includes(command)) {
-    if (!isV4) throw new Error(command + " requires the v4 runtime configuration created by init.");
     if (command === "up") {
       return (await serviceUp({
         paths,
@@ -322,11 +214,9 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     return (await (command === "down" ? serviceDown : serviceStatus)({ paths })).exitCode;
   }
   if (command === "prune") {
-    if (!isV4) throw new Error("prune requires the v4 runtime configuration created by init.");
     return await runPrune(paths, { json: Boolean(options.json), adapter });
   }
   if (command === "stop") {
-    if (!isV4) throw new Error("stop requires the v4 runtime configuration created by init.");
     if (!removeTarget) throw new Error("stop requires a run id.");
     const result = await stopRun(paths, removeTarget);
     process.stdout.write(result.line + "\n");
@@ -342,7 +232,6 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     return result.exitCode;
   }
   if (command === "rm") {
-    if (!isV4) throw new Error("rm requires the v4 runtime configuration created by init.");
     if (!removeTarget) throw new Error("rm requires a run id.");
     // rm folds the run into the archive; a run without a result gets one first. If that fails the
     // human's removal still happens, but the day file marks it and the output says why.
@@ -362,11 +251,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     return 0;
   }
   if (command === "work-status") {
-    process.stdout.write(JSON.stringify(
-      isV4 ? await v4WorkPackageStatus(paths) : await workPackageStatus(paths),
-      null,
-      2,
-    ) + "\n");
+    process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths), null, 2) + "\n");
     return 0;
   }
   if (command === "wait") {
@@ -379,14 +264,12 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     return 0;
   }
 
-  const control = isV4 ? null : await readJson(paths.controlPath);
   if (command === "work-plan") {
     if (!options.outPath) throw new Error("work-plan requires --out.");
     let plan;
     try {
-      plan = await (isV4 ? createV4WorkPackagePlan : createWorkPackagePlan)({
+      plan = await createV4WorkPackagePlan({
       paths,
-      ...(isV4 ? {} : { control }),
       task: options.task,
       taskFile: options.taskFile,
       owner: options.owner,
@@ -407,7 +290,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
       return 1;
     }
     // JSON stays the default because the installer and tests read it; --plain is the human summary (C5.2).
-    if (isV4 && options.plain) {
+    if (options.plain) {
       const order = plan.work_order;
       const pathRefs = order ? order.references.filter((entry) => entry.kind === "path").length : 0;
       process.stdout.write([
@@ -426,16 +309,13 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     process.stdout.write(JSON.stringify({
       valid: true,
       plan_path: plan.plan_path,
-      ...(isV4 ? {} : { plan_sha256: plan.plan_sha256 }),
       work_package: plan.work_package || plan.work_package_id,
       owner: plan.owner,
       breakpoint: plan.breakpoint,
       scope: plan.scope,
-      ...(isV4 ? { gate_a: plan.gate_a } : {}),
+      gate_a: plan.gate_a,
       budget: plan.budget,
-      next_command: isV4
-        ? "work-start --plan <plan_path>"
-        : "work-start --plan <plan_path> --approve " + plan.plan_sha256,
+      next_command: "work-start --plan <plan_path>",
     }, null, 2) + "\n");
     return 0;
   }
@@ -447,11 +327,8 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     // T0-08: the same gate again, because dispatchCommand can be called without bootstrap.
     assertNativeAllowed({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
     if (!options.fakeCli) await assertReviewerProof(paths);
-    const approval = isV4
-      ? options.approval || await confirmV4WorkStart(paths, options.planPath, Boolean(options.yes))
-      : options.approval;
-    if (!approval) throw new Error("Legacy work-start requires --approve.");
-    const authorization = await (isV4 ? authorizeV4WorkPackage : authorizeWorkPackage)({
+    const approval = options.approval || await confirmV4WorkStart(paths, options.planPath, Boolean(options.yes));
+    const authorization = await authorizeV4WorkPackage({
       paths,
       planPath: options.planPath,
       approval,
@@ -468,44 +345,32 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
         maxCalls: authorization.plan.budget.max_claude_calls,
         maxMinutes: authorization.plan.budget.max_claude_minutes_per_call,
         startNewSession: true,
-        runtimeState: isV4 ? createRunRuntimeState(paths, authorization.run.run_id) : null,
+        runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
       });
     } finally {
       // T0-07 V2.8 (a): every way out of a v4 run delivers once; a failure here never masks the run's own exit.
-      if (isV4) {
-        try {
-          const delivery = await deliverOutcome({ paths, runId: authorization.run.run_id, adapter, notify: true });
-          if (!options.json) process.stdout.write(stdoutLines(delivery).join("\n") + "\n");
-        } catch (error) {
-          process.stderr.write("delivery failed: " + String(error?.message || error) + "\n");
-        }
+      try {
+        const delivery = await deliverOutcome({ paths, runId: authorization.run.run_id, adapter, notify: true });
+        if (!options.json) process.stdout.write(stdoutLines(delivery).join("\n") + "\n");
+      } catch (error) {
+        process.stderr.write("delivery failed: " + String(error?.message || error) + "\n");
       }
     }
-    if (options.json || !isV4) {
-      process.stdout.write(JSON.stringify(
-        isV4 ? await v4WorkPackageStatus(paths, authorization.run.run_id) : await workPackageStatus(paths),
-        null,
-        2,
-      ) + "\n");
+    if (options.json) {
+      process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths, authorization.run.run_id), null, 2) + "\n");
     }
     return exitCode;
   }
   if (command === "work-cancel") {
-    if (isV4) {
-      const cancelled = await cancelV4WorkPackage({ paths, reason: options.reason });
-      // Codex 2026-10-14: the cancel itself delivers; the result reflects the workspace at this moment.
-      await deliverOutcome({ paths, runId: cancelled.run_id, adapter, notify: true })
-        .catch((error) => process.stderr.write("delivery failed: " + String(error?.message || error) + "\n"));
-    } else await cancelWorkPackage({ paths, reason: options.reason });
-    process.stdout.write(JSON.stringify(
-      isV4 ? await v4WorkPackageStatus(paths) : await workPackageStatus(paths),
-      null,
-      2,
-    ) + "\n");
+    const cancelled = await cancelV4WorkPackage({ paths, reason: options.reason });
+    // Codex 2026-10-14: the cancel itself delivers; the result reflects the workspace at this moment.
+    await deliverOutcome({ paths, runId: cancelled.run_id, adapter, notify: true })
+      .catch((error) => process.stderr.write("delivery failed: " + String(error?.message || error) + "\n"));
+    process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths), null, 2) + "\n");
     return 0;
   }
   if (command === "review") {
-    const activeControl = isV4 ? await loadSingleActiveControlView(paths) : control;
+    const activeControl = await loadSingleActiveControlView(paths);
     if (options.validateOnly) {
       const result = await validateReviewWorker({ paths, control: activeControl, adapter });
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
@@ -521,9 +386,9 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     return 0;
   }
   if (command === "bounded-resume") {
-    const activeControl = isV4 ? await loadSingleActiveControlView(paths) : control;
-    const runtimeState = isV4 ? createRunRuntimeState(paths, activeControl.v4.run_id) : null;
-    if (isV4) await assertRunResumable(paths, activeControl.v4.run_id);
+    const activeControl = await loadSingleActiveControlView(paths);
+    const runtimeState = createRunRuntimeState(paths, activeControl.v4.run_id);
+    await assertRunResumable(paths, activeControl.v4.run_id);
     if (!options.promptPath) throw new Error("bounded-resume requires --prompt.");
     const maxCalls = options.maxCalls ?? 2;
     const maxMinutes = options.maxMinutes ?? 8;

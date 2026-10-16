@@ -5,7 +5,6 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { dispatchCommand } from "../core/commands.mjs";
 import { fileExists, writeJson } from "../core/io.mjs";
 import { getBridgePaths } from "../core/paths.mjs";
 import {
@@ -207,20 +206,6 @@ test("T5 rm refuses an active run, folds and removes a finished one, and names a
   assert.equal(await fileExists(removed.archive_file), true);
   assert.equal((await removeRun(paths, "run-missing-0001")).exitCode, 1);
   assert.equal((await removeRun(paths, "../escape")).exitCode, 1);
-});
-
-test("T6 a Claude session with no Bridge run leaves no hook log anywhere", async (t) => {
-  const { repoRoot, paths } = await runtime(t);
-  const payloadPath = path.join(repoRoot, "payload.json");
-  await writeJson(payloadPath, {
-    session_id: "11111111-2222-4333-8444-555555555555", cwd: repoRoot, stop_hook_active: false, last_assistant_message: "CODEX_REVIEW_REQUIRED: true",
-  });
-  const exitCode = await dispatchCommand({
-    command: "enqueue", args: ["--payload", payloadPath, "--no-start"], repoRoot, bridgeRoot, adapter: {},
-  });
-  assert.equal(exitCode, 2);
-  assert.equal(await fileExists(path.join(paths.queueRoot, "hook-errors.log")), false);
-  assert.equal(await fileExists(paths.archiveDir), false);
 });
 
 test("T7 a stray file maps to no run: archived as an orphan by its own date and deleted; active-run files untouched", async (t) => {

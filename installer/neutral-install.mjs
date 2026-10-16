@@ -12,7 +12,7 @@ import { canonical } from "../review-bridge/core/policy-v4.mjs";
 import {
   ACTIVE_RUN_STATUSES as RUN_ACTIVE, TERMINAL_RUN_STATUSES as RUN_TERMINAL, planUpgradeInvalidations, policyIdentity,
 } from "../review-bridge/core/state-v4.mjs";
-import { projectPolicyOverride, resolveProfile, detectProject } from "./install.mjs";
+import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

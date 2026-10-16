@@ -22,8 +22,6 @@ export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName = ".claud
     policyOverridePath: path.join(configRoot, "policy.override.json"),
     policySnapshotsDir: path.join(configRoot, "policy-snapshots"),
     defaultPolicyPath: path.join(path.resolve(bridgeRoot), "config", "default-policy.json"),
-    controlPath: path.join(queueRoot, "CONTROL.json"),
-    classificationProfilePath: path.join(queueRoot, "classification-policy.json"),
     pendingDir: path.join(queueRoot, "pending"),
     runningDir: path.join(queueRoot, "running"),
     doneDir: path.join(queueRoot, "done"),
@@ -39,13 +37,11 @@ export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName = ".claud
     reconcileGuardsDir: path.join(queueRoot, "reconcile-guards"),
     upgradeMarkerPath: path.join(queueRoot, "upgrade-in-progress.json"),
     upgradeReportsDir: path.join(queueRoot, "upgrade-reports"),
-    legacyArchiveDir: path.join(queueRoot, "legacy-archive"),
     archiveDir: path.join(privateRoot, "archive"),
     latestPath: path.join(reviewsRoot, "LATEST.txt"),
     reviewPromptOverridePath: path.join(privateRoot, "review-bridge", "review-prompt.md"),
     reviewPromptPath: path.join(path.resolve(bridgeRoot), "review-prompt.md"),
     workerLockPath: path.join(queueRoot, "worker.node.lock"),
     boundedLockPath: path.join(queueRoot, "bounded-resume.node.lock"),
-    boundedStatePath: path.join(queueRoot, "bounded-resume-state.json"),
   };
 }

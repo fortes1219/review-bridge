@@ -158,7 +158,6 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
     { args: ["work-start", "--plan", "anything"], input: "y\n", reason: /must run at an interactive terminal/ },
     { args: ["review"], reason: /for review: only work-start/ },
     { args: ["bounded-resume"], reason: /for bounded-resume: only work-start/ },
-    { args: ["enqueue", "--no-start"], reason: /for enqueue: only work-start/ },
   ]) {
     const blocked = spawnSync(process.execPath, [bootstrap, ...args], {
       cwd: root,
@@ -171,6 +170,12 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
     assert.match(blocked.stderr, /Native execution is unavailable/);
     assert.match(blocked.stderr, reason);
   }
+  // The v3 Stop-hook intake is gone: enqueue is no longer a command at all.
+  const removed = spawnSync(process.execPath, [bootstrap, "enqueue", "--no-start"], {
+    cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
+  });
+  assert.equal(removed.status, 2);
+  assert.match(removed.stderr, /Unsupported review bridge command: enqueue/);
   assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "review-queue", "authorizations")), []);
 });
 

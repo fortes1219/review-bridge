@@ -137,8 +137,12 @@ async function makeRuntime(t, override = { schema_version: 4 }) {
   return { repoRoot, toolsRoot, paths, claude, codex };
 }
 
-async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, changeTypes = "docs", gateExit = 0 } = {}) {
+async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, changeTypes = "docs", gateExit = 0, reviewPrompt = null } = {}) {
   const runtime = await makeRuntime(t, override);
+  if (reviewPrompt !== null) {
+    await fsp.mkdir(path.dirname(runtime.paths.reviewPromptOverridePath), { recursive: true });
+    await fsp.writeFile(runtime.paths.reviewPromptOverridePath, reviewPrompt, "utf8");
+  }
   const argsOut = path.join(runtime.toolsRoot, "claude-args.json");
   const planPath = path.join(runtime.paths.queueRoot, "plan.json");
   const plan = await createV4WorkPackagePlan({
@@ -225,6 +229,16 @@ test("reviewer usage limit ends rate_limited as reviewer provider_usage_limit, n
   assert.equal(await fileExists(status.latest_state.failed_review_job_path), true);
   const writer = JSON.parse(await fsp.readFile(status.latest_state.claude_stdout_path, "utf8"));
   assert.equal(writer.structured_output.event, "writer.result");
+});
+
+test("a project-owned review prompt replaces the packaged one for the reviewer", async (t) => {
+  const { runtime, exitCode, error, status } = await start(t, { reviewPrompt: "PROJECT REVIEW {{REVIEW_INPUT}}\n" });
+  assert.equal(error, null);
+  assert.equal(exitCode, 0);
+  const jobId = path.basename(status.latest_state.review_path).replace(/-codex-review\.md$/, "");
+  const rendered = await fsp.readFile(path.join(runtime.paths.reviewsRoot, jobId + "-review-prompt.md"), "utf8");
+  assert.match(rendered, /^PROJECT REVIEW /);
+  assert.equal(rendered.includes("{{REVIEW_INPUT}}"), false);
 });
 
 test("an unrelated pending job is left alone: a bounded run reviews only its own job", async (t) => {
