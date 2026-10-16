@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { evaluateRule, GateAError, NOT_APPLICABLE_LABEL, recheckGateA, runGateA, sameDelta, selectGateA } from "../features/workOrder/gateA.mjs";
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { mergePolicy } from "../service/records/policySnapshots.mjs";
+import { mergePolicy } from "../policy/policyRules.mjs";
 import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

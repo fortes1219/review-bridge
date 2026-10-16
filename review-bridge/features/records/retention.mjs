@@ -9,13 +9,28 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
-import { ensureDir, fileExists, listJson, readJson, writeJsonAtomicDurable } from "../../service/records/fileStore.mjs";
-import { ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES } from "../../service/records/runStore.mjs";
+import {
+  ACTIVE_RUN_STATUSES,
+  appendArchiveLine,
+  appendArchiveLines,
+  ARCHIVE_SCHEMA_VERSION,
+  archiveFileForDate,
+  fileExists,
+  listFiles,
+  listJson,
+  parseReviewerUsage,
+  parseWriterUsage,
+  probeAuditDir,
+  pruneDayFiles,
+  pruneProbeRecords,
+  readJson,
+  retentionDays,
+  TERMINAL_RUN_STATUSES,
+  writeJsonAtomicDurable,
+} from "../../service/index.mjs";
+import { DAY_MS, olderThan } from "../../utils/dates.mjs";
 
-export const DEFAULT_RETENTION_DAYS = 15;
-export const ARCHIVE_SCHEMA_VERSION = 1;
 const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
-const DAY_MS = 86_400_000;
 
 // One status list for the whole runtime (Codex finding 2026-10-13: this copy had lost the
 // terminal statuses added since T0-04, so those runs were never archived or pruned).
@@ -34,62 +49,6 @@ const PROTECTED_ROOT_FILES = new Set([
   "LATEST.txt",
 ]);
 
-export class RetentionConfigError extends Error {}
-
-export function retentionDays(config) {
-  const block = config?.retention;
-  if (block === undefined || block === null) return DEFAULT_RETENTION_DAYS;
-  if (typeof block !== "object") throw new RetentionConfigError("retention must be an object with days.");
-  const days = block.days;
-  if (days === undefined) return DEFAULT_RETENTION_DAYS;
-  if (!Number.isInteger(days) || days < 1 || days > 365) {
-    throw new RetentionConfigError("retention.days must be a whole number from 1 to 365.");
-  }
-  return days;
-}
-
-// Local calendar day, because the person reads these next to their own clock.
-export function localDateKey(value) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) throw new Error("Invalid date for archive.");
-  const pad = (n) => String(n).padStart(2, "0");
-  return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate());
-}
-
-export function archiveFileForDate(paths, value) {
-  return path.join(paths.archiveDir, localDateKey(value) + ".jsonl");
-}
-
-// T0-11 C3: reviewer read-only check records, one day file per local day like the run archive.
-export function probeAuditDir(paths) {
-  return path.join(paths.configRoot, "reviewer-probe-audit");
-}
-
-// The reviewer check records: the day files, and the single file versions before T0-11 wrote
-// (reviewer-probe-audit.json next to the folder), which goes once it is older than the window.
-export async function pruneProbeRecords(auditDir, days, now) {
-  let deleted = await pruneDayFiles(auditDir, days, now);
-  const legacy = path.join(path.dirname(auditDir), "reviewer-probe-audit.json");
-  const stat = await fsp.stat(legacy).catch(() => null);
-  if (stat?.isFile() && now - stat.mtimeMs > days * DAY_MS) {
-    await fsp.rm(legacy, { force: true });
-    deleted += 1;
-  }
-  return deleted;
-}
-
-// Deletes <YYYY-MM-DD>.jsonl day files whose whole day ended more than `days` ago; never today's.
-export async function pruneDayFiles(directory, days, now) {
-  const today = localDateKey(now);
-  let deleted = 0;
-  for (const file of await listFiles(directory)) {
-    const key = path.basename(file, ".jsonl");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || key === today || !file.endsWith(".jsonl")) continue;
-    if (olderThan(key + "T23:59:59", days, now)) { await fsp.rm(file, { force: true }); deleted += 1; }
-  }
-  return deleted;
-}
-
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
@@ -100,74 +59,6 @@ async function readOptionalJson(file) {
 
 async function readOptionalText(file) {
   try { return await fsp.readFile(file, "utf8"); } catch { return null; }
-}
-
-async function listFiles(directory) {
-  try {
-    const entries = await fsp.readdir(directory, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile()).map((entry) => path.join(directory, entry.name));
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
-}
-
-// Append several lines with one open and one fsync so a run's record lands together.
-export async function appendArchiveLines(file, lines) {
-  if (!lines.length) return;
-  await ensureDir(path.dirname(file));
-  const handle = await fsp.open(file, "a");
-  try {
-    await handle.writeFile(lines.map((line) => JSON.stringify(line) + "\n").join(""), "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-export async function appendArchiveLine(paths, record, clock = Date.now) {
-  const archivedAt = new Date(clock()).toISOString();
-  await appendArchiveLines(archiveFileForDate(paths, archivedAt), [{
-    schema_version: ARCHIVE_SCHEMA_VERSION,
-    archived_at: archivedAt,
-    run_id: null,
-    ...record,
-  }]);
-}
-
-// --- usage parsing (R1.6): fixed shapes, never throws ---------------------
-
-export function parseWriterUsage(stdoutText, { call = null } = {}) {
-  try {
-    const parsed = JSON.parse(stdoutText);
-    const result = Array.isArray(parsed) ? parsed.at(-1) : parsed;
-    if (!result || typeof result !== "object") return { role: "writer", call, parse_error: true };
-    const usage = result.usage && typeof result.usage === "object" ? result.usage : null;
-    const models = result.modelUsage && typeof result.modelUsage === "object" ? Object.keys(result.modelUsage) : [];
-    const number = (value) => (Number.isFinite(value) ? value : null);
-    return {
-      role: "writer",
-      call,
-      model: models.length ? models.join(",") : null,
-      num_turns: number(result.num_turns),
-      input_tokens: number(usage?.input_tokens),
-      cache_read_input_tokens: number(usage?.cache_read_input_tokens),
-      cache_creation_input_tokens: number(usage?.cache_creation_input_tokens),
-      output_tokens: number(usage?.output_tokens),
-      total_cost_usd: number(result.total_cost_usd),
-      ...(usage ? {} : { parse_error: true }),
-    };
-  } catch {
-    return { role: "writer", call, parse_error: true };
-  }
-}
-
-export function parseReviewerUsage(stderrText, { jobId = null } = {}) {
-  const match = /tokens used\s*\r?\n\s*([\d,]+)\s*$/i.exec(String(stderrText || "").trimEnd());
-  if (!match) return { role: "reviewer", job_id: jobId, parse_error: true };
-  const tokens = Number(match[1].replace(/,/g, ""));
-  if (!Number.isFinite(tokens)) return { role: "reviewer", job_id: jobId, parse_error: true };
-  return { role: "reviewer", job_id: jobId, tokens_used: tokens };
 }
 
 // --- mapping artifacts to a run (R2.3): by recorded ids and paths, never by time ---
@@ -372,12 +263,6 @@ export async function mergeRun(paths, runId, { clock = Date.now, undelivered = f
 }
 
 // --- prune (R3) -------------------------------------------------------------
-
-function olderThan(iso, days, now) {
-  const time = Date.parse(iso);
-  if (Number.isNaN(time)) return false;
-  return now - time > days * DAY_MS;
-}
 
 async function activeReferences(paths, runs) {
   const stamps = new Set();

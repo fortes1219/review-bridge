@@ -11,7 +11,9 @@ import { assertSupportedStateFilesystem, inspectStateFilesystem } from "../utils
 import { fileExists, readJson, writeJson, writeText } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import { applyNeutralInstall, planNeutralInstall } from "../../installer/neutral-install.mjs";
-import { digest, loadOrCreatePolicySnapshot, mergePolicy } from "../service/records/policySnapshots.mjs";
+import { digest } from "../utils/digest.mjs";
+import { loadOrCreatePolicySnapshot } from "../service/records/policySnapshots.mjs";
+import { mergePolicy } from "../policy/policyRules.mjs";
 import {
   acquireRunLock,
   applyBudgetExtension,

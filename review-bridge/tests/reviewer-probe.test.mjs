@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { createHash } from "node:crypto";
 import { buildProbeArgs, createReviewerProbeService, isFixedWriteAttempt, redactProbeText, runReviewerProbe } from "../features/setupCheck/reviewerProbe.mjs";
-import { localDateKey } from "../features/records/retention.mjs";
+import { localDateKey } from "../utils/dates.mjs";
 
 const signedIn = (executable) => executable.endsWith("codex")
   ? { status: 0, stdout: "", stderr: "Logged in using ChatGPT\n" }

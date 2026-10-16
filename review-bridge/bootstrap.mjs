@@ -10,8 +10,7 @@ import {
 } from "./router/platform.mjs";
 import { dispatchCommand } from "./router/index.mjs";
 import { inspectDoctor } from "./features/doctor/index.mjs";
-import { createFakeAdapter } from "./service/agentCli/fakeAdapter.mjs";
-import { readJson } from "./service/records/fileStore.mjs";
+import { createFakeAdapter, readJson } from "./service/index.mjs";
 import { getBridgePaths } from "./utils/paths.mjs";
 import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
 

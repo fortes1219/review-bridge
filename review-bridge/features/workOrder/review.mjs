@@ -2,25 +2,23 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   acquireLock,
-  assertUnder,
+  appendIoEvent,
+  classifyProviderFailure,
+  codexDiagnosticTrailer,
   ensureDir,
   fileExists,
   listJson,
+  parseReviewerUsage,
+  readEvidenceTail,
   readJson,
+  runProcess,
+  writeFailureRecord,
   writeJson,
   writeText,
-} from "../../service/records/fileStore.mjs";
-import { appendIoEvent } from "../../service/records/ioEvents.mjs";
-import { runProcess } from "../../service/agentCli/process.mjs";
+} from "../../service/index.mjs";
+import { assertUnder } from "../../utils/pathGuard.mjs";
 import { validateJobPolicy } from "../../policy/policyChecks.mjs";
 import { buildReadList } from "./writerPrompt.mjs";
-import {
-  classifyProviderFailure,
-  codexDiagnosticTrailer,
-  readEvidenceTail,
-  writeFailureRecord,
-} from "../../service/agentCli/providerFailure.mjs";
-import { parseReviewerUsage } from "../records/retention.mjs";
 import {
   controllerScopeResult,
   parseCodexJsonl,

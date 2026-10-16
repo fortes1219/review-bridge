@@ -3,29 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-export function resolvePath(value) {
-  return path.resolve(value);
-}
-
-export function isUnder(candidate, root) {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-export function assertUnder(candidate, root, label = "Path") {
-  if (!isUnder(candidate, root)) {
-    throw new Error(label + " escaped its allowed root.");
-  }
-  return path.resolve(candidate);
-}
-
-export function samePath(left, right) {
-  const a = path.resolve(left);
-  const b = path.resolve(right);
-  return process.platform === "win32"
-    ? a.toLowerCase() === b.toLowerCase()
-    : a === b;
-}
+import { assertUnder } from "../../utils/pathGuard.mjs";
 
 export async function ensureDir(directory) {
   await fsp.mkdir(directory, { recursive: true });
@@ -142,10 +120,6 @@ export async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export function timestampId(date = new Date()) {
-  return date.toISOString().replace(/[-:]/g, "").replace(".", "").replace("Z", "Z");
-}
-
 export async function acquireLock(lockPath) {
   await ensureDir(path.dirname(lockPath));
   let handle;
@@ -191,4 +165,15 @@ export async function acquireLock(lockPath) {
 export function createWriteStream(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   return fs.createWriteStream(file, { encoding: "utf8" });
+}
+
+// The plain files directly in a directory; a missing directory has none.
+export async function listFiles(directory) {
+  try {
+    const entries = await fsp.readdir(directory, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile()).map((entry) => path.join(directory, entry.name));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
 }

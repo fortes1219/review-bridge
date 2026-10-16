@@ -1,5 +1,5 @@
 import path from "node:path";
-import { assertUnder } from "../service/records/fileStore.mjs";
+import { assertUnder } from "./pathGuard.mjs";
 
 export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName = ".claude" } = {}) {
   const root = path.resolve(repoRoot);

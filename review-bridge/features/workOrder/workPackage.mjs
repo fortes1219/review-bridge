@@ -3,18 +3,23 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { assertUnder, fileExists, readJson, samePath, writeJson, writeText } from "../../service/records/fileStore.mjs";
-import { digest, loadOrCreatePolicySnapshot } from "../../service/records/policySnapshots.mjs";
+import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
 import {
   claimStartAuthorization,
   consumeRun,
   createAuthorization,
   createImmutableWorkPackage,
+  fileExists,
   listRuns,
   loadControlView,
+  loadOrCreatePolicySnapshot,
+  readJson,
   readRun,
   recordRunState,
-} from "../../service/records/runStore.mjs";
+  writeJson,
+  writeText,
+} from "../../service/index.mjs";
+import { digest } from "../../utils/digest.mjs";
 import { hasWorkOrderMarkers, MESSAGES as ORDER_MESSAGES, parseWorkOrder, WorkOrderError } from "./workOrderParser.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspaceEvidence.mjs";
 import { recheckGateA, selectGateA } from "./gateA.mjs";

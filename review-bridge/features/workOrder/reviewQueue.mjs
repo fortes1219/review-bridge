@@ -1,16 +1,9 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import {
-  assertUnder,
-  ensureDir,
-  fileExists,
-  listJson,
-  readJson,
-  samePath,
-  timestampId,
-  writeJsonAtomic,
-} from "../../service/records/fileStore.mjs";
+import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
+import { ensureDir, fileExists, listJson, readJson, writeJsonAtomic } from "../../service/index.mjs";
+import { timestampId } from "../../utils/dates.mjs";
 import { classifyReview } from "../../policy/policyChecks.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 

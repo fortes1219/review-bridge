@@ -8,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import {
-  budgetStop,
   classifyProviderFailure,
   codexDiagnosticTrailer,
   failureReasons,
 } from "../service/agentCli/providerFailure.mjs";
+import { budgetStop } from "../features/workOrder/budget.mjs";
 import { runReviewWorker } from "../features/workOrder/review.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

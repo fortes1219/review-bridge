@@ -9,7 +9,7 @@ import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { assertSupportedStateFilesystem } from "./review-bridge/utils/filesystem.mjs";
+import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
 import {
   applyNeutralInstall, applyNeutralUninstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult,

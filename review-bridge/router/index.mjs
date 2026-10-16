@@ -1,410 +1,135 @@
-import fsp from "node:fs/promises";
-import path from "node:path";
-import readline from "node:readline/promises";
+// The command table: each command's options, whether it needs the v4 configuration, and which
+// feature entry it goes to. The router wires features together (the work order's delivery into
+// the records and the setup page) and adds the start gate; the order of steps is the features'.
 import { parseOptions } from "./args.mjs";
-import { runBoundedResume, stopRun, validateBoundedResume } from "../features/workOrder/writerLoop.mjs";
-import { GateAError } from "../features/workOrder/gateA.mjs";
 import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mjs";
-import { deliverOutcome, stdoutLines } from "../features/workOrder/delivery.mjs";
+import * as records from "../features/records/index.mjs";
+import * as setupCheck from "../features/setupCheck/index.mjs";
+import * as workOrder from "../features/workOrder/index.mjs";
+import { fileExists } from "../service/index.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { queueStatus, waitForPending } from "../features/workOrder/reviewQueue.mjs";
-import { assertUnder, fileExists, readJson } from "../service/records/fileStore.mjs";
-import { runReviewWorker, validateReviewWorker } from "../features/workOrder/review.mjs";
-import { createReviewerProbeService } from "../features/setupCheck/reviewerProbe.mjs";
-import { formatPruneSummary, probeAuditDir, prune, removeRun, RetentionConfigError, retentionDays } from "../features/records/retention.mjs";
-import { removeServiceSession, serviceDown, serviceFiles, serviceStatus, serviceUp, writeServiceSession } from "../features/setupCheck/pageService.mjs";
-import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "../features/setupCheck/watchServer.mjs";
-import {
-  authorizeV4WorkPackage,
-  cancelV4WorkPackage,
-  createV4WorkPackagePlan,
-  v4WorkPackageStatus,
-} from "../features/workOrder/workPackage.mjs";
-import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "../service/records/runStore.mjs";
 
-const schemas = {
-  review: {
-    "--dry-run": { key: "dryRun", type: "boolean" },
-    "--validate-only": { key: "validateOnly", type: "boolean" },
-    "--no-notification": { key: "noNotification", type: "boolean" },
-  },
-  "bounded-resume": {
-    "--prompt": { key: "promptPath", type: "string" },
-    "--max-claude-calls": { key: "maxCalls", type: "number" },
-    "--max-claude-minutes": { key: "maxMinutes", type: "number" },
-    "--validate-only": { key: "validateOnly", type: "boolean" },
-  },
-  "work-plan": {
-    "--task": { key: "task", type: "string" },
-    "--task-file": { key: "taskFile", type: "string" },
-    "--owner": { key: "owner", type: "string" },
-    "--work-package": { key: "workPackage", type: "string" },
-    "--breakpoint": { key: "breakpoint", type: "string" },
-    "--change-types": { key: "changeTypes", type: "string" },
-    "--allow-paths": { key: "allowedPaths", type: "string" },
-    "--max-claude-calls": { key: "maxCalls", type: "number" },
-    "--max-claude-minutes": { key: "maxMinutes", type: "number" },
-    "--out": { key: "outPath", type: "string" },
-    "--plain": { key: "plain", type: "boolean" },
-  },
-  "work-start": {
-    "--plan": { key: "planPath", type: "string" },
-    "--approve": { key: "approval", type: "string" },
-    "--yes": { key: "yes", type: "boolean" },
-    "--fake-cli": { key: "fakeCli", type: "boolean" },
-    "--fake-scenario": { key: "fakeScenario", type: "string" },
-    // T0-07 V3.3: the status JSON is opt-in; the default is three plain lines.
-    "--json": { key: "json", type: "boolean" },
-  },
-  "work-cancel": {
-    "--reason": { key: "reason", type: "string" },
-  },
-  "work-status": {},
-  status: {},
-  wait: {
-    "--timeout-minutes": { key: "timeoutMinutes", type: "number" },
-  },
-  watch: {
-    "--port": { key: "port", type: "number" },
-    "--fake-cli": { key: "fakeCli", type: "boolean" },
-  },
-  up: {
-    "--fake-cli": { key: "fakeCli", type: "boolean" },
-  },
-  down: {},
-  ps: {},
-  prune: {
-    "--json": { key: "json", type: "boolean" },
-  },
-  rm: {},
-  stop: {},
+// A run is given its result before the records fold or remove it; the human is not notified.
+const deliverQuietly = ({ paths, adapter }) => (runId) => workOrder.deliverOutcome({ paths, runId, adapter, notify: false });
+
+// T0-08: the same gate as bootstrap again, because dispatchCommand can be called without it.
+const startGate = ({ command, args, paths, options }) => async () => {
+  assertNativeAllowed({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
+  if (!options.fakeCli) await assertReviewerProof(paths);
 };
 
-const CONFIG_FREE_COMMANDS = new Set(["status", "wait"]);
-
-// T0-02 R3: one entry point for every prune trigger (CLI, watch start, daily timer).
-async function runPrune(paths, { json = false, out = process.stdout, adapter = null } = {}) {
-  const config = (await fileExists(paths.bridgeConfigPath)) ? await readJson(paths.bridgeConfigPath).catch(() => ({})) : {};
-  let ttlSeconds = 86_400;
-  for (const file of [paths.defaultPolicyPath, paths.policyOverridePath]) {
-    const policy = (await fileExists(file)) ? await readJson(file).catch(() => null) : null;
-    if (Number.isInteger(policy?.limits?.authorization_ttl_seconds)) ttlSeconds = policy.limits.authorization_ttl_seconds;
-  }
-  try {
-    // T0-07: every prune (command, watch start, daily timer) delivers pending results first; prune
-    // itself refuses to fold a run that has none.
-    const summary = await prune(paths, {
-      config, ttlSeconds,
-      deliver: (runId) => deliverOutcome({ paths, runId, adapter, notify: false }),
-    });
-    out.write(json ? JSON.stringify(summary, null, 2) + "\n" : formatPruneSummary(summary) + "\n");
-    return summary.merge_errors.length ? 1 : 0;
-  } catch (error) {
-    if (error instanceof RetentionConfigError) {
-      out.write("沒有清：" + error.message + "\n");
-      return 1;
-    }
-    throw error;
-  }
-}
-
-async function confirmV4WorkStart(paths, planPath, assumeYes) {
-  const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
-  const plan = await readJson(resolvedPlan);
-  if (plan.schema_version !== 4 || plan.operation !== "start_work_package") {
-    throw new Error("Unsupported v4 work plan.");
-  }
-  if (assumeYes) return plan.plan_sha256;
-  process.stdout.write([
-    "Work package: " + plan.work_package_id,
-    "Owner: " + plan.owner,
-    "Breakpoint: " + plan.breakpoint,
-    "Allowed change types: " + plan.scope.change_types.join(", "),
-    "Allowed paths: " + plan.scope.allowed_paths.join(", "),
-    "Claude budget: " + plan.budget.max_claude_calls + " call(s), "
-      + plan.budget.max_claude_minutes_per_call + " minute(s) per call",
-    "Authorization expires at: " + plan.authorization_expires_at,
-    "Task:",
-    plan.task,
-    "",
-  ].join("\n"));
-  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = await terminal.question("Authorize this work package? [y/N] ");
-    if (!/^y(?:es)?$/i.test(answer.trim())) throw new Error("Work package authorization cancelled by user.");
-  } finally {
-    terminal.close();
-  }
-  return plan.plan_sha256;
-}
-
-async function startWatch({ paths, adapter, adapterId, adapterDefinition, adapterSource, port: portOption }) {
-  const config = await readJson(paths.bridgeConfigPath);
-  const port = portOption ?? config.watch?.port ?? DEFAULT_WATCH_PORT;
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("watch port must be 0 through 65535.");
-  const roles = { writer: config.roles?.writer?.provider_id, reviewer: config.roles?.reviewer?.provider_id };
-  if (!roles.writer || !roles.reviewer) throw new Error("watch requires roles selected by init.");
-  const service = createReviewerProbeService({
-    roles,
-    adapter,
-    adapterId,
-    adapterConfig: adapterDefinition || null,
-    adapterSource,
-    // Audit only: the watch process memory is the sole source of a current proof. T0-11 C3: one
-    // day file per local day, kept as long as the run archive.
-    auditDir: probeAuditDir(paths),
-    // T0-11 F9: an invalid retention setting is passed on as null (clean nothing), never as 15.
-    retentionDays: (() => { try { return retentionDays(config); } catch { return null; } })(),
-  });
-  const watch = await startWatchServer({
-    service,
-    uiRoot: path.join(paths.bridgeRoot, "ui"),
-    port,
-    strictPort: config.watch?.strict_port === true,
-  });
-  if (watch.bumped) {
-    const notice = portBumpNotice(watch.requestedPort, watch.url, findPortOwner(watch.requestedPort));
-    process.stdout.write(notice + "\n");
-    Promise.resolve(adapter.notify?.("Review Bridge", notice)).catch(() => {});
-  }
-  // The stable URL file is what up, ps, and editors read; it survives restarts.
-  // C1: the listening process records itself; up, ps, down and init verify against this.
-  await writeServiceSession(paths, {
-    pid: process.pid, port: watch.port, url: watch.url, service_id: watch.serviceId, started_at: new Date().toISOString(),
-  });
-  await fsp.writeFile(serviceFiles(paths).urlPath, watch.url + "\n", "utf8");
-  // T0-02 R3.4: prune at start and once a day while the service runs.
-  await runPrune(paths, { adapter }).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
-  const pruneTimer = setInterval(() => {
-    runPrune(paths, { adapter }).catch((error) => process.stderr.write("prune: " + error.message + "\n"));
-  }, 86_400_000);
-  pruneTimer.unref();
-  process.stdout.write("Review Bridge setup page: " + watch.url + "\n"
-    + "Opening or refreshing the page uses no model. Press Ctrl+C to stop.\n");
-  await new Promise((resolve) => {
-    process.once("SIGINT", resolve);
-    process.once("SIGTERM", resolve);
-  });
-  clearInterval(pruneTimer);
-  await watch.close();
-  await removeServiceSession(paths);
-  return 0;
-}
+const COMMANDS = {
+  review: {
+    options: {
+      "--dry-run": { key: "dryRun", type: "boolean" },
+      "--validate-only": { key: "validateOnly", type: "boolean" },
+      "--no-notification": { key: "noNotification", type: "boolean" },
+    },
+    run: (context) => workOrder.reviewWork(context),
+  },
+  "bounded-resume": {
+    options: {
+      "--prompt": { key: "promptPath", type: "string" },
+      "--max-claude-calls": { key: "maxCalls", type: "number" },
+      "--max-claude-minutes": { key: "maxMinutes", type: "number" },
+      "--validate-only": { key: "validateOnly", type: "boolean" },
+    },
+    run: (context) => workOrder.resumeWork(context),
+  },
+  "work-plan": {
+    options: {
+      "--task": { key: "task", type: "string" },
+      "--task-file": { key: "taskFile", type: "string" },
+      "--owner": { key: "owner", type: "string" },
+      "--work-package": { key: "workPackage", type: "string" },
+      "--breakpoint": { key: "breakpoint", type: "string" },
+      "--change-types": { key: "changeTypes", type: "string" },
+      "--allow-paths": { key: "allowedPaths", type: "string" },
+      "--max-claude-calls": { key: "maxCalls", type: "number" },
+      "--max-claude-minutes": { key: "maxMinutes", type: "number" },
+      "--out": { key: "outPath", type: "string" },
+      "--plain": { key: "plain", type: "boolean" },
+    },
+    run: (context) => workOrder.planWork(context),
+  },
+  "work-start": {
+    options: {
+      "--plan": { key: "planPath", type: "string" },
+      "--approve": { key: "approval", type: "string" },
+      "--yes": { key: "yes", type: "boolean" },
+      "--fake-cli": { key: "fakeCli", type: "boolean" },
+      "--fake-scenario": { key: "fakeScenario", type: "string" },
+      // T0-07 V3.3: the status JSON is opt-in; the default is three plain lines.
+      "--json": { key: "json", type: "boolean" },
+    },
+    run: (context) => workOrder.startWork({ ...context, guard: startGate(context) }),
+  },
+  "work-cancel": {
+    options: { "--reason": { key: "reason", type: "string" } },
+    run: (context) => workOrder.cancelWork(context),
+  },
+  "work-status": {
+    options: {},
+    run: (context) => workOrder.workStatus(context),
+  },
+  // status and wait only read the review queue; every other command needs the v4 configuration.
+  status: {
+    options: {},
+    configFree: true,
+    run: (context) => workOrder.reviewQueueStatus(context),
+  },
+  wait: {
+    options: { "--timeout-minutes": { key: "timeoutMinutes", type: "number" } },
+    configFree: true,
+    run: (context) => workOrder.waitForReview(context),
+  },
+  watch: {
+    options: {
+      "--port": { key: "port", type: "number" },
+      "--fake-cli": { key: "fakeCli", type: "boolean" },
+    },
+    run: (context) => setupCheck.startWatch({
+      ...context,
+      port: context.options.port,
+      daily: () => records.runPrune(context.paths, { deliver: deliverQuietly(context) }),
+    }),
+  },
+  up: {
+    options: { "--fake-cli": { key: "fakeCli", type: "boolean" } },
+    run: (context) => setupCheck.upService(context),
+  },
+  down: {
+    options: {},
+    run: (context) => setupCheck.downService(context),
+  },
+  ps: {
+    options: {},
+    run: (context) => setupCheck.showService(context),
+  },
+  prune: {
+    options: { "--json": { key: "json", type: "boolean" } },
+    run: (context) => records.runPrune(context.paths, { json: Boolean(context.options.json), deliver: deliverQuietly(context) }),
+  },
+  rm: {
+    options: {},
+    takesRunId: true,
+    run: (context) => records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) }),
+  },
+  stop: {
+    options: {},
+    takesRunId: true,
+    run: (context) => workOrder.stopWork(context),
+  },
+};
 
 export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName = ".claude" }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
-  const removeTarget = command === "rm" || command === "stop" ? args[0] : null;
-  const commandArgs = ["rm", "stop"].includes(command) ? args.slice(1) : args;
-  const options = parseOptions(commandArgs, schemas[command] || {});
-  // status and wait only read the review queue; every other command needs the v4 configuration.
-  if (!CONFIG_FREE_COMMANDS.has(command) && !(await fileExists(paths.bridgeConfigPath))) {
+  const entry = COMMANDS[command];
+  const runId = entry?.takesRunId ? args[0] : null;
+  const options = parseOptions(entry?.takesRunId ? args.slice(1) : args, entry?.options || {});
+  if (!entry?.configFree && !(await fileExists(paths.bridgeConfigPath))) {
     throw new Error(command + " requires the v4 runtime configuration created by init.");
   }
-  if (command === "watch") {
-    return await startWatch({ paths, adapter, adapterId, adapterDefinition, adapterSource, port: options.port });
-  }
-  if (["up", "down", "ps"].includes(command)) {
-    if (command === "up") {
-      return (await serviceUp({
-        paths,
-        bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs"),
-        watchArgs: options.fakeCli ? ["--fake-cli"] : [],
-      })).exitCode;
-    }
-    return (await (command === "down" ? serviceDown : serviceStatus)({ paths })).exitCode;
-  }
-  if (command === "prune") {
-    return await runPrune(paths, { json: Boolean(options.json), adapter });
-  }
-  if (command === "stop") {
-    if (!removeTarget) throw new Error("stop requires a run id.");
-    const result = await stopRun(paths, removeTarget);
-    process.stdout.write(result.line + "\n");
-    // T0-07 V2.8 (b): if the work-start process is gone, the stop command delivers.
-    if (result.exitCode === 0) {
-      try {
-        const delivery = await deliverOutcome({ paths, runId: removeTarget, adapter, notify: true });
-        if (!delivery.already) process.stdout.write(stdoutLines(delivery).join("\n") + "\n");
-      } catch (error) {
-        process.stderr.write("delivery failed: " + String(error?.message || error) + "\n");
-      }
-    }
-    return result.exitCode;
-  }
-  if (command === "rm") {
-    if (!removeTarget) throw new Error("rm requires a run id.");
-    // rm folds the run into the archive; a run without a result gets one first. If that fails the
-    // human's removal still happens, but the day file marks it and the output says why.
-    let deliveryError = null;
-    await deliverOutcome({ paths, runId: removeTarget, adapter, notify: false })
-      .then((delivery) => { if (delivery?.skipped) deliveryError = delivery.reason; })
-      .catch((error) => { deliveryError = String(error?.message || error); });
-    const result = await removeRun(paths, removeTarget);
-    process.stdout.write(result.line + "\n");
-    if (result.undelivered) {
-      process.stdout.write("結果沒交付成功：" + (deliveryError || "原因不明") + "，已標記未交付後移除\n");
-    }
-    return result.exitCode;
-  }
-  if (command === "status") {
-    process.stdout.write(JSON.stringify(await queueStatus(paths), null, 2) + "\n");
-    return 0;
-  }
-  if (command === "work-status") {
-    process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths), null, 2) + "\n");
-    return 0;
-  }
-  if (command === "wait") {
-    const timeoutMinutes = options.timeoutMinutes ?? 120;
-    if (timeoutMinutes < 1 || timeoutMinutes > 1440) {
-      throw new Error("wait timeout must be 1 through 1440 minutes.");
-    }
-    const file = await waitForPending(paths, timeoutMinutes);
-    process.stdout.write(file + "\n");
-    return 0;
-  }
-
-  if (command === "work-plan") {
-    if (!options.outPath) throw new Error("work-plan requires --out.");
-    let plan;
-    try {
-      plan = await createV4WorkPackagePlan({
-      paths,
-      task: options.task,
-      taskFile: options.taskFile,
-      owner: options.owner,
-      workPackage: options.workPackage,
-      breakpoint: options.breakpoint,
-      changeTypes: options.changeTypes,
-      allowedPaths: options.allowedPaths,
-      maxCalls: options.maxCalls ?? 2,
-      maxMinutes: options.maxMinutes ?? 8,
-      outPath: options.outPath,
-    });
-    } catch (error) {
-      // T0-06 G2.3: no approved test entry point for non-docs work; nothing is written.
-      if (!(error instanceof GateAError)) throw error;
-      process.stdout.write(options.plain
-        ? error.plain() + "\n"
-        : JSON.stringify({ valid: false, reason: error.reason, checked: error.checked }, null, 2) + "\n");
-      return 1;
-    }
-    // JSON stays the default because the installer and tests read it; --plain is the human summary (C5.2).
-    if (options.plain) {
-      const order = plan.work_order;
-      const pathRefs = order ? order.references.filter((entry) => entry.kind === "path").length : 0;
-      process.stdout.write([
-        order ? "工作名稱：" + order.name : "工作包：" + plan.work_package_id,
-        ...(order && (order.product || order.version) ? ["產品／版本：" + [order.product, order.version].filter(Boolean).join(" / ")] : []),
-        "範圍：" + ({ default: "預設（整個專案減禁改清單）", references: "參考資料收緊", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
-        ...(order ? ["參考資料：" + order.references.length + " 條（" + pathRefs + " 個路徑）"] : []),
-        "驗收：" + (plan.gate_a?.kind === "command" ? "會跑 " + plan.gate_a.command + "（profile 核准）" : plan.gate_a?.label || "未定"),
-        "plan：" + plan.plan_path,
-        "sha：" + plan.plan_sha256,
-        // T0-08: native work-start refuses --approve; the human confirms the card at the terminal.
-        "下一步：work-start --plan " + plan.plan_path + "，在終端機看完卡片後輸入 y",
-      ].join("\n") + "\n");
-      return 0;
-    }
-    process.stdout.write(JSON.stringify({
-      valid: true,
-      plan_path: plan.plan_path,
-      work_package: plan.work_package || plan.work_package_id,
-      owner: plan.owner,
-      breakpoint: plan.breakpoint,
-      scope: plan.scope,
-      gate_a: plan.gate_a,
-      budget: plan.budget,
-      next_command: "work-start --plan <plan_path>",
-    }, null, 2) + "\n");
-    return 0;
-  }
-  if (command === "work-start") {
-    if (!options.planPath) throw new Error("work-start requires --plan.");
-    if (options.fakeScenario && !options.fakeCli) {
-      throw new Error("--fake-scenario requires --fake-cli.");
-    }
-    // T0-08: the same gate again, because dispatchCommand can be called without bootstrap.
-    assertNativeAllowed({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
-    if (!options.fakeCli) await assertReviewerProof(paths);
-    const approval = options.approval || await confirmV4WorkStart(paths, options.planPath, Boolean(options.yes));
-    const authorization = await authorizeV4WorkPackage({
-      paths,
-      planPath: options.planPath,
-      approval,
-      executionMode: options.fakeCli ? "fake_cli" : "native",
-      authorizedVia: options.approval ? "approve_flag" : options.yes ? "yes_flag" : "terminal",
-    });
-    let exitCode;
-    try {
-      exitCode = await runBoundedResume({
-        paths,
-        control: authorization.control,
-        adapter,
-        promptPath: authorization.promptPath,
-        maxCalls: authorization.plan.budget.max_claude_calls,
-        maxMinutes: authorization.plan.budget.max_claude_minutes_per_call,
-        startNewSession: true,
-        runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
-      });
-    } finally {
-      // T0-07 V2.8 (a): every way out of a v4 run delivers once; a failure here never masks the run's own exit.
-      try {
-        const delivery = await deliverOutcome({ paths, runId: authorization.run.run_id, adapter, notify: true });
-        if (!options.json) process.stdout.write(stdoutLines(delivery).join("\n") + "\n");
-      } catch (error) {
-        process.stderr.write("delivery failed: " + String(error?.message || error) + "\n");
-      }
-    }
-    if (options.json) {
-      process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths, authorization.run.run_id), null, 2) + "\n");
-    }
-    return exitCode;
-  }
-  if (command === "work-cancel") {
-    const cancelled = await cancelV4WorkPackage({ paths, reason: options.reason });
-    // Codex 2026-10-14: the cancel itself delivers; the result reflects the workspace at this moment.
-    await deliverOutcome({ paths, runId: cancelled.run_id, adapter, notify: true })
-      .catch((error) => process.stderr.write("delivery failed: " + String(error?.message || error) + "\n"));
-    process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths), null, 2) + "\n");
-    return 0;
-  }
-  if (command === "review") {
-    const activeControl = await loadSingleActiveControlView(paths);
-    if (options.validateOnly) {
-      const result = await validateReviewWorker({ paths, control: activeControl, adapter });
-      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-      return 0;
-    }
-    await runReviewWorker({
-      paths,
-      control: activeControl,
-      adapter,
-      dryRun: Boolean(options.dryRun),
-      noNotification: Boolean(options.noNotification),
-    });
-    return 0;
-  }
-  if (command === "bounded-resume") {
-    const activeControl = await loadSingleActiveControlView(paths);
-    const runtimeState = createRunRuntimeState(paths, activeControl.v4.run_id);
-    await assertRunResumable(paths, activeControl.v4.run_id);
-    if (!options.promptPath) throw new Error("bounded-resume requires --prompt.");
-    const maxCalls = options.maxCalls ?? 2;
-    const maxMinutes = options.maxMinutes ?? 8;
-    if (maxCalls < 1 || maxCalls > 2) throw new Error("max Claude calls must be 1 or 2.");
-    if (maxMinutes < 1 || maxMinutes > 15) throw new Error("max Claude minutes must be 1 through 15.");
-    if (options.validateOnly) {
-      const result = await validateBoundedResume({
-        paths, control: activeControl, adapter, promptPath: options.promptPath, maxCalls, maxMinutes,
-      });
-      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-      return 0;
-    }
-    return await runBoundedResume({
-      paths, control: activeControl, adapter, promptPath: options.promptPath, maxCalls, maxMinutes,
-      runtimeState,
-    });
-  }
-  throw new Error("Unsupported command: " + command);
+  if (!entry) throw new Error("Unsupported command: " + command);
+  return await entry.run({ command, args, paths, options, runId, adapter, adapterId, adapterDefinition, adapterSource });
 }

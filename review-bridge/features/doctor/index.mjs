@@ -1,13 +1,8 @@
 import path from "node:path";
 
-import { fileExists, listJson, readJson } from "../../service/records/fileStore.mjs";
+import { fileExists, listJson, listRuns, loadOrCreatePolicySnapshot, readJson } from "../../service/index.mjs";
 import { validateClassificationProfile } from "../../policy/policyChecks.mjs";
-import {
-  classificationProfileFromSnapshot,
-  codexPolicyFromSnapshot,
-  loadOrCreatePolicySnapshot,
-} from "../../service/records/policySnapshots.mjs";
-import { listRuns } from "../../service/records/runStore.mjs";
+import { classificationProfileFromSnapshot, codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { inspectStateFilesystem } from "../../utils/filesystem.mjs";
 
 export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = process.version }) {

@@ -3,21 +3,30 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import {
   acquireLock,
-  assertUnder,
+  appendIoEvent,
+  classifyProviderFailure,
+  consumeRun,
   ensureDir,
   fileExists,
+  killProcessTree,
   listJson,
   parseJson,
+  readEvidenceTail,
+  readIoEvents,
   readJson,
-  timestampId,
+  readRun,
+  runProcess,
+  tokenTotal,
+  usageTotalForRun,
+  writeFailureRecord,
   writeJson,
   writeJsonAtomic,
   writeText,
-} from "../../service/records/fileStore.mjs";
+} from "../../service/index.mjs";
+import { assertUnder } from "../../utils/pathGuard.mjs";
+import { timestampId } from "../../utils/dates.mjs";
 import { enqueueReview, hasPendingMessageHash } from "./reviewQueue.mjs";
 import { runReviewWorker } from "./review.mjs";
-import { appendIoEvent, readIoEvents, tokenTotal, usageTotalForRun } from "../../service/records/ioEvents.mjs";
-import { killProcessTree, runProcess } from "../../service/agentCli/process.mjs";
 import {
   buildHandoff,
   buildReadList,
@@ -39,19 +48,11 @@ import {
   WRITER_RESULT_SCHEMA,
   writerResultFromClaudeResult,
 } from "./typedResults.mjs";
-import { consumeRun, readRun } from "../../service/records/runStore.mjs";
 import { runGateA, sameDelta } from "./gateA.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
-import { classificationProfileFromSnapshot } from "../../service/records/policySnapshots.mjs";
-import {
-  budgetStop,
-  classifyProviderFailure,
-  controllerError,
-  failureSummary,
-  readEvidenceTail,
-  writeFailureRecord,
-} from "../../service/agentCli/providerFailure.mjs";
+import { classificationProfileFromSnapshot } from "../../policy/policyRules.mjs";
+import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
 
 const REVIEW_RESUME_LIMITATION = "Review-only resume is not implemented; the writer output is preserved "
   + "and is not re-run. Continuing requires a new human-owner authorization.";

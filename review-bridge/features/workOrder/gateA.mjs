@@ -5,7 +5,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { runProcess } from "../../service/agentCli/process.mjs";
+import { runProcess } from "../../service/index.mjs";
 
 export const NOT_APPLICABLE_LABEL = "不跑測試（純文件）";
 export const GATE_A_TAIL_BYTES = 4 * 1024;

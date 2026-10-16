@@ -1,6 +1,5 @@
 import fsp from "node:fs/promises";
-import path from "node:path";
-import { assertUnder, fileExists, writeJson } from "../records/fileStore.mjs";
+import { fileExists } from "../records/fileStore.mjs";
 
 export const failureReasons = Object.freeze([
   "provider_usage_limit",
@@ -129,62 +128,5 @@ export function classifyProviderFailure({
     exit_code: Number.isInteger(exitCode) ? exitCode : null,
     reset_hint: resetHint,
     reset_hint_source: resetHint ? "cli_text" : null,
-  };
-}
-
-export function budgetStop({ phase, maxCalls, observedAt = new Date().toISOString() }) {
-  return {
-    schema_version: 1,
-    role: "controller",
-    provider: "review-bridge",
-    phase,
-    reason: "work_package_call_budget",
-    observed_at: observedAt,
-    exit_code: null,
-    reset_hint: null,
-    reset_hint_source: null,
-    max_calls: maxCalls,
-  };
-}
-
-export function controllerError({ phase, observedAt = new Date().toISOString() }) {
-  return {
-    schema_version: 1,
-    role: "controller",
-    provider: "review-bridge",
-    phase,
-    reason: "controller_error",
-    observed_at: observedAt,
-    exit_code: null,
-    reset_hint: null,
-    reset_hint_source: null,
-  };
-}
-
-export async function writeFailureRecord(paths, directory, stem, record, evidence = {}) {
-  const recordPath = assertUnder(
-    path.join(directory, stem + "-failure.json"),
-    paths.privateRoot,
-    "Failure record",
-  );
-  const full = { ...record, evidence: { ...evidence } };
-  for (const [key, value] of Object.entries(full.evidence)) {
-    if (value) assertUnder(value, paths.privateRoot, "Failure evidence " + key);
-  }
-  await writeJson(recordPath, full);
-  return { record: full, record_path: recordPath };
-}
-
-export function failureSummary(failure, recordPath = null) {
-  if (!failure) return null;
-  return {
-    role: failure.role,
-    provider: failure.provider,
-    phase: failure.phase,
-    reason: failure.reason,
-    observed_at: failure.observed_at,
-    exit_code: failure.exit_code,
-    reset_hint: failure.reset_hint,
-    record_path: recordPath,
   };
 }

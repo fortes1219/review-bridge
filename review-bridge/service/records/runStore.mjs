@@ -12,11 +12,9 @@ import {
   writeJsonAtomicDurable,
   writeJsonExclusiveDurable,
 } from "./fileStore.mjs";
-import {
-  codexPolicyFromSnapshot,
-  digest,
-  loadOrCreatePolicySnapshot,
-} from "./policySnapshots.mjs";
+import { codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
+import { digest } from "../../utils/digest.mjs";
+import { loadOrCreatePolicySnapshot } from "./policySnapshots.mjs";
 
 // The one list of run statuses; retention and the CLI read it from here so a new terminal
 // status cannot be forgotten by the archive again.

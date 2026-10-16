@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { assertUnder, ensureDir, readJson, writeJsonAtomic } from "../../service/records/fileStore.mjs";
+import { assertUnder } from "../../utils/pathGuard.mjs";
+import { ensureDir, readJson, writeJsonAtomic } from "../../service/index.mjs";
 
 const excludedRoots = new Set([
   ".git",

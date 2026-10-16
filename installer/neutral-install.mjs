@@ -6,12 +6,15 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { inspectStateFilesystem } from "../review-bridge/utils/filesystem.mjs";
-import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
-import { canonical } from "../review-bridge/service/records/policySnapshots.mjs";
 import {
-  ACTIVE_RUN_STATUSES as RUN_ACTIVE, TERMINAL_RUN_STATUSES as RUN_TERMINAL, planUpgradeInvalidations, policyIdentity,
-} from "../review-bridge/service/records/runStore.mjs";
+  ACTIVE_RUN_STATUSES as RUN_ACTIVE,
+  canonical,
+  getBridgePaths,
+  inspectStateFilesystem,
+  planUpgradeInvalidations,
+  policyIdentity,
+  TERMINAL_RUN_STATUSES as RUN_TERMINAL,
+} from "../review-bridge/service/index.mjs";
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
 
