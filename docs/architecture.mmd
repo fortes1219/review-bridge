@@ -8,7 +8,6 @@ flowchart TD
     E[("Append-only per-run events<br/>fsync before projection")]
     K["Controller<br/>locks / recovery / queue / gates"]
     CW["Claude Code<br/>bounded writer session"]
-    H["Claude Stop hook<br/>event trigger only"]
     X["Codex CLI<br/>ephemeral read-only review"]
     G{"REVIEW_GATE<br/>HARD_STOP_REQUIRED"}
     B["Human breakpoint<br/>terminal run or new decision"]
@@ -24,8 +23,7 @@ flowchart TD
     K -->|"event first"| E
     K -->|"then atomic projection"| U
     K --> CW
-    CW --> H
-    H --> K
+    CW -->|"typed writer.result"| K
     K --> X
     X --> G
     G -->|"FAIL + no hard stop<br/>within authorized budget"| K

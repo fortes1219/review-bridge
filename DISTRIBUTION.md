@@ -58,22 +58,16 @@ Normal installation and the four no-token gate checks use one command:
 node bridge.mjs init --target D:\path\to\target-workspace
 ```
 
-If the target is a Git repository, it must already keep `.claude/` outside public Git. The installer never edits tracked `.gitignore`. A workspace without Git uses controller-owned snapshot/delta evidence instead.
+`init` installs under `.review-bridge/`. In a Git repository it adds `.review-bridge/` to the local `.git/info/exclude` and never edits tracked `.gitignore`. A workspace without Git uses controller-owned snapshot/delta evidence instead.
 
-The lower-level interface is:
+Upgrade and uninstall seal a read-only plan whose exact SHA-256 the human approves, at an interactive terminal or non-interactively:
 
 ```powershell
-node installer/install.mjs plan `
-  --target D:\path\to\target-repository `
-  --profile auto `
-  --out D:\temp\review-bridge-plan.json
+node bridge.mjs upgrade --target D:\path\to\target-workspace --plan-out D:\temp\upgrade-plan.json
+node bridge.mjs upgrade --target D:\path\to\target-workspace --plan D:\temp\upgrade-plan.json --approve <plan_sha256>
 
-node installer/install.mjs apply `
-  --target D:\path\to\target-repository `
-  --plan D:\temp\review-bridge-plan.json `
-  --approve <plan_sha256>
-
-node installer/install.mjs verify --target D:\path\to\target-repository
+node bridge.mjs uninstall --target D:\path\to\target-workspace --plan-out D:\temp\uninstall-plan.json
+node bridge.mjs uninstall --target D:\path\to\target-workspace --plan D:\temp\uninstall-plan.json --approve <plan_sha256>
 ```
 
 Automatic profile selection succeeds only when exactly one profile matches. Mixed or ambiguous repositories require an explicit profile ID.

@@ -34,8 +34,8 @@ Review Bridge 是 Claude writer / Codex reviewer 的 workspace-local review cont
 
 1. 執行 `node --version`，必須是 Node.js 22 或更新版本。
 2. 確認目標專案位於本機磁碟，不是 OneDrive、Dropbox、iCloud Drive 或網路磁碟。
-3. 如果目標是 Git repository，必須先由人類確認 `.gitignore` 已包含 `.claude/`。Installer 不會代替人類修改 tracked `.gitignore`。
-4. 首次安裝時，若專案內已有來源不明的 `.claude/tools/review-bridge` 或 Bridge Stop hook，先停止並查明，不要盲目覆蓋。
+3. 如果目標是 Git repository，`init` 會在本機的 `.git/info/exclude` 加入 `.review-bridge/`，不會修改 tracked `.gitignore`。
+4. 首次安裝時，若專案內已有來源不明的 `.review-bridge/`，先停止並查明，不要盲目覆蓋。
 
 Git 是可選的；沒有 Git 時，Bridge 會建立自己的 workspace before/after evidence。
 

@@ -151,21 +151,17 @@ Detection identifies tooling evidence and candidate verification commands. It do
 
 When `--adopt-existing` finds a customized runtime `review-prompt.md`, the approved plan records its hash and migrates it to the project-owned override path before replacing the shared runtime. A conflicting pre-existing override fails closed.
 
-When a Claude Stop hook enqueues a report before `bounded-resume` performs its own durable enqueue, the controller accepts the duplicate only if the matching message hash is still present in `pending`. Duplicates found only in completed or failed history remain fail-closed.
-
 ## Upgrade, Uninstall, And Rollback
 
-Upgrade, uninstall, rollback, and legacy migration use the same internal plan validation as installation. They are maintainer operations, not normal onboarding steps; use `docs/installer-contract.md` instead of asking users to copy an authorization token.
+Upgrade, uninstall, and upgrade rollback use the same sealed-plan approval as installation: `node bridge.mjs upgrade`, `node bridge.mjs uninstall`, and `node bridge.mjs upgrade --rollback`, each confirmed at an interactive terminal or through `--plan-out` then `--plan <file> --approve <sha>`. They are maintainer operations, not normal onboarding steps; see `docs/installer-contract.md`.
 
 An upgrade stages the complete runtime before activation and holds an upgrade marker while it verifies the new runtime and records invalidated unclaimed authorizations. An interrupted operation exposes either the previous runtime or an explicit incomplete-upgrade state, never a partially copied runtime. Resolve an incomplete upgrade through a controller-validated rollback before starting new work.
 
-`uninstall` removes unchanged installer-owned files and preserves project state that was changed after installation. `rollback` is the exact-state recovery path: it restores the latest pre-operation snapshot, including Claude settings, queue/review artifacts, and the ownership manifest.
+`uninstall` backs `.review-bridge/` up outside the project and verifies the copy before deleting it. `upgrade --rollback` restores an interrupted upgrade from its maintenance marker and backup.
 
 The default persistent backup root is `%LOCALAPPDATA%\CodexReviewBridge\backups` on Windows. Use `--backup-root <external-path>` during planning to select another location. The backup root must be outside the target repository.
 
-Persistent snapshots may contain private CONTROL, queue, review, or Claude settings data. Do not publish, commit, or include the backup root in a distribution archive. Automatic retention/pruning is not part of this preview.
-
-Legacy v2/v3 migration is separate from fresh installation. It is model-free, refuses active legacy state, archives the exact legacy bytes, and creates no replayable authorization. Fresh installs do not use this path.
+Backups may contain private queue, review, and run data. Do not publish, commit, or include the backup root in a distribution archive. Automatic retention/pruning is not part of this preview.
 
 No remote repository, npm publication, commit, push, or deploy is performed by this preview. `init` invokes no model; native `work-start` does.
 

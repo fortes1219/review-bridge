@@ -234,6 +234,8 @@ Exclusive-create and lock guarantees are assumed only for a local filesystem wit
 
 ## 6. v2/v3 migration contract
 
+Removed 2026-10-16: the `migrate-control` command and the v2/v3 migration code are no longer in the product. This section is kept as history.
+
 Command shape: `bridge migrate-control plan|apply` with checksum approval.
 
 Required behavior:

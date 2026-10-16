@@ -20,10 +20,8 @@
   "included": [
     "checksum-gated plan/apply/upgrade/uninstall/rollback lifecycle",
     "transaction lock, ownership manifest, immediate failure rollback, and persistent exact-state rollback points",
-    "structural Claude settings merge",
     "v4 immutable work-package, authorization, claim, run projection, and append-only event lifecycles",
     "fresh install with no CONTROL, active authorization, or session identity",
-    "checksum-gated v2/v3 migration with exact-byte archive and rollback",
     "tighten-only policy snapshots, current-only 0.x upgrade invalidation, crash recovery, and budget extension",
     "checksum-gated first-work-package plan/start/status/cancel lifecycle",
     "one-command product init with four no-token fake gate checks",
