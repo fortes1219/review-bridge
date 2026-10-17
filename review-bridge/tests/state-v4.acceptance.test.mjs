@@ -49,7 +49,7 @@ async function makeRuntime(prefix = "ac-v4-", baseRoot = os.tmpdir()) {
     path.join(sourceBridgeRoot, "config", "default-policy.json"),
     path.join(bridgeRoot, "config", "default-policy.json"),
   );
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4,
     state_contract: "v4",

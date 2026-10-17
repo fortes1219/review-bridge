@@ -1,12 +1,15 @@
 import path from "node:path";
 import { assertUnder } from "./pathGuard.mjs";
 
-export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName = ".claude" } = {}) {
+// Bridge state lives only in this provider-neutral folder. There is no default: a caller
+// that does not name it is refused, never sent into a provider's own folder.
+export const PRIVATE_ROOT_NAME = ".review-bridge";
+
+export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName } = {}) {
   const root = path.resolve(repoRoot);
   const runtimeRoot = path.resolve(bridgeRoot);
-  if (![".claude", ".review-bridge"].includes(privateRootName)) {
-    throw new Error("Unsupported Bridge private root.");
-  }
+  if (!privateRootName) throw new Error("Bridge private root is not given.");
+  if (privateRootName !== PRIVATE_ROOT_NAME) throw new Error("Unsupported Bridge private root: " + privateRootName);
   const privateRoot = assertUnder(path.join(root, privateRootName), root, "Private root");
   const queueRoot = assertUnder(path.join(privateRoot, "review-queue"), privateRoot, "Queue root");
   const reviewsRoot = assertUnder(path.join(privateRoot, "reviews"), privateRoot, "Reviews root");

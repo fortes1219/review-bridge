@@ -52,21 +52,21 @@ test("G1 fake mode and model-free commands are unchanged", () => {
 test("G3 dispatchCommand refuses native work-start on its own, without bootstrap, and creates no authorization", async (t) => {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-native-gate-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections" });
   const adapter = { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} };
   await assert.rejects(
-    dispatchCommand({ command: "work-start", args: ["--plan", "x", "--approve", "x"], repoRoot, bridgeRoot, adapter }),
+    dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x", "--approve", "x"], repoRoot, bridgeRoot, adapter }),
     /with --approve or --yes/,
   );
   await assert.rejects(
-    dispatchCommand({ command: "work-start", args: ["--plan", "x", "--yes"], repoRoot, bridgeRoot, adapter }),
+    dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x", "--yes"], repoRoot, bridgeRoot, adapter }),
     /with --approve or --yes/,
   );
   // The test runner's stdin is not a terminal, so the plain form is refused here too.
   if (!(process.stdin.isTTY && process.stdout.isTTY)) {
     await assert.rejects(
-      dispatchCommand({ command: "work-start", args: ["--plan", "x"], repoRoot, bridgeRoot, adapter }),
+      dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x"], repoRoot, bridgeRoot, adapter }),
       /must run at an interactive terminal/,
     );
   }
@@ -90,7 +90,7 @@ async function pageService(t, paths, { state, proven, serviceId = "a".repeat(32)
 async function v4Paths(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-native-proof-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections" });
   return { repoRoot, paths };
 }
@@ -127,12 +127,12 @@ test("G5 at an interactive terminal, native work-start still refuses until the p
   Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
   try {
     await assert.rejects(
-      dispatchCommand({ command: "work-start", args: ["--plan", "x"], repoRoot: rt.repoRoot, bridgeRoot, adapter }),
+      dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x"], repoRoot: rt.repoRoot, bridgeRoot, adapter }),
       /Bridge page service is not running/,
     );
     await pageService(t, rt.paths, { state: "not_run", proven: "not_run" });
     await assert.rejects(
-      dispatchCommand({ command: "work-start", args: ["--plan", "x"], repoRoot: rt.repoRoot, bridgeRoot, adapter }),
+      dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x"], repoRoot: rt.repoRoot, bridgeRoot, adapter }),
       /reviewer read-only check has not passed .*state: not_run/,
     );
   } finally {

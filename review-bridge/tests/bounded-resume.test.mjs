@@ -122,7 +122,7 @@ async function makeRuntime(t, override = { schema_version: 4 }) {
   const toolsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-bounded-tools-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   t.after(() => fsp.rm(toolsRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
     gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },

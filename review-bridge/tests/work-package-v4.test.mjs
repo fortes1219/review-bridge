@@ -17,7 +17,7 @@ const packageRoot = path.resolve(bridgeRoot, "..");
 async function runtime(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-wp-v4-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
     gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
@@ -107,7 +107,7 @@ test("T8 an explicit --allow-paths must exist, stay out of the forbidden list, a
 test("T9 the plan seals the rules digest and every reference hash; a changed reference changes the sha", async (t) => {
   const r = await runtime(t);
   const first = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "seal-a" });
-  assert.equal(first.rules.path, ".claude/review-bridge/rules.md");
+  assert.equal(first.rules.path, ".review-bridge/review-bridge/rules.md");
   assert.match(first.rules.sha256, /^[0-9a-f]{64}$/);
   assert.match(first.rules.text, /規則摘要/);
   await fsp.writeFile(path.join(r.repoRoot, "src", "game", "farm.js"), "// farm v2\n");
@@ -127,7 +127,7 @@ test("T10 authorize fails closed when a reference or rules.md changed after the 
   const sealedRules = await plan(r, { task: order(), id: "stale-rules" });
   await fsp.appendFile(path.join(r.paths.configRoot, "rules.md"), "\n再加一條。\n");
   await assert.rejects(authorizeV4WorkPackage({ paths: r.paths, planPath: sealedRules.plan_path, approval: sealedRules.plan_sha256, executionMode: "fake_cli" }),
-    /批准後 \.claude\/review-bridge\/rules\.md 變了/);
+    /批准後 \.review-bridge\/review-bridge\/rules\.md 變了/);
 });
 
 test("T11 a missing, empty or oversized rules.md stops work-plan", async (t) => {

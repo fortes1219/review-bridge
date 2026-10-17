@@ -19,7 +19,7 @@ const NODE_RULES = [{ command: "npm test", package_script: "test" }];
 async function workspace(t, { bridge = { gate_a: { profile_id: "node-backend", rules: NODE_RULES } }, manifest = { name: "x", scripts: { test: "node -e \"process.exit(0)\"" } } } = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-gate-a-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections", ...bridge });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));

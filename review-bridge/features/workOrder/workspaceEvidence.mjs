@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { assertUnder } from "../../utils/pathGuard.mjs";
+import { PRIVATE_ROOT_NAME } from "../../utils/paths.mjs";
 import { ensureDir, readJson, writeJsonAtomic } from "../../service/index.mjs";
 
 const excludedRoots = new Set([
@@ -14,19 +15,17 @@ const excludedRoots = new Set([
   "node_modules",
   "target",
 ]);
-// The controller's own state is never workspace evidence, under either private root name
-// (T0-05: the neutral `.review-bridge/` root was missing here, so a run's queue and record
-// files counted as scope violations).
-const privateRootNames = [".claude", ".review-bridge"];
-const excludedControllerPaths = privateRootNames.flatMap((root) => [
-  root + "/review-queue",
-  root + "/reviews",
-  root + "/tools/review-bridge",
-  root + "/work-packages",
-  root + "/archive",
-  root + "/review-bridge/policy-snapshots",
-  root + "/review-bridge-install.json",
-]);
+// The controller's own state is never workspace evidence. It lives only under the neutral
+// private root; a provider folder such as `.claude/` is the project's, so changes there count.
+const excludedControllerPaths = [
+  "review-queue",
+  "reviews",
+  "tools/review-bridge",
+  "work-packages",
+  "archive",
+  "review-bridge/policy-snapshots",
+  "review-bridge-install.json",
+].map((entry) => PRIVATE_ROOT_NAME + "/" + entry);
 const maximumFiles = 20_000;
 const maximumBaselineBytes = 100 * 1024 * 1024;
 
@@ -94,7 +93,7 @@ async function manifest(root) {
         continue;
       }
       if (!entry.isFile()) continue;
-      if (isExcluded(relative) || relative === ".claude/review-bridge-install.json") continue;
+      if (isExcluded(relative)) continue;
       const content = await fsp.readFile(absolute);
       totalBytes += content.length;
       files.push({ path: relative, sha256: digest(content), size: content.length });

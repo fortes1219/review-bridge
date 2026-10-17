@@ -30,7 +30,7 @@ async function workspace(t) {
   await fsp.mkdir(path.join(repoRoot, "src", "game"), { recursive: true });
   await fsp.writeFile(path.join(repoRoot, "src", "game", "farm.js"), "// farm\n");
   await fsp.writeFile(path.join(repoRoot, "src", "game", "big.js"), "x".repeat(70 * 1024));
-  return { repoRoot, paths: getBridgePaths(repoRoot, bridgeRoot) };
+  return { repoRoot, paths: getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" }) };
 }
 
 function workPackage() {

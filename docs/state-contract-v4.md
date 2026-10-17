@@ -21,15 +21,15 @@ Copying a work-package file must not copy or create authorization. Changing any 
 ## 2. Proposed layout
 
 ```text
-.claude/tools/review-bridge/config/
+.review-bridge/tools/review-bridge/config/
 └─ default-policy.json                 # installer-owned package default
 
-.claude/review-bridge/
+.review-bridge/review-bridge/
 ├─ bridge.json                         # static schema and policy references
 ├─ policy.override.json                # project-owned override
 └─ policy-snapshots/<sha256>.json       # immutable effective policy
 
-.claude/review-queue/
+.review-bridge/review-queue/
 ├─ work-packages/<id>/<sha256>.json     # immutable definition
 ├─ authorizations/<authorization-id>.json
 ├─ authorization-claims/<authorization-id>.json

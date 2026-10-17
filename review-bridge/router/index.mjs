@@ -122,7 +122,7 @@ const COMMANDS = {
   },
 };
 
-export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName = ".claude" }) {
+export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
   const entry = COMMANDS[command];
   const runId = entry?.takesRunId ? args[0] : null;

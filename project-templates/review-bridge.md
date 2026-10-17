@@ -1,11 +1,11 @@
 # Review Bridge Boundary
 
 The Stop hook is only an event trigger. The controller under
-`.claude/tools/review-bridge/` owns the review state machine.
+`.review-bridge/tools/review-bridge/` owns the review state machine.
 
 - Claude is the writer. Codex is the independent reviewer.
 - Runtime authorization comes only from an immutable v4 authorization that references the exact work-package and effective-policy checksums.
-- Active execution is derived from `.claude/review-queue/runs/*.json`; there is no mutable global active-run list.
+- Active execution is derived from `.review-bridge/review-queue/runs/*.json`; there is no mutable global active-run list.
 - An inactive, missing, malformed, exhausted, or consumed authorization fails closed.
 - A review FAIL without a hard stop may return only named findings to the authorized Claude session.
 - A review FAIL with a hard stop returns control to the human owner.

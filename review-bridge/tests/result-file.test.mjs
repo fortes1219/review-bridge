@@ -22,7 +22,7 @@ const packageRoot = path.resolve(bridgeRoot, "..");
 async function runtime(t, { locale } = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-result-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
     ...(locale ? { locale } : {}),
@@ -259,7 +259,7 @@ test("S6 the language pack drives every string; unknown locales fall back; missi
 test("S8 task_file is sealed; the latest copy sits beside the work order, inline tasks go to work-packages/<id>", async (t) => {
   const rt = await runtime(t);
   const first = await terminalRun(rt, "cancelled", { id: "farm" });
-  assert.equal(first.plan.task_file, ".claude/work-packages/farm.md");
+  assert.equal(first.plan.task_file, ".review-bridge/work-packages/farm.md");
   const d1 = await deliverOutcome({ paths: rt.paths, runId: first.runId, notify: false });
   assert.equal(d1.latest_path, path.join(rt.paths.privateRoot, "work-packages", "farm.result.md"));
   assert.equal(d1.result_path, path.join(rt.paths.queueRoot, first.runId + ".result.md"));
@@ -378,7 +378,7 @@ test("C6 work-cancel delivers on the spot", async (t) => {
   process.stdout.write = () => true;
   let exitCode;
   try {
-    exitCode = await dispatchCommand({ command: "work-cancel", args: [], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} } });
+    exitCode = await dispatchCommand({ privateRootName: ".review-bridge", command: "work-cancel", args: [], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} } });
   } finally {
     process.stdout.write = original;
   }
@@ -424,7 +424,7 @@ test("C8 rm on a run whose delivery fails still removes it, marks the day file a
   process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true; };
   let exitCode;
   try {
-    exitCode = await dispatchCommand({ command: "rm", args: [runId], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async notify() {} } });
+    exitCode = await dispatchCommand({ privateRootName: ".review-bridge", command: "rm", args: [runId], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async notify() {} } });
   } finally {
     process.stdout.write = original;
   }
@@ -445,7 +445,7 @@ test("C8 rm on a run whose delivery fails still removes it, marks the day file a
   const goodChunks = [];
   process.stdout.write = (chunk) => { goodChunks.push(String(chunk)); return true; };
   try {
-    await dispatchCommand({ command: "rm", args: [good.runId], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async notify() {} } });
+    await dispatchCommand({ privateRootName: ".review-bridge", command: "rm", args: [good.runId], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async notify() {} } });
   } finally {
     process.stdout.write = original;
   }
@@ -463,7 +463,7 @@ test("C9 rm on an already archived run without a result still warns and leaves a
   const original = process.stdout.write;
   process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true; };
   try {
-    await dispatchCommand({ command: "rm", args: [runId], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async notify() {} } });
+    await dispatchCommand({ privateRootName: ".review-bridge", command: "rm", args: [runId], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async notify() {} } });
   } finally {
     process.stdout.write = original;
   }

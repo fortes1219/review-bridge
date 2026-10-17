@@ -36,9 +36,9 @@ It is not a general agent framework, a session synchronization protocol, or an a
 - `plan` is read-only and never invokes a model.
 - Integrity and authorization tokens are checked by the controller. Human-facing commands show the target, scope, budget, breakpoint, and effects instead of asking users to copy hashes.
 - Git is not required. Without Git, the controller creates its own before/after workspace evidence and scope-violation report.
-- In a Git repository, `.claude/` must already be ignored. The installer never edits tracked `.gitignore`.
+- In a Git repository, the installer adds `.review-bridge/` to the local `.git/info/exclude` when it is not already ignored. It never edits tracked `.gitignore`.
 - Existing Claude permissions, unrelated hooks, rules, skills, docs, and handoffs are preserved.
-- Existing project-specific review prompts are preserved at `.claude/review-bridge/review-prompt.md` and override the packaged generic prompt.
+- Existing project-specific review prompts are preserved at `.review-bridge/review-bridge/review-prompt.md` and override the packaged generic prompt.
 - Fresh installs create no `CONTROL.json`. Immutable work packages and authorizations create run state only after checksum approval.
 - Failed transactions immediately restore the pre-operation managed paths.
 - Successful operations retain a checksum-verified rollback point outside the target repository.
@@ -86,11 +86,11 @@ The lower-level plan/apply interface remains an internal maintainer API for cont
 
 ## Start The First Work Package
 
-After installation, copy `.claude/work-packages/TEMPLATE.md` to a new task file and edit its work, acceptance criteria, allowed paths, and prohibited actions. Then create a controller-validated authorization plan:
+After installation, copy `.review-bridge/work-packages/TEMPLATE.md` to a new task file and edit its work, acceptance criteria, allowed paths, and prohibited actions. Then create a controller-validated authorization plan:
 
 ```powershell
-node .claude/tools/review-bridge/bootstrap.mjs work-plan `
-  --task-file .claude/work-packages/trial-001.md `
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-plan `
+  --task-file .review-bridge/work-packages/trial-001.md `
   --owner "YOUR_NAME" `
   --work-package trial-001 `
   --breakpoint "return after Codex review" `
@@ -98,7 +98,7 @@ node .claude/tools/review-bridge/bootstrap.mjs work-plan `
   --allow-paths "README.md" `
   --max-claude-calls 2 `
   --max-claude-minutes 8 `
-  --out .claude/review-queue/trial-001.plan.json
+  --out .review-bridge/review-queue/trial-001.plan.json
 ```
 
 Review the scope, budget, and breakpoint printed by `work-plan`. `work-start` then displays the complete task and those limits, asks for confirmation, and validates the internal authorization token itself.
@@ -106,8 +106,8 @@ Review the scope, budget, and breakpoint printed by `work-plan`. `work-start` th
 Run the first plan in no-token fake mode:
 
 ```powershell
-node .claude/tools/review-bridge/bootstrap.mjs work-start `
-  --plan .claude/review-queue/trial-001.plan.json `
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-start `
+  --plan .review-bridge/review-queue/trial-001.plan.json `
   --fake-cli `
   --fake-scenario PASS
 ```
@@ -117,8 +117,8 @@ Fake scenarios include `PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, and `RATE_LIMIT`. 
 On Windows x64, start the new plan without fake flags:
 
 ```powershell
-node .claude/tools/review-bridge/bootstrap.mjs work-start `
-  --plan .claude/review-queue/trial-001.plan.json
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-start `
+  --plan .review-bridge/review-queue/trial-001.plan.json
 ```
 
 `work-start` creates the Claude session, runs the writer, runs ephemeral read-only Codex review, performs only budgeted named corrections, and stops at PASS or a human hard stop. It never commits, pushes, deploys, or starts another work package.
@@ -126,8 +126,8 @@ node .claude/tools/review-bridge/bootstrap.mjs work-start `
 On Apple Silicon macOS, the adapter is selectable for an explicit RC canary after all fake scenarios pass. `init` reports `adapter_status: candidate` and `runtime_verified: false`; that is a disclosure, not a support claim. The canary result is evidence required before promoting macOS to native-verified.
 
 ```powershell
-node .claude/tools/review-bridge/bootstrap.mjs work-status
-node .claude/tools/review-bridge/bootstrap.mjs work-cancel --reason "cancelled_by_human_owner"
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-status
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-cancel --reason "cancelled_by_human_owner"
 ```
 
 See `docs/first-work-package.md` for scope categories, status meanings, cancellation, and fail-closed behavior.

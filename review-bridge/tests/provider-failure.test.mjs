@@ -142,7 +142,7 @@ test("plan call budget stop is a controller reason, never a provider quota", () 
 test("review worker preserves the failed job and links a private typed failure record", async () => {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-provider-failure-"));
   try {
-    const paths = getBridgePaths(repoRoot, bridgeRoot);
+    const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
     const fakeCodex = path.join(repoRoot, "fake-codex-limit.mjs");
     await fsp.writeFile(fakeCodex, [
       "for await (const _ of process.stdin) {}",

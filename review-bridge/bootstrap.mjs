@@ -11,14 +11,14 @@ import {
 import { dispatchCommand } from "./router/index.mjs";
 import { inspectDoctor } from "./features/doctor/index.mjs";
 import { createFakeAdapter, readJson } from "./service/index.mjs";
-import { getBridgePaths } from "./utils/paths.mjs";
+import { getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
 import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
 
 const bridgeRoot = bridgeRootFrom(import.meta.url);
 const repoRoot = path.resolve(bridgeRoot, "../../..");
 const privateRootName = path.basename(path.dirname(path.dirname(bridgeRoot)));
-if (![".claude", ".review-bridge"].includes(privateRootName)) {
-  throw new Error("Bridge runtime is outside a supported private layout.");
+if (privateRootName !== PRIVATE_ROOT_NAME) {
+  throw new Error("Bridge runtime must be installed under " + PRIVATE_ROOT_NAME + "/tools/; found " + privateRootName + ".");
 }
 
 function printUsage() {

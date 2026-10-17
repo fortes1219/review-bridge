@@ -166,7 +166,7 @@ function parseAllowedPaths(value) {
     }
     const normalized = path.posix.normalize(entry);
     if (normalized === ".." || normalized.startsWith("../")) throw new Error("Allowed path escapes the workspace.");
-    if (/^(\.git|\.env(?:\.|$)|\.claude\/(?:review-queue|reviews))(?:\/|$)/i.test(normalized)) {
+    if (/^(\.git|\.env(?:\.|$)|\.review-bridge)(?:\/|$)/i.test(normalized)) {
       throw new Error("Runtime, Git, and environment paths cannot be authorized: " + entry);
     }
   }

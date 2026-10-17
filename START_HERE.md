@@ -64,7 +64,7 @@ node bridge.mjs init --target /Users/me/projects/my-app
 1. 先選 writer／reviewer，以零 LLM 檢查兩邊 CLI 與登入；目前未支援的角色組合在寫入 target 前停下。
 2. 檢查 Node、target、檔案系統與專案 profile。
 3. 建立不可竄改的 install plan 並要求確認。
-4. 安裝 private `.claude/` controller，不修改 application code。
+4. 安裝 private `.review-bridge/` controller，不修改 application code。
 5. 用 fake CLI 跑完 `PASS`、`FAIL_THEN_PASS`、`HARD_STOP`、`RATE_LIMIT`。
 6. 顯示 CLI 與登入結果；native 仍不可開始。
 
@@ -75,7 +75,7 @@ node bridge.mjs init --target /Users/me/projects/my-app
 - planned changes 只安裝 private controller、hook、rule、policy 與 ownership manifest。
 - 畫面明確表示 application files 不會在 init 中變更。
 
-輸入 `n` 或直接按 Enter 會取消安裝，不應產生 `.claude` 安裝結果。
+輸入 `n` 或直接按 Enter 會取消安裝，不應產生 `.review-bridge` 安裝結果。
 
 自動化或 disposable workspace 才使用 `--yes`：
 
@@ -92,13 +92,13 @@ node bridge.mjs init --target <專案的絕對路徑> --writer claude --reviewer
 先複製安裝時建立的範本，再編輯新的 work package：
 
 ```text
-copy .claude\work-packages\TEMPLATE.md .claude\work-packages\trial-001.md
+copy .review-bridge\work-packages\TEMPLATE.md .review-bridge\work-packages\trial-001.md
 ```
 
 macOS / Linux 使用：
 
 ```text
-cp .claude/work-packages/TEMPLATE.md .claude/work-packages/trial-001.md
+cp .review-bridge/work-packages/TEMPLATE.md .review-bridge/work-packages/trial-001.md
 ```
 
 內容至少寫清楚：
@@ -111,19 +111,19 @@ cp .claude/work-packages/TEMPLATE.md .claude/work-packages/trial-001.md
 接著在目標專案執行單行命令：
 
 ```text
-node .claude/tools/review-bridge/bootstrap.mjs work-plan --task-file .claude/work-packages/trial-001.md --owner "YOUR_NAME" --work-package trial-001 --breakpoint "return after Codex review" --change-types docs --allow-paths "README.md" --max-claude-calls 2 --max-claude-minutes 8 --out .claude/review-queue/trial-001.plan.json
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-plan --task-file .review-bridge/work-packages/trial-001.md --owner "YOUR_NAME" --work-package trial-001 --breakpoint "return after Codex review" --change-types docs --allow-paths "README.md" --max-claude-calls 2 --max-claude-minutes 8 --out .review-bridge/review-queue/trial-001.plan.json
 ```
 
 先檢查 `work-plan` 輸出的 scope、allowed paths、budget 與 breakpoint。接著執行 `work-start`；它會再次顯示完整 task 與上述限制，確認後輸入 `y`。Controller 會自行驗證 plan：
 
 ```text
-node .claude/tools/review-bridge/bootstrap.mjs work-start --plan .claude/review-queue/trial-001.plan.json --fake-cli --fake-scenario PASS
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-start --plan .review-bridge/review-queue/trial-001.plan.json --fake-cli --fake-scenario PASS
 ```
 
 Fake run 會消耗該 authorization。Native mode 必須重新產生一份 plan，再執行：
 
 ```text
-node .claude/tools/review-bridge/bootstrap.mjs work-start --plan .claude/review-queue/trial-001.plan.json
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-start --plan .review-bridge/review-queue/trial-001.plan.json
 ```
 
 ## 4. 執行期間會發生什麼
@@ -138,8 +138,8 @@ node .claude/tools/review-bridge/bootstrap.mjs work-start --plan .claude/review-
 查看與取消目前 run：
 
 ```text
-node .claude/tools/review-bridge/bootstrap.mjs work-status
-node .claude/tools/review-bridge/bootstrap.mjs work-cancel --reason "cancelled_by_human_owner"
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-status
+node .review-bridge/tools/review-bridge/bootstrap.mjs work-cancel --reason "cancelled_by_human_owner"
 ```
 
 ## 5. macOS RC canary

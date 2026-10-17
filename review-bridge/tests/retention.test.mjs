@@ -22,7 +22,7 @@ let fixtureCount = 0;
 async function runtime(t, config = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-retention-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot);
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections", ...config,
   });
