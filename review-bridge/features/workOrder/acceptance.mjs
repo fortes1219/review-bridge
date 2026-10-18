@@ -3,35 +3,21 @@
 // must name exactly the sealed ids, and a condition the reviewer passes counts as proven only
 // when its evidence holds: a condition that leans on Gate A needs Gate A to have passed on the
 // same version of the work the reviewer saw. Anything else is failed or unknown, never a pass.
-import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import fsp from "node:fs/promises";
-import path from "node:path";
-
-const sha256 = (value) => createHash("sha256").update(value).digest("hex");
-
-function git(repoRoot, args) {
-  // --no-optional-locks: reading never takes the index lock, so the user's Git state is untouched.
-  const result = spawnSync("git", ["--no-optional-locks", ...args], {
-    cwd: repoRoot, encoding: "buffer", windowsHide: true, timeout: 30_000, maxBuffer: 256 * 1024 * 1024,
-  });
-  return result.status === 0 ? result.stdout : null;
-}
+import { fileSha256, headCommit, isGitWorkTree, runGit as git, sha256 } from "./gitWorkspace.mjs";
 
 // Which version of the work a check ran against. With Git: the commit, every tracked change and
 // every untracked file, by content. Without Git there is no proof of the version (Owner
 // 2026-10-17), so it is recorded as unknown rather than guessed.
 export async function workVersion(repoRoot) {
-  if (git(repoRoot, ["rev-parse", "--is-inside-work-tree"])?.toString().trim() !== "true") return { kind: "unknown", reason: "no_git" };
-  const head = git(repoRoot, ["rev-parse", "--verify", "-q", "HEAD"])?.toString().trim() || null;
+  // Only a project with no .git is "no Git"; a Git project whose Git fails is an error, which stops
+  // the verification instead of letting a pass stand on an unknown version (Codex review round 3).
+  if (!isGitWorkTree(repoRoot)) return { kind: "unknown", reason: "no_git" };
+  const head = headCommit(repoRoot);
   const diff = head ? git(repoRoot, ["diff", "--binary", "HEAD"]) : git(repoRoot, ["diff", "--binary", "--cached"]);
   const untracked = git(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  if (diff === null || untracked === null) return { kind: "unknown", reason: "git_failed" };
+  if (diff === null || untracked === null) throw new Error("Git could not read the version of the work.");
   const files = [];
-  for (const relative of untracked.toString("utf8").split("\0").filter(Boolean).sort()) {
-    const content = await fsp.readFile(path.join(repoRoot, relative)).catch(() => null);
-    files.push([relative, content === null ? null : sha256(content)]);
-  }
+  for (const relative of untracked.toString("utf8").split("\0").filter(Boolean).sort()) files.push([relative, await fileSha256(repoRoot, relative)]);
   const dirty = diff.length > 0 || files.length > 0;
   return { kind: "git", head, dirty, fingerprint: sha256(JSON.stringify({ head, diff: sha256(diff), untracked: files })) };
 }

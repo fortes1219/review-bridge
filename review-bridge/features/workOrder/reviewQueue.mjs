@@ -44,6 +44,7 @@ export async function enqueueReview({
   openFindings = [],
   gateAResult = null,
   workVersion = null,
+  sealedEvidence = null,
 }) {
   const shape = validateHookPayload(payload);
   if (!shape.valid) {
@@ -85,6 +86,7 @@ export async function enqueueReview({
     paths,
     baselinePath: control.workspace_evidence.baseline_path,
     deltaId: shortHash,
+    sealed: sealedEvidence,
   });
   const jobId = timestampId() + "-" + shortHash;
   const jobPath = assertUnder(path.join(paths.pendingDir, jobId + ".json"), paths.queueRoot, "Queue job");

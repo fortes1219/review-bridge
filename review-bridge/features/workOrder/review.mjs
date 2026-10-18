@@ -75,7 +75,11 @@ export async function buildReviewInput({ paths, job, control }) {
   const delta = job.workspace_evidence?.delta_path ? await readJson(job.workspace_evidence.delta_path).catch(() => null) : null;
   const changed = (delta?.changed_files || []).map((entry) => ({
     path: entry.path, change: entry.change, before_sha256: entry.before_sha256 ?? null, after_sha256: entry.after_sha256 ?? null,
+    attribution: entry.attribution ?? null,
   }));
+  // Without Git there is no delta: the writer's claims are the only list, and they stay untrusted.
+  const proofless = delta?.mode === "none";
+  const claimed = (job.writer_result?.changed || []).map((entry) => entry.path);
   const openFindings = Array.isArray(job.open_findings) ? job.open_findings : [];
   return {
     event: "review.input",
@@ -91,12 +95,19 @@ export async function buildReviewInput({ paths, job, control }) {
     writer_result: job.writer_result,
     delta: changed,
     scope_violations: job.workspace_evidence?.scope_violations || [],
+    work_proof: {
+      mode: delta?.mode || "unknown",
+      start_point: delta?.start_point || "unknown",
+      scope_status: delta?.scope_status || "unverified",
+      commits_since_start: delta?.commits_since_start || [],
+      scope_unverified: delta?.scope_unverified || [],
+    },
     writer_claim_mismatch: writerClaimMismatch(job.writer_result, changed),
     // T0-06 G3.4: the controller's own test run, as evidence; the reviewer does not rerun it.
     gate_a_result: job.gate_a_result || null,
     work_version: job.work_version || null,
     open_findings: openFindings,
-    read_list: buildReadList({ deltaPaths: changed.map((entry) => entry.path), findings: openFindings }),
+    read_list: buildReadList({ deltaPaths: proofless ? claimed : changed.map((entry) => entry.path), findings: openFindings }),
     output_schema: "review.result",
   };
 }

@@ -18,6 +18,7 @@ import {
   TERMINAL_RUN_STATUSES,
   tokenTotal,
 } from "../../service/index.mjs";
+import { digest } from "../../utils/digest.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
 import { loadContract } from "./contract.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
@@ -39,7 +40,12 @@ export function classifyOutcome(run) {
     case "hard_stop":
     case "needs_human":
     case "contract_unconfirmed":
-    case "acceptance_unverified": return "needs_human";
+    case "acceptance_unverified":
+    case "start_point_lost":
+    case "evidence_changed":
+    case "version_changed":
+    case "evidence_unconfirmable":
+    case "scope_unverified": return "needs_human";
     case "token_limit":
     case "usage_unknown": return "token_limit";
     case "rate_limited": return "quota";
@@ -212,6 +218,11 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     why.push(t("result.why.budget", { max: workPackage?.budget?.max_claude_calls ?? run.budget?.max_claude_calls ?? "" }));
   } else if (outcome === "needs_human") {
     if (run.status === "acceptance_unverified") why.push(t("result.why.acceptance_unverified"));
+    if (run.status === "start_point_lost") why.push(t("result.why.start_point_lost"));
+    if (run.status === "evidence_changed") why.push(t("result.why.evidence_changed"));
+    if (run.status === "version_changed") why.push(t("result.why.version_changed"));
+    if (run.status === "evidence_unconfirmable") why.push(t("result.why.evidence_unconfirmable"));
+    if (run.status === "scope_unverified") why.push(t("result.why.scope_unverified"));
     if (state.contract_questions?.length) {
       why.push(t("result.why.contract.questions"));
       for (const question of state.contract_questions) why.push("- " + question);
@@ -284,11 +295,26 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     : null;
   const changed = [];
   const violations = [];
+  const unverified = [];
+  // What the work proof can and cannot show, before the list itself (RC3-BLOCKER-00).
+  const proof = [];
+  if (delta?.mode === "none") proof.push(t("result.proof.no_git"));
+  if (delta?.mode === "changed") proof.push(t("result.proof.records_changed"));
+  if (delta?.mode === "unconfirmed") proof.push(t("result.proof.records_unconfirmed"));
+  if (delta?.mode === "git") proof.push(t("result.proof.records_only"));
+  if (delta?.start_point === "lost") proof.push(t("result.proof.start_lost"));
+  if (delta?.commits_since_start?.length) {
+    proof.push(t("result.proof.commits"));
+    for (const commit of delta.commits_since_start) proof.push("- " + commit.commit.slice(0, 12) + " " + commit.subject);
+  }
   for (const entry of delta?.changed_files || []) {
-    const line = "- " + entry.path + "（" + t("result.change." + entry.change) + "）";
+    const line = "- " + entry.path + "（" + t("result.change." + entry.change) + "）" + (entry.attribution === "unattributed" ? t("result.proof.unattributed") : "");
     if ((delta.scope_violations || []).includes(entry.path)) violations.push(line);
+    else if ((delta.scope_unverified || []).includes(entry.path)) unverified.push(line);
     else changed.push(line);
   }
+  // Without a work proof "nothing changed" cannot be said.
+  const noProof = !delta || ["none", "changed", "unconfirmed"].includes(delta.mode) || delta.start_point === "lost";
 
   const rows = tokenRows(events);
   const tokens = [t("result.tokens.header"), "|---|---|---|---|---|---|---|---|"];
@@ -303,7 +329,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
   }
 
   const line = oneLine({ t, outcome, review, gate, workPackage, state, failure, stop, run });
-  return { name, head, acceptance, why, stderrTail, next, changed, changedNote, violations, tokens, line, calls };
+  return { name, head, acceptance, why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, tokens, line, calls };
 }
 
 // RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
@@ -387,10 +413,12 @@ export function renderResult({ t, sections, commands, runId, latest, closedAt = 
       "",
       "## " + t("result.section.changed"),
       ...(sections.changedNote ? [sections.changedNote, ""] : []),
-      ...(changedLines.length ? changedLines : sections.changed.length ? [] : [t("result.changed.none")]),
+      ...((sections.proof || []).length ? [...sections.proof, ""] : []),
+      ...(changedLines.length ? changedLines : sections.changed.length || sections.noProof ? [] : [t("result.changed.none")]),
       ...(sections.changed.length > changed ? [t("result.changed.more", { count: sections.changed.length - changed })] : []),
       ...(sections.violations.length ? ["", "### " + t("result.section.violations"), ...violationLines,
         ...(sections.violations.length > changed ? [t("result.violations.more", { count: sections.violations.length - changed })] : [])] : []),
+      ...((sections.unverified || []).length ? ["", "### " + t("result.section.unverified"), ...sections.unverified.slice(0, changed).map((line) => clipLine(line, clip))] : []),
       "",
       "## " + t("result.section.tokens"),
       ...sections.tokens,
@@ -493,9 +521,19 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   const events = await readIoEvents(paths, runId);
   let delta = null;
   if (control.workspace_evidence?.baseline_path) {
-    // One delta per attempt: concurrent deliverers must not race on the same file name.
-    const evidence = await createWorkspaceDelta({ paths, baselinePath: control.workspace_evidence.baseline_path, deltaId: "result-" + runId + "-" + randomUUID().slice(0, 8) }).catch(() => null);
-    if (evidence) delta = await readJson(evidence.delta_path).catch(() => null);
+    // A delivery may run in another process, where the controller's in-memory seal is gone; the
+    // baseline is then checked against the hash on the run record, and the result says so.
+    const baseline = await readJson(control.workspace_evidence.baseline_path).catch(() => null);
+    if (!baseline || !control.workspace_evidence.baseline_sha256 || digest(baseline) !== control.workspace_evidence.baseline_sha256 || run.status === "evidence_changed") {
+      // A run stopped because its records changed: none of them is used to list or attribute changes.
+      delta = { mode: "changed", changed_files: [], scope_violations: [], scope_unverified: [] };
+    } else if (run.status === "evidence_unconfirmable") {
+      delta = { mode: "unconfirmed", changed_files: [], scope_violations: [], scope_unverified: [] };
+    } else {
+      // One delta per attempt: concurrent deliverers must not race on the same file name.
+      const evidence = await createWorkspaceDelta({ paths, baselinePath: control.workspace_evidence.baseline_path, deltaId: "result-" + runId + "-" + randomUUID().slice(0, 8) }).catch(() => null);
+      if (evidence) delta = await readJson(evidence.delta_path).catch(() => null);
+    }
   }
   const outcome = classifyOutcome(run);
   // A contract that no longer loads is reported as such; its conditions then stay unknown.

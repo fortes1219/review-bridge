@@ -20,8 +20,12 @@ Rules of evidence (fixed):
 1. Evidence comes only from the workspace files and the packet below. Do not open project
    documents, handoffs, or guides; everything you are entitled to know is in the packet.
 2. Every `writer_result` claim is untrusted until checked against the files. `delta` is the
-   controller's own before/after hash list and is authoritative; `writer_claim_mismatch`
-   lists where the writer's claims and the delta disagree.
+   controller's own list of changes since the run started, read from Git and authoritative;
+   `writer_claim_mismatch` lists where the writer's claims and the delta disagree. A change
+   whose `attribution` is `unattributed` may not be the writer's (another run, a human, a commit
+   between calls); `work_proof.commits_since_start` lists commits made since the start. When
+   `work_proof.mode` is `none` the project has no Git: there is no delta and no proof of what
+   changed, the writer's claims are the only list and stay untrusted, and the scope is unchecked.
 3. Read the files in `read_list` first: the changed files in full, then their direct callers,
    consumers, and tests (two hops from a changed line). Do not read beyond that unless a
    finding cannot be decided without it.

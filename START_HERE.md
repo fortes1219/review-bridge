@@ -21,7 +21,7 @@ Review Bridge 是 Claude writer / Codex reviewer 的 workspace-local review cont
 - Node.js 22 或更新版本。
 - Fake mode 不需要 Claude 或 Codex 登入，也不會消耗模型 token。
 - Native mode 才需要已登入的 Claude Code CLI 與 Codex CLI。
-- Git 是可選的；沒有 Git 時，Bridge 會建立自己的 workspace before/after evidence。
+- 沒有 Git 也能工作，但工作證明需要 Git。有 Git 時，Bridge 記下 run 開始時的 commit 和分支，交接時從 Git 讀出之後的改動，不複製檔案，也不會 commit、暫存、stash 或切換任何東西；沒有 Git 時照常工作，但結果會寫明沒有工作證明、範圍未核對。
 - Controller state 必須位於本機檔案系統。OneDrive 同步目錄與網路磁碟不支援並行 controller。
 
 平台狀態：
@@ -37,7 +37,7 @@ Review Bridge 是 Claude writer / Codex reviewer 的 workspace-local review cont
 3. 如果目標是 Git repository，`init` 會在本機的 `.git/info/exclude` 加入 `.review-bridge/`，不會修改 tracked `.gitignore`。
 4. 首次安裝時，若專案內已有來源不明的 `.review-bridge/`，先停止並查明，不要盲目覆蓋。
 
-Git 是可選的；沒有 Git 時，Bridge 會建立自己的 workspace before/after evidence。
+沒有 Git 也能工作，但工作證明需要 Git。有 Git 時，Bridge 記下 run 開始時的 commit 和分支，交接時從 Git 讀出之後的改動，不複製檔案，也不會 commit、暫存、stash 或切換任何東西；沒有 Git 時照常工作，但結果會寫明沒有工作證明、範圍未核對。
 
 ## 2. 人類互動式安裝與零 token 自證
 

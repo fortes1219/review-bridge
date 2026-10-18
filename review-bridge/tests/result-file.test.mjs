@@ -84,6 +84,11 @@ test("S1 every terminal status delivers once: two files, the right title, three 
     contract_unconfirmed: { state: { status: "contract_unconfirmed", contract_problems: ["the reviewer could not confirm the translation"] } },
     usage_unknown: { state: { status: "usage_unknown", token_limit_role: "contract_checker" } },
     acceptance_unverified: { state: { status: "acceptance_unverified", review_gate: "PASS" } },
+    start_point_lost: { state: { status: "start_point_lost" } },
+    evidence_changed: { state: { status: "evidence_changed", error: "writer:the run's starting record" } },
+    version_changed: { state: { status: "version_changed" } },
+    evidence_unconfirmable: { state: { status: "evidence_unconfirmable" } },
+    scope_unverified: { state: { status: "scope_unverified", scope_unverified: ["README.md"] } },
   };
   assert.equal(Object.keys(cases).length, TERMINAL_RUN_STATUSES.length, "every terminal status has a case");
   for (const status of TERMINAL_RUN_STATUSES) {

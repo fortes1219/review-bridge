@@ -268,6 +268,7 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
   const workspaceEvidence = await createWorkspaceBaseline({
     paths,
     planSha256: plan.plan_sha256,
+    runId: plan.proposed_run_id,
     allowedPaths: plan.scope.allowed_paths,
     forbiddenPaths: plan.scope.forbidden_paths || [],
   });

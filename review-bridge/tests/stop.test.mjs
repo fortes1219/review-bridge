@@ -14,10 +14,16 @@ const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const packageRoot = path.resolve(runtimeSource, "..");
 
 // A neutral install made by the real init in fake mode, so work-start --fake-cli is usable.
-async function install(t) {
+async function install(t, { withGit = false } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-stop-"));
   // T0-06: a code work order needs an approved test entry point; the script exits 0 unless FAKE_GATE_EXIT says otherwise.
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(Number(process.env.FAKE_GATE_EXIT||0))\"" } }));
+  // The work proof needs Git; without it a result can only say there is no proof.
+  if (withGit) {
+    for (const args of [["init", "-q"], ["add", "-A"], ["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "start"]]) {
+      spawnSync("git", args, { cwd: root, windowsHide: true });
+    }
+  }
   const port = await freePort();
   const init = spawnSync(process.execPath, [
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(port),
@@ -295,7 +301,7 @@ test("S4b the rebuild commands in a needs-fix result run as written in sh and in
 });
 
 test("S1e an external stop before the writer enqueued still lists the files changed so far", async (t) => {
-  const { root, bootstrap, bridge, paths } = await install(t);
+  const { root, bootstrap, bridge, paths } = await install(t, { withGit: true });
   const { plan, planArg } = await planFakeWork(root, bridge, "stop-early");
   const runId = plan.proposed_run_id;
   const child = spawn(process.execPath, [bootstrap, "work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli"], {

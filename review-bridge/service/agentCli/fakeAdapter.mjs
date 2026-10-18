@@ -18,8 +18,10 @@ export function createFakeAdapter(bridgeRoot, requestedScenario = "PASS") {
       return process.execPath;
     },
     buildInvocation(kind, executable, args) {
+      // Only reviews count toward the scenario; a contract check is a Codex call but not a review.
+      const contractCheck = args.some((arg) => String(arg).endsWith("contract.check.schema.json"));
       if (kind === "claude") claudeCalls += 1;
-      else codexCalls += 1;
+      else if (!contractCheck) codexCalls += 1;
       let gate = "PASS";
       if (scenario === "FAIL_THEN_PASS") gate = codexCalls === 1 ? "FAIL" : "PASS";
       if (scenario === "HARD_STOP") gate = "HARD_STOP";

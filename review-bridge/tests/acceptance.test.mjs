@@ -92,3 +92,15 @@ test("Gate A always has a time limit; a missing one refuses to run instead of ru
   assert.equal(effectiveLimits({}).gate_a_minutes, 10);
   await assert.rejects(runGateA({ paths: { repoRoot: os.tmpdir() }, gateA: { kind: "command", command: "node -e 0" }, stdoutPath: "x", stderrPath: "y", timeoutMs: Number.NaN }), /no valid time limit/);
 });
+
+// Codex review round 3: once a project has Git, a failing Git query stops the version, never "no Git".
+test("reading the version of a Git project fails loudly when Git fails; only a project without .git is unknown", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-version-fail-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  assert.deepEqual(await workVersion(root), { kind: "unknown", reason: "no_git" });
+  spawnSync("git", ["init", "-q"], { cwd: root, windowsHide: true });
+  const previous = process.env.GIT_DIR;
+  process.env.GIT_DIR = path.join(root, "no-such-git-dir");
+  t.after(() => { if (previous === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = previous; });
+  await assert.rejects(workVersion(root), /Git could not/);
+});

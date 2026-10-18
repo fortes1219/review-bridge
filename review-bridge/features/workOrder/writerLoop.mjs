@@ -50,11 +50,11 @@ import {
   writerResultFromClaudeResult,
 } from "./typedResults.mjs";
 import { runGateA, sameDelta } from "./gateA.mjs";
-import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
+import { createWorkspaceDelta, EvidenceChangedError, recordWindow, sealEvidence, snapshotWorkspace, startPointStatus, verifySealedEvidence } from "./workspaceEvidence.mjs";
 import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
 import { classificationProfileFromSnapshot } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
-import { acceptanceRows, decideAcceptance, workVersion } from "./acceptance.mjs";
+import { acceptanceRows, decideAcceptance, sameVersion, workVersion } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
 import { establishContract } from "./translation.mjs";
 
@@ -98,6 +98,56 @@ export function writerModelFor(control) {
 
 async function writeBoundedState(paths, runtimeState, state) {
   return await runtimeState.recordState(state);
+}
+
+// A writer or Gate A call runs between two snapshots of the work, so its changes can be tied to it
+// (workspaceEvidence.mjs); each window's hash joins the controller's in-memory seal. Without Git,
+// or without a baseline, the call just runs.
+async function inWindow(paths, baselinePath, sealed, meta, work) {
+  const before = baselinePath ? await snapshotWorkspace(paths, baselinePath) : null;
+  const result = await work();
+  if (!before) return result;
+  const recorded = await recordWindow(paths, baselinePath, { ...meta, before });
+  sealed.windows.set(path.resolve(recorded.file), recorded.sha256);
+  return result;
+}
+
+// A resumed run whose earlier calls left records: the controller that sealed them is gone, so they
+// cannot be confirmed. No model call starts; the human decides (this is not a claim of tampering).
+async function unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId }) {
+  const baselinePath = control.workspace_evidence?.baseline_path;
+  if (!baselinePath) return null;
+  const earlier = await listJson(path.join(path.dirname(baselinePath), "windows")).catch(() => []);
+  if (!earlier.length) return null;
+  await writeBoundedState(paths, runtimeState, {
+    writer_model: writerModel, status: "evidence_unconfirmable", session_id: sessionId, call: 0, updated_at: new Date().toISOString(),
+    earlier_call_records: earlier.length,
+  });
+  await recordIo(paths, runtimeState.runId, { event: "stop", status: "evidence_unconfirmable", role: "controller", provider: null, detail_ref: "resume" });
+  await consumeAuthorization(paths, control, "evidence_unconfirmable");
+  return 0;
+}
+
+// After every untrusted call (writer, Gate A, reviewer): the work-proof records must still be the
+// ones this controller sealed, and the Git start must still exist. Either failing stops the run
+// for the human. Without Git there is nothing to check.
+async function proofStop({ paths, runtimeState, control, baselinePath, sealed, state, after }) {
+  if (!baselinePath) return null;
+  let status = null;
+  let detail = null;
+  try {
+    const baseline = await verifySealedEvidence(paths, baselinePath, sealed);
+    if (baseline.mode === "git" && (await startPointStatus(paths, baselinePath)) === "lost") { status = "start_point_lost"; detail = "git_start:" + after; }
+  } catch (error) {
+    if (!(error instanceof EvidenceChangedError)) throw error;
+    status = "evidence_changed";
+    detail = after + ":" + error.message;
+  }
+  if (!status) return null;
+  await writeBoundedState(paths, runtimeState, { ...state, status, updated_at: new Date().toISOString(), error: detail });
+  await recordIo(paths, runtimeState.runId, { event: "stop", status, role: "controller", provider: null, detail_ref: detail });
+  await consumeAuthorization(paths, control, status);
+  return 0;
 }
 
 // Exit code shared with reference_changed: an input sealed at start no longer matches.
@@ -305,9 +355,13 @@ export async function runBoundedResume({
     let lastGateADelta = null;
     let handoffReason = "correction";
     const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
+    const unconfirmable = await unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId });
+    if (unconfirmable !== null) return unconfirmable;
     const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId });
     if (sealed.exitCode !== null) return sealed.exitCode;
     const contractSha256 = sealed.sha256;
+    // The work-proof seal: the baseline hash as authorized, and every window this controller writes.
+    const evidenceSeal = sealEvidence(control.workspace_evidence?.baseline_sha256);
 
     for (let call = 1; call <= maxCalls; call += 1) {
       currentControl = await loadLiveControl(paths, runtimeState);
@@ -383,7 +437,8 @@ export async function runBoundedResume({
       ];
       const invocation = adapter.buildInvocation("claude", claude, claudeArgs);
       const callStartedAt = Date.now();
-      const processResult = await runProcess({
+      const baselinePath = currentControl.workspace_evidence?.baseline_path || null;
+      const processResult = await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "writer" }, () => runProcess({
         invocation,
         cwd: paths.repoRoot,
         input: effectivePrompt,
@@ -391,8 +446,14 @@ export async function runBoundedResume({
         stderrPath,
         timeoutMs: maxMinutes * 60_000,
         onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "writer", provider: "claude", call }),
-      });
+      }));
       await clearProcess(paths, runId);
+      // Checked at the call's common exit, before any success or failure path returns: a call that
+      // rewrites a record and then fails is still caught. A rebase, amend, reset or branch switch
+      // since the start leaves nothing sound to compare against; the human decides.
+      const proofState = { writer_model: writerModel, session_id: sessionId, call, claude_stdout_path: stdoutPath };
+      const afterWriterProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "writer" });
+      if (afterWriterProof !== null) return afterWriterProof;
       // D3.3: the final result object keeps the legacy single-JSON file for everything downstream.
       const stream = parseClaudeStream(await fsp.readFile(streamPath, "utf8").catch(() => ""));
       // Tokens spent by a call with no final result still count; the record says it is partial.
@@ -536,22 +597,26 @@ export async function runBoundedResume({
         // The version Gate A tests is recorded with its result, so a condition proven by Gate A can
         // be tied to the version the reviewer later reads.
         const testedVersion = await workVersion(paths.repoRoot);
-        gateAResult = { ...(await runGateA({
+        gateAResult = { ...(await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "gate_a" }, () => runGateA({
           paths, gateA: workPackage.gate_a,
           stdoutPath: path.join(paths.queueRoot, stamp + "-gate-a.stdout.log"),
           stderrPath: path.join(paths.queueRoot, stamp + "-gate-a.stderr.log"),
           timeoutMs: limits.gate_a_minutes * 60_000,
           onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "controller", provider: "gate_a", call }),
-        })), work_version: testedVersion };
+        }))), work_version: testedVersion };
         await clearProcess(paths, runId);
         if ((await readRunStatus(paths, runId)) === "stopped") return 130;
         await recordIo(paths, runId, { ...gateAResult, call });
+        const afterGateProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "gate_a" });
+        if (afterGateProof !== null) return afterGateProof;
         if (gateAResult.kind === "command" && !gateAResult.passed) {
           // G3.5: the controller's result goes back to the writer as fix.input; no reviewer call.
           const delta = currentControl.workspace_evidence?.baseline_path
-            ? await createWorkspaceDelta({ paths, baselinePath: currentControl.workspace_evidence.baseline_path, deltaId: "gate-a-" + stamp })
+            ? await createWorkspaceDelta({ paths, baselinePath: currentControl.workspace_evidence.baseline_path, deltaId: "gate-a-" + stamp, sealed: evidenceSeal })
             : null;
           const changed = delta ? (await readJson(delta.delta_path)).changed_files : [];
+          // Without Git there is no list of changes, so "nothing changed between two failures" cannot be shown.
+          const comparable = delta?.mode === "git";
           lastChangedFiles = changed.map((entry) => ({ path: entry.path, change: entry.change, after_sha256: entry.after_sha256 }));
           const gateState = {
             writer_model: writerModel, status: "gate_a_failed", session_id: sessionId, call, updated_at: new Date().toISOString(),
@@ -559,7 +624,7 @@ export async function runBoundedResume({
             claude_stdout_path: stdoutPath,
           };
           // G3.6: the same command failing twice on an unchanged delta means nothing was fixed.
-          if (lastGateAResult && lastGateADelta && sameDelta(lastGateADelta, lastChangedFiles)) {
+          if (comparable && lastGateAResult && lastGateADelta && sameDelta(lastGateADelta, lastChangedFiles)) {
             const stopGate = { review_gate: "FAIL", hard_stop_required: true, hard_stop_reason: "needs_human_decision" };
             await writeBoundedState(paths, runtimeState, { ...gateState, status: "hard_stop", ...stopGate });
             await recordIo(paths, runId, { event: "stop", status: "hard_stop", role: "controller", provider: null, detail_ref: "gate_a_loop" });
@@ -567,7 +632,7 @@ export async function runBoundedResume({
             return 0;
           }
           lastGateAResult = gateAResult;
-          lastGateADelta = lastChangedFiles;
+          lastGateADelta = comparable ? lastChangedFiles : null;
           handoffReason = "gate_a_failed";
           lastFindings = [];
           await writeBoundedState(paths, runtimeState, gateState);
@@ -614,6 +679,7 @@ export async function runBoundedResume({
         openFindings: lastFindings,
         gateAResult,
         workVersion: reviewVersion,
+        sealedEvidence: evidenceSeal,
       });
       const hookQueuedDuplicate = enqueued.accepted
         && enqueued.duplicate
@@ -631,6 +697,8 @@ export async function runBoundedResume({
         throw new Error("Review worker returned no unambiguous outcome for job " + ownJobId + ".");
       }
       const [ownOutcome] = ownOutcomes;
+      const afterReviewProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "review" });
+      if (afterReviewProof !== null) return afterReviewProof;
       if (ownOutcome.status === "failed") {
         const failedReview = ownOutcome;
         const failure = failedReview.provider_failure || controllerError({ phase: "review" });
@@ -660,6 +728,15 @@ export async function runBoundedResume({
       if (!(await fileExists(latestReviewPath))) throw new Error("Codex review result is missing.");
       const afterReview = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
       if (afterReview.exitCode !== null) return afterReview.exitCode;
+      // The reviewer judged the version recorded before the review; if the work changed meanwhile,
+      // its verdicts do not belong to any version Bridge can name.
+      const versionAfterReview = await workVersion(paths.repoRoot);
+      if (reviewVersion.kind === "git" && !sameVersion(reviewVersion, versionAfterReview)) {
+        await writeBoundedState(paths, runtimeState, { ...proofState, status: "version_changed", updated_at: new Date().toISOString(), review_version: reviewVersion, version_after_review: versionAfterReview });
+        await recordIo(paths, runId, { event: "stop", status: "version_changed", role: "controller", provider: null, detail_ref: "review" });
+        await consumeAuthorization(paths, control, "version_changed");
+        return 0;
+      }
       const review = await fsp.readFile(latestReviewPath, "utf8");
       lastChangedFiles = await changedFilesForJob(paths, ownJobId);
       // T0-05 D3: the typed verdict is checked against the fixed rules; prose is not read.
@@ -727,6 +804,15 @@ export async function runBoundedResume({
         });
         await recordIo(paths, runId, { event: "stop", status: "acceptance_unverified", role: "controller", provider: null, detail_ref: "acceptance" });
         await consumeAuthorization(paths, control, "acceptance_unverified");
+        return 0;
+      }
+      // Out-of-scope changes Bridge could not attribute (another run's record, a human edit, a commit
+      // between calls) are never delivered as passed; the human judges them. No run is named.
+      const scopeInDoubt = ownOutcome.review_input?.work_proof?.scope_unverified || [];
+      if (reviewResult.gate === "PASS" && scopeInDoubt.length) {
+        await writeBoundedState(paths, runtimeState, { ...proofState, status: "scope_unverified", updated_at: new Date().toISOString(), scope_unverified: scopeInDoubt, review_gate: reviewResult.gate, review_path: latestReviewPath });
+        await recordIo(paths, runId, { event: "stop", status: "scope_unverified", role: "controller", provider: null, detail_ref: "scope" });
+        await consumeAuthorization(paths, control, "scope_unverified");
         return 0;
       }
       const recheck = call > 1 ? recheckFindings(lastFindings, reviewResult.findings) : null;

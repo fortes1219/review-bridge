@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -117,7 +118,7 @@ if (process.argv.includes("--output-schema")) {
 await fsp.writeFile(out, "HARD_STOP_REQUIRED: false\\nREVIEW_GATE: " + (mode === "fail" ? "FAIL" : "PASS") + "\\n");
 `;
 
-async function makeRuntime(t, override = { schema_version: 4 }) {
+async function makeRuntime(t, override = { schema_version: 4 }, { git = false } = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-bounded-"));
   // T0-05 D2.5: anything written inside the repo outside README.md is a scope violation, so the
   // fake CLIs and their argument dump live next to the repo, not in it.
@@ -133,6 +134,14 @@ async function makeRuntime(t, override = { schema_version: 4 }) {
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# fixture\n", "utf8");
   // T0-06: a real `npm test` entry point; it exits with FAKE_GATE_EXIT (default 0) and prints a marker line.
   await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({ name: "bounded-fixture", scripts: { test: "node -e \"console.log('GATE-A-RAN');process.exit(Number(process.env.FAKE_GATE_EXIT||0))\"" } }), "utf8");
+  // With git, the work proof comes from Git; Bridge's own folder is excluded as the installer does.
+  if (git) {
+    const run = (...args) => spawnSync("git", args, { cwd: repoRoot, windowsHide: true });
+    run("init", "-q");
+    await fsp.appendFile(path.join(repoRoot, ".git", "info", "exclude"), "\n/.review-bridge/\n");
+    run("add", "-A");
+    run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "fixture");
+  }
   const claude = path.join(toolsRoot, "fake-claude.mjs");
   const codex = path.join(toolsRoot, "fake-codex.mjs");
   await fsp.writeFile(claude, fakeClaudeSource, "utf8");
@@ -140,8 +149,8 @@ async function makeRuntime(t, override = { schema_version: 4 }) {
   return { repoRoot, toolsRoot, paths, claude, codex };
 }
 
-async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, changeTypes = "docs", gateExit = 0, reviewPrompt = null } = {}) {
-  const runtime = await makeRuntime(t, override);
+async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, changeTypes = "docs", gateExit = 0, reviewPrompt = null, git = false, beforeResume = null } = {}) {
+  const runtime = await makeRuntime(t, override, { git });
   if (reviewPrompt !== null) {
     await fsp.mkdir(path.dirname(runtime.paths.reviewPromptOverridePath), { recursive: true });
     await fsp.writeFile(runtime.paths.reviewPromptOverridePath, reviewPrompt, "utf8");
@@ -185,6 +194,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     async notify() {},
   };
   const runId = authorization.run.run_id;
+  if (beforeResume) await beforeResume(runtime, authorization);
   let exitCode;
   let error = null;
   // Gate A runs through the real shell with the controller's environment, not the adapter's.
@@ -553,7 +563,7 @@ test("R6b the second writer call gets the Gate A result in its handoff, not a fi
 });
 
 test("R7 two Gate A failures on an unchanged delta are a loop: hard_stop, no third writer call", async (t) => {
-  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2 });
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2, git: true });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
   assert.equal(run.status, "hard_stop");
@@ -564,6 +574,17 @@ test("R7 two Gate A failures on an unchanged delta are a loop: hard_stop, no thi
   assert.equal(events.some((event) => event.event === "review.input"), false);
 });
 
+// Without Git there is no list of changes, so two failures in a row cannot be shown to be "nothing
+// changed"; the call budget ends the run instead of a loop verdict.
+test("R7b without Git two Gate A failures are not called a loop; the budget ends the run", async (t) => {
+  const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2 });
+  assert.equal(error, null);
+  assert.equal(exitCode, 76);
+  assert.equal(run.status, "call_budget_exhausted");
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.some((event) => event.detail_ref === "gate_a_loop"), false);
+});
+
 test("R9 Gate A passed but the reviewer failed: correction_pending with gate_a_passed still true", async (t) => {
   const { runtime, exitCode, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", codexMode: "fail", maxCalls: 1 });
   assert.equal(exitCode, 76);
@@ -572,4 +593,24 @@ test("R9 Gate A passed but the reviewer failed: correction_pending with gate_a_p
   assert.equal(run.gate_a_passed, true);
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.find((event) => event.event === "review.result").gate, "FAIL");
+});
+
+// Codex review round 3: a controller that was interrupted lost its in-memory seal. Resuming a run
+// whose earlier calls left records must stop before any model call, not spend a writer call first.
+test("resuming a run whose earlier calls left work-proof records stops before any model call", async (t) => {
+  const { exitCode, error, run, claudeArgs, runtime } = await start(t, {
+    git: true,
+    beforeResume: async (rt, authorization) => {
+      // A record a first, interrupted round left behind, as the controller writes it.
+      const windows = path.join(path.dirname(authorization.control.workspace_evidence.baseline_path), "windows");
+      await fsp.mkdir(windows, { recursive: true });
+      await fsp.writeFile(path.join(windows, "1-writer-1.json"), JSON.stringify({ run_id: authorization.run.run_id, call: 1, phase: "writer", started_at: new Date().toISOString(), ended_at: new Date().toISOString(), changed: [] }));
+    },
+  });
+  assert.equal(error, null);
+  assert.equal(exitCode, 0);
+  assert.equal(run.status, "evidence_unconfirmable");
+  assert.equal(claudeArgs, null, "no writer call was started");
+  const events = await readIoEvents(runtime.paths, run.run_id);
+  assert.equal(events.some((event) => event.event === "task.input"), false);
 });

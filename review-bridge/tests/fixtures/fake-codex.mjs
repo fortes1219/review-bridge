@@ -79,6 +79,23 @@ const open = prompt.indexOf("=== review.input ===");
 const close = prompt.indexOf("=== end review.input ===");
 const input = open >= 0 && close > open ? JSON.parse(prompt.slice(open + "=== review.input ===".length, close)) : {};
 const deltaPath = input.delta?.[0]?.path || input.read_list?.[0]?.path || "README.md";
+// FAKE_CODEX_TOUCH=1 changes a project file while the review runs (a real reviewer is read-only;
+// this stands for anything else changing the work meanwhile).
+if (process.env.FAKE_CODEX_TOUCH === "1") await fsp.appendFile("README.md", "changed during the review\n");
+// FAKE_CODEX_WINDOW_TAMPER=1 empties every call record and then fails the review, so the evidence
+// check must run on the reviewer's failure path too.
+if (process.env.FAKE_CODEX_WINDOW_TAMPER === "1") {
+  const { readdir, readFile, writeFile } = fsp;
+  const root = ".review-bridge/review-queue/workspace-evidence";
+  for (const dir of await readdir(root).catch(() => [])) {
+    for (const name of await readdir(root + "/" + dir + "/windows").catch(() => [])) {
+      const file = root + "/" + dir + "/windows/" + name;
+      await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, "utf8")), changed: [] }));
+    }
+  }
+  process.stderr.write("fake reviewer failed after rewriting the call records\n");
+  process.exit(2);
+}
 const openIds = (input.open_findings || []).map((finding) => finding.id);
 const keep = process.env.FAKE_CODEX_KEEP || "";
 

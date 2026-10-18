@@ -35,7 +35,7 @@ It is not a general agent framework, a session synchronization protocol, or an a
 
 - `plan` is read-only and never invokes a model.
 - Integrity and authorization tokens are checked by the controller. Human-facing commands show the target, scope, budget, breakpoint, and effects instead of asking users to copy hashes.
-- Git is not required. Without Git, the controller creates its own before/after workspace evidence and scope-violation report.
+- Git is not required to work, but the work proof needs it. With Git, Bridge records the commit and branch a run starts from and reads the changes since then from Git at each hand-off, without copying files and without committing, staging, stashing or switching anything. Without Git, work still runs, but the result says there is no work proof: Bridge cannot list what changed and does not check the scope.
 - In a Git repository, the installer adds `.review-bridge/` to the local `.git/info/exclude` when it is not already ignored. It never edits tracked `.gitignore`.
 - Existing Claude permissions, unrelated hooks, rules, skills, docs, and handoffs are preserved.
 - Existing project-specific review prompts are preserved at `.review-bridge/review-bridge/review-prompt.md` and override the packaged generic prompt.

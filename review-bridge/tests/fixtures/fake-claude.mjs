@@ -3,6 +3,7 @@
 // outside it), and a result line carrying usage and, when the CLI was asked for a
 // schema, a writer.result in `structured_output`. A contract-translation prompt gets a
 // contract.translation instead. No model is involved.
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -105,7 +106,50 @@ function structuredOutput() {
   const workOrder = /"work_order": "([^"]+)"/.exec(prompt)?.[1] || "unknown";
   const contractSha = /"contract_sha256": "([0-9a-f]{64})"/.exec(prompt)?.[1] || null;
   tamperContract(contractSha);
+  const evidenceRoot = path.join(process.cwd(), ".review-bridge", "review-queue", "workspace-evidence");
+  const evidenceDirs = () => (fs.existsSync(evidenceRoot) ? fs.readdirSync(evidenceRoot).map((dir) => path.join(evidenceRoot, dir)) : []);
+  // FAKE_CLAUDE_EVIDENCE_TAMPER=1 empties the forbidden list in the run's starting record, as a
+  // writer trying to change what its work is judged against would.
+  if (process.env.FAKE_CLAUDE_EVIDENCE_TAMPER === "1") {
+    for (const dir of evidenceDirs()) {
+      const file = path.join(dir, "baseline.json");
+      if (!fs.existsSync(file)) continue;
+      fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), forbidden_paths: [] }));
+    }
+  }
+  // FAKE_CLAUDE_GIT_AMEND=1 rewrites the project's last commit, as a writer that rewrote history would.
+  if (process.env.FAKE_CLAUDE_GIT_AMEND === "1") {
+    spawnSync("git", ["-c", "user.email=w@example.com", "-c", "user.name=w", "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten by the writer"], { cwd: process.cwd(), windowsHide: true });
+  }
+  // FAKE_CLAUDE_WRITE=<path> appends a line to that project file, a change the writer really makes.
+  if (process.env.FAKE_CLAUDE_WRITE) fs.appendFileSync(path.join(process.cwd(), process.env.FAKE_CLAUDE_WRITE), "written by the writer\n");
+  // FAKE_CLAUDE_FORGE_WINDOW=1 forges another run's call record overlapping this call, plus a run
+  // record for it, as a writer hiding its own out-of-scope change behind a second run would.
+  if (process.env.FAKE_CLAUDE_FORGE_WINDOW === "1") {
+    const runsDir = path.join(process.cwd(), ".review-bridge", "review-queue", "runs");
+    fs.writeFileSync(path.join(runsDir, "run-b-forged.json"), JSON.stringify({ run_id: "run-b-forged", created_at: new Date(Date.now() - 3_600_000).toISOString() }));
+    const forged = path.join(evidenceRoot, "forged-b", "windows");
+    fs.mkdirSync(forged, { recursive: true });
+    fs.writeFileSync(path.join(forged, "1-writer-1.json"), JSON.stringify({
+      run_id: "run-b-forged", call: 1, phase: "writer", started_at: new Date(Date.now() - 60_000).toISOString(), ended_at: new Date(Date.now() + 60_000).toISOString(),
+      changed: [{ path: process.env.FAKE_CLAUDE_WRITE || "README.md", after_sha256: null }],
+    }));
+  }
   const call = Number(/"call": (\d+)/.exec(prompt)?.[1] || 1);
+  // FAKE_CLAUDE_WINDOW_TAMPER_CALL=<n> makes writer call n empty every earlier call record and then
+  // fail with a non-zero exit, so the evidence check must run on the failure path too.
+  if (Number(process.env.FAKE_CLAUDE_WINDOW_TAMPER_CALL) === call) {
+    for (const dir of evidenceDirs()) {
+      const windows = path.join(dir, "windows");
+      if (!fs.existsSync(windows)) continue;
+      for (const name of fs.readdirSync(windows)) {
+        const file = path.join(windows, name);
+        fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), changed: [] }));
+      }
+    }
+    process.stderr.write("fake writer failed after rewriting the call records\n");
+    process.exit(3);
+  }
   const handoffAt = prompt.indexOf("=== HANDOFF ===");
   const addressed = handoffAt >= 0 ? [...prompt.slice(handoffAt).matchAll(/"id": "(F\d+)"/g)].map((match) => match[1]) : [];
   if (resultMode === "MALFORMED") return { event: "writer.result", work_order: workOrder };

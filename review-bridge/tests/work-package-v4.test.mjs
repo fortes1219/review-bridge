@@ -7,13 +7,13 @@ import { fileURLToPath } from "node:url";
 
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 import { consumeRun, readRun } from "../service/records/runStore.mjs";
 import { isPidAlive } from "../service/agentCli/process.mjs";
 import { recordProcessOrKill, runMustStop } from "../features/workOrder/writerLoop.mjs";
 import { authorizeV4WorkPackage, createV4WorkPackagePlan, FORBIDDEN_PATHS } from "../features/workOrder/workPackage.mjs";
-import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath } from "../features/workOrder/workspaceEvidence.mjs";
+import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath, recordWindow, snapshotWorkspace } from "../features/workOrder/workspaceEvidence.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");
@@ -172,10 +172,18 @@ test("T12 authorized_by is the OS user and authorized_via records how work-start
 
 test("T13 the workspace delta flags a forbidden path as a scope violation even inside the allowed scope", async (t) => {
   const r = await runtime(t);
-  const baseline = await createWorkspaceBaseline({ paths: r.paths, planSha256: "f".repeat(64), allowedPaths: ["**"], forbiddenPaths: [...FORBIDDEN_PATHS] });
+  const git = (...args) => spawnSync("git", args, { cwd: r.repoRoot, windowsHide: true });
+  git("init", "-q");
+  await fsp.appendFile(path.join(r.repoRoot, ".git", "info", "exclude"), "\n/.review-bridge/\n");
+  git("add", "-A");
+  git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "fixture");
+  const baseline = await createWorkspaceBaseline({ paths: r.paths, planSha256: "f".repeat(64), runId: "run-t13", allowedPaths: ["**"], forbiddenPaths: [...FORBIDDEN_PATHS] });
+  // The edits happen during one of the run's own calls, so they are the run's.
+  const before = await snapshotWorkspace(r.paths, baseline.baseline_path);
   await fsp.writeFile(path.join(r.repoRoot, "package-lock.json"), "{\"changed\":true}\n");
   await fsp.writeFile(path.join(r.repoRoot, "src", "index.js"), "// edited\n");
   await fsp.writeFile(path.join(r.repoRoot, ".env"), "SECRET=1\n");
+  await recordWindow(r.paths, baseline.baseline_path, { runId: "run-t13", call: 1, phase: "writer", before });
   const delta = await createWorkspaceDelta({ paths: r.paths, baselinePath: baseline.baseline_path, deltaId: "t13" });
   assert.deepEqual(delta.scope_violations, [".env", "package-lock.json"]);
   assert.ok(delta.changed_paths.includes("src/index.js"));
