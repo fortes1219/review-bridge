@@ -85,8 +85,24 @@ const keep = process.env.FAKE_CODEX_KEEP || "";
 function finding(id, severity, path) {
   return {
     id, severity, path, line: 1,
-    reach: "fake call path", claim: "fake defect " + id, evidence: "fake evidence", fix: "fake fix", acceptance_ref: 1,
+    reach: "fake call path", claim: "fake defect " + id, evidence: "fake evidence", fix: "fake fix", acceptance_ref: conditionIds[0] || null,
   };
+}
+
+// One verdict per contract condition in review.input. FAKE_CODEX_VERDICT picks the outcome Bridge
+// must handle: "cannot_verify" or "fail_under_pass" on the first condition, "missing" drops the
+// last, "no_evidence" passes the first with no evidence. A FAIL gate fails the first condition.
+const conditionIds = (input.contract?.acceptance || []).map((item) => item.id);
+function verdictsOutput() {
+  const mode = process.env.FAKE_CODEX_VERDICT || "";
+  const failing = gate === "FAIL" || gate === "HARD_STOP";
+  const items = conditionIds.map((id, index) => {
+    if (index === 0 && (failing || mode === "fail_under_pass")) return { id, verdict: "fail", evidence: "fake: blocked by the first finding" };
+    if (index === 0 && mode === "cannot_verify") return { id, verdict: "cannot_verify", evidence: "fake: needs a browser to see it" };
+    if (index === 0 && mode === "no_evidence") return { id, verdict: "pass", evidence: "" };
+    return { id, verdict: "pass", evidence: "fake: read the delta and the Gate A output for " + id };
+  });
+  return mode === "missing" ? items.slice(0, -1) : items;
 }
 
 let findings = [];
@@ -111,6 +127,7 @@ const result = gate === "MALFORMED"
       findings: gate === "FAIL_EMPTY" ? [] : findings,
       verified: ["fake: read the delta"],
       not_run: ["fake: project tests"],
+      verdicts: verdictsOutput(),
     };
 await fsp.writeFile(outputPath, JSON.stringify(result, null, 2), "utf8");
 
@@ -122,4 +139,5 @@ const events = [
   { type: "item.completed", item: { id: "item_1", type: "agent_message", text: "review.result submitted" } },
   { type: "turn.completed", usage: { input_tokens: tokens, cached_input_tokens: Math.floor(tokens / 2), cache_write_input_tokens: 0, output_tokens: 410, reasoning_output_tokens: 0 } },
 ];
-for (const event of events) process.stdout.write(JSON.stringify(event) + "\n");
+// FAKE_CODEX_USAGE=none leaves out the review's usage, so Bridge cannot read it.
+for (const event of process.env.FAKE_CODEX_USAGE === "none" ? events.slice(0, -1) : events) process.stdout.write(JSON.stringify(event) + "\n");

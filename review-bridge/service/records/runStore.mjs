@@ -22,7 +22,7 @@ export const ACTIVE_RUN_STATUSES = Object.freeze(["running", "review_pending", "
 export const TERMINAL_RUN_STATUSES = Object.freeze([
   "pass", "hard_stop", "rate_limited", "cancelled", "policy_failure",
   "call_budget_exhausted", "claude_timeout", "claude_failed", "reviewer_failed", "controller_failure",
-  "token_limit", "stopped", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown",
+  "token_limit", "stopped", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown", "acceptance_unverified",
   "needs_human", "malformed_writer_result", "malformed_review_result",
 ]);
 const activeStatuses = new Set(ACTIVE_RUN_STATUSES);

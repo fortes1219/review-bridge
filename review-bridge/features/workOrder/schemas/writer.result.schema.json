@@ -3,7 +3,7 @@
   "title": "writer.result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["event", "work_order", "contract_sha256", "call", "status", "changed", "verification", "unverified", "needs_human", "addressed_findings"],
+  "required": ["event", "work_order", "contract_sha256", "call", "status", "changed", "verification", "unverified", "needs_human", "addressed_findings", "criteria"],
   "properties": {
     "event": { "const": "writer.result" },
     "work_order": { "type": "string", "minLength": 1 },
@@ -49,6 +49,19 @@
         }
       }
     },
-    "addressed_findings": { "type": "array", "items": { "type": "string", "pattern": "^F[0-9]+$" } }
+    "addressed_findings": { "type": "array", "items": { "type": "string", "pattern": "^F[0-9]+$" } },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "note"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^AC[1-9][0-9]*$" },
+          "status": { "enum": ["done", "not_done"] },
+          "note": { "type": "string", "maxLength": 200 }
+        }
+      }
+    }
   }
 }

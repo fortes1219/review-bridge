@@ -22,7 +22,7 @@ function writerResult(overrides = {}) {
     event: "writer.result", work_order: "wo-1", contract_sha256: null, call: 1, status: "done",
     changed: [{ path: "src/a.js", action: "modified", summary: "x" }],
     verification: [{ command: "npm test", exit_code: 0, summary: "ok" }],
-    unverified: [], needs_human: [], addressed_findings: [],
+    unverified: [], needs_human: [], addressed_findings: [], criteria: [],
     ...overrides,
   };
 }
@@ -32,7 +32,7 @@ function finding(id, overrides = {}) {
 }
 
 function reviewResult(overrides = {}) {
-  return { event: "review.result", work_order: "wo-1", contract_sha256: null, call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1")], verified: [], not_run: [], ...overrides };
+  return { event: "review.result", work_order: "wo-1", contract_sha256: null, call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1")], verified: [], not_run: [], verdicts: [], ...overrides };
 }
 
 async function workspace(t) {

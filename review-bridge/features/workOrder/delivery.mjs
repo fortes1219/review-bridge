@@ -18,6 +18,8 @@ import {
   TERMINAL_RUN_STATUSES,
   tokenTotal,
 } from "../../service/index.mjs";
+import { acceptanceRows } from "./acceptance.mjs";
+import { loadContract } from "./contract.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
@@ -36,7 +38,8 @@ export function classifyOutcome(run) {
     case "call_budget_exhausted": return "needs_fix";
     case "hard_stop":
     case "needs_human":
-    case "contract_unconfirmed": return "needs_human";
+    case "contract_unconfirmed":
+    case "acceptance_unverified": return "needs_human";
     case "token_limit":
     case "usage_unknown": return "token_limit";
     case "rate_limited": return "quota";
@@ -167,7 +170,7 @@ function writerCalls(run, events) {
 }
 
 // V2.2–V2.6: the sections, as arrays of lines, from typed records only.
-export function composeSections({ t, run, outcome, workPackage, plan, events, delta, limits = {}, deliveredAt = Date.now() }) {
+export function composeSections({ t, run, outcome, workPackage, plan, events, delta, contract = null, limits = {}, deliveredAt = Date.now() }) {
   const name = workPackage?.task_file || workPackage?.work_package_id || run.work_package_id || run.run_id;
   const state = run.last_state || {};
   const calls = writerCalls(run, events);
@@ -176,6 +179,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
   const writer = last(events, "writer.result");
   const stop = last(events, "stop");
   const failure = state.failure || null;
+  const acceptance = acceptanceSection({ t, contract, events, writer, review, gate });
 
   const head = [];
   const subtitle = [];
@@ -207,6 +211,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     }
     why.push(t("result.why.budget", { max: workPackage?.budget?.max_claude_calls ?? run.budget?.max_claude_calls ?? "" }));
   } else if (outcome === "needs_human") {
+    if (run.status === "acceptance_unverified") why.push(t("result.why.acceptance_unverified"));
     if (state.contract_questions?.length) {
       why.push(t("result.why.contract.questions"));
       for (const question of state.contract_questions) why.push("- " + question);
@@ -298,7 +303,24 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
   }
 
   const line = oneLine({ t, outcome, review, gate, workPackage, state, failure, stop, run });
-  return { name, head, why, stderrTail, next, changed, changedNote, violations, tokens, line, calls };
+  return { name, head, acceptance, why, stderrTail, next, changed, changedNote, violations, tokens, line, calls };
+}
+
+// RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
+// checked on. A run that stopped before the decision still lists every condition, unknown.
+function acceptanceSection({ t, contract, events, writer, review, gate }) {
+  const decided = last(events, "acceptance");
+  const reviewInput = last(events, "review.input");
+  const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review, gateA: gate, reviewVersion: reviewInput?.work_version || null }) : []);
+  if (!rows.length) return [];
+  const version = decided?.review_version || reviewInput?.work_version || gate?.work_version || null;
+  const lines = rows.map((row) => "- " + t("result.acceptance.row", {
+    id: row.id, result: t("result.acceptance." + row.result), statement: row.statement,
+    verdict: row.verdict || t("result.acceptance.none"), gate: t("result.acceptance.gate." + row.gate_a), evidence: row.evidence || t("result.acceptance.none"),
+  }));
+  if (version?.kind === "git") lines.push(t(version.dirty ? "result.acceptance.version.dirty" : "result.acceptance.version.git", { head: String(version.head || "none").slice(0, 12) }));
+  else if (version) lines.push(t("result.acceptance.version.unknown"));
+  return lines;
 }
 
 // V3.1: the one sentence after the title.
@@ -354,6 +376,7 @@ export function renderResult({ t, sections, commands, runId, latest, closedAt = 
       ...(latest ? ["<!-- rb:latest run=" + runId + " closed_at=" + (closedAt || "unknown") + " -->", t("result.latest_of_run", { run_id: runId }), ""] : []),
       ...sections.head.map((line) => clipLine(line, clip)),
       "",
+      ...((sections.acceptance || []).length ? ["## " + t("result.section.acceptance"), ...sections.acceptance.map((line) => clipLine(line, clip)), ""] : []),
       "## " + t("result.section.why"),
       ...why,
       ...(trimmed ? [t("result.content_trimmed")] : []),
@@ -475,7 +498,9 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
     if (evidence) delta = await readJson(evidence.delta_path).catch(() => null);
   }
   const outcome = classifyOutcome(run);
-  const sections = composeSections({ t, run, outcome, workPackage, plan, events, delta, limits: control.v4.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
+  // A contract that no longer loads is reported as such; its conditions then stay unknown.
+  const contract = control.v4.contract_sha256 ? await loadContract(paths, control.v4.contract_sha256).catch(() => null) : null;
+  const sections = composeSections({ t, run, outcome, workPackage, plan, events, delta, contract, limits: control.v4.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
   const commands = outcome === "delivered" ? null : await rebuildCommands({ paths, plan, workPackage });
   const runPath = path.join(paths.queueRoot, runId + ".result.md");
   const latestPath = latestPathFor(paths, workPackage, plan);

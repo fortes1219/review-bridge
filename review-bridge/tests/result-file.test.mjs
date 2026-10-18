@@ -83,6 +83,7 @@ test("S1 every terminal status delivers once: two files, the right title, three 
     contract_changed: {},
     contract_unconfirmed: { state: { status: "contract_unconfirmed", contract_problems: ["the reviewer could not confirm the translation"] } },
     usage_unknown: { state: { status: "usage_unknown", token_limit_role: "contract_checker" } },
+    acceptance_unverified: { state: { status: "acceptance_unverified", review_gate: "PASS" } },
   };
   assert.equal(Object.keys(cases).length, TERMINAL_RUN_STATUSES.length, "every terminal status has a case");
   for (const status of TERMINAL_RUN_STATUSES) {

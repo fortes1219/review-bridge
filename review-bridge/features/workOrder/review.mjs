@@ -94,6 +94,7 @@ export async function buildReviewInput({ paths, job, control }) {
     writer_claim_mismatch: writerClaimMismatch(job.writer_result, changed),
     // T0-06 G3.4: the controller's own test run, as evidence; the reviewer does not rerun it.
     gate_a_result: job.gate_a_result || null,
+    work_version: job.work_version || null,
     open_findings: openFindings,
     read_list: buildReadList({ deltaPaths: changed.map((entry) => entry.path), findings: openFindings }),
     output_schema: "review.result",
@@ -215,6 +216,9 @@ export async function runReviewWorker({
             "-c", "model_reasoning_effort=\"" + job.reasoning_effort + "\"",
             "exec",
             "--ephemeral",
+            // A project without Git is still reviewed (Owner 2026-10-17); Codex otherwise refuses an
+            // untrusted folder. The session stays read-only.
+            "--skip-git-repo-check",
             "--sandbox", "read-only",
             "--cd", paths.repoRoot,
             "--output-schema", REVIEW_RESULT_SCHEMA, "--json",

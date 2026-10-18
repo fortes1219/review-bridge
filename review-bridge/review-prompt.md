@@ -29,17 +29,26 @@ Rules of evidence (fixed):
    writer finished; it is test evidence. Do not rerun the whole suite. Run only the smallest
    command that decides one finding.
 5. Without evidence there is no FAIL. A finding must land on a line of code; a contradiction
-   between `work` and the delta is itself a finding on the contradicting line.
+   between the contract (or `work` when there is no contract) and the delta is itself a finding
+   on the contradicting line.
 6. On a recheck (`open_findings` non-empty): report an open id again only if it is still
    present, with the same id; omit the id when it is fixed; new ids may only land on files in
    `delta`.
-7. `acceptance_ref` is the 1-based index into `acceptance` the finding blocks, or null.
+7. `acceptance_ref` is the id of the contract condition the finding blocks (for example `AC2`),
+   or null.
 8. `hard_stop` is true only when correction needs a new owner decision
    (`needs_human_decision`), the change expands beyond the authorized scope
    (`scope_expansion`), or a release action is involved (`release_action`).
 9. `verified` lists what you actually checked; `not_run` lists what you did not.
 10. The machine reads only the typed fields. Hesitation in prose changes nothing; drop or
     downgrade a finding you do not stand behind.
+11. `verdicts` has one entry for every condition in `contract.acceptance`, by id, once each:
+    `pass` with the evidence that shows it (a file and line, or the Gate A output),
+    `fail` with a finding whose `acceptance_ref` is that id, or `cannot_verify` saying what is
+    missing. A condition whose `verify` names `gate_a` leans on `gate_a_result`; it was run on
+    `gate_a_result.work_version`, and you read `work_version`. `gate` is PASS only when no
+    condition fails. Bridge decides from the verdicts: a condition that is not shown to pass is
+    not delivered as passed. With no contract, `verdicts` is empty.
 
 Rules the owner set for this workspace:
 {{RULES}}

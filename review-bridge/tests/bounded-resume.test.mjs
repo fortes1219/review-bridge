@@ -41,10 +41,12 @@ const writerResult = process.env.T_WRITER === "malformed" ? { event: "writer.res
   event: "writer.result", work_order: "s2-04-fixture", contract_sha256: null, call, status: process.env.T_WRITER === "blocked" ? "blocked" : "done",
   changed: [{ path: "README.md", action: "modified", summary: "fake edit" }], verification: [], unverified: [],
   needs_human: process.env.T_WRITER === "needs_human" ? [{ question: "which?", options: ["a", "b"] }] : [],
-  addressed_findings: [...new Set(addressed)],
+  addressed_findings: [...new Set(addressed)], criteria: [],
 };
 const typed = args.includes("--json-schema") ? { structured_output: writerResult } : {};
-const ok = { session_id: session, is_error: false, result: "report\\nCODEX_REVIEW_REQUIRED: true", ...typed };
+// Real CLIs always report usage, and Bridge stops when it cannot read it, so the fake reports it.
+const ok = { session_id: session, is_error: false, result: "report\\nCODEX_REVIEW_REQUIRED: true", num_turns: 2,
+  modelUsage: { "fake-opus": { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: 1000, outputTokens: 3 } }, ...typed };
 if (mode === "stream") {
   const tokens = Number(process.env.T_TOKENS || 1000);
   const lines = [
@@ -104,11 +106,11 @@ if (process.argv.includes("--output-schema")) {
   const verdict = mode === "malformed" ? { event: "review.result", gate: "MAYBE" } : {
     event: "review.result", work_order: "s2-04-fixture", contract_sha256: null, call,
     gate: mode === "fail" ? "FAIL" : "PASS", hard_stop: false, hard_stop_reason: null,
-    findings: mode === "fail" ? [finding] : [], verified: [], not_run: [],
+    findings: mode === "fail" ? [finding] : [], verified: [], not_run: [], verdicts: [],
   };
   await fsp.writeFile(out, JSON.stringify(verdict));
-  if (process.env.T_CODEX_TOKENS) {
-    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: Number(process.env.T_CODEX_TOKENS), cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1 } }) + "\\n");
+  if (process.env.T_CODEX_TOKENS !== "none") {
+    process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: Number(process.env.T_CODEX_TOKENS || 0), cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1 } }) + "\\n");
   }
   process.exit(0);
 }
@@ -366,7 +368,7 @@ test("P4 stream output: task.input, read and usage are recorded; the result file
   assert.equal(events[2].tokens.cache_read, 1000);
   assert.equal(events[4].kind, "not_applicable"); // docs-only: Gate A is recorded, nothing runs
   assert.equal(events[6].role, "reviewer");
-  assert.equal(events[6].parse_error, true); // this inline fake prints no --json stream and no trailer
+  assert.equal(events[6].source, "cli_json"); // the inline fake reports usage, as a real CLI does
   const writer = JSON.parse(await fsp.readFile(status.latest_state.claude_stdout_path, "utf8"));
   assert.equal(writer.type, "result");
   assert.equal(writer.structured_output.event, "writer.result");
@@ -471,7 +473,7 @@ test("P5b the per-run ceiling adds up across calls and the second call rotates t
   assert.equal(exitCode, 76);
   assert.equal(run.status, "token_limit");
   assert.equal(status.latest_state.token_limit, "per_run");
-  assert.equal(status.latest_state.tokens_this_run, 2012);
+  assert.equal(status.latest_state.tokens_this_run, 2013); // two writer calls of 1006 and one reviewer output token
   assert.equal(run.claude_session_ids.length, 2);
   assert.notEqual(run.claude_session_ids[0], run.claude_session_ids[1]);
   assert.equal(run.claude_session_id, run.claude_session_ids[1]);

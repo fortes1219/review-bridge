@@ -168,7 +168,8 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     ...(contract ? [
       "Contract: " + contract.sha256 + ". It is the work order as sealed when the human started the work; it is read-only.",
       "Answer with this contract_sha256. If the contract looks wrong, ask through needs_human; never edit it or work from another version.",
-    ] : []),
+      "In criteria, report every acceptance condition of the contract by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done.",
+    ] : ["There is no contract for this task; leave criteria empty."]),
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",
     "Your final answer must be one writer.result object that matches the JSON schema given to the CLI; no prose outside it.",
     "Set needs_human when a decision only the owner can make is missing; set status to blocked or out_of_scope instead of guessing.",

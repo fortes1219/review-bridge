@@ -140,6 +140,8 @@ export async function runGateA({ paths, gateA, stdoutPath, stderrPath, timeoutMs
   if (!gateA || gateA.kind !== "command") {
     return { event: "gate_a_result", kind: "not_applicable", command: null, label: NOT_APPLICABLE_LABEL, passed: null };
   }
+  // A missing or broken limit must not mean "no limit".
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Gate A has no valid time limit: " + timeoutMs);
   const startedAt = Date.now();
   // On timeout runProcess terminates the whole tree while the shell is alive (process.mjs).
   const result = await runProcess({

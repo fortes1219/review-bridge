@@ -5,6 +5,8 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { criteriaProblems, verdictProblems } from "./acceptance.mjs";
+
 const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "schemas");
 
 export const WRITER_RESULT_SCHEMA = path.join(schemasDir, "writer.result.schema.json");
@@ -75,7 +77,9 @@ function contractEchoErrors(value, expected) {
   return ["$.contract_sha256: expected " + (expected || "null")];
 }
 
-export async function validateWriterResult(value, { workOrder, call, contractSha256 = null }) {
+// `contract` is the sealed contract object (null for an inline task); its conditions are the ids
+// the answer must cover.
+export async function validateWriterResult(value, { workOrder, call, contractSha256 = null, contract = null }) {
   const errors = value && typeof value === "object" && !Array.isArray(value)
     ? validateAgainstSchema(value, await loadSchema(WRITER_RESULT_SCHEMA))
     : ["$: not an object"];
@@ -83,6 +87,7 @@ export async function validateWriterResult(value, { workOrder, call, contractSha
     if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
     if (value.call !== call) errors.push("$.call: expected " + call);
     errors.push(...contractEchoErrors(value, contractSha256));
+    errors.push(...criteriaProblems(value, contract));
   }
   return { ok: errors.length === 0, errors };
 }
@@ -126,7 +131,7 @@ export async function workspaceFileProblem(repoRoot, relative) {
 }
 
 // D3.3: schema first, then the fixed rules; any failure is malformed_review_result.
-export async function validateReviewResult(value, { workOrder, call, repoRoot, previousFindings = [], deltaPaths = null, contractSha256 = null }) {
+export async function validateReviewResult(value, { workOrder, call, repoRoot, previousFindings = [], deltaPaths = null, contractSha256 = null, contract = null }) {
   const errors = value && typeof value === "object" && !Array.isArray(value)
     ? validateAgainstSchema(value, await loadSchema(REVIEW_RESULT_SCHEMA))
     : ["$: not an object"];
@@ -134,6 +139,7 @@ export async function validateReviewResult(value, { workOrder, call, repoRoot, p
   if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
   if (value.call !== call) errors.push("$.call: expected " + call);
   errors.push(...contractEchoErrors(value, contractSha256));
+  errors.push(...verdictProblems(value, contract));
   if (value.gate === "FAIL" && value.findings.length === 0) errors.push("$.findings: FAIL needs at least one finding");
   if (value.gate === "PASS" && value.findings.some((finding) => finding.severity === "HIGH")) errors.push("$.findings: PASS cannot carry a HIGH finding");
   // Codex finding 2026-10-13: a PASS must not carry a hard-stop signal; the two contradict.
@@ -181,6 +187,8 @@ export function controllerScopeResult({ workOrder, call, scopeViolations, contra
     })),
     verified: [],
     not_run: [],
+    // The controller judged no condition; on a scope violation every one stays unknown.
+    verdicts: [],
     source: "controller",
   };
 }

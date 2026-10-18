@@ -54,6 +54,7 @@ import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
 import { classificationProfileFromSnapshot } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
+import { acceptanceRows, decideAcceptance, workVersion } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
 import { establishContract } from "./translation.mjs";
 
@@ -157,14 +158,16 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
 }
 
 // T0-04 D4.1: ceilings come from the policy snapshot; missing ones use the package defaults.
-export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, max_tokens_per_call: 1_500_000, max_tokens_per_run: 4_000_000, max_output_chars: 4_000 });
-function effectiveLimits(control) {
+// gate_a_minutes was missing here until RC3-BLOCKER-00, which left Gate A with no time limit.
+export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, max_tokens_per_call: 1_500_000, max_tokens_per_run: 4_000_000, max_output_chars: 4_000, gate_a_minutes: 10 });
+export function effectiveLimits(control) {
   const limits = control?.v4?.policy_snapshot?.effective_policy?.limits || {};
   return {
     max_turns: limits.max_turns ?? DEFAULT_LIMITS.max_turns,
     max_tokens_per_call: limits.max_tokens_per_call ?? DEFAULT_LIMITS.max_tokens_per_call,
     max_tokens_per_run: limits.max_tokens_per_run ?? DEFAULT_LIMITS.max_tokens_per_run,
     max_output_chars: DEFAULT_LIMITS.max_output_chars,
+    gate_a_minutes: limits.gate_a_minutes ?? DEFAULT_LIMITS.gate_a_minutes,
   };
 }
 
@@ -405,8 +408,10 @@ export async function runBoundedResume({
           ...(read.path ? { outside_list: readList.length ? !isInReadList(read.path, readList) : null } : {}),
         });
       }
+      let writerUsage = null;
       if (stream.result && !processResult.timedOut) {
         const usage = usageFromResult(stream.result, { call, durationMs: Date.now() - callStartedAt });
+        writerUsage = usage;
         await recordIo(paths, runId, usage);
         const callTotal = tokenTotal(usage.tokens);
         const runTotal = await usageTotalForRun(paths, runId);
@@ -489,12 +494,22 @@ export async function runBoundedResume({
         await consumeAuthorization(paths, control, limited ? "rate_limited" : "claude_failed");
         return limited ? 75 : 1;
       }
+      // Usage Bridge cannot read cannot be shown to stay under the ceilings; no further call starts.
+      if (!writerUsage || writerUsage.parse_error) {
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel, status: "usage_unknown", session_id: sessionId, call, updated_at: new Date().toISOString(),
+          token_limit_role: "writer", missing: writerUsage?.missing || [], claude_stdout_path: stdoutPath,
+        });
+        await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "writer", provider: "claude", detail_ref: "usage" });
+        await consumeAuthorization(paths, control, "usage_unknown");
+        return 76;
+      }
       // The writer ran with write access; the contract must still be the one it was given.
       const afterWriter = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
       if (afterWriter.exitCode !== null) return afterWriter.exitCode;
       // T0-05 D1: the typed answer is checked by the harness; prose is never read.
       const writerResult = writerResultFromClaudeResult(claudeResult);
-      const writerCheck = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call, contractSha256 });
+      const writerCheck = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call, contractSha256, contract: afterWriter.contract?.contract || null });
       if (!writerCheck.ok) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "malformed_writer_result", session_id: sessionId, call,
@@ -518,13 +533,16 @@ export async function runBoundedResume({
       // T0-06 G3: the sealed verification runs after the writer and before any review.
       let gateAResult = null;
       if (workPackage.gate_a) {
-        gateAResult = await runGateA({
+        // The version Gate A tests is recorded with its result, so a condition proven by Gate A can
+        // be tied to the version the reviewer later reads.
+        const testedVersion = await workVersion(paths.repoRoot);
+        gateAResult = { ...(await runGateA({
           paths, gateA: workPackage.gate_a,
           stdoutPath: path.join(paths.queueRoot, stamp + "-gate-a.stdout.log"),
           stderrPath: path.join(paths.queueRoot, stamp + "-gate-a.stderr.log"),
           timeoutMs: limits.gate_a_minutes * 60_000,
           onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "controller", provider: "gate_a", call }),
-        });
+        })), work_version: testedVersion };
         await clearProcess(paths, runId);
         if ((await readRunStatus(paths, runId)) === "stopped") return 130;
         await recordIo(paths, runId, { ...gateAResult, call });
@@ -584,6 +602,8 @@ export async function runBoundedResume({
         last_assistant_message: JSON.stringify(writerResult),
       };
       await writeJson(payloadPath, payload);
+      // The version the reviewer will read; a Gate A result for another version proves nothing here.
+      const reviewVersion = await workVersion(paths.repoRoot);
       const enqueued = await enqueueReview({
         payload,
         paths,
@@ -593,6 +613,7 @@ export async function runBoundedResume({
         call,
         openFindings: lastFindings,
         gateAResult,
+        workVersion: reviewVersion,
       });
       const hookQueuedDuplicate = enqueued.accepted
         && enqueued.duplicate
@@ -648,6 +669,7 @@ export async function runBoundedResume({
       const check = ownOutcome.controller_decided ? { ok: true, errors: [] } : await validateReviewResult(reviewResult, {
         workOrder: workPackage.work_package_id, call, repoRoot: paths.repoRoot,
         previousFindings: lastFindings, deltaPaths: call > 1 ? lastChangedFiles.map((entry) => entry.path) : null, contractSha256,
+        contract: afterReview.contract?.contract || null,
       });
       if (!check.ok) {
         await writeBoundedState(paths, runtimeState, {
@@ -659,6 +681,16 @@ export async function runBoundedResume({
         return MALFORMED_EXIT_CODE;
       }
       await recordIo(paths, runId, { ...reviewResult });
+      // A reviewer call whose usage cannot be read cannot be shown to stay under the ceilings.
+      if (!ownOutcome.controller_decided && (!ownOutcome.usage || ownOutcome.usage.parse_error)) {
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel, status: "usage_unknown", session_id: sessionId, call, updated_at: new Date().toISOString(),
+          token_limit_role: "reviewer", missing: ownOutcome.usage?.missing || [], review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+        });
+        await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "reviewer", provider: "codex", detail_ref: "usage" });
+        await consumeAuthorization(paths, control, "usage_unknown");
+        return 76;
+      }
       // D5.3: the reviewer's call is measured against the same ceilings as the writer's.
       if (ownOutcome.usage && !ownOutcome.controller_decided) {
         const callTotal = tokenTotal(ownOutcome.usage.tokens);
@@ -679,6 +711,24 @@ export async function runBoundedResume({
         }
       }
       // D4.3 / D4.4: ids that survive a correction are unresolved; one survival on FAIL is a loop.
+      // Bridge decides every sealed condition from the records; the reviewer's PASS alone does not
+      // deliver. A condition that is not proven stops the run for the human instead of passing.
+      const sealedContract = afterReview.contract?.contract || null;
+      const rows = sealedContract && !ownOutcome.controller_decided
+        ? acceptanceRows({ contract: sealedContract, writer: writerResult, review: reviewResult, gateA: gateAResult, reviewVersion })
+        : [];
+      const accepted = rows.length ? decideAcceptance(rows) : null;
+      if (rows.length) await recordIo(paths, runId, { event: "acceptance", call, decision: accepted, review_version: reviewVersion, rows });
+      if (reviewResult.gate === "PASS" && accepted && accepted !== "proven") {
+        await writeBoundedState(paths, runtimeState, {
+          writer_model: writerModel, status: "acceptance_unverified", session_id: sessionId, call, updated_at: new Date().toISOString(),
+          ...(gateAResult ? { gate_a_passed: gateAResult.kind === "command" ? gateAResult.passed : null } : {}),
+          review_gate: reviewResult.gate, review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+        });
+        await recordIo(paths, runId, { event: "stop", status: "acceptance_unverified", role: "controller", provider: null, detail_ref: "acceptance" });
+        await consumeAuthorization(paths, control, "acceptance_unverified");
+        return 0;
+      }
       const recheck = call > 1 ? recheckFindings(lastFindings, reviewResult.findings) : null;
       if (recheck) await recordIo(paths, runId, { event: "recheck", call, ...recheck });
       const loop = recheck && reviewResult.gate === "FAIL" && recheck.unresolved.length ? recheck.unresolved[0] : null;

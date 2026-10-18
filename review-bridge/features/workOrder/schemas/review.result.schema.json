@@ -3,7 +3,7 @@
   "title": "review.result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["event", "work_order", "contract_sha256", "call", "gate", "hard_stop", "hard_stop_reason", "findings", "verified", "not_run"],
+  "required": ["event", "work_order", "contract_sha256", "call", "gate", "hard_stop", "hard_stop_reason", "findings", "verified", "not_run", "verdicts"],
   "properties": {
     "event": { "const": "review.result" },
     "work_order": { "type": "string", "minLength": 1 },
@@ -27,11 +27,24 @@
           "claim": { "type": "string", "minLength": 1, "maxLength": 200 },
           "evidence": { "type": "string", "maxLength": 200 },
           "fix": { "type": "string", "maxLength": 200 },
-          "acceptance_ref": { "type": ["integer", "null"], "minimum": 1 }
+          "acceptance_ref": { "type": ["string", "null"], "pattern": "^AC[1-9][0-9]*$" }
         }
       }
     },
     "verified": { "type": "array", "items": { "type": "string", "maxLength": 120 } },
-    "not_run": { "type": "array", "items": { "type": "string", "maxLength": 120 } }
+    "not_run": { "type": "array", "items": { "type": "string", "maxLength": 120 } },
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "evidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^AC[1-9][0-9]*$" },
+          "verdict": { "enum": ["pass", "fail", "cannot_verify"] },
+          "evidence": { "type": "string", "maxLength": 300 }
+        }
+      }
+    }
   }
 }

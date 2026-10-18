@@ -84,6 +84,21 @@ function tamperContract(sha) {
   fs.writeFileSync(file, JSON.stringify(contract, null, 2) + "\n");
 }
 
+// One entry per contract condition in task.input. FAKE_WRITER_CRITERIA bends it the ways the
+// harness must refuse: "missing" drops the last, "duplicate" repeats the first, "open" leaves
+// the first not done while the status stays done.
+function criteriaOutput() {
+  const taskAt = prompt.indexOf("=== TASK (task.input) ===");
+  const taskEnd = prompt.indexOf("\n=== ", taskAt + 1);
+  const task = taskAt >= 0 ? prompt.slice(taskAt, taskEnd > taskAt ? taskEnd : undefined) : "";
+  const ids = [...new Set([...task.matchAll(/"id": "(AC\d+)"/g)].map((match) => match[1]))];
+  const mode = process.env.FAKE_WRITER_CRITERIA || "";
+  const items = ids.map((id, index) => ({ id, status: mode === "open" && index === 0 ? "not_done" : "done", note: "fake: done for " + id }));
+  if (mode === "missing") return items.slice(0, -1);
+  if (mode === "duplicate" && items.length) return [...items, items[0]];
+  return items;
+}
+
 // The typed answer is built from the injected task.input and handoff, as a real writer would.
 function structuredOutput() {
   if (translating) return translationOutput();
@@ -105,6 +120,7 @@ function structuredOutput() {
     unverified: [],
     needs_human: resultMode === "NEEDS_HUMAN" ? [{ question: "which colour?", options: ["red", "blue"] }] : [],
     addressed_findings: [...new Set(addressed)],
+    criteria: criteriaOutput(),
   };
 }
 
@@ -122,7 +138,8 @@ const result = {
   duration_ms: 1200,
   total_cost_usd: 0.42,
   usage: { input_tokens: 94, cache_creation_input_tokens: 454, cache_read_input_tokens: cacheRead, output_tokens: 2352 },
-  modelUsage: { "fake-opus": { inputTokens: 94, cacheCreationInputTokens: 454, cacheReadInputTokens: cacheRead, outputTokens: 2352 } },
+  // FAKE_CLAUDE_USAGE=none leaves out the writer's usage, so Bridge cannot read it.
+  ...(process.env.FAKE_CLAUDE_USAGE === "none" && !translating ? {} : { modelUsage: { "fake-opus": { inputTokens: 94, cacheCreationInputTokens: 454, cacheReadInputTokens: cacheRead, outputTokens: 2352 } } }),
   result: rateLimited
     ? "usage limit reached; resets soon"
     : typed

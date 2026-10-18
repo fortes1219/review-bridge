@@ -43,6 +43,7 @@ export async function enqueueReview({
   call = null,
   openFindings = [],
   gateAResult = null,
+  workVersion = null,
 }) {
   const shape = validateHookPayload(payload);
   if (!shape.valid) {
@@ -99,6 +100,8 @@ export async function enqueueReview({
     writer_result: writerResult,
     open_findings: openFindings,
     gate_a_result: gateAResult,
+    // The version of the work the reviewer reads (RC3-BLOCKER-00).
+    work_version: workVersion,
     authorization: {
       plan_sha256: control.authorization_plan_sha256 || null,
       work_package: control.work_package || null,
