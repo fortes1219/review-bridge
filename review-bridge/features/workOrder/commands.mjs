@@ -1,7 +1,7 @@
 // The work order's command entries: plan, start, status, cancel, stop, review, resume, and the
 // review queue's status and wait. Each owns its order of steps and what it prints.
 import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "../../service/index.mjs";
-import { confirmV4WorkStart } from "./confirmStart.mjs";
+import { confirmV4WorkStart, contractStepsLine } from "./confirmStart.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
 import { GateAError } from "./gateA.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
@@ -41,14 +41,11 @@ export async function planWork({ paths, options }) {
   }
   // JSON stays the default because the installer and tests read it; --plain is the human summary (C5.2).
   if (options.plain) {
-    const order = plan.work_order;
-    const pathRefs = order ? order.references.filter((entry) => entry.kind === "path").length : 0;
     process.stdout.write([
-      order ? "工作名稱：" + order.name : "工作包：" + plan.work_package_id,
-      ...(order && (order.product || order.version) ? ["產品／版本：" + [order.product, order.version].filter(Boolean).join(" / ")] : []),
-      "範圍：" + ({ default: "預設（整個專案減禁改清單）", references: "參考資料收緊", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
-      ...(order ? ["參考資料：" + order.references.length + " 條（" + pathRefs + " 個路徑）"] : []),
+      plan.task_file ? "工單：" + plan.task_file : "工作包：" + plan.work_package_id,
+      "範圍：" + ({ default: "預設（整個專案減禁改清單）", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
       "驗收：" + (plan.gate_a?.kind === "command" ? "會跑 " + plan.gate_a.command + "（profile 核准）" : plan.gate_a?.label || "未定"),
+      ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
       "plan：" + plan.plan_path,
       "sha：" + plan.plan_sha256,
       // T0-08: native work-start refuses --approve; the human confirms the card at the terminal.

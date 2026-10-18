@@ -29,8 +29,7 @@ export function validateHookPayload(payload) {
 
 // T0-05 D2.4: the classifier reads the work text and the writer's typed claims, not prose.
 function classificationText(control, writerResult) {
-  const order = control.v4?.work_package?.work_order;
-  const work = order ? order.work : control.v4?.work_package?.task || "";
+  const work = control.v4?.work_package?.task || "";
   const claims = (writerResult.changed || []).map((entry) => entry.path + " " + entry.summary);
   return [work, ...claims].join("\n");
 }

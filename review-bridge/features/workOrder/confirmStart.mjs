@@ -4,6 +4,12 @@ import readline from "node:readline/promises";
 import { readJson } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
 
+// The model calls before the work, as the plan seals them; the human approves them with the plan.
+export function contractStepsLine(steps) {
+  return "Before the work: up to " + steps.max_attempts + " work-order translation(s) by the writer (" + steps.translate.provider + ")"
+    + " and " + steps.max_attempts + " check(s) by the reviewer (" + steps.check.provider + "), " + steps.minutes_per_call + " minute(s) per call";
+}
+
 // The human reads the sealed plan at the terminal and answers y; the answer approves that plan's SHA.
 export async function confirmV4WorkStart(paths, planPath, assumeYes) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
@@ -20,6 +26,7 @@ export async function confirmV4WorkStart(paths, planPath, assumeYes) {
     "Allowed paths: " + plan.scope.allowed_paths.join(", "),
     "Claude budget: " + plan.budget.max_claude_calls + " call(s), "
       + plan.budget.max_claude_minutes_per_call + " minute(s) per call",
+    ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
     "Authorization expires at: " + plan.authorization_expires_at,
     "Task:",
     plan.task,

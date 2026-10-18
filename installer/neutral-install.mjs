@@ -166,7 +166,7 @@ function neutralBridgeConfig({ profileId, roles, profile, watch = { port: DEFAUL
     watch: { port: watch.port, strict_port: watch.strict_port },
     retention: { days: retentionDays },
     // T0-07 V4.2: the language pack for result files, notifications and the stdout summary.
-    locale: "zh-TW",
+    locale: "en",
     // T0-06 G1.3: the profile-approved verification rules; work-plan picks Gate A from here.
     gate_a: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
     readiness: { reviewer_readonly_proven: "not_run" },

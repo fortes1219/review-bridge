@@ -39,7 +39,7 @@ async function makeRuntime(prefix) {
     path.join(bridgeRoot, "config", "default-policy.json"),
   );
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4" });
+  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   return { repoRoot, bridgeRoot, paths };
 }
@@ -80,6 +80,9 @@ test("R1 multiline task files allow newline, tab, and backticks", async () => {
   ].join("\n");
   const taskFile = path.join(runtime.paths.privateRoot, "work-packages", "r1.md");
   const outPath = path.join(runtime.paths.queueRoot, "r1.plan.json");
+  // A work-order file seals the installed rules and checks that an explicit path exists.
+  await fsp.copyFile(path.join(sourceBridgeRoot, "..", "project-templates", "rules.md"), path.join(runtime.paths.configRoot, "rules.md"));
+  await fsp.writeFile(path.join(runtime.repoRoot, "README.md"), "# demo\n");
   await fsp.mkdir(path.dirname(taskFile), { recursive: true });
   await fsp.writeFile(taskFile, task, "utf8");
   const plan = await createV4WorkPackagePlan({

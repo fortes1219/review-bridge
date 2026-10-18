@@ -20,7 +20,7 @@ async function workspace(t, { bridge = { gate_a: { profile_id: "node-backend", r
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-gate-a-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections", ...bridge });
+  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } }, ...bridge });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
   if (manifest) await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify(manifest));
@@ -31,7 +31,7 @@ async function workspace(t, { bridge = { gate_a: { profile_id: "node-backend", r
 }
 
 function order() {
-  return "<!-- rb:name -->\n牧場\n<!-- rb:work -->\n做一個牧場\n<!-- rb:acceptance -->\n- 看得到牧場\n<!-- rb:references -->\n- src/a.js\n";
+  return "# Work order: farm\n\n## Work\nBuild a small farm.\n\n## Acceptance\n- The farm is visible.\n\n## References\n- src/a.js\n";
 }
 
 async function plan({ paths, repoRoot }, { changeTypes = "code", id = "gate-" + Math.random().toString(16).slice(2, 8) } = {}) {

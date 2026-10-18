@@ -103,7 +103,7 @@ async function confirmInstall(plan, assumeYes) {
   }
 }
 
-async function runFakeScenarios(target, privateName = ".claude") {
+async function runFakeScenarios(target, privateName) {
   const bootstrap = path.join(target, privateName, "tools", "review-bridge", "bootstrap.mjs");
   const workRoot = path.join(target, privateName, "work-packages");
   const queueRoot = path.join(target, privateName, "review-queue");
@@ -119,7 +119,17 @@ async function runFakeScenarios(target, privateName = ".claude") {
     const id = "init-self-test-" + scenario.name.toLowerCase().replaceAll("_", "-");
     const taskPath = path.join(workRoot, id + ".md");
     const planPath = path.join(queueRoot, id + ".plan.json");
-    await fsp.writeFile(taskPath, "Self-test only. Do not modify application files.\n", "utf8");
+    // A minimal work order: the fake translation turns its one acceptance line into AC1.
+    await fsp.writeFile(taskPath, [
+      "# Review Bridge self-test",
+      "",
+      "Self-test only. Do not modify application files.",
+      "",
+      "## Acceptance",
+      "",
+      "- The fake review gate is reached.",
+      "",
+    ].join("\n"), "utf8");
     const planned = jsonOutput(run(process.execPath, [
       bootstrap,
       "work-plan",

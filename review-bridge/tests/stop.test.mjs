@@ -33,6 +33,9 @@ async function install(t) {
     await fsp.rm(root, { recursive: true, force: true });
   });
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
+  // These checks read the Chinese pack; English, the product default, is covered by the delivery tests.
+  const config = await readJson(paths.bridgeConfigPath);
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ ...config, locale: "zh-TW" }, null, 2) + "\n");
   return { root, bootstrap, bridge, paths };
 }
 
@@ -79,7 +82,8 @@ test("P7 stop: unknown and finished runs exit 1; a running writer is killed and 
   let record = null;
   while (Date.now() < deadline) {
     record = await readJson(processFile).catch(() => null);
-    if (record?.pid) break;
+    // The contract translation runs first and briefly; the sleeping call is the writer's.
+    if (record?.pid && record.role === "writer") break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(record?.pid, "writer process was never recorded");
@@ -145,10 +149,16 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   assert.ok(kinds.includes("read"));
   assert.ok(kinds.includes("usage"));
   const reads = events.filter((event) => event.event === "read");
-  assert.ok(reads.some((event) => event.outside_list === false));
-  assert.ok(reads.some((event) => event.outside_list === true));
-  const usage = events.find((event) => event.event === "usage");
+  // The first call has no read list (no files are injected), so its reads are recorded unjudged.
+  assert.ok(reads.some((event) => event.role !== "reviewer" && event.outside_list === null));
+  const usage = events.find((event) => event.event === "usage" && event.role === "writer");
   assert.equal(usage.tokens.cache_read, 150346);
+  // The work order became a sealed contract before the writer's first call.
+  assert.deepEqual(kinds.slice(0, 5), ["usage", "contract.translation", "usage", "contract.check", "contract.sealed"]);
+  assert.equal(events[0].role, "translator");
+  const run = await readJson(path.join(paths.runsDir, plan.proposed_run_id + ".json"));
+  const contractSha = events.find((event) => event.event === "contract.sealed").contract_sha256;
+  assert.equal(run.contract_sha256, contractSha);
   // T0-05: typed results on both sides, the reviewer packet, and the reviewer's own usage and read.
   assert.deepEqual(kinds.filter((kind) => /result|input$/.test(kind)), ["task.input", "writer.result", "gate_a_result", "review.input", "review.result"]);
   const gateEvent = events.find((event) => event.event === "gate_a_result");
@@ -157,10 +167,15 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   const writerResult = events.find((event) => event.event === "writer.result");
   assert.equal(writerResult.work_order, "stop-1");
   assert.equal(writerResult.status, "done");
+  assert.equal(writerResult.contract_sha256, contractSha);
+  // The reviewer reads the same sealed contract the writer got.
+  const taskInput = events.find((event) => event.event === "task.input");
   const reviewInput = events.find((event) => event.event === "review.input");
-  assert.equal(reviewInput.work, (await readJson(path.join(paths.queueRoot, "stop-1.plan.json"))).work_order.work);
-  assert.ok(Array.isArray(reviewInput.acceptance) && reviewInput.acceptance.length > 0);
-  assert.deepEqual(reviewInput.writer_claim_mismatch.claimed_not_in_delta, ["package.json"]);
+  assert.equal(taskInput.contract_sha256, contractSha);
+  assert.equal(reviewInput.contract_sha256, contractSha);
+  assert.deepEqual(reviewInput.contract, taskInput.contract);
+  assert.ok(reviewInput.contract.acceptance.length > 0);
+  assert.deepEqual(reviewInput.writer_claim_mismatch.claimed_not_in_delta, ["README.md"]);
   const reviewResult = events.find((event) => event.event === "review.result");
   assert.equal(reviewResult.gate, "PASS");
   const reviewerUsage = events.find((event) => event.event === "usage" && event.role === "reviewer");
@@ -176,10 +191,10 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   const promptFile = files.find((name) => name.endsWith("-writer-only-prompt.txt"));
   const prompt = await fsp.readFile(path.join(paths.queueRoot, promptFile), "utf8");
   assert.match(prompt, /=== RULES \(rules\.md\) ===/);
-  assert.match(prompt, /=== package\.json \([0-9a-f]{12}\) ===/);
-  assert.match(prompt, /"express"/);
-  const run = await readJson(path.join(paths.runsDir, plan.proposed_run_id + ".json"));
-  assert.equal(run.status, "pass");
+  assert.match(prompt, new RegExp("Contract: " + contractSha));
+  // A path named in the work order is context for the writer, not a file Bridge injects.
+  assert.doesNotMatch(prompt, /=== package\.json \([0-9a-f]{12}\) ===/);
+  assert.equal((await readJson(path.join(paths.runsDir, plan.proposed_run_id + ".json"))).status, "pass");
 });
 
 test("S7 / S5 live: work-start prints three plain lines, writes the result beside the work order, and the fake notification is captured", async (t) => {
@@ -204,7 +219,7 @@ test("S7 / S5 live: work-start prints three plain lines, writes the result besid
   const notices = (await fsp.readFile(notifyFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(notices.length, 1);
   assert.equal(notices[0].title, "已交付");
-  assert.match(notices[0].message, /^小型牧場：現有測試通過，reviewer 通過$/); // the template's work-order name, then the one line
+  assert.match(notices[0].message, /^\.review-bridge\/work-packages\/stop\.md：現有測試通過，reviewer 通過$/); // the work-order file, then the one line
   const events = await readIoEvents(paths, plan.proposed_run_id);
   assert.equal(events.find((event) => event.event === "notified").ok, true);
   assert.equal(events.find((event) => event.event === "notified").sent, true);

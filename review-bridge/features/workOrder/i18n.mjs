@@ -5,7 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const DEFAULT_LOCALE = "zh-TW";
+export const DEFAULT_LOCALE = "en";
 const localesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "locales");
 const cache = new Map();
 

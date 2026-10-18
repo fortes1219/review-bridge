@@ -27,16 +27,42 @@ export async function runProcess({
     // A shell run gets its own process group on POSIX so a timeout can reach its descendants.
     detached: invocation.shell === true && process.platform !== "win32",
   });
-  child.stdout.pipe(stdout);
-  child.stderr.pipe(stderr);
-  child.stdin.end(input);
-  // T0-04 D5.1: the caller records the pid so `stop` can reach the process tree.
-  if (onSpawn && Number.isInteger(child.pid)) await onSpawn(child.pid);
-
   let timer;
   let forceTimer;
   let timedOut = false;
   let treeKill = null;
+  // Listen before anything is awaited: a child that ends while onSpawn writes its record would
+  // otherwise close unheard, and with every timer unref'd the process would exit mid-await.
+  const closed = new Promise((resolve, reject) => {
+    child.once("error", (error) => {
+      stdout.end();
+      stderr.end();
+      reject(error);
+    });
+    child.once("close", (code, signal) => resolve({
+      exitCode: code === null ? 2 : code,
+      signal,
+      timedOut,
+      pid: child.pid,
+    }));
+  });
+  child.stdout.pipe(stdout);
+  child.stderr.pipe(stderr);
+  child.stdin.end(input);
+  // T0-04 D5.1: the caller records the pid so `stop` can reach the process tree. If that fails,
+  // nothing outside can reach the process, so it is killed and waited for before the error goes up.
+  if (onSpawn && Number.isInteger(child.pid)) {
+    try {
+      await onSpawn(child.pid);
+    } catch (error) {
+      await killProcessTree(child.pid, { group: invocation.shell === true }).catch(() => null);
+      try { child.kill("SIGKILL"); } catch {}
+      await closed.catch(() => null);
+      await Promise.allSettled([finished(stdout), finished(stderr)]);
+      throw error;
+    }
+  }
+
   if (timeoutMs > 0) {
     timer = setTimeout(() => {
       timedOut = true;
@@ -53,19 +79,7 @@ export async function runProcess({
 
   let result;
   try {
-    result = await new Promise((resolve, reject) => {
-      child.once("error", (error) => {
-        stdout.end();
-        stderr.end();
-        reject(error);
-      });
-      child.once("close", (code, signal) => resolve({
-        exitCode: code === null ? 2 : code,
-        signal,
-        timedOut,
-        pid: child.pid,
-      }));
-    });
+    result = await closed;
   } finally {
     if (timer) clearTimeout(timer);
     if (forceTimer) clearTimeout(forceTimer);

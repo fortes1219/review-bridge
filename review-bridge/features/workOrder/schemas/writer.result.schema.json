@@ -3,10 +3,11 @@
   "title": "writer.result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["event", "work_order", "call", "status", "changed", "verification", "unverified", "needs_human", "addressed_findings"],
+  "required": ["event", "work_order", "contract_sha256", "call", "status", "changed", "verification", "unverified", "needs_human", "addressed_findings"],
   "properties": {
     "event": { "const": "writer.result" },
     "work_order": { "type": "string", "minLength": 1 },
+    "contract_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
     "call": { "type": "integer", "minimum": 1 },
     "status": { "enum": ["done", "blocked", "out_of_scope"] },
     "changed": {

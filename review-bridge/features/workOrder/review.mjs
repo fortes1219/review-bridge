@@ -19,6 +19,7 @@ import {
 import { assertUnder } from "../../utils/pathGuard.mjs";
 import { validateJobPolicy } from "../../policy/policyChecks.mjs";
 import { buildReadList } from "./writerPrompt.mjs";
+import { loadContract } from "./contract.mjs";
 import {
   controllerScopeResult,
   parseCodexJsonl,
@@ -64,9 +65,13 @@ export async function validateReviewWorker({ paths, control, adapter }) {
 }
 
 // T0-05 D2.2: the packet the reviewer gets. Zero model: card text, typed claims, delta hashes.
-export async function buildReviewInput({ job, control }) {
+export async function buildReviewInput({ paths, job, control }) {
   const workPackage = control.v4?.work_package || {};
-  const order = workPackage.work_order || null;
+  // The reviewer reads the same sealed contract as the writer; a changed file stops the review.
+  const contractSha256 = control.v4?.contract_sha256 || null;
+  const work = contractSha256
+    ? { contract_sha256: contractSha256, contract: await loadContract(paths, contractSha256) }
+    : { contract_sha256: null, work: workPackage.task };
   const delta = job.workspace_evidence?.delta_path ? await readJson(job.workspace_evidence.delta_path).catch(() => null) : null;
   const changed = (delta?.changed_files || []).map((entry) => ({
     path: entry.path, change: entry.change, before_sha256: entry.before_sha256 ?? null, after_sha256: entry.after_sha256 ?? null,
@@ -77,8 +82,7 @@ export async function buildReviewInput({ job, control }) {
     work_order: workPackage.work_package_id,
     call: job.call,
     level: job.review_level,
-    work: order ? order.work : workPackage.task,
-    acceptance: order ? order.acceptance : [],
+    ...work,
     scope: {
       change_types: workPackage.scope?.change_types || [],
       allowed_paths: workPackage.scope?.allowed_paths || [],
@@ -166,7 +170,7 @@ export async function runReviewWorker({
         await writeText(reportPath, String(job.last_assistant_message));
         const runId = job.authorization?.run_id || null;
         const template = await fsp.readFile(reviewPromptPath, "utf8");
-        const reviewInput = await buildReviewInput({ job, control });
+        const reviewInput = await buildReviewInput({ paths, job, control });
         if (runId) await appendIoEvent(paths, runId, reviewInput);
         const prompt = renderPrompt(template, {
           JOB_PATH: metadataPath,
@@ -203,6 +207,7 @@ export async function runReviewWorker({
           controllerDecided = true;
           await writeJson(resultPath, controllerScopeResult({
             workOrder: reviewInput.work_order, call: job.call, scopeViolations: reviewInput.scope_violations,
+            contractSha256: reviewInput.contract_sha256,
           }));
         } else {
           const codexArgs = [

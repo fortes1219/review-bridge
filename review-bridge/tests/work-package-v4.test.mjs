@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { readRun } from "../service/records/runStore.mjs";
+import { spawn } from "node:child_process";
+
+import { consumeRun, readRun } from "../service/records/runStore.mjs";
+import { isPidAlive } from "../service/agentCli/process.mjs";
+import { recordProcessOrKill, runMustStop } from "../features/workOrder/writerLoop.mjs";
 import { authorizeV4WorkPackage, createV4WorkPackagePlan, FORBIDDEN_PATHS } from "../features/workOrder/workPackage.mjs";
 import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath } from "../features/workOrder/workspaceEvidence.mjs";
 
@@ -20,6 +24,7 @@ async function runtime(t) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
+    roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
   await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({ name: "wp", scripts: { test: "node -e \"process.exit(0)\"" } }));
@@ -33,14 +38,20 @@ async function runtime(t) {
   return { repoRoot, paths };
 }
 
+// A work order in the human template's shape; any headings and any language would do.
 function order({ references = "" } = {}) {
-  return `<!-- rb:name -->
-牧場
-<!-- rb:work -->
-做一個牧場
-<!-- rb:acceptance -->
-- 看得到牧場
-<!-- rb:references -->
+  return `# Work order: farm
+
+## Work
+
+Build a small farm.
+
+## Acceptance
+
+- The farm is visible.
+
+## References, attachments and dependencies (optional)
+
 ${references}
 `;
 }
@@ -68,7 +79,9 @@ test("T6 default scope is everything minus the fixed forbidden list", async (t) 
   assert.deepEqual(created.scope.allowed_paths, ["**"]);
   assert.deepEqual(created.scope.forbidden_paths, [...FORBIDDEN_PATHS]);
   assert.equal(created.scope.source, "default");
-  assert.equal(created.work_order.name, "牧場");
+  // The work order is sealed as text; it becomes a contract only after the human starts the work.
+  assert.match(created.task_file, /\.md$/);
+  assert.equal(created.work_order, undefined);
   for (const forbidden of [".git/config", ".env", ".env.local", "deploy/key.pem", "package-lock.json", "a/b/package-lock.json",
     ".github/workflows/ci.yml", "Dockerfile", "Dockerfile.dev", "infra/main.tf", ".review-bridge/x", ".claude/settings.json"]) {
     assert.equal(matchesForbiddenPath(forbidden, FORBIDDEN_PATHS), true, forbidden);
@@ -78,25 +91,24 @@ test("T6 default scope is everything minus the fixed forbidden list", async (t) 
   }
 });
 
-test("T7 reference paths narrow the scope; free-text references do not", async (t) => {
+test("T7 paths written in a work order are context: they neither narrow the scope nor get sealed", async (t) => {
   const r = await runtime(t);
   const created = await plan(r, { task: order({ references: "- src/game/\n- 照首頁的做法\nREADME.md" }) });
-  assert.deepEqual(created.scope.allowed_paths, ["README.md", "src/game"]);
-  assert.equal(created.scope.source, "references");
-  assert.deepEqual(created.references.map((entry) => entry.path), ["src/game", "README.md"]);
-  assert.equal(created.references[0].files.length, 1);
-  assert.match(created.references[0].files[0].sha256, /^[0-9a-f]{64}$/);
-  assert.equal(created.references[1].bytes, 7);
+  assert.deepEqual(created.scope.allowed_paths, ["**"]);
+  assert.equal(created.scope.source, "default");
+  assert.equal(created.references, undefined);
 });
 
-test("T8 an explicit --allow-paths must exist, stay out of the forbidden list, and stay inside the references", async (t) => {
+test("T8 an explicit --allow-paths must exist and stay out of the forbidden list", async (t) => {
   const r = await runtime(t);
   const explicit = await plan(r, { task: order({ references: "src/" }), allowedPaths: "src/game/farm.js" });
   assert.deepEqual(explicit.scope.allowed_paths, ["src/game/farm.js"]);
   assert.equal(explicit.scope.source, "explicit");
   await assert.rejects(plan(r, { task: order(), allowedPaths: "src/missing.js" }), /允許路徑不存在/);
   await assert.rejects(plan(r, { task: order(), allowedPaths: "package-lock.json" }), /禁改清單/);
-  await assert.rejects(plan(r, { task: order({ references: "src/game/" }), allowedPaths: "README.md" }), /不在參考資料的範圍內/);
+  // A path the work order mentions does not limit what --allow-paths may name.
+  const outside = await plan(r, { task: order({ references: "src/game/" }), allowedPaths: "README.md" });
+  assert.deepEqual(outside.scope.allowed_paths, ["README.md"]);
   // Legacy inline task without markers still needs an explicit scope.
   await assert.rejects(createV4WorkPackagePlan({
     paths: r.paths, task: "plain task", owner: "o", workPackage: "legacy-1", breakpoint: "b", changeTypes: "code",
@@ -104,26 +116,27 @@ test("T8 an explicit --allow-paths must exist, stay out of the forbidden list, a
   }), /allowed path is required/);
 });
 
-test("T9 the plan seals the rules digest and every reference hash; a changed reference changes the sha", async (t) => {
+test("T9 the plan seals the rules digest and the work-order text; a changed work order changes the sha", async (t) => {
   const r = await runtime(t);
   const first = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "seal-a" });
   assert.equal(first.rules.path, ".review-bridge/review-bridge/rules.md");
   assert.match(first.rules.sha256, /^[0-9a-f]{64}$/);
   assert.match(first.rules.text, /規則摘要/);
-  await fsp.writeFile(path.join(r.repoRoot, "src", "game", "farm.js"), "// farm v2\n");
-  const second = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "seal-b" });
-  assert.notEqual(first.references[0].sha256, second.references[0].sha256);
+  const second = await plan(r, { task: order({ references: "src/game/farm.js\n- one more line" }), id: "seal-b" });
+  assert.notEqual(first.task_sha256, second.task_sha256);
   const firstDigestInput = { ...first, plan_sha256: undefined, proposed_run_id: 0, proposed_session_id: 0, created_at: 0, work_package_id: 0, authorization_expires_at: 0 };
   const secondDigestInput = { ...second, plan_sha256: undefined, proposed_run_id: 0, proposed_session_id: 0, created_at: 0, work_package_id: 0, authorization_expires_at: 0 };
   assert.notDeepEqual(firstDigestInput, secondDigestInput);
 });
 
-test("T10 authorize fails closed when a reference or rules.md changed after the plan was built", async (t) => {
+test("T10 authorize fails closed when the work order or rules.md changed after the plan was built", async (t) => {
   const r = await runtime(t);
-  const sealed = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "stale-ref" });
-  await fsp.writeFile(path.join(r.repoRoot, "src", "game", "farm.js"), "// changed after approval\n");
+  const sealed = await plan(r, { task: order(), id: "stale-order" });
+  // A file the work order mentions may change freely; it is context, not part of the seal.
+  await fsp.writeFile(path.join(r.repoRoot, "src", "game", "farm.js"), "// changed after the plan\n");
+  await fsp.appendFile(path.join(r.paths.privateRoot, "stale-order.md"), "- One more acceptance line.\n");
   await assert.rejects(authorizeV4WorkPackage({ paths: r.paths, planPath: sealed.plan_path, approval: sealed.plan_sha256, executionMode: "fake_cli" }),
-    /批准後 src\/game\/farm\.js 變了，重新建 plan/);
+    /The work order \.review-bridge\/stale-order\.md changed after the plan was built\. Build a new plan\./);
   const sealedRules = await plan(r, { task: order(), id: "stale-rules" });
   await fsp.appendFile(path.join(r.paths.configRoot, "rules.md"), "\n再加一條。\n");
   await assert.rejects(authorizeV4WorkPackage({ paths: r.paths, planPath: sealedRules.plan_path, approval: sealedRules.plan_sha256, executionMode: "fake_cli" }),
@@ -166,4 +179,44 @@ test("T13 the workspace delta flags a forbidden path as a scope violation even i
   const delta = await createWorkspaceDelta({ paths: r.paths, baselinePath: baseline.baseline_path, deltaId: "t13" });
   assert.deepEqual(delta.scope_violations, [".env", "package-lock.json"]);
   assert.ok(delta.changed_paths.includes("src/index.js"));
+});
+
+// The calling side of the stop protocol for writer and Gate A processes: a process that starts
+// around a stop (the stop command may already have looked for a pid) is killed once it is recorded.
+test("a writer or Gate A process recorded after its run was stopped is killed; one in a running run is left alone", { timeout: 30_000 }, async (t) => {
+  const r = await runtime(t);
+  const sleeper = () => spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { windowsHide: true, stdio: "ignore" });
+  const waitExit = (child) => new Promise((resolve) => child.once("exit", resolve));
+  const running = await plan(r, { task: order(), id: "proc-running" });
+  const live = await authorizeV4WorkPackage({ paths: r.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
+  const kept = sleeper();
+  t.after(() => { try { kept.kill(); } catch {} });
+  await recordProcessOrKill(r.paths, live.run.run_id, { pid: kept.pid, role: "writer", provider: "claude", call: 1 });
+  assert.equal(isPidAlive(kept.pid), true);
+  await consumeRun(r.paths, live.run.run_id, "cancelled", null);
+  const stopping = await plan(r, { task: order(), id: "proc-stopped" });
+  const stopped = await authorizeV4WorkPackage({ paths: r.paths, planPath: stopping.plan_path, approval: stopping.plan_sha256, executionMode: "fake_cli" });
+  await consumeRun(r.paths, stopped.run.run_id, "stopped", null);
+  const late = sleeper();
+  const exited = waitExit(late);
+  await recordProcessOrKill(r.paths, stopped.run.run_id, { pid: late.pid, role: "writer", provider: "claude", call: 1 });
+  await exited;
+  assert.equal(isPidAlive(late.pid), false);
+});
+
+// The status check fails closed: a run whose record cannot be read is treated as stopped.
+test("a process whose run record cannot be read is killed; the stop check never reads an unknown status as running", { timeout: 30_000 }, async (t) => {
+  const r = await runtime(t);
+  const running = await plan(r, { task: order(), id: "proc-known" });
+  const live = await authorizeV4WorkPackage({ paths: r.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
+  assert.equal(await runMustStop(r.paths, live.run.run_id), false);
+  assert.equal(await runMustStop(r.paths, "run-without-record-0001"), true);
+  // A run file that does not parse (a torn write, a disk error) makes the status unreadable.
+  await fsp.writeFile(path.join(r.paths.runsDir, live.run.run_id + ".json"), "{\"torn\":");
+  assert.equal(await runMustStop(r.paths, live.run.run_id), true);
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { windowsHide: true, stdio: "ignore" });
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  await recordProcessOrKill(r.paths, live.run.run_id, { pid: child.pid, role: "writer", provider: "claude", call: 1 });
+  await exited;
+  assert.equal(isPidAlive(child.pid), false);
 });

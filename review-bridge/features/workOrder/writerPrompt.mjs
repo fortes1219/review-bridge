@@ -68,14 +68,18 @@ export function isInReadList(relativePath, readList) {
   return readList.some((entry) => candidate === entry.path || candidate.startsWith(entry.path + "/"));
 }
 
-export function buildTaskInput({ workPackage, call, readList, limits }) {
-  const order = workPackage.work_order || null;
+// A work-order run hands the writer the whole sealed contract; the legacy inline path, the task text.
+function workOf(workPackage, contract) {
+  if (!contract) return { work: workPackage.task };
+  return { contract_sha256: contract.sha256, contract: contract.contract };
+}
+
+export function buildTaskInput({ workPackage, call, readList, limits, contract = null }) {
   return {
     event: "task.input",
     work_order: workPackage.work_package_id,
     call,
-    work: order ? order.work : workPackage.task,
-    acceptance: order ? order.acceptance : [],
+    ...workOf(workPackage, contract),
     scope: {
       change_types: workPackage.scope.change_types,
       allowed_paths: workPackage.scope.allowed_paths,
@@ -98,7 +102,7 @@ const SEVERITY_ORDER = { HIGH: 3, MEDIUM: 2, LOW: 1 };
 
 // D2: the Controller writes the handoff from records; the model never writes it.
 // T0-05 D4.1: `open_findings` are the typed findings of the last review.result.
-export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFindings = [], lastGate = null, changedFiles = [], readList = [], gateAResult = null }) {
+export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFindings = [], lastGate = null, changedFiles = [], readList = [], gateAResult = null, contract = null }) {
   const progress = [];
   for (const event of ioEvents) {
     if (event.event === "usage" && event.role === "writer") {
@@ -120,8 +124,8 @@ export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFin
     work_order: workPackage.work_package_id,
     reason,
     from: { role: "writer", provider: "claude", calls_used: call - 1 },
-    work: workPackage.work_order ? workPackage.work_order.work : workPackage.task,
-    acceptance: workPackage.work_order ? workPackage.work_order.acceptance : [],
+    // The contract itself is in task.input on every call; the handoff names which one.
+    ...(contract ? { contract_sha256: contract.sha256 } : { work: workPackage.task }),
     scope: {
       change_types: workPackage.scope.change_types,
       allowed_paths: workPackage.scope.allowed_paths,
@@ -136,7 +140,7 @@ export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFin
     next: clip(reason === "gate_a_failed" ? "現有測試失敗（見 gate_a_result），修到它通過，維持範圍；做完回 writer.result。" : "修正上列 findings，維持範圍；做完回 writer.result，addressed_findings 列出處理過的 id。", MAX_NEXT_CHARS),
   };
   // D2.3 / T0-05 D4.2: trim the changed-file list first (the delta is on disk anyway), then
-  // findings from LOW upward, then old progress lines; work and acceptance are never cut.
+  // findings from LOW upward, then old progress lines; the work and the contract hash are never cut.
   const size = () => JSON.stringify(handoff).length;
   while (size() > MAX_HANDOFF_CHARS && handoff.workspace.changed.length > 0) handoff.workspace.changed.pop();
   while (size() > MAX_HANDOFF_CHARS && handoff.open_findings.length > 0) handoff.open_findings.pop();
@@ -145,7 +149,7 @@ export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFin
 }
 
 // D1.2: fixed order. Header, rules, task.input, injected files, handoff.
-export function composeWriterPrompt({ workPackage, control, runId, call, taskInput, references, handoff = null, rulesText }) {
+export function composeWriterPrompt({ workPackage, control, runId, call, taskInput, references, handoff = null, rulesText, contract = null }) {
   const scope = workPackage.scope;
   const header = [
     WRITER_MODE_HEADER,
@@ -161,6 +165,10 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     "You may hand separate parts of this work to sub-agents in parallel; they share this scope and budget, and you integrate their work into the one result.",
     "After integrating, make one bounded local consistency pass over what changed. That pass is not a review: neither you nor a sub-agent acts as the reviewer; the independent reviewer is started by the controller.",
     "Do not stage, commit, push, deploy or release.",
+    ...(contract ? [
+      "Contract: " + contract.sha256 + ". It is the work order as sealed when the human started the work; it is read-only.",
+      "Answer with this contract_sha256. If the contract looks wrong, ask through needs_human; never edit it or work from another version.",
+    ] : []),
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",
     "Your final answer must be one writer.result object that matches the JSON schema given to the CLI; no prose outside it.",
     "Set needs_human when a decision only the owner can make is missing; set status to blocked or out_of_scope instead of guessing.",

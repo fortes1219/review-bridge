@@ -36,10 +36,10 @@ async function workspace(t) {
 function workPackage() {
   return {
     work_package_id: "farm-1",
-    task: "ignored when work_order is present",
+    task: "# 牧場\n做一個牧場",
+    task_file: ".review-bridge/work-packages/farm.md",
     breakpoint: "return after review",
     scope: { change_types: ["code"], allowed_paths: ["src/game"], forbidden_paths: [".git/**", ".env"] },
-    work_order: { name: "牧場", work: "做一個牧場", acceptance: ["看得到牧場", "農車會動"], references: [] },
     rules: { path: ".review-bridge/review-bridge/rules.md", sha256: "0".repeat(64), text: "# 規則\n不 commit。" },
     references: [{ path: "src/game", files: [
       { path: "src/game/farm.js", sha256: sha("// farm\n"), bytes: 8 },
@@ -47,6 +47,18 @@ function workPackage() {
     ] }],
   };
 }
+
+// The sealed contract as the writer loop hands it on: the hash and the whole object.
+const contract = {
+  sha256: "c".repeat(64),
+  contract: {
+    schema: "review-bridge.contract",
+    acceptance: [
+      { id: "AC1", statement: "看得到牧場", source_refs: [{ start: 2, end: 2 }], verify: [{ kind: "reviewer", check: "畫面" }], run_refs: [] },
+      { id: "AC2", statement: "農車會動", source_refs: [{ start: 2, end: 2 }], verify: [{ kind: "gate_a", check: null }], run_refs: [] },
+    ],
+  },
+};
 
 test("P1 the prompt is composed only from the sealed package: header, rules, task.input, injected files; no go-read", async (t) => {
   const { paths } = await workspace(t);
@@ -56,8 +68,8 @@ test("P1 the prompt is composed only from the sealed package: header, rules, tas
   assert.equal(references[0].text, "// farm\n");
   assert.equal(references[1].text, null); // over 64 KiB: path and size only
   const readList = buildReadList({ references });
-  const taskInput = buildTaskInput({ workPackage: pkg, call: 1, readList, limits: { max_turns: 20, max_output_chars: 4000 } });
-  const prompt = composeWriterPrompt({ workPackage: pkg, control: { breakpoint: "return after review" }, runId: "run-1", call: 1, taskInput, references, rulesText: pkg.rules.text });
+  const taskInput = buildTaskInput({ workPackage: pkg, call: 1, readList, limits: { max_turns: 20, max_output_chars: 4000 }, contract });
+  const prompt = composeWriterPrompt({ workPackage: pkg, control: { breakpoint: "return after review" }, runId: "run-1", call: 1, taskInput, references, rulesText: pkg.rules.text, contract });
   const lines = prompt.split("\n");
   assert.equal(lines[0], "[REVIEW_BRIDGE_MODE: WRITER_ONLY]");
   // Sub-agents may implement; the policy's one local consistency pass stays, and it is not a review.
@@ -68,8 +80,17 @@ test("P1 the prompt is composed only from the sealed package: header, rules, tas
   assert.ok(prompt.indexOf("=== RULES") < prompt.indexOf("=== TASK"));
   assert.ok(prompt.indexOf("=== TASK") < prompt.indexOf("=== src/game/farm.js (" + sha("// farm\n").slice(0, 12) + ") ==="));
   assert.match(prompt, /不 commit。/);
-  assert.match(prompt, /"work": "做一個牧場"/);
-  assert.match(prompt, /"acceptance": \[\n\s+"看得到牧場",\n\s+"農車會動"\n\s+\]/);
+  // The writer gets the whole contract and its hash, and is told the contract is read-only.
+  assert.equal(taskInput.contract_sha256, contract.sha256);
+  assert.deepEqual(taskInput.contract, contract.contract);
+  assert.equal(taskInput.work, undefined);
+  assert.match(prompt, /"statement": "看得到牧場"/);
+  assert.match(prompt, new RegExp("Contract: " + contract.sha256 + "\\. .*read-only"));
+  assert.match(prompt, /Answer with this contract_sha256/);
+  // Without a contract (the legacy inline task) the writer gets the task text instead.
+  const inline = buildTaskInput({ workPackage: { ...pkg, task_file: undefined }, call: 1, readList: [], limits: { max_turns: 20, max_output_chars: 4000 } });
+  assert.equal(inline.work, pkg.task);
+  assert.equal(inline.contract, undefined);
   assert.match(prompt, /"max_turns": 20/);
   assert.match(prompt, /71680 bytes, 1 lines; too large to inline/);
   assert.doesNotMatch(prompt, /Read first|Read only the task|go read|請先讀/i);
@@ -109,11 +130,12 @@ test("P3 the handoff is built from records, carries typed findings sorted by sev
   ];
   const changed = Array.from({ length: 300 }, (_, index) => ({ path: "src/game/file-" + index + ".js", change: "modified" }));
   const readList = buildReadList({ references: [{ path: "src/game/farm.js" }], findings: openFindings.slice(0, 3) });
-  const handoff = buildHandoff({ workPackage: pkg, call: 2, reason: "correction", ioEvents, openFindings, lastGate: "FAIL", changedFiles: changed, readList });
+  const handoff = buildHandoff({ workPackage: pkg, call: 2, reason: "correction", ioEvents, openFindings, lastGate: "FAIL", changedFiles: changed, readList, contract });
   assert.equal(handoff.event, "handoff");
   assert.equal(handoff.from.calls_used, 1);
-  assert.equal(handoff.work, "做一個牧場");
-  assert.deepEqual(handoff.acceptance, ["看得到牧場", "農車會動"]);
+  // The contract itself rides in task.input; the handoff names which one.
+  assert.equal(handoff.contract_sha256, contract.sha256);
+  assert.equal(handoff.work, undefined);
   assert.ok(handoff.progress.length <= 10);
   assert.equal(handoff.progress.at(-1), "上次審查：FAIL");
   assert.ok(handoff.progress.includes("第 1 次審查：FAIL，15 條 findings"));

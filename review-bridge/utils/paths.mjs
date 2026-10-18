@@ -31,6 +31,7 @@ export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName } = {}) {
     failedDir: path.join(queueRoot, "failed"),
     evidenceRoot: path.join(queueRoot, "workspace-evidence"),
     workPackagesDir: path.join(queueRoot, "work-packages"),
+    contractsDir: path.join(queueRoot, "contracts"),
     authorizationsDir: path.join(queueRoot, "authorizations"),
     authorizationClaimsDir: path.join(queueRoot, "authorization-claims"),
     authorizationInvalidationsDir: path.join(queueRoot, "authorization-invalidations"),

@@ -79,7 +79,7 @@ async function serviceRunning(root) {
 
 async function addUserData(root) {
   const privateRoot = path.join(root, ".review-bridge");
-  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "<!-- rb:name -->\n牧場\n");
+  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "# Work order: farm\n");
   await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.result.md"), "# 已交付\n");
   await fsp.mkdir(path.join(privateRoot, "archive"), { recursive: true });
   await fsp.writeFile(path.join(privateRoot, "archive", "2026-10-14.jsonl"), "{\"type\":\"run\"}\n");

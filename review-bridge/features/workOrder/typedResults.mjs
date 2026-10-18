@@ -31,7 +31,7 @@ function typeMatches(value, expected) {
   return actual === expected;
 }
 
-// A small draft-07 subset: enough for the two result schemas, no external dependency.
+// A small draft-07 subset: enough for the result and contract schemas, no external dependency.
 export function validateAgainstSchema(value, schema, at = "$", errors = []) {
   if (schema.const !== undefined && value !== schema.const) errors.push(at + ": must be " + JSON.stringify(schema.const));
   if (schema.enum && !schema.enum.some((option) => option === value)) errors.push(at + ": must be one of " + JSON.stringify(schema.enum));
@@ -48,6 +48,7 @@ export function validateAgainstSchema(value, schema, at = "$", errors = []) {
     if (schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(at + ": does not match " + schema.pattern);
   }
   if (typeof value === "number" && schema.minimum !== undefined && value < schema.minimum) errors.push(at + ": below " + schema.minimum);
+  if (Array.isArray(value) && schema.minItems !== undefined && value.length < schema.minItems) errors.push(at + ": fewer than " + schema.minItems + " items");
   if (Array.isArray(value) && schema.items) value.forEach((item, index) => validateAgainstSchema(item, schema.items, at + "[" + index + "]", errors));
   if (value && typeof value === "object" && !Array.isArray(value)) {
     for (const key of schema.required || []) if (!(key in value)) errors.push(at + ": missing " + key);
@@ -68,13 +69,20 @@ export function writerResultFromClaudeResult(result) {
   return null;
 }
 
-export async function validateWriterResult(value, { workOrder, call }) {
+// A model's answer names the contract it worked from; any other hash is not this run's work.
+function contractEchoErrors(value, expected) {
+  if ((value.contract_sha256 ?? null) === (expected || null)) return [];
+  return ["$.contract_sha256: expected " + (expected || "null")];
+}
+
+export async function validateWriterResult(value, { workOrder, call, contractSha256 = null }) {
   const errors = value && typeof value === "object" && !Array.isArray(value)
     ? validateAgainstSchema(value, await loadSchema(WRITER_RESULT_SCHEMA))
     : ["$: not an object"];
   if (!errors.length) {
     if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
     if (value.call !== call) errors.push("$.call: expected " + call);
+    errors.push(...contractEchoErrors(value, contractSha256));
   }
   return { ok: errors.length === 0, errors };
 }
@@ -118,13 +126,14 @@ export async function workspaceFileProblem(repoRoot, relative) {
 }
 
 // D3.3: schema first, then the fixed rules; any failure is malformed_review_result.
-export async function validateReviewResult(value, { workOrder, call, repoRoot, previousFindings = [], deltaPaths = null }) {
+export async function validateReviewResult(value, { workOrder, call, repoRoot, previousFindings = [], deltaPaths = null, contractSha256 = null }) {
   const errors = value && typeof value === "object" && !Array.isArray(value)
     ? validateAgainstSchema(value, await loadSchema(REVIEW_RESULT_SCHEMA))
     : ["$: not an object"];
   if (errors.length) return { ok: false, errors };
   if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
   if (value.call !== call) errors.push("$.call: expected " + call);
+  errors.push(...contractEchoErrors(value, contractSha256));
   if (value.gate === "FAIL" && value.findings.length === 0) errors.push("$.findings: FAIL needs at least one finding");
   if (value.gate === "PASS" && value.findings.some((finding) => finding.severity === "HIGH")) errors.push("$.findings: PASS cannot carry a HIGH finding");
   // Codex finding 2026-10-13: a PASS must not carry a hard-stop signal; the two contradict.
@@ -149,10 +158,11 @@ export async function validateReviewResult(value, { workOrder, call, repoRoot, p
 }
 
 // D2.5: scope violations are decided by the controller; no reviewer call is made.
-export function controllerScopeResult({ workOrder, call, scopeViolations }) {
+export function controllerScopeResult({ workOrder, call, scopeViolations, contractSha256 = null }) {
   return {
     event: "review.result",
     work_order: workOrder,
+    contract_sha256: contractSha256,
     call,
     gate: "FAIL",
     hard_stop: true,

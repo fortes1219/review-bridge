@@ -35,8 +35,10 @@ export function classifyOutcome(run) {
     case "pass": return "delivered";
     case "call_budget_exhausted": return "needs_fix";
     case "hard_stop":
-    case "needs_human": return "needs_human";
-    case "token_limit": return "token_limit";
+    case "needs_human":
+    case "contract_unconfirmed": return "needs_human";
+    case "token_limit":
+    case "usage_unknown": return "token_limit";
     case "rate_limited": return "quota";
     case "stopped": return "stopped";
     case "cancelled": return "cancelled";
@@ -135,8 +137,13 @@ export function tokenRows(events) {
     writer: count((event) => event.event === "task.input"),
     reviewer: count((event) => event.event === "review.input") - count((event) => event.event === "review.result" && event.source === "controller"),
   };
+  // Translating and checking the contract come before the writer's first call; each has a row only when it ran.
+  for (const role of ["translator", "contract_checker"]) {
+    const calls = count((event) => event.event === "usage" && event.role === role);
+    if (calls) expected[role] = calls;
+  }
   const rows = {};
-  for (const role of ["writer", "reviewer"]) {
+  for (const role of Object.keys(expected)) {
     const usage = events.filter((event) => event.event === "usage" && event.role === role);
     const readable = usage.filter((event) => !event.parse_error);
     const calls = Math.max(expected[role], usage.length);
@@ -161,8 +168,7 @@ function writerCalls(run, events) {
 
 // V2.2–V2.6: the sections, as arrays of lines, from typed records only.
 export function composeSections({ t, run, outcome, workPackage, plan, events, delta, limits = {}, deliveredAt = Date.now() }) {
-  const order = workPackage?.work_order || null;
-  const name = order?.name || workPackage?.work_package_id || run.work_package_id || run.run_id;
+  const name = workPackage?.task_file || workPackage?.work_package_id || run.work_package_id || run.run_id;
   const state = run.last_state || {};
   const calls = writerCalls(run, events);
   const gate = last(events, "gate_a_result");
@@ -201,6 +207,14 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     }
     why.push(t("result.why.budget", { max: workPackage?.budget?.max_claude_calls ?? run.budget?.max_claude_calls ?? "" }));
   } else if (outcome === "needs_human") {
+    if (state.contract_questions?.length) {
+      why.push(t("result.why.contract.questions"));
+      for (const question of state.contract_questions) why.push("- " + question);
+    }
+    if (run.status === "contract_unconfirmed") {
+      why.push(t("result.why.contract.unconfirmed"));
+      for (const line of (state.contract_problems || []).slice(0, 10)) why.push("- " + line);
+    }
     if (writer?.needs_human?.length) {
       why.push(t("result.why.needs_human.questions"));
       for (const item of writer.needs_human) why.push("- " + t("result.why.needs_human.question", { question: item.question, options: (item.options || []).join(" / ") }));
@@ -218,6 +232,8 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
         why.push("- " + t("result.why.finding", { id: finding.id, severity: finding.severity, path: finding.path, line: finding.line, claim: finding.claim, fix: finding.fix }));
       }
     }
+  } else if (outcome === "token_limit" && run.status === "usage_unknown") {
+    why.push(t("result.why.usage_unknown", { role: t("result.tokens.role." + (state.token_limit_role || "writer")) }));
   } else if (outcome === "token_limit") {
     const role = state.token_limit_role || stop?.role || "writer";
     const which = state.token_limit === "per_run" ? "per_run" : "per_call";
@@ -240,6 +256,10 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     for (const file of [state.stderr_path, state.claude_stderr_path, state.review_error_path, failure?.record_path].filter(Boolean)) why.push(t("result.why.error.log", { path: file }));
     if (state.error) why.push(String(state.error));
     if (Array.isArray(state.errors)) for (const line of state.errors.slice(0, 10)) why.push("- " + line);
+    if (state.contract_problems?.length) {
+      why.push(t("result.why.contract.problems"));
+      for (const line of state.contract_problems.slice(0, 10)) why.push("- " + line);
+    }
   }
 
   const next = [];
@@ -267,7 +287,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
 
   const rows = tokenRows(events);
   const tokens = [t("result.tokens.header"), "|---|---|---|---|---|---|---|---|"];
-  for (const role of ["writer", "reviewer"]) {
+  for (const role of Object.keys(rows)) {
     const row = rows[role];
     const label = t("result.tokens.role." + role);
     if (!row.complete) {

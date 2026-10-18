@@ -20,9 +20,26 @@ import {
   writeText,
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
-import { hasWorkOrderMarkers, MESSAGES as ORDER_MESSAGES, parseWorkOrder, WorkOrderError } from "./workOrderParser.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspaceEvidence.mjs";
 import { recheckGateA, selectGateA } from "./gateA.mjs";
+import { MAX_TRANSLATION_ATTEMPTS } from "./contract.mjs";
+import { DEFAULT_WRITER_MODEL } from "./writerLoop.mjs";
+
+// The model calls that turn a work order into a contract run before any work, so the plan names
+// them for the human to approve: who translates, who checks, how often, and for how long. The
+// providers are the configured roles as they are; a native run refuses one it cannot call yet.
+async function contractSteps(paths, snapshot, budget) {
+  const config = await readJson(paths.bridgeConfigPath).catch(() => ({}));
+  const writer = config?.roles?.writer?.provider_id;
+  const reviewer = config?.roles?.reviewer?.provider_id;
+  if (!writer || !reviewer) throw new Error("The writer and reviewer roles are not set in bridge.json; a work order cannot be planned.");
+  return {
+    translate: { role: "writer", provider: writer, model: snapshot.effective_policy?.writer?.model || DEFAULT_WRITER_MODEL },
+    check: { role: "reviewer", provider: reviewer },
+    max_attempts: MAX_TRANSLATION_ATTEMPTS,
+    minutes_per_call: budget.max_claude_minutes_per_call,
+  };
+}
 
 // T0-03 C2.1: fixed, in code, listed in every plan. Never from a model.
 export const FORBIDDEN_PATHS = Object.freeze([
@@ -33,9 +50,6 @@ export const FORBIDDEN_PATHS = Object.freeze([
 ]);
 const RULES_RELATIVE = "review-bridge/rules.md";
 const RULES_MAX_CHARS = 4_000;
-const REFERENCE_MAX_FILES = 200;
-const REFERENCE_MAX_BYTES = 2 * 1024 * 1024;
-const SKIPPED_DIRS = new Set([".git", "node_modules", "dist", "coverage", "target", ".nuxt", ".output"]);
 
 function sha256Of(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
@@ -46,30 +60,20 @@ async function pathExists(paths, relative) {
   return await fsp.stat(absolute).then((stat) => ({ absolute, directory: stat.isDirectory() })).catch(() => null);
 }
 
-// C2: scope from references (narrowed), from --allow-paths (explicit, must be a subset), or the default.
-async function resolveScope({ paths, workOrder, allowedPaths }) {
-  const referencePaths = workOrder ? workOrder.references.filter((entry) => entry.kind === "path") : [];
+// C2: scope from --allow-paths (explicit) or, for a work-order file, the default. Paths written
+// in a work order are context for the writer, never permission, so they do not narrow or widen it.
+async function resolveScope({ paths, workOrderFile, allowedPaths }) {
   const forbidden = [...FORBIDDEN_PATHS];
   if (allowedPaths) {
     const explicit = parseAllowedPaths(allowedPaths);
     for (const entry of explicit) {
       // C2.4 existence applies to human work orders; the legacy inline/test path keeps shape checks only.
-      if (workOrder && !(await pathExists(paths, entry))) throw new Error("允許路徑不存在：" + entry);
+      if (workOrderFile && !(await pathExists(paths, entry))) throw new Error("允許路徑不存在：" + entry);
       if (matchesForbiddenPath(entry, forbidden)) throw new Error("允許路徑在禁改清單內：" + entry);
-      if (referencePaths.length && !referencePaths.some((ref) => entry === ref.path || entry.startsWith(ref.path + "/"))) {
-        throw new Error("允許路徑不在參考資料的範圍內：" + entry);
-      }
     }
     return { allowed_paths: explicit, forbidden_paths: forbidden, source: "explicit" };
   }
-  if (referencePaths.length) {
-    const narrowed = [...new Set(referencePaths.map((ref) => ref.path))].sort();
-    for (const entry of narrowed) {
-      if (matchesForbiddenPath(entry, forbidden)) throw new Error("參考資料的路徑在禁改清單內：" + entry);
-    }
-    return { allowed_paths: narrowed, forbidden_paths: forbidden, source: "references" };
-  }
-  if (!workOrder) throw new Error("At least one allowed path is required.");
+  if (!workOrderFile) throw new Error("At least one allowed path is required.");
   return { allowed_paths: ["**"], forbidden_paths: forbidden, source: "default" };
 }
 
@@ -82,53 +86,6 @@ export async function snapshotRules(paths) {
   if (!text.trim()) throw new Error("規則摘要檔是空的：" + relative + "。寫回內容或從 project-templates/rules.md 復原。");
   if (text.length > RULES_MAX_CHARS) throw new Error("規則摘要檔超過 " + RULES_MAX_CHARS + " 字：" + relative + "。縮短後再建 plan。");
   return { path: relative, sha256: sha256Of(text), text };
-}
-
-// C3.4: every referenced file by hash; contents are verified at startup, not copied here.
-export async function snapshotReferences(paths, workOrder) {
-  const records = [];
-  let totalFiles = 0;
-  let totalBytes = 0;
-  const count = (bytes) => {
-    totalFiles += 1;
-    totalBytes += bytes;
-    if (totalFiles > REFERENCE_MAX_FILES || totalBytes > REFERENCE_MAX_BYTES) {
-      throw new Error("參考資料太多：超過 " + REFERENCE_MAX_FILES + " 個檔或 2 MiB，請把路徑收窄。");
-    }
-  };
-  for (const reference of (workOrder?.references || []).filter((entry) => entry.kind === "path")) {
-    const found = await pathExists(paths, reference.path);
-    if (!found) throw new Error("參考資料裡這條路徑不存在：" + reference.path);
-    if (!found.directory) {
-      const buffer = await fsp.readFile(found.absolute);
-      count(buffer.length);
-      records.push({ path: reference.path, sha256: sha256Of(buffer), bytes: buffer.length });
-      continue;
-    }
-    const files = [];
-    async function walk(directory, prefix) {
-      const entries = await fsp.readdir(directory, { withFileTypes: true });
-      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-        if (entry.isSymbolicLink()) continue;
-        const relative = prefix + "/" + entry.name;
-        if (entry.isDirectory()) {
-          if (!SKIPPED_DIRS.has(entry.name)) await walk(path.join(directory, entry.name), relative);
-          continue;
-        }
-        if (!entry.isFile()) continue;
-        const buffer = await fsp.readFile(path.join(directory, entry.name));
-        count(buffer.length);
-        files.push({ path: relative, sha256: sha256Of(buffer), bytes: buffer.length });
-      }
-    }
-    await walk(found.absolute, reference.path);
-    records.push({ path: reference.path, files });
-  }
-  return records;
-}
-
-function referenceDigest(records) {
-  return sha256Of(JSON.stringify(records));
 }
 
 const allowedChangeTypes = new Set([
@@ -209,16 +166,14 @@ export async function createV4WorkPackagePlan({
     taskFileRelative = path.relative(paths.repoRoot, resolved).split(path.sep).join("/");
   }
   taskText = requiredText(taskText, "Task", 40_000);
-  // A human work order (from a file, or any text carrying rb: markers) is parsed by fixed rules;
-  // inline --task text without markers is the legacy/test path and keeps requiring --allow-paths.
-  const workOrder = hasWorkOrderMarkers(taskText) ? await parseWorkOrder(taskText, { repoRoot: paths.repoRoot }) : null;
-  // A file without markers is not a work order; it is accepted only as the legacy path with an explicit scope.
-  if (!workOrder && taskFile && !allowedPaths) throw new WorkOrderError([ORDER_MESSAGES.no_markers()]);
+  // A work-order file is sealed as text here and turned into a contract by the model only after
+  // the human starts the work; inline --task text is the legacy/test path and needs --allow-paths.
+  const workOrderFile = Boolean(taskFile);
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   const budget = validateBudget(snapshot.effective_policy, maxCalls, maxMinutes);
-  const scope = await resolveScope({ paths, workOrder, allowedPaths });
-  const rules = workOrder ? await snapshotRules(paths) : null;
-  const references = workOrder ? await snapshotReferences(paths, workOrder) : [];
+  const scope = await resolveScope({ paths, workOrderFile, allowedPaths });
+  const rules = workOrderFile ? await snapshotRules(paths) : null;
+  const contract = workOrderFile ? await contractSteps(paths, snapshot, budget) : null;
   const changeTypeList = parseChangeTypes(changeTypes);
   // T0-06 G2: the verification is decided here, from the installed rules, and sealed for approval.
   const gateA = await selectGateA({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})), changeTypes: changeTypeList });
@@ -235,9 +190,8 @@ export async function createV4WorkPackagePlan({
     task: taskText,
     task_sha256: digest(taskText),
     task_file: taskFileRelative,
-    work_order: workOrder,
     rules,
-    references,
+    ...(contract ? { contract_steps: contract } : {}),
     scope: {
       change_types: changeTypeList,
       ...scope,
@@ -276,11 +230,11 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     const current = await snapshotRules(paths);
     if (current.sha256 !== plan.rules.sha256) throw new Error("批准後 " + plan.rules.path + " 變了，重新建 plan");
   }
-  if (plan.work_order) {
-    const current = await snapshotReferences(paths, plan.work_order);
-    if (referenceDigest(current) !== referenceDigest(plan.references || [])) {
-      const changed = current.find((entry, index) => JSON.stringify(entry) !== JSON.stringify((plan.references || [])[index]));
-      throw new Error("批准後 " + (changed ? changed.path : "參考資料") + " 變了，重新建 plan");
+  // Starting authorizes the work order as it is now; one edited since the plan is not what was sealed.
+  if (plan.task_file) {
+    const current = await fsp.readFile(path.resolve(paths.repoRoot, ...plan.task_file.split("/")), "utf8").catch(() => null);
+    if (current === null || digest(current.trim()) !== plan.task_sha256) {
+      throw new Error("The work order " + plan.task_file + " changed after the plan was built. Build a new plan.");
     }
   }
   // T0-06 G2.5: the sealed test entry point must still exist when the human approves.
@@ -295,9 +249,8 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     scope: plan.scope,
     budget: plan.budget,
     breakpoint: plan.breakpoint,
-    work_order: plan.work_order || null,
     rules: plan.rules || null,
-    references: plan.references || [],
+    contract_steps: plan.contract_steps || null,
     gate_a: plan.gate_a || null,
     task_file: plan.task_file || null,
   }, () => Date.parse(plan.created_at));

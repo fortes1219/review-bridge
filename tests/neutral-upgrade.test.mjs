@@ -156,7 +156,7 @@ function sameTree(actual, expected, label) {
 
 async function addUserData(root) {
   const privateRoot = privateOf(root);
-  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "<!-- rb:name -->\n牧場\n");
+  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "# Work order: farm\n");
   await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.result.md"), "# 已交付\n");
   await fsp.mkdir(path.join(privateRoot, "archive"), { recursive: true });
   await fsp.writeFile(path.join(privateRoot, "archive", "2026-10-14.jsonl"), "{\"type\":\"run\"}\n");
@@ -181,7 +181,8 @@ function bootstrapRun(root, args, expected = 0) {
 async function fakeRun(root, id) {
   const planPath = path.join(privateOf(root), "review-queue", id + ".plan.json");
   const taskPath = path.join(privateOf(root), "work-packages", id + ".md");
-  await fsp.writeFile(taskPath, "Update README.md only.\n");
+  // A work order with something to check; one without stops at translation and asks the human.
+  await fsp.writeFile(taskPath, "# Update the README\n\nUpdate README.md only.\n\n## Acceptance\n\n- README.md says hello.\n");
   bootstrapRun(root, ["work-plan", "--task-file", taskPath, "--owner", "o", "--work-package", id, "--breakpoint", "b",
     "--change-types", "docs", "--allow-paths", "README.md", "--max-claude-calls", "2", "--max-claude-minutes", "1", "--out", planPath]);
   const started = bootstrapRun(root, ["work-start", "--plan", planPath, "--yes", "--fake-cli", "--fake-scenario", "PASS", "--json"]);

@@ -19,12 +19,14 @@ import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../features/wor
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");
 
-async function runtime(t, { locale } = {}) {
+// These checks read the Chinese pack; English is the product default (see S6).
+async function runtime(t, { locale = "zh-TW" } = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-result-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
+    roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     ...(locale ? { locale } : {}),
     gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
@@ -36,7 +38,7 @@ async function runtime(t, { locale } = {}) {
   return { repoRoot, paths };
 }
 
-const ORDER = "<!-- rb:name -->\n牧場\n<!-- rb:work -->\n做一個牧場\n<!-- rb:acceptance -->\n- 看得到牧場\n<!-- rb:references -->\n- README.md\n";
+const ORDER = "# Work order: farm\n\n## Work\nBuild a small farm.\n\n## Acceptance\n- The farm is visible.\n\n## References\n- README.md\n";
 
 // A real v4 run brought to `status` the way the state machine does it, with typed events behind it.
 async function terminalRun(rt, status, { changeTypes = "docs", state = null, gate = null, events = [], task = null, id = "wo-" + Math.random().toString(16).slice(2, 8), breakpoint = "return after review", allowedPaths = null } = {}) {
@@ -77,6 +79,10 @@ test("S1 every terminal status delivers once: two files, the right title, three 
     policy_failure: {},
     claude_failed: { state: { status: "claude_failed", stderr_path: "C:/x/err.log", failure: { role: "writer", provider: "claude", reason: "provider_error" } } },
     reviewer_failed: {}, claude_timeout: {}, controller_failure: {}, reference_changed: {}, malformed_writer_result: {}, malformed_review_result: {},
+    contract_rejected: { state: { status: "contract_rejected", contract_problems: ["$.acceptance[0].id: expected AC1"] } },
+    contract_changed: {},
+    contract_unconfirmed: { state: { status: "contract_unconfirmed", contract_problems: ["the reviewer could not confirm the translation"] } },
+    usage_unknown: { state: { status: "usage_unknown", token_limit_role: "contract_checker" } },
   };
   assert.equal(Object.keys(cases).length, TERMINAL_RUN_STATUSES.length, "every terminal status has a case");
   for (const status of TERMINAL_RUN_STATUSES) {
@@ -246,11 +252,14 @@ test("S6 the language pack drives every string; unknown locales fall back; missi
   assert.match(text, /Existing tests passed: npm test/);
   assert.match(text, /## Next step/);
   assert.match(text, /\| writer \| /);
-  // No zh-TW pack string leaks through; the work order's own name (牧場) is user text and stays.
+  // No zh-TW pack string leaks through.
   assert.doesNotMatch(text, /為什麼|下一步|已交付|改了哪些檔|未知/);
   assert.deepEqual(stdoutLines(delivery)[0].startsWith("Delivered: "), true);
+  // English is the default: no locale and an unknown one both land there.
+  const unset = await runtime(t, { locale: null });
+  assert.equal(await resolveLocale(unset.paths), "en");
   const odd = await runtime(t, { locale: "xx-YY" });
-  assert.equal(await resolveLocale(odd.paths), "zh-TW");
+  assert.equal(await resolveLocale(odd.paths), "en");
   const tr = await createTranslator("zh-TW");
   assert.equal(tr("no.such.key"), "no.such.key");
   assert.equal(tr("stdout.file", { path: "p" }), "結果檔：p");
@@ -295,7 +304,7 @@ test("windowsArgQuote follows the C runtime rules that node itself parses", () =
   assert.equal(windowsArgQuote(""), '""');
 });
 
-test("C1 the rebuild command keeps an explicit scope; a references scope needs no flag", async (t) => {
+test("C1 the rebuild command keeps an explicit scope; the default scope of a work order needs no flag", async (t) => {
   const rt = await runtime(t);
   const explicit = await terminalRun(rt, "cancelled", { id: "scoped", allowedPaths: "README.md" });
   assert.equal(explicit.plan.scope.source, "explicit");
@@ -304,8 +313,9 @@ test("C1 the rebuild command keeps an explicit scope; a references scope needs n
   const ps = /PowerShell：\n\n```\n(.+)\n```/.exec(text)[1];
   assert.match(sh, / --allow-paths 'README\.md' /);
   assert.match(ps, / --allow-paths README\.md /);
+  // Paths written in a work order are context, not scope: without --allow-paths the scope is the default.
   const byRefs = await terminalRun(rt, "cancelled", { id: "refs" });
-  assert.equal(byRefs.plan.scope.source, "references");
+  assert.equal(byRefs.plan.scope.source, "default");
   const refsText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: byRefs.runId, notify: false })).result_path, "utf8");
   assert.doesNotMatch(refsText, /--allow-paths/);
 });

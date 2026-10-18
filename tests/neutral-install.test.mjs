@@ -115,9 +115,10 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   // T0-02 R3.1: retention ships with the 15-day default and is owner-editable.
   assert.deepEqual(plan.retention, { days: 15 });
   assert.deepEqual(config.retention, { days: 15 });
-  // T0-03 T14: the work-order template carries all six markers; rules.md is installed and owner-editable.
+  // The work-order template is the packaged one, for people to fill in; rules.md is installed and owner-editable.
   const template = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), "utf8");
-  for (const key of ["name", "product", "version", "work", "acceptance", "references"]) assert.match(template, new RegExp("<!-- rb:" + key + " -->"));
+  assert.equal(template, await fsp.readFile(new URL("../project-templates/work-package.md", import.meta.url), "utf8"));
+  assert.match(template, /^## Acceptance$/m);
   const rulesPath = path.join(root, ".review-bridge", "review-bridge", "rules.md");
   assert.ok((await fsp.readFile(rulesPath, "utf8")).length > 0);
   await fsp.writeFile(rulesPath, "# 我的規則\n不要動測試。\n");

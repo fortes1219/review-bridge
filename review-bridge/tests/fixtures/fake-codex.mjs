@@ -11,6 +11,47 @@ if (outputIndex < 0 || !process.argv[outputIndex + 1]) {
   process.stderr.write("missing --output-last-message\n");
   process.exit(2);
 }
+const usageEvents = (tokens) => [
+  { type: "thread.started", thread_id: "fake-thread" },
+  { type: "turn.started" },
+  { type: "turn.completed", usage: { input_tokens: tokens, cached_input_tokens: Math.floor(tokens / 2), cache_write_input_tokens: 0, output_tokens: 410, reasoning_output_tokens: 0 } },
+];
+
+// The contract check: every condition judged faithful unless FAKE_CONTRACT_CHECK asks for one
+// of the other outcomes the harness must handle. "_first" outcomes apply to attempt 1 only.
+if (prompt.includes("[REVIEW_BRIDGE_MODE: CONTRACT_CHECK]")) {
+  const mode = process.env.FAKE_CONTRACT_CHECK || "faithful";
+  const attempt = Number(/Attempt: (\d+)/.exec(prompt)?.[1] || 1);
+  const sha256 = /^Candidate: ([0-9a-f]{64})$/m.exec(prompt)?.[1] || "0".repeat(64);
+  const open = prompt.indexOf("=== CANDIDATE CONTRACT ===");
+  const close = prompt.indexOf("=== END CANDIDATE CONTRACT ===");
+  const candidate = JSON.parse(prompt.slice(open + "=== CANDIDATE CONTRACT ===".length, close));
+  const wrong = mode === "unfaithful_always" || (mode === "unfaithful_first" && attempt === 1);
+  const ids = candidate.acceptance.map((item) => item.id);
+  // The parts to judge are the ones the prompt lists; a wrong or skipped one is chosen by mode.
+  const fields = /exactly once: (.+?)\. A part is faithful/.exec(prompt)[1].split(", ");
+  const wrongField = mode === "field_unfaithful_first" && attempt === 1 ? "scope_notes.include" : null;
+  const answer = {
+    event: "contract.check",
+    candidate_sha256: sha256,
+    fields: (mode === "skip_field" ? fields.slice(1) : fields).map((field) => ({
+      field, faithful: field !== wrongField, note: field === wrongField ? "an exclusion was copied as an inclusion" : null,
+    })),
+    acceptance: (mode === "skip_ac" ? ids.slice(0, -1) : ids).map((id, index) => ({
+      id, faithful: !(wrong && index === 0), note: wrong && index === 0 ? "says more than its lines" : null,
+    })),
+    missing: mode === "missing_first" && attempt === 1 ? [{ source_refs: [{ start: 1, end: 1 }], note: "fake: a stated requirement was left out" }] : [],
+    ambiguities: mode === "ambiguous" ? [{ question: "Which page should show the farm?", source_refs: [] }] : [],
+    cannot_confirm: mode === "cannot_confirm",
+    cannot_confirm_reason: mode === "cannot_confirm" ? "fake: the work order refers to a design not given" : null,
+  };
+  await fsp.writeFile(process.argv[outputIndex + 1], JSON.stringify(answer, null, 2), "utf8");
+  // FAKE_CONTRACT_CHECK_USAGE=none leaves out turn.completed, so Bridge cannot read the usage.
+  const events = usageEvents(Number(process.env.FAKE_CODEX_TOKENS || 12_000));
+  for (const event of process.env.FAKE_CONTRACT_CHECK_USAGE === "none" ? events.slice(0, 2) : events) process.stdout.write(JSON.stringify(event) + "\n");
+  process.exit(0);
+}
+
 if (!prompt.includes("Claude")) {
   process.stderr.write("review prompt did not reach fake Codex\n");
   process.exit(3);
@@ -62,6 +103,7 @@ const result = gate === "MALFORMED"
   : {
       event: "review.result",
       work_order: input.work_order || "unknown",
+      contract_sha256: process.env.FAKE_CODEX_CONTRACT === "other" ? "0".repeat(64) : input.contract_sha256 ?? null,
       call: input.call || 1,
       gate: gate === "PASS" || gate === "PASS_WITH_HIGH" ? "PASS" : "FAIL",
       hard_stop: gate === "HARD_STOP",

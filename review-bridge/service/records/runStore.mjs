@@ -22,7 +22,7 @@ export const ACTIVE_RUN_STATUSES = Object.freeze(["running", "review_pending", "
 export const TERMINAL_RUN_STATUSES = Object.freeze([
   "pass", "hard_stop", "rate_limited", "cancelled", "policy_failure",
   "call_budget_exhausted", "claude_timeout", "claude_failed", "reviewer_failed", "controller_failure",
-  "token_limit", "stopped", "reference_changed",
+  "token_limit", "stopped", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown",
   "needs_human", "malformed_writer_result", "malformed_review_result",
 ]);
 const activeStatuses = new Set(ACTIVE_RUN_STATUSES);
@@ -292,11 +292,11 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     budget: structuredClone(input.budget),
     breakpoint: String(input.breakpoint || ""),
     // T0-03/T0-04: what the writer will be shown travels with the immutable package.
-    ...(input.work_order !== undefined ? { work_order: structuredClone(input.work_order) } : {}),
     ...(input.rules !== undefined ? { rules: structuredClone(input.rules) } : {}),
     ...(input.references !== undefined ? { references: structuredClone(input.references) } : {}),
     ...(input.gate_a !== undefined ? { gate_a: structuredClone(input.gate_a) } : {}),
     ...(input.task_file !== undefined ? { task_file: input.task_file } : {}),
+    ...(input.contract_steps ? { contract_steps: structuredClone(input.contract_steps) } : {}),
     created_at: nowIso(clock),
   };
   if (!record.task.trim() || !record.breakpoint.trim()) throw new Error("Work package task and breakpoint are required.");
@@ -592,6 +592,15 @@ export async function consumeRun(paths, runId, reason, gate = null, options = {}
   }, options);
 }
 
+// The run's contract is fixed once; a second, different hash for the same run is refused.
+export async function recordRunContract(paths, runId, sha256, options = {}) {
+  return await mutateRun(paths, runId, "contract_sealed", { contract_sha256: sha256 }, (run) => {
+    if (run.contract_sha256 && run.contract_sha256 !== sha256) throw new Error("Run already has a different contract.");
+    run.contract_sha256 = sha256;
+    return run;
+  }, options);
+}
+
 // T0-04 D2.1: every writer call runs in a fresh Claude session; the run records each one.
 export async function rotateRunSession(paths, runId, sessionId, options = {}) {
   return await mutateRun(paths, runId, "session_rotated", { session_id: sessionId }, (run) => {
@@ -692,7 +701,7 @@ export async function loadControlView(paths, runId) {
       max_claude_calls_per_resume: run.budget.max_claude_calls,
       max_claude_minutes_per_call: run.budget.max_claude_minutes_per_call,
     },
-    v4: { run_id: run.run_id, policy_snapshot: snapshot, work_package: workPackage },
+    v4: { run_id: run.run_id, policy_snapshot: snapshot, work_package: workPackage, contract_sha256: run.contract_sha256 || null },
   };
 }
 
@@ -742,6 +751,9 @@ export function createRunRuntimeState(paths, runId) {
     },
     async rotateSession(sessionId) {
       return await rotateRunSession(paths, runId, sessionId);
+    },
+    async recordContract(sha256) {
+      return await recordRunContract(paths, runId, sha256);
     },
     async getState() {
       return (await readRun(paths, runId)).last_state;

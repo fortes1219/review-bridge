@@ -54,6 +54,8 @@ import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
 import { classificationProfileFromSnapshot } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
+import { ContractChangedError, loadContract } from "./contract.mjs";
+import { establishContract } from "./translation.mjs";
 
 const REVIEW_RESUME_LIMITATION = "Review-only resume is not implemented; the writer output is preserved "
   + "and is not re-run. Continuing requires a new human-owner authorization.";
@@ -97,6 +99,63 @@ async function writeBoundedState(paths, runtimeState, state) {
   return await runtimeState.recordState(state);
 }
 
+// Exit code shared with reference_changed: an input sealed at start no longer matches.
+const SEALED_INPUT_CHANGED_EXIT_CODE = 78;
+
+// Every boundary reads the contract through the hash the run recorded; a missing or changed
+// file ends the run instead of letting any model work from another version.
+async function checkedContract({ paths, runtimeState, control, contractSha256, state }) {
+  if (!contractSha256) return { contract: null, exitCode: null };
+  try {
+    return { contract: { sha256: contractSha256, contract: await loadContract(paths, contractSha256) }, exitCode: null };
+  } catch (error) {
+    if (!(error instanceof ContractChangedError)) throw error;
+    await writeBoundedState(paths, runtimeState, { ...state, status: "contract_changed", updated_at: new Date().toISOString(), error: error.message });
+    await recordIo(paths, runtimeState.runId, { event: "stop", status: "contract_changed", role: "controller", provider: null, detail_ref: contractSha256 });
+    await consumeAuthorization(paths, control, "contract_changed");
+    return { contract: null, exitCode: SEALED_INPUT_CHANGED_EXIT_CODE };
+  }
+}
+
+// A stop before the work exits with the code the writer's or reviewer's own stop of that kind uses;
+// one that needs the human (an unclear work order, an unconfirmed check) exits 0 like needs_human.
+const CONTRACT_EXIT_CODES = Object.freeze({
+  needs_human: 0, contract_unconfirmed: 0, claude_failed: 1, reviewer_failed: 1, policy_failure: 1, rate_limited: 75, token_limit: 76, usage_unknown: 76,
+  // The status could not be read when a stop check failed closed; the run is closed as stopped.
+  stopped: 130,
+  claude_timeout: 77, contract_rejected: MALFORMED_EXIT_CODE,
+});
+
+// A work-order run gets its contract once, before the writer's first call; a resumed run keeps it.
+async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId }) {
+  const workPackage = control.v4.work_package;
+  if (!workPackage.task_file) return { sha256: null, exitCode: null };
+  if (control.v4.contract_sha256) return { sha256: control.v4.contract_sha256, exitCode: null };
+  if (!workPackage.contract_steps) throw new Error("The work package names no contract steps; build a new plan.");
+  const runId = runtimeState.runId;
+  const policy = control.codex_policy || {};
+  const translated = await establishContract({
+    paths, runId, workPackage, adapter, limits: effectiveLimits(control), executionMode: control.execution_mode,
+    isStopped: () => runMustStop(paths, runId),
+    effort: policy.effort_by_level?.[policy.default_review_level] || "medium",
+    onSpawn: (pid, role, provider) => recordProcess(paths, runId, { pid, role, provider, call: 0 }),
+  });
+  await clearProcess(paths, runId);
+  if ((await readRunStatus(paths, runId)) === "stopped") return { sha256: null, exitCode: 130 };
+  if (translated.status === "sealed") {
+    await runtimeState.recordContract(translated.sha256);
+    return { sha256: translated.sha256, exitCode: null };
+  }
+  const { status, detail, problems = [], questions = [], failure = null, ...ceiling } = translated;
+  await writeBoundedState(paths, runtimeState, {
+    writer_model: writerModel, status, session_id: sessionId, call: 0, updated_at: new Date().toISOString(),
+    contract_problems: problems, contract_questions: questions, ...(failure ? { failure } : {}), ...ceiling,
+  });
+  await recordIo(paths, runId, { event: "stop", status, role: "controller", provider: null, detail_ref: "contract:" + detail });
+  await consumeAuthorization(paths, control, status);
+  return { sha256: null, exitCode: CONTRACT_EXIT_CODES[status] };
+}
+
 // T0-04 D4.1: ceilings come from the policy snapshot; missing ones use the package defaults.
 export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, max_tokens_per_call: 1_500_000, max_tokens_per_run: 4_000_000, max_output_chars: 4_000 });
 function effectiveLimits(control) {
@@ -124,6 +183,25 @@ async function recordProcess(paths, runId, record) {
   await writeJsonAtomic(processFile(paths, runId), { ...record, started_at: new Date().toISOString() });
 }
 
+// The status check of the stop protocol fails closed: a run that is stopped, missing, or whose
+// record cannot be read must not keep a model call or Gate A command running.
+export async function runMustStop(paths, runId) {
+  if (!runId) return false;
+  try {
+    return (await readRun(paths, runId)).status === "stopped";
+  } catch {
+    return true;
+  }
+}
+
+// The calling side of the stop protocol (see stopRun): record the pid, then read the status; a
+// run stopped in between gets its new process killed here, since stop may have read no pid. If
+// the record cannot be written, runProcess kills the process before the error goes up.
+export async function recordProcessOrKill(paths, runId, record) {
+  await recordProcess(paths, runId, record);
+  if (await runMustStop(paths, runId)) await killProcessTree(record.pid);
+}
+
 async function clearProcess(paths, runId) {
   if (!runId) return;
   await fsp.rm(processFile(paths, runId), { force: true });
@@ -149,12 +227,15 @@ export async function stopRun(paths, runId) {
   const run = await readRun(paths, runId).catch(() => null);
   if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
   if (!ACTIVE_RUN_STATUSES.has(run.status)) return { exitCode: 1, line: "已經結束：" + run.status, reason: "terminal" };
-  const record = await readJson(processFile(paths, runId)).catch(() => null);
   let lastError = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try { await consumeRun(paths, runId, "stopped", null); lastError = null; break; } catch (error) { lastError = error; await new Promise((resolve) => setTimeout(resolve, 300)); }
   }
   if (lastError) throw lastError;
+  // Read the pid only after the run is marked stopped. A call records its pid and then reads the
+  // status (recordProcessOrKill), so whichever side comes second sees the other: either this
+  // read finds the pid, or the call finds the run stopped and kills its own process.
+  const record = await readJson(processFile(paths, runId)).catch(() => null);
   const killed = record?.pid ? await killProcessTree(record.pid) : { killed: false, reason: "no_process" };
   await appendIoEvent(paths, runId, {
     event: "stop", status: "stopped", role: record?.role || null, provider: record?.provider || null,
@@ -221,6 +302,9 @@ export async function runBoundedResume({
     let lastGateADelta = null;
     let handoffReason = "correction";
     const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
+    const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId });
+    if (sealed.exitCode !== null) return sealed.exitCode;
+    const contractSha256 = sealed.sha256;
 
     for (let call = 1; call <= maxCalls; call += 1) {
       currentControl = await loadLiveControl(paths, runtimeState);
@@ -258,17 +342,21 @@ export async function runBoundedResume({
         await consumeAuthorization(paths, control, "reference_changed");
         return 78;
       }
+      const boundaryState = { writer_model: writerModel, session_id: sessionId, call };
+      const beforeCall = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
+      if (beforeCall.exitCode !== null) return beforeCall.exitCode;
+      const contract = beforeCall.contract;
       const readList = buildReadList({ references, findings: lastFindings });
-      const taskInput = buildTaskInput({ workPackage, call, readList, limits });
+      const taskInput = buildTaskInput({ workPackage, call, readList, limits, contract });
       const handoff = call > 1 ? buildHandoff({
         workPackage, call, reason: handoffReason, ioEvents: await readIoEvents(paths, runId),
         openFindings: lastFindings, lastGate, changedFiles: lastChangedFiles, readList,
-        gateAResult: handoffReason === "gate_a_failed" ? lastGateAResult : null,
+        gateAResult: handoffReason === "gate_a_failed" ? lastGateAResult : null, contract,
       }) : null;
       if (handoff) await recordIo(paths, runId, handoff);
       const effectivePrompt = composeWriterPrompt({
         workPackage, control: currentControl, runId, call, taskInput, references, handoff,
-        rulesText: workPackage.rules?.text || "",
+        rulesText: workPackage.rules?.text || "", contract,
       });
       await recordIo(paths, runId, {
         ...taskInput,
@@ -299,7 +387,7 @@ export async function runBoundedResume({
         stdoutPath: streamPath,
         stderrPath,
         timeoutMs: maxMinutes * 60_000,
-        onSpawn: (pid) => recordProcess(paths, runId, { pid, role: "writer", provider: "claude", call }),
+        onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "writer", provider: "claude", call }),
       });
       await clearProcess(paths, runId);
       // D3.3: the final result object keeps the legacy single-JSON file for everything downstream.
@@ -401,9 +489,12 @@ export async function runBoundedResume({
         await consumeAuthorization(paths, control, limited ? "rate_limited" : "claude_failed");
         return limited ? 75 : 1;
       }
+      // The writer ran with write access; the contract must still be the one it was given.
+      const afterWriter = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
+      if (afterWriter.exitCode !== null) return afterWriter.exitCode;
       // T0-05 D1: the typed answer is checked by the harness; prose is never read.
       const writerResult = writerResultFromClaudeResult(claudeResult);
-      const writerCheck = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call });
+      const writerCheck = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call, contractSha256 });
       if (!writerCheck.ok) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "malformed_writer_result", session_id: sessionId, call,
@@ -432,7 +523,7 @@ export async function runBoundedResume({
           stdoutPath: path.join(paths.queueRoot, stamp + "-gate-a.stdout.log"),
           stderrPath: path.join(paths.queueRoot, stamp + "-gate-a.stderr.log"),
           timeoutMs: limits.gate_a_minutes * 60_000,
-          onSpawn: (pid) => recordProcess(paths, runId, { pid, role: "controller", provider: "gate_a", call }),
+          onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "controller", provider: "gate_a", call }),
         });
         await clearProcess(paths, runId);
         if ((await readRunStatus(paths, runId)) === "stopped") return 130;
@@ -546,6 +637,8 @@ export async function runBoundedResume({
       const latestReviewPath = ownOutcome.result_path;
       assertUnder(latestReviewPath, paths.reviewsRoot, "Latest review");
       if (!(await fileExists(latestReviewPath))) throw new Error("Codex review result is missing.");
+      const afterReview = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
+      if (afterReview.exitCode !== null) return afterReview.exitCode;
       const review = await fsp.readFile(latestReviewPath, "utf8");
       lastChangedFiles = await changedFilesForJob(paths, ownJobId);
       // T0-05 D3: the typed verdict is checked against the fixed rules; prose is not read.
@@ -554,7 +647,7 @@ export async function runBoundedResume({
       // A controller-decided verdict (D2.5) is the harness's own; only a reviewer's answer is checked.
       const check = ownOutcome.controller_decided ? { ok: true, errors: [] } : await validateReviewResult(reviewResult, {
         workOrder: workPackage.work_package_id, call, repoRoot: paths.repoRoot,
-        previousFindings: lastFindings, deltaPaths: call > 1 ? lastChangedFiles.map((entry) => entry.path) : null,
+        previousFindings: lastFindings, deltaPaths: call > 1 ? lastChangedFiles.map((entry) => entry.path) : null, contractSha256,
       });
       if (!check.ok) {
         await writeBoundedState(paths, runtimeState, {

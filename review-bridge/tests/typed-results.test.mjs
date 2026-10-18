@@ -19,7 +19,7 @@ import {
 
 function writerResult(overrides = {}) {
   return {
-    event: "writer.result", work_order: "wo-1", call: 1, status: "done",
+    event: "writer.result", work_order: "wo-1", contract_sha256: null, call: 1, status: "done",
     changed: [{ path: "src/a.js", action: "modified", summary: "x" }],
     verification: [{ command: "npm test", exit_code: 0, summary: "ok" }],
     unverified: [], needs_human: [], addressed_findings: [],
@@ -32,7 +32,7 @@ function finding(id, overrides = {}) {
 }
 
 function reviewResult(overrides = {}) {
-  return { event: "review.result", work_order: "wo-1", call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1")], verified: [], not_run: [], ...overrides };
+  return { event: "review.result", work_order: "wo-1", contract_sha256: null, call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1")], verified: [], not_run: [], ...overrides };
 }
 
 async function workspace(t) {
@@ -56,6 +56,21 @@ test("Q1 writer.result: the schema and the call identity are checked, nothing el
   assert.match(long.errors[0], /unverified\[0\]: longer than 120/);
   assert.equal((await validateWriterResult(null, { workOrder: "wo-1", call: 1 })).ok, false);
   assert.equal((await validateWriterResult(writerResult({ addressed_findings: ["H-1"] }), { workOrder: "wo-1", call: 1 })).ok, false);
+});
+
+test("a writer or reviewer answer must name the run's contract, and only that one", async (t) => {
+  const repoRoot = await workspace(t);
+  const sealed = "a".repeat(64);
+  const other = "b".repeat(64);
+  assert.equal((await validateWriterResult(writerResult({ contract_sha256: sealed }), { workOrder: "wo-1", call: 1, contractSha256: sealed })).ok, true);
+  assert.deepEqual((await validateWriterResult(writerResult({ contract_sha256: other }), { workOrder: "wo-1", call: 1, contractSha256: sealed })).errors, ["$.contract_sha256: expected " + sealed]);
+  assert.deepEqual((await validateWriterResult(writerResult(), { workOrder: "wo-1", call: 1, contractSha256: sealed })).errors, ["$.contract_sha256: expected " + sealed]);
+  // An inline task has no contract; naming one is as wrong as naming the wrong one.
+  assert.deepEqual((await validateWriterResult(writerResult({ contract_sha256: sealed }), { workOrder: "wo-1", call: 1 })).errors, ["$.contract_sha256: expected null"]);
+  const review = await validateReviewResult(reviewResult({ contract_sha256: other }), { workOrder: "wo-1", call: 1, repoRoot, contractSha256: sealed });
+  assert.deepEqual(review.errors, ["$.contract_sha256: expected " + sealed]);
+  // No answer can carry a replacement contract: the schemas allow no extra field.
+  assert.deepEqual((await validateWriterResult(writerResult({ contract: {} }), { workOrder: "wo-1", call: 1 })).errors, ["$: unexpected contract"]);
 });
 
 test("Q1b the typed answer comes only from structured_output; a result text that is the object is not accepted", () => {

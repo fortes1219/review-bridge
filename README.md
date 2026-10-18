@@ -86,7 +86,7 @@ The lower-level plan/apply interface remains an internal maintainer API for cont
 
 ## Start The First Work Package
 
-After installation, copy `.review-bridge/work-packages/TEMPLATE.md` to a new task file and edit its work, acceptance criteria, allowed paths, and prohibited actions. Then create a controller-validated authorization plan:
+After installation, copy `.review-bridge/work-packages/TEMPLATE.md` to a new work-order file and describe the work and its acceptance results in your own words, in any language. Files or modules you mention there are context for the writer, not permission: the files Bridge may change come only from `--allow-paths` or, without it, the whole project minus the fixed forbidden list. Then create a controller-validated authorization plan:
 
 ```powershell
 node .review-bridge/tools/review-bridge/bootstrap.mjs work-plan `
@@ -101,7 +101,7 @@ node .review-bridge/tools/review-bridge/bootstrap.mjs work-plan `
   --out .review-bridge/review-queue/trial-001.plan.json
 ```
 
-Review the scope, budget, and breakpoint printed by `work-plan`. `work-start` then displays the complete task and those limits, asks for confirmation, and validates the internal authorization token itself.
+Review the scope, budget, and breakpoint printed by `work-plan`, and the model calls made before the work: the writer translates the work order into a contract and the reviewer checks it, up to two times each. `work-start` then displays the complete task and those limits, asks for confirmation, and validates the internal authorization token itself. Starting authorizes the work order as it is then; there is no second approval of the translation. If the reviewer finds the work order itself unclear, or cannot confirm the translation, no work starts and the result file says why.
 
 Run the first plan in no-token fake mode:
 

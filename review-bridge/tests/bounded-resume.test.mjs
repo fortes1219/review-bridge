@@ -38,7 +38,7 @@ const call = Number(/"call": (\\d+)/.exec(prompt)?.[1] || 1);
 const handoffAt = prompt.indexOf("=== HANDOFF ===");
 const addressed = handoffAt >= 0 ? [...prompt.slice(handoffAt).matchAll(/"id": "(F\\d+)"/g)].map((m) => m[1]) : [];
 const writerResult = process.env.T_WRITER === "malformed" ? { event: "writer.result" } : {
-  event: "writer.result", work_order: "s2-04-fixture", call, status: process.env.T_WRITER === "blocked" ? "blocked" : "done",
+  event: "writer.result", work_order: "s2-04-fixture", contract_sha256: null, call, status: process.env.T_WRITER === "blocked" ? "blocked" : "done",
   changed: [{ path: "README.md", action: "modified", summary: "fake edit" }], verification: [], unverified: [],
   needs_human: process.env.T_WRITER === "needs_human" ? [{ question: "which?", options: ["a", "b"] }] : [],
   addressed_findings: [...new Set(addressed)],
@@ -102,7 +102,7 @@ if (process.argv.includes("--output-schema")) {
   const call = Number(/"call": (\\d+)/.exec(prompt)?.[1] || 1);
   const finding = { id: "F1", severity: "HIGH", path: "README.md", line: 1, reach: "r", claim: "c", evidence: "e", fix: "f", acceptance_ref: null };
   const verdict = mode === "malformed" ? { event: "review.result", gate: "MAYBE" } : {
-    event: "review.result", work_order: "s2-04-fixture", call,
+    event: "review.result", work_order: "s2-04-fixture", contract_sha256: null, call,
     gate: mode === "fail" ? "FAIL" : "PASS", hard_stop: false, hard_stop_reason: null,
     findings: mode === "fail" ? [finding] : [], verified: [], not_run: [],
   };
