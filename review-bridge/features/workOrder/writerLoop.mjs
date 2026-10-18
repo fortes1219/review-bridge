@@ -5,9 +5,8 @@ import {
   acquireLock,
   appendIoEvent,
   classifyProviderFailure,
-  consumeRun,
-  ensureDir,
   fileExists,
+  isPidAlive,
   killProcessTree,
   listJson,
   parseJson,
@@ -15,12 +14,13 @@ import {
   readIoEvents,
   readJson,
   readRun,
+  RunEndedError,
   runProcess,
+  stopRunRecord,
   tokenTotal,
   usageTotalForRun,
   writeFailureRecord,
   writeJson,
-  writeJsonAtomic,
   writeText,
 } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
@@ -57,6 +57,9 @@ import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
 import { acceptanceRows, decideAcceptance, sameVersion, workVersion } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
 import { establishContract } from "./translation.mjs";
+import { clearProcess, killConfirmed, processFile, readRunStatus, recordProcess, recordProcessOrKill, runMustStop } from "./processRecords.mjs";
+
+export { recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 
 const REVIEW_RESUME_LIMITATION = "Review-only resume is not implemented; the writer output is preserved "
   + "and is not re-run. Continuing requires a new human-owner authorization.";
@@ -226,45 +229,6 @@ async function recordIo(paths, runId, event) {
   return await appendIoEvent(paths, runId, event);
 }
 
-function processFile(paths, runId) {
-  return path.join(paths.runLocksDir, runId + ".process.json");
-}
-
-async function recordProcess(paths, runId, record) {
-  if (!runId) return;
-  await ensureDir(paths.runLocksDir);
-  await writeJsonAtomic(processFile(paths, runId), { ...record, started_at: new Date().toISOString() });
-}
-
-// The status check of the stop protocol fails closed: a run that is stopped, missing, or whose
-// record cannot be read must not keep a model call or Gate A command running.
-export async function runMustStop(paths, runId) {
-  if (!runId) return false;
-  try {
-    return (await readRun(paths, runId)).status === "stopped";
-  } catch {
-    return true;
-  }
-}
-
-// The calling side of the stop protocol (see stopRun): record the pid, then read the status; a
-// run stopped in between gets its new process killed here, since stop may have read no pid. If
-// the record cannot be written, runProcess kills the process before the error goes up.
-export async function recordProcessOrKill(paths, runId, record) {
-  await recordProcess(paths, runId, record);
-  if (await runMustStop(paths, runId)) await killProcessTree(record.pid);
-}
-
-async function clearProcess(paths, runId) {
-  if (!runId) return;
-  await fsp.rm(processFile(paths, runId), { force: true });
-}
-
-async function readRunStatus(paths, runId) {
-  if (!runId) return null;
-  return (await readRun(paths, runId).catch(() => null))?.status || null;
-}
-
 async function changedFilesForJob(paths, jobId) {
   const job = await readJson(path.join(paths.doneDir, jobId + ".json")).catch(() => null);
   const deltaPath = job?.workspace_evidence?.delta_path;
@@ -275,21 +239,57 @@ async function changedFilesForJob(paths, jobId) {
 
 const ACTIVE_RUN_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
 
+// A killed process tree can take a moment to go; give it up to three seconds before calling it alive.
+async function stillAlive(pid) {
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    if (!isPidAlive(pid)) return false;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return isPidAlive(pid);
+}
+
+async function unresolvedProcess(paths, runId) {
+  return Boolean((await readJson(processFile(paths, runId)).catch(() => null))?.pid);
+}
+
 // T0-04 D5.2: mark the run stopped first so the writer loop sees it, then kill the process tree.
-export async function stopRun(paths, runId) {
+export async function stopRun(paths, runId, { kill = killProcessTree } = {}) {
   const run = await readRun(paths, runId).catch(() => null);
   if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
-  if (!ACTIVE_RUN_STATUSES.has(run.status)) return { exitCode: 1, line: "已經結束：" + run.status, reason: "terminal" };
-  let lastError = null;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    try { await consumeRun(paths, runId, "stopped", null); lastError = null; break; } catch (error) { lastError = error; await new Promise((resolve) => setTimeout(resolve, 300)); }
+  // A stopped run that still has a pid record is a stop whose kill was not confirmed: retry the
+  // kill without writing the stop again.
+  const retry = run.status === "stopped" && await unresolvedProcess(paths, runId);
+  if (!retry) {
+    if (!ACTIVE_RUN_STATUSES.has(run.status)) return { exitCode: 1, line: "已經結束：" + run.status, reason: "terminal" };
+    // The early read above cannot see a PASS written just after it; the locked write decides.
+    let lastError = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await stopRunRecord(paths, runId);
+        lastError = null;
+        break;
+      } catch (error) {
+        if (error instanceof RunEndedError) {
+          if (error.status === "stopped" && await unresolvedProcess(paths, runId)) { lastError = null; break; }
+          return { exitCode: 1, line: "已經結束：" + error.status, reason: "terminal" };
+        }
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+    if (lastError) throw lastError;
   }
-  if (lastError) throw lastError;
   // Read the pid only after the run is marked stopped. A call records its pid and then reads the
   // status (recordProcessOrKill), so whichever side comes second sees the other: either this
   // read finds the pid, or the call finds the run stopped and kills its own process.
   const record = await readJson(processFile(paths, runId)).catch(() => null);
-  const killed = record?.pid ? await killProcessTree(record.pid) : { killed: false, reason: "no_process" };
+  const killed = record?.pid ? await kill(record.pid) : { killed: false, reason: "no_process" };
+  // A kill that is not confirmed, or a process that outlives it, is reported and its record kept
+  // for another stop; no "stopped" result is delivered while any of it may still be working.
+  if (record?.pid && (!killConfirmed(killed) || await stillAlive(record.pid))) {
+    await appendIoEvent(paths, runId, { event: "stop", status: "stop_incomplete", role: record.role || null, provider: record.provider || null, detail_ref: "pid:" + record.pid + ":" + killed.reason });
+    return { exitCode: 2, line: "停止未完成：pid " + record.pid + " 仍在執行，請再執行一次 stop", reason: "kill_failed" };
+  }
   await appendIoEvent(paths, runId, {
     event: "stop", status: "stopped", role: record?.role || null, provider: record?.provider || null,
     detail_ref: record ? "pid:" + record.pid + ":" + killed.reason : "no_process",
@@ -697,6 +697,8 @@ export async function runBoundedResume({
         throw new Error("Review worker returned no unambiguous outcome for job " + ownJobId + ".");
       }
       const [ownOutcome] = ownOutcomes;
+      // Stopped during the review: the killed review's output is not taken, and nothing is recorded.
+      if (ownOutcome.status === "stopped" || (await readRunStatus(paths, runId)) === "stopped") return 130;
       const afterReviewProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "review" });
       if (afterReviewProof !== null) return afterReviewProof;
       if (ownOutcome.status === "failed") {

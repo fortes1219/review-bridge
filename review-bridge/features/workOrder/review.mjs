@@ -20,6 +20,7 @@ import { assertUnder } from "../../utils/pathGuard.mjs";
 import { validateJobPolicy } from "../../policy/policyChecks.mjs";
 import { buildReadList } from "./writerPrompt.mjs";
 import { loadContract } from "./contract.mjs";
+import { clearProcess, recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 import {
   controllerScopeResult,
   parseCodexJsonl,
@@ -237,13 +238,16 @@ export async function runReviewWorker({
             "-",
           ];
           const invocation = adapter.buildInvocation("codex", codex, codexArgs);
+          // The reviewer's pid is recorded like the writer's, so a stop during the review reaches it.
           const processResult = await runProcess({
             invocation,
             cwd: paths.repoRoot,
             input: prompt,
             stdoutPath,
             stderrPath,
+            onSpawn: runId ? (pid) => recordProcessOrKill(paths, runId, { pid, role: "reviewer", provider: "codex", job_id: jobId, call: job.call }) : null,
           });
+          await clearProcess(paths, runId);
           exitCode = processResult.exitCode;
           timedOut = Boolean(processResult.timedOut);
           // D5: usage and commands from the JSONL stream; the stderr trailer is the fallback.
@@ -256,6 +260,16 @@ export async function runReviewWorker({
           if (runId) {
             for (const read of reads) await appendIoEvent(paths, runId, { event: "read", role: "reviewer", call: job.call, ...read });
             await appendIoEvent(paths, runId, usage);
+          }
+          // Stopped during the review: the job is closed as stopped, its output is not taken, and a
+          // non-zero exit caused by the kill is not a reviewer failure.
+          if (runId && await runMustStop(paths, runId)) {
+            const stoppedJob = { ...job, status: "stopped", completed_at: new Date().toISOString() };
+            await writeJson(runningPath, stoppedJob);
+            await writeJson(metadataPath, stoppedJob);
+            await fsp.rename(runningPath, failedPath);
+            outcomes.push({ job_id: jobId, status: "stopped" });
+            continue;
           }
         }
 

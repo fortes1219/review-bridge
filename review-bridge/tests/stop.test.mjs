@@ -347,3 +347,39 @@ test("S1c the prune command delivers a run whose delivery was lost, then folds i
   const day = (await fsp.readFile(run.archive_file, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
   assert.ok(day.some((line) => line.type === "artifact" && line.kind === "result" && line.run_id === runId));
 });
+
+// Codex review: a stop during the review must reach the reviewer process, and the run must stay
+// stopped: no PASS, no reviewer_failed, no verdict taken from the killed review.
+test("stop during the review kills the reviewer and the run stays stopped", async (t) => {
+  const { root, bootstrap, bridge, paths } = await install(t);
+  const { plan, planArg } = await planFakeWork(root, bridge, "stop-review");
+  const runId = plan.proposed_run_id;
+  const child = spawn(process.execPath, [bootstrap, "work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli"], {
+    cwd: root, windowsHide: true, env: { ...process.env, FAKE_CODEX_SLEEP_MS: "30000" }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const exit = new Promise((resolve) => child.once("close", (code) => resolve(code)));
+  const processFile = path.join(paths.runLocksDir, runId + ".process.json");
+  const deadline = Date.now() + 30_000;
+  let record = null;
+  while (Date.now() < deadline) {
+    record = await readJson(processFile).catch(() => null);
+    if (record?.pid && record.role === "reviewer") break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(record?.role, "reviewer", "the reviewer's pid was never recorded");
+  const stopped = bridge(["stop", runId]);
+  assert.equal(stopped.status, 0, stopped.stderr + stopped.stdout);
+  assert.equal(await exit, 130);
+  const { isPidAlive } = await import("../service/agentCli/process.mjs");
+  assert.equal(isPidAlive(record.pid), false);
+  const run = await readJson(path.join(paths.runsDir, runId + ".json"));
+  assert.equal(run.status, "stopped");
+  assert.equal(run.closed_reason, "stopped");
+  const events = await readIoEvents(paths, runId);
+  assert.equal(events.some((event) => event.event === "review.result"), false);
+  // The killed review's job is closed as stopped, not filed as a reviewer failure.
+  const jobs = await Promise.all((await fsp.readdir(paths.failedDir)).map((name) => readJson(path.join(paths.failedDir, name))));
+  const job = jobs.find((entry) => entry.authorization?.run_id === runId);
+  assert.equal(job?.status, "stopped");
+  assert.equal(job?.provider_failure, undefined);
+});

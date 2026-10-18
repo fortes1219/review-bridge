@@ -12,7 +12,6 @@ import {
   appendIoEvent,
   classifyProviderFailure,
   codexDiagnosticTrailer,
-  killProcessTree,
   readEvidenceTail,
   runProcess,
   tokenTotal,
@@ -24,6 +23,7 @@ import {
 import { timestampId } from "../../utils/dates.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { failureSummary } from "./budget.mjs";
+import { killStartedAfterStop } from "./processRecords.mjs";
 import {
   buildContract,
   checkTranslation,
@@ -157,7 +157,7 @@ async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, can
 function guardedSpawn({ onSpawn, isStopped, role, provider }) {
   return async (pid) => {
     await onSpawn(pid, role, provider);
-    if (await isStopped()) await killProcessTree(pid);
+    if (await isStopped()) await killStartedAfterStop(pid);
   };
 }
 

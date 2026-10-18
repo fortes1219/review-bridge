@@ -527,12 +527,14 @@ export async function reconcileRunProjection(paths, runId) {
   return latest;
 }
 
+// A mutator that returns null leaves the run as it is: no event, no new projection.
 async function mutateRun(paths, runId, type, details, mutator, { substantive = true, clock = Date.now, duringMaintenance = false } = {}) {
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   return await withRunLock(paths, runId, snapshot.effective_policy, async (lease) => {
     await lease.assertOwner();
     const current = await reconcileRunProjection(paths, runId);
     const next = await mutator(structuredClone(current));
+    if (next === null) return current;
     await lease.assertOwner();
     return await appendProjectionEvent(paths, current, next, type, details, clock, substantive);
   }, { duringMaintenance });
@@ -565,8 +567,38 @@ export async function deliverRun(paths, runId, build, { clock = Date.now } = {})
   });
 }
 
+// Closing a run: whoever closes it first wins. A run with closed_at keeps its status, reason and
+// time; a PASS that arrives after a stop is refused, and a stop that arrives after a PASS (even one
+// not yet closed) is refused, so the PASS can still close normally. Decided inside the run lock.
+export class RunClosedError extends Error {
+  constructor(runId) {
+    super("Run " + runId + " is already closed.");
+    this.name = "RunClosedError";
+  }
+}
+
+export class RunEndedError extends Error {
+  constructor(status) {
+    super("The run has already ended: " + status + ".");
+    this.name = "RunEndedError";
+    this.status = status;
+  }
+}
+
+export async function stopRunRecord(paths, runId, options = {}) {
+  return await mutateRun(paths, runId, "run_terminal", { reason: "stopped", gate: null }, (run) => {
+    if (run.closed_at || terminalStatuses.has(run.status)) throw new RunEndedError(run.status);
+    run.status = "stopped";
+    run.closed_reason = "stopped";
+    run.closed_at = nowIso(options.clock || Date.now);
+    run.review_gate = null;
+    return run;
+  }, options);
+}
+
 export async function recordRunState(paths, runId, state, options = {}) {
   return await mutateRun(paths, runId, "state_recorded", { status: state.status }, (run) => {
+    if (run.closed_at) throw new RunClosedError(runId);
     run.last_state = structuredClone(state);
     // T0-06 G3.7: both halves of PASS are kept on the run, not only the reviewer's.
     if (typeof state.gate_a_passed === "boolean" || state.gate_a_passed === null) run.gate_a_passed = state.gate_a_passed;
@@ -580,6 +612,8 @@ export async function recordRunState(paths, runId, state, options = {}) {
 
 export async function consumeRun(paths, runId, reason, gate = null, options = {}) {
   return await mutateRun(paths, runId, "run_terminal", { reason, gate }, (run) => {
+    // Already closed (by a stop, or an earlier close): its status and reason stand.
+    if (run.closed_at) return null;
     if (!terminalStatuses.has(run.status)) {
       run.status = gate?.review_gate === "PASS" ? "pass"
         : gate?.hard_stop_required ? "hard_stop"

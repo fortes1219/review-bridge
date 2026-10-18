@@ -79,6 +79,9 @@ const open = prompt.indexOf("=== review.input ===");
 const close = prompt.indexOf("=== end review.input ===");
 const input = open >= 0 && close > open ? JSON.parse(prompt.slice(open + "=== review.input ===".length, close)) : {};
 const deltaPath = input.delta?.[0]?.path || input.read_list?.[0]?.path || "README.md";
+// FAKE_CODEX_SLEEP_MS keeps a review running, so a test can stop the run while it reads.
+const reviewSleepMs = Number(process.env.FAKE_CODEX_SLEEP_MS || 0);
+if (reviewSleepMs > 0) await new Promise((resolve) => setTimeout(resolve, reviewSleepMs));
 // FAKE_CODEX_TOUCH=1 changes a project file while the review runs (a real reviewer is read-only;
 // this stands for anything else changing the work meanwhile).
 if (process.env.FAKE_CODEX_TOUCH === "1") await fsp.appendFile("README.md", "changed during the review\n");
