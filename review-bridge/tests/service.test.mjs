@@ -21,7 +21,7 @@ async function freePort() {
   return port;
 }
 
-// A minimal neutral layout: the copied runtime plus a v4 bridge.json with roles and a watch block.
+// A minimal neutral layout: the copied runtime plus a bridge.json with roles and a watch block.
 async function workspace(t, watch) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-service-"));
   const runtime = path.join(root, ".review-bridge", "tools", "review-bridge");
@@ -29,7 +29,6 @@ async function workspace(t, watch) {
   await fsp.mkdir(path.join(root, ".review-bridge", "review-bridge"), { recursive: true });
   await fsp.writeFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), JSON.stringify({
     schema_version: 4,
-    state_contract: "v4",
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     watch,
   }));

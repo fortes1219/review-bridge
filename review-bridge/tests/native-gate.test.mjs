@@ -53,7 +53,7 @@ test("G3 dispatchCommand refuses native work-start on its own, without bootstrap
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-native-gate-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections" });
+  await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
   const adapter = { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} };
   await assert.rejects(
     dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x", "--approve", "x"], repoRoot, bridgeRoot, adapter }),
@@ -87,19 +87,19 @@ async function pageService(t, paths, { state, proven, serviceId = "a".repeat(32)
   await writeServiceSession(paths, { pid: process.pid, port, url: "http://127.0.0.1:" + port + "/", service_id: serviceId, started_at: new Date().toISOString() });
 }
 
-async function v4Paths(t) {
+async function configuredPaths(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-native-proof-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections" });
+  await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
   return { repoRoot, paths };
 }
 
 test("G4 the reviewer proof comes only from the running page service with a matching identity", async (t) => {
-  const none = await v4Paths(t);
+  const none = await configuredPaths(t);
   assert.deepEqual(await checkReviewerProof(none.paths).then(({ ok, reason, detail }) => ({ ok, reason, detail })), { ok: false, reason: "watch_not_running", detail: "no_session" });
   for (const [state, proven] of [["not_run", "not_run"], ["stale", false], ["failed", false], ["unknown", false]]) {
-    const rt = await v4Paths(t);
+    const rt = await configuredPaths(t);
     await pageService(t, rt.paths, { state, proven });
     const result = await checkReviewerProof(rt.paths);
     assert.equal(result.ok, false, state);
@@ -107,20 +107,20 @@ test("G4 the reviewer proof comes only from the running page service with a matc
     assert.equal(result.detail, state);
   }
   // A look-alike on the port with another service id is not the Bridge page.
-  const imposter = await v4Paths(t);
+  const imposter = await configuredPaths(t);
   await pageService(t, imposter.paths, { state: "proven", proven: true, answerId: "b".repeat(32) });
   assert.deepEqual((({ ok, reason, detail }) => ({ ok, reason, detail }))(await checkReviewerProof(imposter.paths)), { ok: false, reason: "watch_not_running", detail: "wrong_service" });
   // A Boolean without the proven state (or the reverse) is not a proof.
-  const half = await v4Paths(t);
+  const half = await configuredPaths(t);
   await pageService(t, half.paths, { state: "not_run", proven: true });
   assert.equal((await checkReviewerProof(half.paths)).ok, false);
-  const proven = await v4Paths(t);
+  const proven = await configuredPaths(t);
   await pageService(t, proven.paths, { state: "proven", proven: true });
   assert.equal((await checkReviewerProof(proven.paths)).ok, true);
 });
 
 test("G5 at an interactive terminal, native work-start still refuses until the page reports the proof", async (t) => {
-  const rt = await v4Paths(t);
+  const rt = await configuredPaths(t);
   const adapter = { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} };
   const saved = { stdin: Object.getOwnPropertyDescriptor(process.stdin, "isTTY"), stdout: Object.getOwnPropertyDescriptor(process.stdout, "isTTY") };
   Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });

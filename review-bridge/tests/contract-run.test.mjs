@@ -7,6 +7,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContract } from "../features/workOrder/contract.mjs";
+import { workOrderChange } from "../features/workOrder/delivery.mjs";
+import { processFile } from "../features/workOrder/processRecords.mjs";
+import { projectLockReleased } from "../features/workOrder/workPackage.mjs";
 import { unsupportedContractStep } from "../features/workOrder/translation.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
@@ -281,6 +284,12 @@ test("editing the work order never changes a running contract; only starting aga
   assert.equal(await exit, 0);
   const firstRun = await runOf(rt, first);
   assert.equal(firstRun.status, "pass");
+  // The result marks the edit and says it was not used; the work was judged on the sealed text.
+  const firstResult = await resultOf(rt, "farm");
+  assert.match(firstResult, /## Work order changed after the start/);
+  assert.match(firstResult, /judged the work against the version sealed at the start/);
+  assert.match(firstResult, /^\+ - The cart is red\.$/m);
+  assert.doesNotMatch(firstResult, /^\+ - The farm is visible\.$/m);
   const firstContract = await loadContract(rt.paths, sealed.contract_sha256);
   assert.equal(firstContract.acceptance.length, 1);
   assert.equal(firstContract.source.lines.includes("- The cart is red."), false);
@@ -297,6 +306,153 @@ test("editing the work order never changes a running contract; only starting aga
   assert.notEqual(secondRun.contract_sha256, firstRun.contract_sha256);
   assert.equal((await loadContract(rt.paths, secondRun.contract_sha256)).acceptance.length, 2);
   assert.deepEqual(await loadContract(rt.paths, firstRun.contract_sha256), firstContract);
+  // The second run was judged on the text it sealed, so its result has no change section.
+  assert.doesNotMatch(await resultOf(rt, "farm"), /Work order changed after the start/);
+});
+
+test("a work order file that is gone, or reads the same apart from outer blank lines, is reported as such", () => {
+  assert.deepEqual(workOrderChange("# A\n- one\n", "\n# A\n- one\n\n"), null);
+  assert.deepEqual(workOrderChange("# A\n- one\n", null), { missing: true });
+  const change = workOrderChange("# A\n- one\n- two\n", "# A\n- two\n- three\n```js\n");
+  assert.deepEqual(change.removed, ["- one"]);
+  assert.deepEqual(change.added, ["- three", "```js"]);
+  // A fence inside the work order cannot close the block that shows the change.
+  assert.ok(change.fence.length > 3 && /^`+$/.test(change.fence));
+});
+
+const UNKILLABLE = process.platform === "win32" ? 4 : 1;
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The old version's writer sleeps; returns once its pid is recorded.
+async function startSleeping(rt, work) {
+  const child = spawn(process.execPath, [rt.bootstrap, "work-start", "--plan", work.planArg, "--approve", work.plan.plan_sha256, "--fake-cli", "--json"], {
+    cwd: rt.root, windowsHide: true, env: { ...process.env, FAKE_CLAUDE_SLEEP_MS: "60000" }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const exit = new Promise((resolve) => child.once("close", resolve));
+  const recordPath = processFile(rt.paths, work.plan.proposed_run_id);
+  const deadline = Date.now() + 30_000;
+  let record = null;
+  while (record?.role !== "writer" && Date.now() < deadline) {
+    record = await readJson(recordPath).catch(() => null);
+    if (record?.role !== "writer") await pause(100);
+  }
+  assert.equal(record?.role, "writer", "the old version's writer never started");
+  return { child, exit, record, recordPath };
+}
+
+test("starting an edited work order again stops the running version first, and nothing of it is carried over", async (t) => {
+  const rt = await install(t);
+  const first = await planWork(rt, "farm", SINGLE);
+  const old = await startSleeping(rt, first);
+  t.after(() => { try { process.kill(old.record.pid); } catch {} });
+  const edited = SINGLE + "- The cart is red.\n";
+  // Saving the work order stops nothing.
+  await fsp.writeFile(path.join(rt.root, first.order), edited);
+  await pause(1000);
+  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal(alive(old.record.pid), true);
+
+  // A stop of the old version that cannot be confirmed refuses the new start; nothing of it is made.
+  const second = await planWork(rt, "farm", edited);
+  await fsp.writeFile(old.recordPath, JSON.stringify({ ...old.record, pid: UNKILLABLE }));
+  const refused = start(rt, second);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, new RegExp("could not be stopped: run " + first.plan.proposed_run_id));
+  assert.equal(await fsp.stat(path.join(rt.paths.runsDir, second.plan.proposed_run_id + ".json")).then(() => true, () => false), false);
+
+  // Starting again retries the stop; the new version runs only once the old one is gone.
+  await fsp.writeFile(old.recordPath, JSON.stringify(old.record));
+  const started = start(rt, second);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(alive(old.record.pid), false);
+  await old.exit;
+  const oldRun = await runOf(rt, first);
+  assert.equal(oldRun.status, "stopped");
+  assert.equal(oldRun.closed_reason, "superseded");
+  const oldStop = (await eventsOf(rt, first)).find((event) => event.event === "stop" && event.status === "stopped");
+  assert.equal(oldStop.superseded_by, second.plan.proposed_run_id);
+  const newEvents = await eventsOf(rt, second);
+  assert.ok(oldStop.occurred_at <= newEvents[0].occurred_at, "the new version started before the old one was stopped");
+  // The new version has its own contract and verdicts; the old run left none of its records in it.
+  const newRun = await runOf(rt, second);
+  assert.equal(newRun.status, "pass");
+  assert.notEqual(newRun.contract_sha256, oldRun.contract_sha256);
+  assert.equal((await loadContract(rt.paths, newRun.contract_sha256)).acceptance.length, 2);
+  assert.ok(newEvents.every((event) => event.run_id === second.plan.proposed_run_id));
+  assert.equal((await eventsOf(rt, first)).some((event) => event.event === "review.result"), false);
+  // The old authorization cannot start anything again.
+  assert.notEqual(start(rt, first).status, 0);
+  // The old run's own result says why it stopped.
+  const oldResult = await fsp.readFile(path.join(rt.paths.queueRoot, first.plan.proposed_run_id + ".result.md"), "utf8");
+  // Whichever side delivered first, the new run is named; it is never left out.
+  assert.match(oldResult, new RegExp("started again as a new version: run " + second.plan.proposed_run_id + "[. ]"));
+});
+
+test("the new version waits for the old work-start to let go of the project, and refuses if it does not", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-lock-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const paths = getBridgePaths(root, runtimeSource, { privateRootName: ".review-bridge" });
+  await fsp.mkdir(path.dirname(paths.boundedLockPath), { recursive: true });
+  assert.equal(await projectLockReleased(paths, { timeoutMs: 0 }), true);
+  const sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { windowsHide: true, stdio: "ignore" });
+  t.after(() => { try { sleeper.kill(); } catch {} });
+  await fsp.writeFile(paths.boundedLockPath, JSON.stringify({ pid: sleeper.pid }));
+  assert.equal(await projectLockReleased(paths, { timeoutMs: 600 }), false);
+  // The holder exits while the new version waits: the wait ends and the start may go on.
+  const waiting = projectLockReleased(paths, { timeoutMs: 10_000 });
+  await pause(400);
+  sleeper.kill();
+  assert.equal(await waiting, true);
+  // A lock left by a process that is gone does not hold the project.
+  assert.equal(await projectLockReleased(paths, { timeoutMs: 0 }), true);
+});
+
+test("the new version starts only after the old work-start has let go of the project", async (t) => {
+  const rt = await install(t);
+  const first = await planWork(rt, "farm", SINGLE);
+  const old = await startSleeping(rt, first);
+  t.after(() => { try { process.kill(old.record.pid); } catch {} });
+  // The old work-start dies without closing; a process that holds the project for a few seconds
+  // stands in for one still closing.
+  old.child.kill("SIGKILL");
+  await old.exit;
+  const second = await planWork(rt, "farm", SINGLE + "- The cart is red.\n");
+  const closing = spawn(process.execPath, ["-e", "setTimeout(() => {}, 4000)"], { windowsHide: true, stdio: "ignore" });
+  t.after(() => { try { closing.kill(); } catch {} });
+  await fsp.writeFile(rt.paths.boundedLockPath, JSON.stringify({ pid: closing.pid }));
+  const started = start(rt, second);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(alive(old.record.pid), false);
+  assert.equal((await runOf(rt, second)).status, "pass");
+  // The old version's work-start is gone, so the new start delivered it.
+  const oldRun = await runOf(rt, first);
+  assert.equal(oldRun.closed_reason, "superseded");
+  assert.equal(oldRun.outcome, "stopped");
+});
+
+test("the start card names the running version it will stop, and answering no leaves it running", async (t) => {
+  const rt = await install(t);
+  const first = await planWork(rt, "farm", SINGLE);
+  const old = await startSleeping(rt, first);
+  t.after(() => { try { process.kill(old.record.pid); } catch {} });
+  const second = await planWork(rt, "farm", SINGLE + "- The cart is red.\n");
+  const declined = spawnSync(process.execPath, [rt.bootstrap, "work-start", "--plan", second.planArg, "--fake-cli"], {
+    cwd: rt.root, encoding: "utf8", windowsHide: true, input: "n\n",
+  });
+  assert.notEqual(declined.status, 0);
+  assert.match(declined.stdout, new RegExp("Starting stops the version still running from this work order: run " + first.plan.proposed_run_id));
+  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal(alive(old.record.pid), true);
+  // Another work order's start leaves this one running too. (Its own run is not the point here: it
+  // cannot work while the farm run holds the project.)
+  const other = await planWork(rt, "barn", SINGLE);
+  start(rt, other);
+  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal(alive(old.record.pid), true);
+  const stopped = rt.bridge(["stop", first.plan.proposed_run_id]);
+  assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
+  await old.exit;
 });
 
 test("an open question from the translation stops the work before the writer and is shown to the human", async (t) => {

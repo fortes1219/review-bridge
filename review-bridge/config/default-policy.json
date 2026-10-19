@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "policy_schema_version": 4,
-  "package_policy_id": "review-bridge-v4-0.x-current",
+  "package_policy_id": "review-bridge-default",
   "limits": {
     "max_claude_calls": 2,
     "max_claude_minutes_per_call": 15,

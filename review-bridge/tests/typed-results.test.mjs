@@ -165,9 +165,9 @@ test("Q8 the codex --json stream gives usage and commands; cached tokens are not
   assert.equal(reviewerUsageEvent({ usage: null, trailerTokens: undefined, call: 1, durationMs: 5 }).parse_error, true);
 });
 
-test("Q10 a Stop-hook message during a v4 run is not a submission: harness_driven, no job", async (t) => {
+test("Q10 a Stop-hook message during a run is not a submission: harness_driven, no job", async (t) => {
   const repoRoot = await workspace(t);
-  const control = { authorization_status: "active", active_claude_session: "s-1", v4: { run_id: "run-1" } };
+  const control = { authorization_status: "active", active_claude_session: "s-1", run: { run_id: "run-1" } };
   const payload = { session_id: "s-1", cwd: repoRoot, stop_hook_active: false, last_assistant_message: "CODEX_REVIEW_REQUIRED: true\nreport" };
   const result = await enqueueReview({ payload, paths: { repoRoot }, control });
   assert.deepEqual(result, { accepted: false, reason: "harness_driven" });

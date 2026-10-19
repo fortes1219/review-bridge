@@ -9,7 +9,7 @@ import { evaluateRule, GateAError, NOT_APPLICABLE_LABEL, recheckGateA, runGateA,
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import { mergePolicy } from "../policy/policyRules.mjs";
-import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../features/workOrder/workPackage.mjs";
+import { authorizeWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");
@@ -20,7 +20,7 @@ async function workspace(t, { bridge = { gate_a: { profile_id: "node-backend", r
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-gate-a-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } }, ...bridge });
+  await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } }, ...bridge });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
   if (manifest) await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify(manifest));
@@ -37,7 +37,7 @@ function order() {
 async function plan({ paths, repoRoot }, { changeTypes = "code", id = "gate-" + Math.random().toString(16).slice(2, 8) } = {}) {
   const taskFile = path.join(paths.privateRoot, id + ".md");
   await fsp.writeFile(taskFile, order());
-  return await createV4WorkPackagePlan({
+  return await createWorkPackagePlan({
     paths, taskFile, owner: "Fortes", workPackage: id, breakpoint: "return after review", changeTypes,
     maxCalls: 1, maxMinutes: 5, outPath: path.join(paths.privateRoot, id + ".plan.json"),
   });
@@ -101,7 +101,7 @@ test("R4 approval re-checks the sealed entry point; removing it refuses the star
   const planned = await plan(ws);
   await fsp.writeFile(path.join(ws.repoRoot, "package.json"), JSON.stringify({ name: "x" }));
   assert.equal((await recheckGateA(ws.repoRoot, planned.gate_a)).ok, false);
-  await assert.rejects(authorizeV4WorkPackage({ paths: ws.paths, planPath: planned.plan_path, approval: planned.plan_sha256, executionMode: "fake_cli" }), /測試入口變了/);
+  await assert.rejects(authorizeWorkPackage({ paths: ws.paths, planPath: planned.plan_path, approval: planned.plan_sha256, executionMode: "fake_cli" }), /測試入口變了/);
 });
 
 test("R8 the sealed command runs through the shell with a timeout; over time is a failure; the minutes limit only tightens", async (t) => {

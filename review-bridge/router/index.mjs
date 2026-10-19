@@ -1,4 +1,4 @@
-// The command table: each command's options, whether it needs the v4 configuration, and which
+// The command table: each command's options, whether it needs the configuration, and which
 // feature entry it goes to. The router wires features together (the work order's delivery into
 // the records and the setup page) and adds the start gate; the order of steps is the features'.
 import { parseOptions } from "./args.mjs";
@@ -72,7 +72,7 @@ const COMMANDS = {
     options: {},
     run: (context) => workOrder.workStatus(context),
   },
-  // status and wait only read the review queue; every other command needs the v4 configuration.
+  // status and wait only read the review queue; every other command needs the configuration.
   status: {
     options: {},
     configFree: true,
@@ -128,7 +128,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   const runId = entry?.takesRunId ? args[0] : null;
   const options = parseOptions(entry?.takesRunId ? args.slice(1) : args, entry?.options || {});
   if (!entry?.configFree && !(await fileExists(paths.bridgeConfigPath))) {
-    throw new Error(command + " requires the v4 runtime configuration created by init.");
+    throw new Error(command + " requires the runtime configuration created by init.");
   }
   if (!entry) throw new Error("Unsupported command: " + command);
   return await entry.run({ command, args, paths, options, runId, adapter, adapterId, adapterDefinition, adapterSource });

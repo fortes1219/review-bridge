@@ -40,7 +40,7 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function makeRuntime(prefix = "ac-v4-", baseRoot = os.tmpdir()) {
+async function makeRuntime(prefix = "ac-state-", baseRoot = os.tmpdir()) {
   const repoRoot = await fsp.mkdtemp(path.join(baseRoot, prefix));
   const bridgeRoot = path.join(repoRoot, ".runtime");
   cleanupRoots.add(repoRoot);
@@ -52,7 +52,6 @@ async function makeRuntime(prefix = "ac-v4-", baseRoot = os.tmpdir()) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4,
-    state_contract: "v4",
     active_runs: "derive_from_run_projections",
   });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });

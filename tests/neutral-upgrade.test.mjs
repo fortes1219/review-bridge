@@ -118,6 +118,8 @@ async function makeOld(root, { policy = false } = {}) {
   const configFile = path.join(privateOf(root), "review-bridge", "bridge.json");
   const config = await readJson(configFile);
   delete config.active_runs;
+  // Installs made before the rename still carry this key.
+  config.state_contract = "v4";
   await writeJson(configFile, config);
   const installFile = path.join(privateOf(root), "review-bridge-install.json");
   const manifest = await readJson(installFile);
@@ -215,7 +217,7 @@ function crashAt(root, hook) {
   assert.equal(result.status, 9, "the child should exit at " + hook + ": " + result.stderr);
 }
 
-async function v4(root, runtimeRoot = runtimeOf(root)) {
+async function workApi(root, runtimeRoot = runtimeOf(root)) {
   const { getBridgePaths } = await import(sourceModule("utils/paths.mjs"));
   return {
     paths: getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }),
@@ -226,7 +228,7 @@ async function v4(root, runtimeRoot = runtimeOf(root)) {
 }
 
 async function makePlan(api, id) {
-  return await api.createV4WorkPackagePlan({
+  return await api.createWorkPackagePlan({
     paths: api.paths, task: "Update README.md only.", owner: "o", workPackage: id, breakpoint: "b", changeTypes: "docs",
     allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(api.paths.queueRoot, id + ".plan.json"),
   });
@@ -243,6 +245,7 @@ test("W1 upgrade replaces the runtime, keeps every user file and editable settin
   assert.equal(plan.from.version, "0.1.0-old");
   assert.equal(plan.to.version, (await readJson(path.join(sourceRuntime, "templates", "PACKAGE_MANIFEST.json"))).version);
   assert.deepEqual(plan.config_added_keys, ["active_runs"]);
+  assert.deepEqual(plan.config_removed_keys, ["state_contract"]);
   assert.equal(plan.template.action, "keep_and_write_new");
   assert.equal(plan.policy_changed, false);
   // farm.md, farm.result.md, the day file, rules.md, TEMPLATE.md, bridge.json and the fake run's records.
@@ -262,6 +265,7 @@ test("W1 upgrade replaces the runtime, keeps every user file and editable settin
   assert.deepEqual(config.retention, { days: 20 });
   assert.equal(config.locale, "en");
   assert.equal(config.active_runs, "derive_from_run_projections", "the new key is added");
+  assert.equal(Object.hasOwn(config, "state_contract"), false, "the retired key is removed");
   assert.equal(after.get("work-packages/TEMPLATE.new.md"), sha(await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md"))));
   assert.equal([...after.keys()].filter((name) => name.startsWith("tools/") && !name.startsWith("tools/review-bridge/")).length, 0, "no previous or next runtime is left");
   assert.equal(await exists(markerOf(root)), false);
@@ -330,7 +334,7 @@ test("W3 a crash between the two renames: work is refused, the rollback plan tak
   await makeOld(root);
   await fakeRun(root, "before-crash");
   // The installed runtime is renamed away by the crash; the same policy is read from the source.
-  const api = await v4(root, sourceRuntime);
+  const api = await workApi(root, sourceRuntime);
   const pending = await makePlan(api, "pending-1");
   const before = await persistent(root);
   crashAt(root, "betweenRenames");
@@ -340,7 +344,7 @@ test("W3 a crash between the two renames: work is refused, the rollback plan tak
   assert.equal(await exists(path.join(privateOf(root), "tools", ".review-bridge-previous-" + marker.upgrade_id)), true);
   // The installed entry point is gone, and the state machine refuses new work while the marker is there.
   assert.equal(await exists(path.join(runtimeOf(root), "bootstrap.mjs")), false);
-  await assert.rejects(api.authorizeV4WorkPackage({ paths: api.paths, planPath: pending.plan_path, approval: pending.plan_sha256, executionMode: "fake_cli" }), /Runtime upgrade is in progress/);
+  await assert.rejects(api.authorizeWorkPackage({ paths: api.paths, planPath: pending.plan_path, approval: pending.plan_sha256, executionMode: "fake_cli" }), /Runtime upgrade is in progress/);
   const plan = await planNeutralUpgradeRollback({ target: root });
   assert.equal(plan.kind, "restore");
   assert.equal(plan.runtime_source, "previous");
@@ -434,12 +438,12 @@ test("W4 work-start is refused once the marker is written; a run claimed just be
   const root = await workspace(t);
   await install(root);
   await makeOld(root);
-  const api = await v4(root);
+  const api = await workApi(root);
   const waiting = await makePlan(api, "waiting-1");
   let refused = null;
   const { result } = await upgrade(root, {
     afterMarker: async () => {
-      refused = await api.authorizeV4WorkPackage({ paths: api.paths, planPath: waiting.plan_path, approval: waiting.plan_sha256, executionMode: "fake_cli" })
+      refused = await api.authorizeWorkPackage({ paths: api.paths, planPath: waiting.plan_path, approval: waiting.plan_sha256, executionMode: "fake_cli" })
         .then(() => null, (error) => error.message);
     },
   });
@@ -449,7 +453,7 @@ test("W4 work-start is refused once the marker is written; a run claimed just be
   // project changed since its plan and refuses cleanly, and the next plan goes through.
   await makeOld(root);
   const raced = await makePlan(api, "raced-1");
-  const authorized = await api.authorizeV4WorkPackage({ paths: api.paths, planPath: raced.plan_path, approval: raced.plan_sha256, executionMode: "fake_cli" });
+  const authorized = await api.authorizeWorkPackage({ paths: api.paths, planPath: raced.plan_path, approval: raced.plan_sha256, executionMode: "fake_cli" });
   await assert.rejects(upgrade(root, {
     afterMarker: async () => assert.rejects(api.cancelIfMaintenance(api.paths, authorized.run.run_id), /maintenance_in_progress/),
   }), /The project changed after the plan was shown/);
@@ -473,9 +477,9 @@ test("W5 / W6 / W8 approval binds the plan; running work, a failed verification,
   sameTree(await tree(privateOf(root)), changed, "W5 nothing moved");
   assert.notEqual(changed.get("review-bridge/rules.md"), before.get("review-bridge/rules.md"));
   // W6: running work.
-  const api = await v4(root);
+  const api = await workApi(root);
   const running = await makePlan(api, "running-1");
-  await api.authorizeV4WorkPackage({ paths: api.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
+  await api.authorizeWorkPackage({ paths: api.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
   const busy = await persistent(root);
   await assert.rejects(upgrade(root), /Work is still running: .+ \(running\)\. Stop it or let it finish first/);
   sameTree(await persistent(root), busy, "W6 running work");
@@ -512,7 +516,7 @@ test("W7 a new default policy invalidates unstarted authorizations, reports them
   const root = await workspace(t);
   await install(root);
   await makeOld(root, { policy: true });
-  const api = await v4(root);
+  const api = await workApi(root);
   const { snapshot } = await api.loadOrCreatePolicySnapshot(api.paths);
   const workPackage = await api.createImmutableWorkPackage(api.paths, {
     work_package_id: "wp-" + randomUUID(), task: "Unclaimed fixture.", acceptance_criteria: [],
@@ -529,7 +533,7 @@ test("W7 a new default policy invalidates unstarted authorizations, reports them
   assert.deepEqual(result.invalidated_authorization_ids, [authorization.authorization_id]);
   assert.equal(await exists(path.join(api.paths.authorizationInvalidationsDir, authorization.authorization_id + ".json")), true);
   await assert.rejects(api.claimStartAuthorization(api.paths, authorization.authorization_id, { executionMode: "fake_cli" }), /Bridge was upgraded or its policy changed\. Make a new plan with work-plan/);
-  await assert.rejects(api.authorizeV4WorkPackage({ paths: api.paths, planPath: stalePlan.plan_path, approval: stalePlan.plan_sha256, executionMode: "fake_cli" }), /Work plan is stale because effective policy changed: Bridge was upgraded or its policy changed\. Make a new plan with work-plan/);
+  await assert.rejects(api.authorizeWorkPackage({ paths: api.paths, planPath: stalePlan.plan_path, approval: stalePlan.plan_sha256, executionMode: "fake_cli" }), /Work plan is stale because effective policy changed: Bridge was upgraded or its policy changed\. Make a new plan with work-plan/);
 });
 
 test("W10 / W11 the CLI has no --yes and needs a terminal; the plan route works; the proof-loss line is shown and the restarted page is not_run", async (t) => {

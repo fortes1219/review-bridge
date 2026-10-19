@@ -1,16 +1,16 @@
 // The work order's command entries: plan, start, status, cancel, stop, review, resume, and the
 // review queue's status and wait. Each owns its order of steps and what it prints.
 import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "../../service/index.mjs";
-import { confirmV4WorkStart, contractStepsLine } from "./confirmStart.mjs";
+import { confirmWorkStart, contractStepsLine } from "./confirmStart.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
 import { GateAError } from "./gateA.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { queueStatus, waitForPending } from "./reviewQueue.mjs";
 import {
-  authorizeV4WorkPackage,
-  cancelV4WorkPackage,
-  createV4WorkPackagePlan,
-  v4WorkPackageStatus,
+  authorizeWorkPackage,
+  cancelWorkPackage,
+  createWorkPackagePlan,
+  workPackageStatus,
 } from "./workPackage.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
 
@@ -18,7 +18,7 @@ export async function planWork({ paths, options }) {
   if (!options.outPath) throw new Error("work-plan requires --out.");
   let plan;
   try {
-    plan = await createV4WorkPackagePlan({
+    plan = await createWorkPackagePlan({
       paths,
       task: options.task,
       taskFile: options.taskFile,
@@ -75,14 +75,19 @@ export async function startWork({ paths, options, adapter, guard }) {
     throw new Error("--fake-scenario requires --fake-cli.");
   }
   await guard();
-  const approval = options.approval || await confirmV4WorkStart(paths, options.planPath, Boolean(options.yes));
-  const authorization = await authorizeV4WorkPackage({
+  const approval = options.approval || await confirmWorkStart(paths, options.planPath, Boolean(options.yes));
+  const authorization = await authorizeWorkPackage({
     paths,
     planPath: options.planPath,
     approval,
     executionMode: options.fakeCli ? "fake_cli" : "native",
     authorizedVia: options.approval ? "approve_flag" : options.yes ? "yes_flag" : "terminal",
   });
+  // The replaced version is delivered here too, in case its own work-start is gone.
+  for (const runId of authorization.superseded) {
+    await deliverOutcome({ paths, runId, adapter, notify: true })
+      .catch((error) => process.stderr.write("delivery failed: " + String(error?.message || error) + "\n"));
+  }
   let exitCode;
   try {
     exitCode = await runBoundedResume({
@@ -96,7 +101,7 @@ export async function startWork({ paths, options, adapter, guard }) {
       runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
     });
   } finally {
-    // T0-07 V2.8 (a): every way out of a v4 run delivers once; a failure here never masks the run's own exit.
+    // T0-07 V2.8 (a): every way out of a run delivers once; a failure here never masks the run's own exit.
     try {
       const delivery = await deliverOutcome({ paths, runId: authorization.run.run_id, adapter, notify: true });
       if (!options.json) process.stdout.write(stdoutLines(delivery).join("\n") + "\n");
@@ -105,22 +110,22 @@ export async function startWork({ paths, options, adapter, guard }) {
     }
   }
   if (options.json) {
-    process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths, authorization.run.run_id), null, 2) + "\n");
+    process.stdout.write(JSON.stringify(await workPackageStatus(paths, authorization.run.run_id), null, 2) + "\n");
   }
   return exitCode;
 }
 
 export async function workStatus({ paths }) {
-  process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths), null, 2) + "\n");
+  process.stdout.write(JSON.stringify(await workPackageStatus(paths), null, 2) + "\n");
   return 0;
 }
 
 export async function cancelWork({ paths, options, adapter }) {
-  const cancelled = await cancelV4WorkPackage({ paths, reason: options.reason });
+  const cancelled = await cancelWorkPackage({ paths, reason: options.reason });
   // Codex 2026-10-14: the cancel itself delivers; the result reflects the workspace at this moment.
   await deliverOutcome({ paths, runId: cancelled.run_id, adapter, notify: true })
     .catch((error) => process.stderr.write("delivery failed: " + String(error?.message || error) + "\n"));
-  process.stdout.write(JSON.stringify(await v4WorkPackageStatus(paths), null, 2) + "\n");
+  process.stdout.write(JSON.stringify(await workPackageStatus(paths), null, 2) + "\n");
   return 0;
 }
 
@@ -159,8 +164,8 @@ export async function reviewWork({ paths, options, adapter }) {
 
 export async function resumeWork({ paths, options, adapter }) {
   const activeControl = await loadSingleActiveControlView(paths);
-  const runtimeState = createRunRuntimeState(paths, activeControl.v4.run_id);
-  await assertRunResumable(paths, activeControl.v4.run_id);
+  const runtimeState = createRunRuntimeState(paths, activeControl.run.run_id);
+  await assertRunResumable(paths, activeControl.run.run_id);
   if (!options.promptPath) throw new Error("bounded-resume requires --prompt.");
   const maxCalls = options.maxCalls ?? 2;
   const maxMinutes = options.maxMinutes ?? 8;

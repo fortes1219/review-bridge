@@ -1,4 +1,4 @@
-// Language packs (T0-07 V4). Bridge's own human-facing text comes from
+// Language packs. Bridge's own human-facing text comes from
 // `locales/<lang>.json`; internal codes stay language-neutral. A missing key
 // returns the key itself so a gap in a pack never breaks a delivery.
 import fsp from "node:fs/promises";

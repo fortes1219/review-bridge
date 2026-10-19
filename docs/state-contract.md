@@ -1,4 +1,4 @@
-# Review Bridge State Contract v4
+# Review Bridge State Contract
 
 Status: APPROVED FOR STAGING IMPLEMENTATION  
 Date: 2026-08-28  
@@ -214,11 +214,11 @@ Required distinction:
 
 Recommendation: approve this distinction as a hard invariant.
 
-If an older runtime cannot read the current state schema, installer rollback fails closed instead of restoring an incompatible runtime. Migration rollback may restore operational pointers/configuration from the legacy archive, but v4 migration events and evidence remain append-only.
+If an older runtime cannot read the current state schema, installer rollback fails closed instead of restoring an incompatible runtime. Migration rollback may restore operational pointers/configuration from the legacy archive, but migration events and evidence remain append-only.
 
 ### D7 - Storage atomicity boundary
 
-Recommendation: approve local filesystem as the supported consistency boundary for v4.
+Recommendation: approve local filesystem as the supported consistency boundary for this state contract.
 
 Exclusive-create and lock guarantees are assumed only for a local filesystem with documented atomic semantics, such as local NTFS, APFS, or ext4. OneDrive-synchronized folders, network shares, and similar filesystems are unsupported for concurrent controller execution. Preflight must warn or fail when the location is known to be unsafe; README must state this limitation.
 
@@ -284,11 +284,11 @@ Implementation is not complete until disposable tests prove all of these:
 
 ## 8. Release gate
 
-The human owner must approve D1-D7. The independent reviewer must then review the approved contract and acceptance matrix. Only after that review may the writer implement v4 state handling.
+The human owner must approve D1-D7. The independent reviewer must then review the approved contract and acceptance matrix. Only after that review may the writer implement this state handling.
 
 Release milestones are independent:
 
-1. Fresh-install RC: requires v4 fresh-install state handling, disposable no-Git Vue initialization, all fake gates, native-readiness reporting, and the real bounded canary. It does not require legacy CONTROL migration or any change to an existing installed runtime.
+1. Fresh-install RC: requires fresh-install state handling under this contract, disposable no-Git Vue initialization, all fake gates, native-readiness reporting, and the real bounded canary. It does not require legacy CONTROL migration or any change to an existing installed runtime.
 2. Legacy project migration: separately requires the approved v2/v3 migration command. Before its plan step, the current legacy work package/CONTROL must reach an inactive, consumed or otherwise terminal state and all live Bridge locks must be clear. The milestone then requires migration plan/apply evidence, rollback verification, and installed-runtime regression.
 
-Failure or delay in a legacy project migration must not block delivery of a fresh-install v4 RC. Migration code must not be included in the RC critical path unless that RC explicitly advertises legacy upgrade support.
+Failure or delay in a legacy project migration must not block delivery of a fresh-install RC. Migration code must not be included in the RC critical path unless that RC explicitly advertises legacy upgrade support.

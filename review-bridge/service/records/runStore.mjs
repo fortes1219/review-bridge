@@ -585,11 +585,16 @@ export class RunEndedError extends Error {
   }
 }
 
-export async function stopRunRecord(paths, runId, options = {}) {
-  return await mutateRun(paths, runId, "run_terminal", { reason: "stopped", gate: null }, (run) => {
+// `closedReason` is "stopped" for the stop command and "superseded" when the work order is started
+// again; the status is "stopped" either way. `supersededBy`, the new start's run id, is written in
+// the same locked step, so whoever delivers the stopped run can name it.
+export async function stopRunRecord(paths, runId, { closedReason = "stopped", supersededBy = null, ...options } = {}) {
+  const details = { reason: closedReason, gate: null, ...(supersededBy ? { superseded_by: supersededBy } : {}) };
+  return await mutateRun(paths, runId, "run_terminal", details, (run) => {
     if (run.closed_at || terminalStatuses.has(run.status)) throw new RunEndedError(run.status);
     run.status = "stopped";
-    run.closed_reason = "stopped";
+    run.closed_reason = closedReason;
+    if (supersededBy) run.superseded_by = supersededBy;
     run.closed_at = nowIso(options.clock || Date.now);
     run.review_gate = null;
     return run;
@@ -735,7 +740,7 @@ export async function loadControlView(paths, runId) {
       max_claude_calls_per_resume: run.budget.max_claude_calls,
       max_claude_minutes_per_call: run.budget.max_claude_minutes_per_call,
     },
-    v4: { run_id: run.run_id, policy_snapshot: snapshot, work_package: workPackage, contract_sha256: run.contract_sha256 || null },
+    run: { run_id: run.run_id, policy_snapshot: snapshot, work_package: workPackage, contract_sha256: run.contract_sha256 || null },
   };
 }
 

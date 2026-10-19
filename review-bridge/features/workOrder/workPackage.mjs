@@ -10,6 +10,7 @@ import {
   createAuthorization,
   createImmutableWorkPackage,
   fileExists,
+  isPidAlive,
   listRuns,
   loadControlView,
   loadOrCreatePolicySnapshot,
@@ -23,7 +24,8 @@ import { digest } from "../../utils/digest.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspaceEvidence.mjs";
 import { recheckGateA, selectGateA } from "./gateA.mjs";
 import { MAX_TRANSLATION_ATTEMPTS } from "./contract.mjs";
-import { DEFAULT_WRITER_MODEL } from "./writerLoop.mjs";
+import { processFile } from "./processRecords.mjs";
+import { DEFAULT_WRITER_MODEL, stopRun } from "./writerLoop.mjs";
 
 // The model calls that turn a work order into a contract run before any work, so the plan names
 // them for the human to approve: who translates, who checks, how often, and for how long. The
@@ -142,7 +144,7 @@ function validateBudget(policy, maxCalls, maxMinutes) {
   return { max_claude_calls: calls, max_claude_minutes_per_call: minutes };
 }
 
-export async function createV4WorkPackagePlan({
+export async function createWorkPackagePlan({
   paths,
   task,
   taskFile,
@@ -209,10 +211,71 @@ export async function createV4WorkPackagePlan({
   return { ...plan, plan_path: resolvedOut };
 }
 
-export async function authorizeV4WorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
+const RUNNING_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
+
+// The runs a start of this plan replaces: runs of the same work order file still running, or
+// stopped with a kill not yet confirmed. Saving the file replaces nothing; only a start does. A
+// running run whose record cannot be read refuses the start instead of being guessed at. A plan
+// already used (its run exists) replaces nothing; the start refuses that plan later anyway.
+export async function runningVersions(paths, plan) {
+  if (!plan.task_file) return [];
+  if (await readRun(paths, plan.proposed_run_id).then(() => true, () => false)) return [];
+  const found = [];
+  for (const run of await listRuns(paths)) {
+    const unresolved = run.status === "stopped" && await fileExists(processFile(paths, run.run_id));
+    if (!RUNNING_STATUSES.has(run.status) && !unresolved) continue;
+    let control;
+    try {
+      control = await loadControlView(paths, run.run_id);
+    } catch {
+      throw new Error("Run " + run.run_id + " is still running and its record cannot be read; stop it before starting " + plan.task_file + ".");
+    }
+    if (control.run?.work_package?.task_file === plan.task_file) found.push(run.run_id);
+  }
+  return found;
+}
+
+// The project's work lock is held by a work-start until its loop returns. A stopped version's
+// work-start returns soon after its calls are killed; the new version cannot run before that.
+export async function projectLockReleased(paths, { timeoutMs = 30_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let holder;
+    try {
+      holder = await readJson(paths.boundedLockPath);
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      holder = null; // being written or removed; look again
+    }
+    const pid = Number(holder?.pid);
+    if (holder && Number.isInteger(pid) && pid > 0 && !isPidAlive(pid)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+// The old version's calls are stopped, and the stop confirmed, before anything of the new version
+// is made. A stop that cannot be confirmed, or an old work-start that does not let go of the
+// project, refuses the start; starting again retries it.
+async function stopEarlierVersions(paths, plan) {
+  const stopped = [];
+  for (const runId of await runningVersions(paths, plan)) {
+    const result = await stopRun(paths, runId, { supersededBy: plan.proposed_run_id });
+    if (result.exitCode === 2) {
+      throw new Error("The version still running from " + plan.task_file + " could not be stopped: run " + runId + " (" + result.reason + "). Start again to retry the stop; the new version does not start before the old one has stopped.");
+    }
+    if (result.exitCode === 0) stopped.push(runId);
+  }
+  if (stopped.length && !(await projectLockReleased(paths))) {
+    throw new Error("The old version of " + plan.task_file + " is stopped, but its work-start has not finished closing. Start again in a moment.");
+  }
+  return stopped;
+}
+
+export async function authorizeWorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
   const plan = await readJson(resolvedPlan);
-  if (plan.schema_version !== 4 || plan.operation !== "start_work_package") throw new Error("Unsupported v4 work plan.");
+  if (plan.schema_version !== 4 || plan.operation !== "start_work_package") throw new Error("Unsupported work plan.");
   const actual = planDigest(plan);
   if (plan.plan_sha256 !== actual || String(approval || "").toLowerCase() !== actual) {
     throw new Error("Work plan approval checksum is invalid.");
@@ -242,6 +305,9 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
     const recheck = await recheckGateA(paths.repoRoot, plan.gate_a);
     if (!recheck.ok) throw new Error("批准後專案的測試入口變了（" + recheck.reasons.join("；") + "），重新建 plan");
   }
+  // Every refusal above leaves the running version alone. From here the start replaces it: nothing
+  // of the old run (its authorization, contract or verdicts) is carried into the new one.
+  const superseded = await stopEarlierVersions(paths, plan);
   const workPackage = await createImmutableWorkPackage(paths, {
     work_package_id: plan.work_package_id,
     task: plan.task,
@@ -285,6 +351,7 @@ export async function authorizeV4WorkPackage({ paths, planPath, approval, execut
   return {
     plan,
     authorization,
+    superseded,
     run: started.run,
     control: await loadControlView(paths, started.run.run_id),
     promptPath,
@@ -302,7 +369,7 @@ export async function cancelIfMaintenance(paths, runId) {
   throw new Error("Bridge maintenance (uninstall or upgrade) started while this work was being authorized; the run was cancelled before any model call (maintenance_in_progress).");
 }
 
-export async function cancelV4WorkPackage({ paths, runId = null, reason = "cancelled_by_human_owner" }) {
+export async function cancelWorkPackage({ paths, runId = null, reason = "cancelled_by_human_owner" }) {
   const active = await listRuns(paths, { activeOnly: true });
   const selected = runId ? active.find((run) => run.run_id === runId) : active.length === 1 ? active[0] : null;
   if (!selected) throw new Error("Specify exactly one active run to cancel.");
@@ -310,7 +377,7 @@ export async function cancelV4WorkPackage({ paths, runId = null, reason = "cance
   return { ...(await readRun(paths, selected.run_id)), cancel_reason: requiredText(reason, "Cancel reason", 160) };
 }
 
-export async function v4WorkPackageStatus(paths, runId = null) {
+export async function workPackageStatus(paths, runId = null) {
   const runs = await listRuns(paths);
   const ordered = [...runs].sort((left, right) => {
     const byTime = Date.parse(right.updated_at || right.created_at || 0)
@@ -318,10 +385,9 @@ export async function v4WorkPackageStatus(paths, runId = null) {
     return byTime || left.run_id.localeCompare(right.run_id);
   });
   const selected = runId ? runs.find((run) => run.run_id === runId) : ordered[0] || null;
-  if (!selected) return { state_contract: "v4", active_runs: 0, latest_run: null };
+  if (!selected) return { active_runs: 0, latest_run: null };
   const control = await loadControlView(paths, selected.run_id);
   return {
-    state_contract: "v4",
     run_id: selected.run_id,
     work_package: control.work_package,
     authorization_status: control.authorization_status,

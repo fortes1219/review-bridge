@@ -20,7 +20,7 @@
   "included": [
     "checksum-gated plan/apply/upgrade/uninstall/rollback lifecycle",
     "transaction lock, ownership manifest, immediate failure rollback, and persistent exact-state rollback points",
-    "v4 immutable work-package, authorization, claim, run projection, and append-only event lifecycles",
+    "immutable work-package, authorization, claim, run projection, and append-only event lifecycles",
     "fresh install with no CONTROL, active authorization, or session identity",
     "tighten-only policy snapshots, current-only 0.x upgrade invalidation, crash recovery, and budget extension",
     "checksum-gated first-work-package plan/start/status/cancel lifecycle",
@@ -48,7 +48,7 @@
     "Windows native adapter smoke passed without model calls",
     "Claude Code 2.1.218 live --session-id then --resume contract smoke passed with the same UUID and resumed context",
     "Gitleaks source scan passed before packaging",
-    "state contract v4 acceptance suites: AC-01 through AC-20 passed on real local NTFS",
+    "state contract acceptance suites: AC-01 through AC-20 passed on real local NTFS",
     "Darwin arm64 is a selectable canary candidate and is not native-verified; Linux remains experimental"
   ]
 }

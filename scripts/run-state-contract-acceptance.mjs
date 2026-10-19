@@ -8,12 +8,13 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const testPath = path.join(packageRoot, "review-bridge", "tests", "state-v4.acceptance.test.mjs");
+const testPath = path.join(packageRoot, "review-bridge", "tests", "state-contract.acceptance.test.mjs");
 const evidenceRoot = path.join(packageRoot, "docs", "evidence");
 const platformLabel = `${process.platform}-${process.arch}`;
-const rawName = `state-v4-acceptance-${platformLabel}-20260828.tap`;
+const runDay = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+const rawName = `state-contract-acceptance-${platformLabel}-${runDay}.tap`;
 const rawPath = path.join(evidenceRoot, rawName);
-const manifestPath = path.join(evidenceRoot, `state-v4-acceptance-${platformLabel}-20260828.json`);
+const manifestPath = path.join(evidenceRoot, `state-contract-acceptance-${platformLabel}-${runDay}.json`);
 const command = `node --test --test-reporter=tap ${path.relative(packageRoot, testPath).replaceAll("\\", "/")}`;
 
 function detectWindowsFilesystem(location) {
@@ -41,7 +42,7 @@ await fsp.rm(ac16Root, { recursive: true, force: true });
 const raw = [result.stdout, result.stderr].filter(Boolean).join("\n");
 await fsp.writeFile(rawPath, raw, "utf8");
 if (result.error) throw result.error;
-if (result.status !== 0) throw new Error("State v4 acceptance failed; inspect " + rawPath);
+if (result.status !== 0) throw new Error("State contract acceptance failed; inspect " + rawPath);
 const expectedSkipped = process.platform === "win32" ? 0 : 1;
 if (!/# suites 20(?:\r?\n|$)/.test(raw) || !/# fail 0(?:\r?\n|$)/.test(raw)
     || !(new RegExp(`# skipped ${expectedSkipped}(?:\\r?\\n|$)`).test(raw))) {
@@ -51,7 +52,7 @@ const filesystem = detectWindowsFilesystem(ac16Root);
 const timestamp = new Date().toISOString();
 const evidence = {
   schema_version: 1,
-  contract: "Review Bridge State Contract v4",
+  contract: "Review Bridge State Contract",
   generated_at: timestamp,
   command,
   runtime: process.version,
@@ -62,7 +63,7 @@ const evidence = {
     const id = "AC-" + String(index + 1).padStart(2, "0");
     return {
       id,
-      primary_test: "review-bridge/tests/state-v4.acceptance.test.mjs",
+      primary_test: "review-bridge/tests/state-contract.acceptance.test.mjs",
       top_level_suite: id === "AC-15"
         ? "AC-15 / R7 unsafe synchronized or network storage fails preflight"
         : id === "AC-20"

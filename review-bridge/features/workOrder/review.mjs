@@ -67,9 +67,9 @@ export async function validateReviewWorker({ paths, control, adapter }) {
 
 // T0-05 D2.2: the packet the reviewer gets. Zero model: card text, typed claims, delta hashes.
 export async function buildReviewInput({ paths, job, control }) {
-  const workPackage = control.v4?.work_package || {};
+  const workPackage = control.run?.work_package || {};
   // The reviewer reads the same sealed contract as the writer; a changed file stops the review.
-  const contractSha256 = control.v4?.contract_sha256 || null;
+  const contractSha256 = control.run?.contract_sha256 || null;
   const work = contractSha256
     ? { contract_sha256: contractSha256, contract: await loadContract(paths, contractSha256) }
     : { contract_sha256: null, work: workPackage.task };
@@ -192,7 +192,7 @@ export async function runReviewWorker({
           REVIEW_LEVEL: job.review_level,
           REASONING_EFFORT: job.reasoning_effort,
           CLASSIFICATION_REASONS: (job.classification_reasons || []).join("; "),
-          RULES: String(control.v4?.work_package?.rules?.text || "").trim(),
+          RULES: String(control.run?.work_package?.rules?.text || "").trim(),
           REVIEW_INPUT: [REVIEW_INPUT_OPEN, JSON.stringify(reviewInput, null, 2), REVIEW_INPUT_CLOSE].join("\n"),
         });
         await writeText(promptPath, prompt);

@@ -80,7 +80,7 @@ The external checksum sidecar is optional supply-chain evidence for advanced con
 
 Controller state must be on a local filesystem with atomic file operations. Known synchronized and network-mounted locations fail preflight. Exclusive-create concurrency is not supported on OneDrive, Dropbox, iCloud Drive, UNC, NFS, CIFS, or SMB state paths. This RC has real local NTFS evidence; APFS and ext4 support must not be claimed until equivalent native evidence exists.
 
-On non-Windows systems, `npm run test:state-v4` is expected to report 19 passing suites and one skipped suite. AC-16 is the real local NTFS-only exercise; its skip is intentional outside Windows. AC-15 still verifies POSIX synchronized/network path rejection on every platform.
+On non-Windows systems, `npm run test:state-contract` is expected to report 19 passing suites and one skipped suite. AC-16 is the real local NTFS-only exercise; its skip is intentional outside Windows. AC-15 still verifies POSIX synchronized/network path rejection on every platform.
 
 The lower-level plan/apply interface remains an internal maintainer API for controlled upgrades and automation. Normal users should use `bridge.mjs init`; maintainer details are isolated in `docs/installer-contract.md`.
 

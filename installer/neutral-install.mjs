@@ -154,7 +154,6 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
 function neutralBridgeConfig({ profileId, roles, profile, watch = { port: DEFAULT_WATCH_PORT, strict_port: false }, retentionDays = DEFAULT_RETENTION_DAYS }) {
   return {
     schema_version: 4,
-    state_contract: "v4",
     profile_id: profileId,
     roles: {
       writer: { provider_id: roles.writer },
@@ -165,7 +164,7 @@ function neutralBridgeConfig({ profileId, roles, profile, watch = { port: DEFAUL
     requires_human_authorization: true,
     watch: { port: watch.port, strict_port: watch.strict_port },
     retention: { days: retentionDays },
-    // T0-07 V4.2: the language pack for result files, notifications and the stdout summary.
+    // The language pack for result files, notifications and the stdout summary.
     locale: "en",
     // T0-06 G1.3: the profile-approved verification rules; work-plan picks Gate A from here.
     gate_a: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
@@ -1229,6 +1228,8 @@ export async function applyNeutralUninstall(plan, approval, hooks = {}) {
 
 const OWNER_EDITABLE_KEYS = Object.freeze(["watch", "retention", "locale", "gate_a"]);
 const PROTECTED_KEYS = Object.freeze(["roles", "requires_human_authorization", "readiness"]);
+// Keys an earlier Bridge wrote and no longer uses; an upgrade removes them.
+const RETIRED_KEYS = Object.freeze(["state_contract"]);
 const CONFIG_RELATIVE = "review-bridge/bridge.json";
 const TEMPLATE_RELATIVE = "work-packages/TEMPLATE.md";
 const TEMPLATE_NEW_RELATIVE = "work-packages/TEMPLATE.new.md";
@@ -1267,9 +1268,10 @@ function mergeBridgeConfig(current, defaults) {
   const kept = (key) => OWNER_EDITABLE_KEYS.includes(key) || PROTECTED_KEYS.includes(key);
   const merged = {};
   for (const key of Object.keys(defaults)) merged[key] = kept(key) && Object.hasOwn(current, key) ? current[key] : defaults[key];
-  for (const key of Object.keys(current)) if (!Object.hasOwn(merged, key)) merged[key] = current[key];
+  for (const key of Object.keys(current)) if (!Object.hasOwn(merged, key) && !RETIRED_KEYS.includes(key)) merged[key] = current[key];
   return {
     merged,
+    removed: Object.keys(current).filter((key) => RETIRED_KEYS.includes(key)),
     added: Object.keys(defaults).filter((key) => !Object.hasOwn(current, key)),
     updated: Object.keys(defaults).filter((key) => Object.hasOwn(current, key) && !kept(key) && !sameValue(current[key], defaults[key])),
   };
@@ -1318,9 +1320,9 @@ async function planFreshUpgrade(root, backupRootOverride) {
   if (from.runtime_sha256 === to.runtime_sha256) return { up_to_date: true, target: root, version: to.version, runtime_sha256: to.runtime_sha256 };
   const config = JSON.parse(await fsp.readFile(inPrivate(privateRoot, CONFIG_RELATIVE), "utf8"));
   const defaults = await defaultConfigFor(root, config, manifest);
-  if (config.schema_version !== defaults.schema_version || config.state_contract !== defaults.state_contract) {
-    throw new Error("The new version uses another bridge.json schema (" + config.schema_version + "/" + config.state_contract + " to "
-      + defaults.schema_version + "/" + defaults.state_contract + "); converting data across major versions is not supported.");
+  if (config.schema_version !== defaults.schema_version) {
+    throw new Error("The new version uses another bridge.json schema (" + config.schema_version + " to "
+      + defaults.schema_version + "); converting data across schemas is not supported.");
   }
   const merge = mergeBridgeConfig(config, defaults);
   const templateNow = sha256(await fsp.readFile(inPrivate(privateRoot, TEMPLATE_RELATIVE)));
@@ -1356,6 +1358,7 @@ async function planFreshUpgrade(root, backupRootOverride) {
     user_files: userFiles.slice(0, 20),
     config_added_keys: merge.added,
     config_updated_keys: merge.updated,
+    config_removed_keys: merge.removed,
     template: {
       modified: templateModified,
       action: templateAction,
@@ -1947,6 +1950,7 @@ export function formatUpgradePlan(plan) {
     ...(plan.user_file_count > plan.user_files.length ? ["  …另外 " + (plan.user_file_count - plan.user_files.length) + " 個"] : []),
     ...(plan.config_added_keys.length ? ["bridge.json 會補上新設定：" + plan.config_added_keys.join("、")] : []),
     ...(plan.config_updated_keys.length ? ["bridge.json 會更新 Bridge 自己的設定：" + plan.config_updated_keys.join("、")] : []),
+    ...(plan.config_removed_keys.length ? ["bridge.json 會移除 Bridge 不再使用的設定：" + plan.config_removed_keys.join("、")] : []),
     template,
     ...(plan.policy_changed ? ["新版的預設 policy 不同：升級後未開始的授權會失效，需重新建 plan。"] : []),
     ...(plan.service_running ? ["會先停掉網頁服務，升級後再啟動。"] : []),

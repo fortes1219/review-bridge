@@ -12,18 +12,18 @@ import { spawn, spawnSync } from "node:child_process";
 import { consumeRun, readRun } from "../service/records/runStore.mjs";
 import { isPidAlive } from "../service/agentCli/process.mjs";
 import { recordProcessOrKill, runMustStop } from "../features/workOrder/writerLoop.mjs";
-import { authorizeV4WorkPackage, createV4WorkPackagePlan, FORBIDDEN_PATHS } from "../features/workOrder/workPackage.mjs";
+import { authorizeWorkPackage, createWorkPackagePlan, FORBIDDEN_PATHS } from "../features/workOrder/workPackage.mjs";
 import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath, recordWindow, snapshotWorkspace } from "../features/workOrder/workspaceEvidence.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");
 
 async function runtime(t) {
-  const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-wp-v4-"));
+  const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-wp-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
-    schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
+    schema_version: 4, active_runs: "derive_from_run_projections",
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
@@ -59,7 +59,7 @@ ${references}
 async function plan(runtime, { task, allowedPaths, id = "wp-" + Math.random().toString(16).slice(2, 8) } = {}) {
   const taskFile = path.join(runtime.paths.privateRoot, id + ".md");
   await fsp.writeFile(taskFile, task);
-  return await createV4WorkPackagePlan({
+  return await createWorkPackagePlan({
     paths: runtime.paths,
     taskFile,
     owner: "Fortes",
@@ -110,7 +110,7 @@ test("T8 an explicit --allow-paths must exist and stay out of the forbidden list
   const outside = await plan(r, { task: order({ references: "src/game/" }), allowedPaths: "README.md" });
   assert.deepEqual(outside.scope.allowed_paths, ["README.md"]);
   // Legacy inline task without markers still needs an explicit scope.
-  await assert.rejects(createV4WorkPackagePlan({
+  await assert.rejects(createWorkPackagePlan({
     paths: r.paths, task: "plain task", owner: "o", workPackage: "legacy-1", breakpoint: "b", changeTypes: "code",
     maxCalls: 1, maxMinutes: 5, outPath: path.join(r.paths.privateRoot, "legacy.plan.json"),
   }), /allowed path is required/);
@@ -135,11 +135,11 @@ test("T10 authorize fails closed when the work order or rules.md changed after t
   // A file the work order mentions may change freely; it is context, not part of the seal.
   await fsp.writeFile(path.join(r.repoRoot, "src", "game", "farm.js"), "// changed after the plan\n");
   await fsp.appendFile(path.join(r.paths.privateRoot, "stale-order.md"), "- One more acceptance line.\n");
-  await assert.rejects(authorizeV4WorkPackage({ paths: r.paths, planPath: sealed.plan_path, approval: sealed.plan_sha256, executionMode: "fake_cli" }),
+  await assert.rejects(authorizeWorkPackage({ paths: r.paths, planPath: sealed.plan_path, approval: sealed.plan_sha256, executionMode: "fake_cli" }),
     /The work order \.review-bridge\/stale-order\.md changed after the plan was built\. Build a new plan\./);
   const sealedRules = await plan(r, { task: order(), id: "stale-rules" });
   await fsp.appendFile(path.join(r.paths.configRoot, "rules.md"), "\n再加一條。\n");
-  await assert.rejects(authorizeV4WorkPackage({ paths: r.paths, planPath: sealedRules.plan_path, approval: sealedRules.plan_sha256, executionMode: "fake_cli" }),
+  await assert.rejects(authorizeWorkPackage({ paths: r.paths, planPath: sealedRules.plan_path, approval: sealedRules.plan_sha256, executionMode: "fake_cli" }),
     /批准後 \.review-bridge\/review-bridge\/rules\.md 變了/);
 });
 
@@ -157,7 +157,7 @@ test("T11 a missing, empty or oversized rules.md stops work-plan", async (t) => 
 test("T12 authorized_by is the OS user and authorized_via records how work-start was answered", async (t) => {
   const r = await runtime(t);
   const a = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "auth-a" });
-  const started = await authorizeV4WorkPackage({ paths: r.paths, planPath: a.plan_path, approval: a.plan_sha256, executionMode: "fake_cli", authorizedVia: "approve_flag" });
+  const started = await authorizeWorkPackage({ paths: r.paths, planPath: a.plan_path, approval: a.plan_sha256, executionMode: "fake_cli", authorizedVia: "approve_flag" });
   assert.equal(started.authorization.authorized_by, os.userInfo().username);
   assert.equal(started.authorization.authorized_via, "approve_flag");
   assert.notEqual(started.authorization.authorized_by, "Fortes-typed-into-the-plan");
@@ -165,7 +165,7 @@ test("T12 authorized_by is the OS user and authorized_via records how work-start
   assert.equal(run.authorized_by, os.userInfo().username);
   assert.equal(run.authorized_via, "approve_flag");
   const b = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "auth-b" });
-  const viaYes = await authorizeV4WorkPackage({ paths: r.paths, planPath: b.plan_path, approval: b.plan_sha256, executionMode: "fake_cli", authorizedVia: "yes_flag" });
+  const viaYes = await authorizeWorkPackage({ paths: r.paths, planPath: b.plan_path, approval: b.plan_sha256, executionMode: "fake_cli", authorizedVia: "yes_flag" });
   assert.equal(viaYes.authorization.authorized_via, "yes_flag");
   assert.equal((await readJson(path.join(r.paths.authorizationsDir, viaYes.authorization.authorization_id + ".json"))).authorized_via, "yes_flag");
 });
@@ -196,14 +196,14 @@ test("a writer or Gate A process recorded after its run was stopped is killed; o
   const sleeper = () => spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { windowsHide: true, stdio: "ignore" });
   const waitExit = (child) => new Promise((resolve) => child.once("exit", resolve));
   const running = await plan(r, { task: order(), id: "proc-running" });
-  const live = await authorizeV4WorkPackage({ paths: r.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
+  const live = await authorizeWorkPackage({ paths: r.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
   const kept = sleeper();
   t.after(() => { try { kept.kill(); } catch {} });
   await recordProcessOrKill(r.paths, live.run.run_id, { pid: kept.pid, role: "writer", provider: "claude", call: 1 });
   assert.equal(isPidAlive(kept.pid), true);
   await consumeRun(r.paths, live.run.run_id, "cancelled", null);
   const stopping = await plan(r, { task: order(), id: "proc-stopped" });
-  const stopped = await authorizeV4WorkPackage({ paths: r.paths, planPath: stopping.plan_path, approval: stopping.plan_sha256, executionMode: "fake_cli" });
+  const stopped = await authorizeWorkPackage({ paths: r.paths, planPath: stopping.plan_path, approval: stopping.plan_sha256, executionMode: "fake_cli" });
   await consumeRun(r.paths, stopped.run.run_id, "stopped", null);
   const late = sleeper();
   const exited = waitExit(late);
@@ -216,7 +216,7 @@ test("a writer or Gate A process recorded after its run was stopped is killed; o
 test("a process whose run record cannot be read is killed; the stop check never reads an unknown status as running", { timeout: 30_000 }, async (t) => {
   const r = await runtime(t);
   const running = await plan(r, { task: order(), id: "proc-known" });
-  const live = await authorizeV4WorkPackage({ paths: r.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
+  const live = await authorizeWorkPackage({ paths: r.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
   assert.equal(await runMustStop(r.paths, live.run.run_id), false);
   assert.equal(await runMustStop(r.paths, "run-without-record-0001"), true);
   // A run file that does not parse (a torn write, a disk error) makes the status unreadable.

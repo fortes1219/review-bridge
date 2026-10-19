@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { writeJson } from "../service/records/fileStore.mjs";
 import { consumeRun, readRun, recordRunState, RunEndedError, stopRunRecord } from "../service/records/runStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../features/workOrder/workPackage.mjs";
+import { authorizeWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 import { stopRun } from "../features/workOrder/writerLoop.mjs";
+import { deliverOutcome } from "../features/workOrder/delivery.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -18,14 +19,14 @@ async function runningRun(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-closing-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections" });
+  await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# demo\n");
-  const plan = await createV4WorkPackagePlan({
+  const plan = await createWorkPackagePlan({
     paths, task: "Update README.md only.", owner: "Fortes", workPackage: "closing", breakpoint: "return after review",
     changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, "closing.plan.json"),
   });
-  const authorization = await authorizeV4WorkPackage({ paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
+  const authorization = await authorizeWorkPackage({ paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
   return { paths, runId: authorization.run.run_id };
 }
 
@@ -136,4 +137,31 @@ test("a process started after the stop that cannot be killed is not ignored by t
   await assert.rejects(recordProcessOrKill(paths, runId, { pid, role: "writer", provider: "claude", call: 1 }), /could not be killed/);
   // Its record stays, so a later stop can try again.
   await fsp.access(path.join(paths.runLocksDir, runId + ".process.json"));
+});
+
+// Codex review of the new-version start: the old run's own work-start may deliver as soon as the
+// locked stop is written, before stopRun records its event. The new run is named from the record.
+test("a run stopped for a new start names that run from its own record, and says it replaced this one only once it exists", async (t) => {
+  const { paths, runId } = await runningRun(t);
+  const next = "0f6c7a1e-3b2d-4c8e-9a51-6d2e8f4b7c90";
+  await stopRunRecord(paths, runId, { closedReason: "superseded", supersededBy: next });
+  assert.equal((await readRun(paths, runId)).superseded_by, next);
+  const early = await fsp.readFile((await deliverOutcome({ paths, runId, notify: false })).result_path, "utf8");
+  assert.match(early, new RegExp("started again as a new version: run " + next + "\. That run had not been created when this result was written"));
+  assert.doesNotMatch(early, /replaced this one/);
+
+  // A second stopped run whose new start did get its run.
+  const plan = await createWorkPackagePlan({
+    paths, task: "Update README.md only.", owner: "Fortes", workPackage: "closing-next", breakpoint: "return after review",
+    changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, "closing-next.plan.json"),
+  });
+  const successor = (await authorizeWorkPackage({ paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" })).run.run_id;
+  const other = await createWorkPackagePlan({
+    paths, task: "Update README.md only.", owner: "Fortes", workPackage: "closing-old", breakpoint: "return after review",
+    changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, "closing-old.plan.json"),
+  });
+  const replaced = (await authorizeWorkPackage({ paths, planPath: other.plan_path, approval: other.plan_sha256, executionMode: "fake_cli" })).run.run_id;
+  await stopRunRecord(paths, replaced, { closedReason: "superseded", supersededBy: successor });
+  const late = await fsp.readFile((await deliverOutcome({ paths, runId: replaced, notify: false })).result_path, "utf8");
+  assert.match(late, new RegExp("started again as a new version: run " + successor + " replaced this one\."));
 });

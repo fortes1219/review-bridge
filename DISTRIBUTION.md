@@ -38,7 +38,7 @@ Requirements: Node.js 22 or newer. Git is optional. Native work requires Claude 
 ```powershell
 npm test
 npm run test:runtime
-npm run test:state-v4:evidence
+npm run test:state-contract:evidence
 npm run smoke:windows
 ```
 

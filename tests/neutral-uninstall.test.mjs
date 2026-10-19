@@ -223,20 +223,20 @@ test("V3 maintenance blocks new work, and a run claimed as the marker appears is
   await install(root);
   const runtimeRoot = path.join(root, ".review-bridge", "tools", "review-bridge");
   const { getBridgePaths } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "utils", "paths.mjs")).href);
-  const { createV4WorkPackagePlan, authorizeV4WorkPackage, cancelIfMaintenance } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "features", "workOrder", "workPackage.mjs")).href);
+  const { createWorkPackagePlan, authorizeWorkPackage, cancelIfMaintenance } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "features", "workOrder", "workPackage.mjs")).href);
   const { readRun } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "service", "records", "runStore.mjs")).href);
   const paths = getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" });
-  const makePlan = async (id) => createV4WorkPackagePlan({
+  const makePlan = async (id) => createWorkPackagePlan({
     paths, task: "Update package.json only.", owner: "o", workPackage: id, breakpoint: "b", changeTypes: "docs",
     allowedPaths: "package.json", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, id + ".plan.json"),
   });
   const marker = path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
   const blocked = await makePlan("blocked-1");
   await fsp.writeFile(marker, JSON.stringify({ operation: "uninstall", upgrade_id: "x" }));
-  await assert.rejects(authorizeV4WorkPackage({ paths, planPath: blocked.plan_path, approval: blocked.plan_sha256, executionMode: "fake_cli" }), /Runtime upgrade is in progress/);
+  await assert.rejects(authorizeWorkPackage({ paths, planPath: blocked.plan_path, approval: blocked.plan_sha256, executionMode: "fake_cli" }), /Runtime upgrade is in progress/);
   await fsp.rm(marker);
   const raced = await makePlan("raced-1");
-  const authorized = await authorizeV4WorkPackage({ paths, planPath: raced.plan_path, approval: raced.plan_sha256, executionMode: "fake_cli" });
+  const authorized = await authorizeWorkPackage({ paths, planPath: raced.plan_path, approval: raced.plan_sha256, executionMode: "fake_cli" });
   await fsp.writeFile(marker, JSON.stringify({ operation: "uninstall", upgrade_id: "x" }));
   await assert.rejects(cancelIfMaintenance(paths, authorized.run.run_id), /maintenance_in_progress/);
   const run = await readRun(paths, authorized.run.run_id);
@@ -248,7 +248,7 @@ test("V3 maintenance blocks new work, and a run claimed as the marker appears is
   assert.equal(result.ok, true);
 });
 
-test("V4 / V5 / V8e approval binds the plan; invalid targets, held locks, foreign markers, inside backups and --yes are refused", async (t) => {
+test("approval binds the plan; invalid targets, held locks, foreign markers, inside backups and --yes are refused", async (t) => {
   const root = await workspace(t);
   await assert.rejects(planNeutralUninstall({ target: root }), /No Review Bridge installation here/);
   await install(root);

@@ -23,7 +23,7 @@ Stage 2 development: role-first onboarding replaces the fixed Claude-writer/Code
 - Never modify tracked `.gitignore`; stop if `.claude/` is not already ignored.
 - Merge JSON structurally and own exactly one review-bridge Stop hook.
 - Fresh install creates no CONTROL, authorization, claim, run, or copied session identity.
-- Upgrade activation follows `docs/state-contract-v4.md` D5: stage a complete runtime, hold an upgrade marker, switch directories without exposing partial contents, report invalidated authorization IDs, and fail closed after interruption.
+- Upgrade activation follows `docs/state-contract.md` D5: stage a complete runtime, hold an upgrade marker, switch directories without exposing partial contents, report invalidated authorization IDs, and fail closed after interruption.
 - Use ownership hashes, a transaction lock, a short-lived transaction backup, post-apply verification, and persistent rollback points.
 - Keep persistent snapshots outside the target repository. On Windows the default root is `%LOCALAPPDATA%\CodexReviewBridge\backups`.
 - Snapshot the managed runtime, project rule, Claude settings, queue, reviews, and ownership manifest before mutation.

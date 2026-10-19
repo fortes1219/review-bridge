@@ -88,7 +88,7 @@ test("the work version comes from Git without touching it; without Git it is unk
 });
 
 test("Gate A always has a time limit; a missing one refuses to run instead of running without one", async () => {
-  assert.equal(effectiveLimits({ v4: { policy_snapshot: { effective_policy: { limits: { gate_a_minutes: 3 } } } } }).gate_a_minutes, 3);
+  assert.equal(effectiveLimits({ run: { policy_snapshot: { effective_policy: { limits: { gate_a_minutes: 3 } } } } }).gate_a_minutes, 3);
   assert.equal(effectiveLimits({}).gate_a_minutes, 10);
   await assert.rejects(runGateA({ paths: { repoRoot: os.tmpdir() }, gateA: { kind: "command", command: "node -e 0" }, stdoutPath: "x", stderrPath: "y", timeoutMs: Number.NaN }), /no valid time limit/);
 });

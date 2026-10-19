@@ -12,9 +12,9 @@ import { fileExists, readJson, writeJson } from "../service/records/fileStore.mj
 import { getBridgePaths } from "../utils/paths.mjs";
 import { createRunRuntimeState, readRun } from "../service/records/runStore.mjs";
 import {
-  authorizeV4WorkPackage,
-  createV4WorkPackagePlan,
-  v4WorkPackageStatus,
+  authorizeWorkPackage,
+  createWorkPackagePlan,
+  workPackageStatus,
 } from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,7 +34,7 @@ const at = args.indexOf("--session-id") >= 0 ? args.indexOf("--session-id") : ar
 const session = args[at + 1];
 const mode = process.env.T_CLAUDE;
 if (process.env.T_ARGS_OUT) await fsp.writeFile(process.env.T_ARGS_OUT, JSON.stringify(args.slice(2)));
-// T0-05: a v4 run asks for a schema; the typed answer is built from the injected task.input.
+// T0-05: a run asks for a schema; the typed answer is built from the injected task.input.
 const call = Number(/"call": (\\d+)/.exec(prompt)?.[1] || 1);
 const handoffAt = prompt.indexOf("=== HANDOFF ===");
 const addressed = handoffAt >= 0 ? [...prompt.slice(handoffAt).matchAll(/"id": "(F\\d+)"/g)].map((m) => m[1]) : [];
@@ -127,7 +127,7 @@ async function makeRuntime(t, override = { schema_version: 4 }, { git = false } 
   t.after(() => fsp.rm(toolsRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
-    schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
+    schema_version: 4, active_runs: "derive_from_run_projections",
     gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
   await writeJson(paths.policyOverridePath, override);
@@ -157,7 +157,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
   }
   const argsOut = path.join(runtime.toolsRoot, "claude-args.json");
   const planPath = path.join(runtime.paths.queueRoot, "plan.json");
-  const plan = await createV4WorkPackagePlan({
+  const plan = await createWorkPackagePlan({
     paths: runtime.paths,
     task: "Update README.md only.",
     owner: "Human Owner",
@@ -169,7 +169,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     maxMinutes: 1,
     outPath: planPath,
   });
-  const authorization = await authorizeV4WorkPackage({
+  const authorization = await authorizeWorkPackage({
     paths: runtime.paths, planPath, approval: plan.plan_sha256, executionMode: "fake_cli",
   });
   const adapter = {
@@ -217,7 +217,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     if (previousGateExit === undefined) delete process.env.FAKE_GATE_EXIT;
     else process.env.FAKE_GATE_EXIT = previousGateExit;
   }
-  const status = await v4WorkPackageStatus(runtime.paths, runId);
+  const status = await workPackageStatus(runtime.paths, runId);
   const claudeArgs = await fileExists(argsOut) ? JSON.parse(await fsp.readFile(argsOut, "utf8")) : null;
   return { runtime, exitCode, error, status, claudeArgs, run: await readRun(runtime.paths, runId) };
 }
@@ -351,7 +351,7 @@ test("project override sets the writer model; failure states record it too", asy
 
 test("a malformed writer model override is refused", async (t) => {
   const runtime = await makeRuntime(t, { schema_version: 4, writer: { model: "opus --dangerously" } });
-  await assert.rejects(createV4WorkPackagePlan({
+  await assert.rejects(createWorkPackagePlan({
     paths: runtime.paths,
     task: "Update README.md only.",
     owner: "Human Owner",

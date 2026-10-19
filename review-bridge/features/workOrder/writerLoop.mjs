@@ -85,7 +85,7 @@ function sameAuthorization(current, expected) {
 }
 
 async function consumeAuthorization(paths, expected, reason, gate = null) {
-  await expected.v4_runtime_state.consume(reason, gate);
+  await expected.runtime_state.consume(reason, gate);
 }
 
 async function loadLiveControl(paths, runtimeState) {
@@ -96,7 +96,7 @@ export const DEFAULT_WRITER_MODEL = "opus";
 
 // The policy snapshot pins the model; a snapshot without one uses the package default.
 export function writerModelFor(control) {
-  return control?.v4?.policy_snapshot?.effective_policy?.writer?.model || DEFAULT_WRITER_MODEL;
+  return control?.run?.policy_snapshot?.effective_policy?.writer?.model || DEFAULT_WRITER_MODEL;
 }
 
 async function writeBoundedState(paths, runtimeState, state) {
@@ -182,9 +182,9 @@ const CONTRACT_EXIT_CODES = Object.freeze({
 
 // A work-order run gets its contract once, before the writer's first call; a resumed run keeps it.
 async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId }) {
-  const workPackage = control.v4.work_package;
+  const workPackage = control.run.work_package;
   if (!workPackage.task_file) return { sha256: null, exitCode: null };
-  if (control.v4.contract_sha256) return { sha256: control.v4.contract_sha256, exitCode: null };
+  if (control.run.contract_sha256) return { sha256: control.run.contract_sha256, exitCode: null };
   if (!workPackage.contract_steps) throw new Error("The work package names no contract steps; build a new plan.");
   const runId = runtimeState.runId;
   const policy = control.codex_policy || {};
@@ -214,7 +214,7 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
 // gate_a_minutes was missing here until RC3-BLOCKER-00, which left Gate A with no time limit.
 export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, max_tokens_per_call: 1_500_000, max_tokens_per_run: 4_000_000, max_output_chars: 4_000, gate_a_minutes: 10 });
 export function effectiveLimits(control) {
-  const limits = control?.v4?.policy_snapshot?.effective_policy?.limits || {};
+  const limits = control?.run?.policy_snapshot?.effective_policy?.limits || {};
   return {
     max_turns: limits.max_turns ?? DEFAULT_LIMITS.max_turns,
     max_tokens_per_call: limits.max_tokens_per_call ?? DEFAULT_LIMITS.max_tokens_per_call,
@@ -253,7 +253,8 @@ async function unresolvedProcess(paths, runId) {
 }
 
 // T0-04 D5.2: mark the run stopped first so the writer loop sees it, then kill the process tree.
-export async function stopRun(paths, runId, { kill = killProcessTree } = {}) {
+// `supersededBy` is the run of a new version of the same work order that this stop makes room for.
+export async function stopRun(paths, runId, { kill = killProcessTree, supersededBy = null } = {}) {
   const run = await readRun(paths, runId).catch(() => null);
   if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
   // A stopped run that still has a pid record is a stop whose kill was not confirmed: retry the
@@ -265,7 +266,7 @@ export async function stopRun(paths, runId, { kill = killProcessTree } = {}) {
     let lastError = null;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        await stopRunRecord(paths, runId);
+        await stopRunRecord(paths, runId, { closedReason: supersededBy ? "superseded" : "stopped", supersededBy });
         lastError = null;
         break;
       } catch (error) {
@@ -293,6 +294,7 @@ export async function stopRun(paths, runId, { kill = killProcessTree } = {}) {
   await appendIoEvent(paths, runId, {
     event: "stop", status: "stopped", role: record?.role || null, provider: record?.provider || null,
     detail_ref: record ? "pid:" + record.pid + ":" + killed.reason : "no_process",
+    ...(supersededBy ? { superseded_by: supersededBy } : {}),
   });
   await fsp.rm(processFile(paths, runId), { force: true });
   return { exitCode: 0, line: "已停止 " + runId, reason: killed.reason };
@@ -337,7 +339,7 @@ export async function runBoundedResume({
   startNewSession = false,
   runtimeState,
 }) {
-  control.v4_runtime_state = runtimeState;
+  control.runtime_state = runtimeState;
   const invocationStartedAt = Date.now();
   const validation = await validateBoundedResume({
     paths, control, adapter, promptPath, maxCalls, maxMinutes,
@@ -365,7 +367,7 @@ export async function runBoundedResume({
 
     for (let call = 1; call <= maxCalls; call += 1) {
       currentControl = await loadLiveControl(paths, runtimeState);
-      currentControl.v4_runtime_state = runtimeState;
+      currentControl.runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization is no longer active.");
       }
@@ -375,7 +377,7 @@ export async function runBoundedResume({
       const stderrPath = path.join(paths.queueRoot, stamp + "-claude.stderr.log");
       const payloadPath = path.join(paths.queueRoot, stamp + "-stop-payload.json");
       const effectivePromptPath = path.join(paths.queueRoot, stamp + "-writer-only-prompt.txt");
-      const workPackage = currentControl.v4.work_package;
+      const workPackage = currentControl.run.work_package;
       const runId = runtimeState.runId;
       const limits = effectiveLimits(currentControl);
       // D2.1: every call is a fresh session; the run records the rotation.
@@ -384,7 +386,7 @@ export async function runBoundedResume({
         await runtimeState.rotateSession(sessionId);
         control.active_claude_session = sessionId;
         currentControl = await loadLiveControl(paths, runtimeState);
-        currentControl.v4_runtime_state = runtimeState;
+        currentControl.runtime_state = runtimeState;
       }
       let references;
       try {
@@ -655,7 +657,7 @@ export async function runBoundedResume({
         handoffReason = "correction";
       }
       currentControl = await loadLiveControl(paths, runtimeState);
-      currentControl.v4_runtime_state = runtimeState;
+      currentControl.runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization was cancelled before review enqueue.");
       }
@@ -673,7 +675,7 @@ export async function runBoundedResume({
         payload,
         paths,
         control: currentControl,
-        classificationProfile: classificationProfileFromSnapshot(currentControl.v4.policy_snapshot),
+        classificationProfile: classificationProfileFromSnapshot(currentControl.run.policy_snapshot),
         writerResult,
         call,
         openFindings: lastFindings,
@@ -872,7 +874,7 @@ export async function runBoundedResume({
       }
 
       currentControl = await loadLiveControl(paths, runtimeState);
-      currentControl.v4_runtime_state = runtimeState;
+      currentControl.runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization was cancelled before correction.");
       }

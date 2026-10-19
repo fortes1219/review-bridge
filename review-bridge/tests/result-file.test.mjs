@@ -14,7 +14,7 @@ import { loadOrCreatePolicySnapshot } from "../service/records/policySnapshots.m
 import { classifyOutcome, composeSections, deliverOutcome, deliverPendingRuns, OUTCOMES, renderResult, RESULT_MAX_BYTES, shellQuote, stdoutLines, tokenRows, windowsArgQuote } from "../features/workOrder/delivery.mjs";
 import { mergeRun } from "../features/records/retention.mjs";
 import { consumeRun, readRun, recordRunState, TERMINAL_RUN_STATUSES, withRunLock } from "../service/records/runStore.mjs";
-import { authorizeV4WorkPackage, createV4WorkPackagePlan } from "../features/workOrder/workPackage.mjs";
+import { authorizeWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");
@@ -25,7 +25,7 @@ async function runtime(t, { locale = "zh-TW" } = {}) {
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
-    schema_version: 4, state_contract: "v4", active_runs: "derive_from_run_projections",
+    schema_version: 4, active_runs: "derive_from_run_projections",
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     ...(locale ? { locale } : {}),
     gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
@@ -40,15 +40,15 @@ async function runtime(t, { locale = "zh-TW" } = {}) {
 
 const ORDER = "# Work order: farm\n\n## Work\nBuild a small farm.\n\n## Acceptance\n- The farm is visible.\n\n## References\n- README.md\n";
 
-// A real v4 run brought to `status` the way the state machine does it, with typed events behind it.
+// A real run brought to `status` the way the state machine does it, with typed events behind it.
 async function terminalRun(rt, status, { changeTypes = "docs", state = null, gate = null, events = [], task = null, id = "wo-" + Math.random().toString(16).slice(2, 8), breakpoint = "return after review", allowedPaths = null } = {}) {
   const taskFile = path.join(rt.paths.privateRoot, "work-packages", id + ".md");
   if (!task) await fsp.writeFile(taskFile, ORDER);
-  const plan = await createV4WorkPackagePlan({
+  const plan = await createWorkPackagePlan({
     paths: rt.paths, ...(task ? { task } : { taskFile }), owner: "Fortes", workPackage: id, breakpoint, changeTypes,
     ...(task || allowedPaths ? { allowedPaths: allowedPaths || "README.md" } : {}), maxCalls: 2, maxMinutes: 1, outPath: path.join(rt.paths.queueRoot, id + "-" + Math.random().toString(16).slice(2, 6) + ".plan.json"),
   });
-  const authorization = await authorizeV4WorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
+  const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
   const runId = authorization.run.run_id;
   for (const event of events) await appendIoEvent(rt.paths, runId, event);
   if (state) await recordRunState(rt.paths, runId, { call: 1, updated_at: new Date().toISOString(), ...state });
@@ -385,11 +385,11 @@ test("C6 work-cancel delivers on the spot", async (t) => {
   const rt = await runtime(t);
   const taskFile = path.join(rt.paths.privateRoot, "work-packages", "cancel.md");
   await fsp.writeFile(taskFile, ORDER);
-  const plan = await createV4WorkPackagePlan({
+  const plan = await createWorkPackagePlan({
     paths: rt.paths, taskFile, owner: "Fortes", workPackage: "cancel-1", breakpoint: "b", changeTypes: "docs",
     maxCalls: 1, maxMinutes: 1, outPath: path.join(rt.paths.queueRoot, "cancel-1.plan.json"),
   });
-  const authorization = await authorizeV4WorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
+  const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
   const original = process.stdout.write;
   process.stdout.write = () => true;
   let exitCode;

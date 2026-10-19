@@ -13,8 +13,8 @@ import {
   createImmutableWorkPackage,
 } from "../service/records/runStore.mjs";
 import {
-  createV4WorkPackagePlan,
-  v4WorkPackageStatus,
+  createWorkPackagePlan,
+  workPackageStatus,
 } from "../features/workOrder/workPackage.mjs";
 
 const sourceBridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -39,7 +39,7 @@ async function makeRuntime(prefix) {
     path.join(bridgeRoot, "config", "default-policy.json"),
   );
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, state_contract: "v4", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } });
+  await writeJson(paths.bridgeConfigPath, { schema_version: 4, roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   return { repoRoot, bridgeRoot, paths };
 }
@@ -85,7 +85,7 @@ test("R1 multiline task files allow newline, tab, and backticks", async () => {
   await fsp.writeFile(path.join(runtime.repoRoot, "README.md"), "# demo\n");
   await fsp.mkdir(path.dirname(taskFile), { recursive: true });
   await fsp.writeFile(taskFile, task, "utf8");
-  const plan = await createV4WorkPackagePlan({
+  const plan = await createWorkPackagePlan({
     paths: runtime.paths,
     taskFile,
     owner: "RC2 Test Owner",
@@ -113,7 +113,7 @@ test("R3 work-status selects updated_at newest and lists every run", async () =>
     runId: "a-newer-run",
     timestamp: "2026-08-28T01:00:00.000Z",
   });
-  const status = await v4WorkPackageStatus(runtime.paths);
+  const status = await workPackageStatus(runtime.paths);
   assert.equal(status.run_id, "a-newer-run");
   assert.deepEqual(status.runs.map((run) => run.run_id), ["a-newer-run", "z-older-run"]);
   assert.deepEqual(Object.keys(status.runs[0]).sort(), ["run_id", "status", "updated_at", "work_package"]);

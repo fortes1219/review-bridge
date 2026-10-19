@@ -3,6 +3,7 @@ import readline from "node:readline/promises";
 
 import { readJson } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
+import { runningVersions } from "./workPackage.mjs";
 
 // The model calls before the work, as the plan seals them; the human approves them with the plan.
 export function contractStepsLine(steps) {
@@ -11,13 +12,14 @@ export function contractStepsLine(steps) {
 }
 
 // The human reads the sealed plan at the terminal and answers y; the answer approves that plan's SHA.
-export async function confirmV4WorkStart(paths, planPath, assumeYes) {
+export async function confirmWorkStart(paths, planPath, assumeYes) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
   const plan = await readJson(resolvedPlan);
   if (plan.schema_version !== 4 || plan.operation !== "start_work_package") {
-    throw new Error("Unsupported v4 work plan.");
+    throw new Error("Unsupported work plan.");
   }
   if (assumeYes) return plan.plan_sha256;
+  const replaced = await runningVersions(paths, plan);
   process.stdout.write([
     "Work package: " + plan.work_package_id,
     "Owner: " + plan.owner,
@@ -28,6 +30,7 @@ export async function confirmV4WorkStart(paths, planPath, assumeYes) {
       + plan.budget.max_claude_minutes_per_call + " minute(s) per call",
     ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
     "Authorization expires at: " + plan.authorization_expires_at,
+    ...replaced.map((runId) => "Starting stops the version still running from this work order: run " + runId),
     "Task:",
     plan.task,
     "",

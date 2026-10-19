@@ -29,7 +29,7 @@ export function validateHookPayload(payload) {
 
 // T0-05 D2.4: the classifier reads the work text and the writer's typed claims, not prose.
 function classificationText(control, writerResult) {
-  const work = control.v4?.work_package?.task || "";
+  const work = control.run?.work_package?.task || "";
   const claims = (writerResult.changed || []).map((entry) => entry.path + " " + entry.summary);
   return [work, ...claims].join("\n");
 }
@@ -64,7 +64,7 @@ export async function enqueueReview({
   }
   const message = payload.last_assistant_message;
   if (!message.trim()) return { accepted: false, reason: "empty_message" };
-  // T0-05 D1.6: a v4 run is driven by the harness; only its typed writer result is a submission.
+  // T0-05 D1.6: a run is driven by the harness; only its typed writer result is a submission.
   if (!writerResult) return { accepted: false, reason: "harness_driven" };
 
   const policy = classifyReview(classificationText(control, writerResult), control, classificationProfile);
@@ -111,8 +111,8 @@ export async function enqueueReview({
       breakpoint: control.breakpoint || null,
       scope: control.authorized_scope || null,
       execution_mode: control.execution_mode || "native",
-      run_id: control.v4?.run_id || null,
-      effective_policy_sha256: control.v4?.policy_snapshot?.effective_policy_sha256 || null,
+      run_id: control.run?.run_id || null,
+      effective_policy_sha256: control.run?.policy_snapshot?.effective_policy_sha256 || null,
     },
     workspace_evidence: workspaceEvidence,
     ...policy,

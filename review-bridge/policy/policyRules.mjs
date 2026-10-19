@@ -177,7 +177,7 @@ export function codexPolicyFromSnapshot(snapshot) {
   const classification = snapshot.effective_policy.classification;
   return {
     classification_profile: "snapshot-" + snapshot.effective_policy_sha256,
-    classification: "controller_dynamic_v4",
+    classification: "controller_dynamic",
     default_review_level: classification.default_review_level,
     allowed_review_levels: structuredClone(classification.allowed_review_levels),
     effort_by_level: structuredClone(classification.effort_by_level),

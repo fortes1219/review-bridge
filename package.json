@@ -10,8 +10,8 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "test:runtime": "node --test review-bridge/tests/integration.test.mjs review-bridge/tests/platform.test.mjs",
-    "test:state-v4": "node --test review-bridge/tests/state-v4.acceptance.test.mjs",
-    "test:state-v4:evidence": "node scripts/run-state-v4-acceptance.mjs",
+    "test:state-contract": "node --test review-bridge/tests/state-contract.acceptance.test.mjs",
+    "test:state-contract:evidence": "node scripts/run-state-contract-acceptance.mjs",
     "checksums": "node scripts/generate-checksums.mjs",
     "verify:archive": "node scripts/verify-release-archive.mjs",
     "package:release": "node scripts/package-release.mjs",

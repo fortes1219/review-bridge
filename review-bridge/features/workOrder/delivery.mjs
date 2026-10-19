@@ -32,6 +32,54 @@ export const LOCK_RETRY_DELAY_MS = 250;
 export const LATE_DELIVERY_MS = 60_000;
 export const OUTCOMES = Object.freeze(["delivered", "needs_fix", "needs_human", "token_limit", "quota", "stopped", "cancelled", "error"]);
 
+export const ORDER_CHANGE_MAX_LINES = 20;
+
+// The work order as sealed at the start against the file as it is now. Null when they match
+// (outer blank lines aside), { missing } when the file is gone; otherwise the lines that left and
+// the lines that came, each in its own order, blank lines ignored. The fence is longer than any
+// run of backticks in those lines, so a code block inside the work order cannot close it.
+export function workOrderChange(sealed, current) {
+  if (current === null) return { missing: true };
+  if (String(sealed).trim() === String(current).trim()) return null;
+  const lines = (text) => String(text).split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line.trim());
+  const left = lines(sealed);
+  const right = lines(current);
+  const unmatched = (from, against) => {
+    const pool = new Map();
+    for (const line of against) pool.set(line, (pool.get(line) || 0) + 1);
+    return from.filter((line) => {
+      const count = pool.get(line) || 0;
+      if (count) { pool.set(line, count - 1); return false; }
+      return true;
+    });
+  };
+  const removed = unmatched(left, right);
+  const added = unmatched(right, left);
+  const longest = Math.max(0, ...[...removed, ...added].map((line) => Math.max(0, ...(line.match(/`+/g) || []).map((run) => run.length))));
+  return { removed, added, fence: "`".repeat(Math.max(3, longest + 1)) };
+}
+
+async function currentWorkOrder(paths, taskFile) {
+  try {
+    return await fsp.readFile(path.resolve(paths.repoRoot, ...taskFile.split("/")), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    return { unreadable: error.code || "error" };
+  }
+}
+
+function orderChangeLines(t, change) {
+  if (!change) return [];
+  if (change.unreadable) return [t("result.order_changed.unreadable", { code: change.unreadable })];
+  if (change.missing) return [t("result.order_changed.missing")];
+  const shown = (lines, mark) => [
+    ...lines.slice(0, ORDER_CHANGE_MAX_LINES).map((line) => mark + " " + line),
+    ...(lines.length > ORDER_CHANGE_MAX_LINES ? [mark + " " + t("result.order_changed.more", { count: lines.length - ORDER_CHANGE_MAX_LINES })] : []),
+  ];
+  const diff = [...shown(change.removed, "-"), ...shown(change.added, "+")];
+  return [t("result.order_changed.note"), ...(diff.length ? ["", change.fence + "diff", ...diff, change.fence] : [])];
+}
+
 // V1: the eight outcome codes, decided from the run record alone.
 export function classifyOutcome(run) {
   switch (run?.status) {
@@ -176,7 +224,7 @@ function writerCalls(run, events) {
 }
 
 // V2.2–V2.6: the sections, as arrays of lines, from typed records only.
-export function composeSections({ t, run, outcome, workPackage, plan, events, delta, contract = null, limits = {}, deliveredAt = Date.now() }) {
+export function composeSections({ t, run, outcome, workPackage, plan, events, delta, contract = null, orderChange = null, successorExists = false, limits = {}, deliveredAt = Date.now() }) {
   const name = workPackage?.task_file || workPackage?.work_package_id || run.work_package_id || run.run_id;
   const state = run.last_state || {};
   const calls = writerCalls(run, events);
@@ -263,7 +311,10 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     why.push(t("result.why.quota", { role: t("result.tokens.role." + role), provider }));
     if (failure?.reset_hint) why.push(t("result.why.quota.reset", { hint: failure.reset_hint }));
   } else if (outcome === "stopped") {
-    if (stop?.role) why.push(t("result.why.stopped", { call: state.call ?? calls, role: t.has("result.tokens.role." + stop.role) ? t("result.tokens.role." + stop.role) : stop.role }));
+    // The new run is named from the run record, written with the stop; it is said to have replaced
+    // this one only if it existed when this result was written.
+    if (run.closed_reason === "superseded") why.push(t(successorExists ? "result.why.superseded" : "result.why.superseded.pending", { run_id: run.superseded_by || t("result.acceptance.none") }));
+    else if (stop?.role) why.push(t("result.why.stopped", { call: state.call ?? calls, role: t.has("result.tokens.role." + stop.role) ? t("result.tokens.role." + stop.role) : stop.role }));
     else why.push(t("result.why.stopped.unknown"));
   } else if (outcome === "cancelled") {
     why.push(t("result.why.cancelled"));
@@ -329,7 +380,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
   }
 
   const line = oneLine({ t, outcome, review, gate, workPackage, state, failure, stop, run });
-  return { name, head, acceptance, why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, tokens, line, calls };
+  return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, tokens, line, calls };
 }
 
 // RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
@@ -360,7 +411,7 @@ function oneLine({ t, outcome, review, gate, workPackage, state, failure, stop, 
     case "needs_human": return t("line.needs_human");
     case "token_limit": return t("line.token_limit", { role: t("result.tokens.role." + (state.token_limit_role || stop?.role || "writer")) });
     case "quota": return t("line.quota", { role: t("result.tokens.role." + (failure?.role || "writer")), provider: failure?.provider || "" });
-    case "stopped": return t("line.stopped");
+    case "stopped": return run.closed_reason === "superseded" ? t("line.stopped.superseded") : t("line.stopped");
     case "cancelled": return t("line.cancelled");
     default: return t("line.error", { reason: run.closed_reason || run.status });
   }
@@ -403,6 +454,8 @@ export function renderResult({ t, sections, commands, runId, latest, closedAt = 
       ...sections.head.map((line) => clipLine(line, clip)),
       "",
       ...((sections.acceptance || []).length ? ["## " + t("result.section.acceptance"), ...sections.acceptance.map((line) => clipLine(line, clip)), ""] : []),
+      // At the tightest steps only the note stays; the listed lines are bounded but not needed.
+      ...((sections.orderChange || []).length ? ["## " + t("result.section.order_changed"), ...(trimmed ? sections.orderChange.slice(0, 1) : sections.orderChange).map((line) => clipLine(line, clip)), ""] : []),
       "## " + t("result.section.why"),
       ...why,
       ...(trimmed ? [t("result.content_trimmed")] : []),
@@ -516,7 +569,7 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   if (!TERMINAL_RUN_STATUSES.includes(run.status)) throw new Error("Run is still active: " + runId);
   // Everything is gathered before the lock; the build step only writes.
   const control = await loadControlView(paths, runId);
-  const workPackage = control.v4.work_package;
+  const workPackage = control.run.work_package;
   const plan = await planForRun(paths, runId);
   const events = await readIoEvents(paths, runId);
   let delta = null;
@@ -537,8 +590,12 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   }
   const outcome = classifyOutcome(run);
   // A contract that no longer loads is reported as such; its conditions then stay unknown.
-  const contract = control.v4.contract_sha256 ? await loadContract(paths, control.v4.contract_sha256).catch(() => null) : null;
-  const sections = composeSections({ t, run, outcome, workPackage, plan, events, delta, contract, limits: control.v4.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
+  const contract = control.run.contract_sha256 ? await loadContract(paths, control.run.contract_sha256).catch(() => null) : null;
+  // The work is judged on the sealed work order; an edit made since is shown, never used.
+  const current = workPackage?.task_file ? await currentWorkOrder(paths, workPackage.task_file) : undefined;
+  const orderChange = current === undefined ? null : current?.unreadable ? current : workOrderChange(workPackage.task, current);
+  const successorExists = run.superseded_by ? await readRun(paths, run.superseded_by).then(() => true, () => false) : false;
+  const sections = composeSections({ t, run, outcome, workPackage, plan, events, delta, contract, orderChange, successorExists, limits: control.run.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
   const commands = outcome === "delivered" ? null : await rebuildCommands({ paths, plan, workPackage });
   const runPath = path.join(paths.queueRoot, runId + ".result.md");
   const latestPath = latestPathFor(paths, workPackage, plan);
