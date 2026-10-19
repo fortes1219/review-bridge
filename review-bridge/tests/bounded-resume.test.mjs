@@ -210,6 +210,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
       maxMinutes: 1,
       startNewSession: true,
       runtimeState: createRunRuntimeState(runtime.paths, runId),
+      workLock: authorization.workLock,
     });
   } catch (caught) {
     error = caught;

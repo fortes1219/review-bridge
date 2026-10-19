@@ -268,7 +268,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     if (run.status === "acceptance_unverified") why.push(t("result.why.acceptance_unverified"));
     if (run.status === "start_point_lost") why.push(t("result.why.start_point_lost"));
     if (run.status === "evidence_changed") why.push(t("result.why.evidence_changed"));
-    if (run.status === "version_changed") why.push(t("result.why.version_changed"));
+    if (run.status === "version_changed") why.push(t(state.changed_after === "gate_a" ? "result.why.version_changed.gate_a" : "result.why.version_changed"));
     if (run.status === "evidence_unconfirmable") why.push(t("result.why.evidence_unconfirmable"));
     if (run.status === "scope_unverified") why.push(t("result.why.scope_unverified"));
     if (state.contract_questions?.length) {

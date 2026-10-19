@@ -1,275 +1,275 @@
 {
   "schema_version": 1,
-  "contract": "Review Bridge State Contract v4",
+  "contract": "Review Bridge State Contract",
   "generated_at": "2026-08-28T07:52:13.833Z",
-  "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+  "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
   "runtime": "v24.16.0",
   "operating_system": "Windows_NT 10.0.26200 x64",
   "filesystem": {
     "volume": "D:",
     "filesystem_type": "NTFS"
   },
-  "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap",
+  "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap",
   "acceptance": [
     {
       "id": "AC-01",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-01",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-02",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-02",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-03",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-03",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-04",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-04",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-05",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-05",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-06",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-06",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-07",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-07",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-08",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-08",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-09",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-09",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-10",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-10",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-11",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-11",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-12",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-12",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-13",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-13",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-14",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-14",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-15",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-15 / R7 unsafe synchronized or network storage fails preflight",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-16",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-16",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": "NTFS",
       "volume": "D:",
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-17",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-17",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-18",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-18",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-19",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-19",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     },
     {
       "id": "AC-20",
-      "primary_test": "review-bridge/tests/state-v4.acceptance.test.mjs",
+      "primary_test": "review-bridge/tests/state-contract.acceptance.test.mjs",
       "top_level_suite": "AC-20 / R2 the same approved plan cannot start twice",
-      "command": "node --test --test-reporter=tap review-bridge/tests/state-v4.acceptance.test.mjs",
+      "command": "node --test --test-reporter=tap review-bridge/tests/state-contract.acceptance.test.mjs",
       "result": "PASS",
       "timestamp": "2026-08-28T07:52:13.833Z",
       "runtime": "v24.16.0",
       "operating_system": "Windows_NT 10.0.26200 x64",
       "filesystem_type": null,
       "volume": null,
-      "raw_output": "docs/evidence/state-v4-acceptance-win32-x64-20260828.tap"
+      "raw_output": "docs/evidence/state-contract-acceptance-win32-x64-20260828.tap"
     }
   ]
 }

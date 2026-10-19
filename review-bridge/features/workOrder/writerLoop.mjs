@@ -24,7 +24,6 @@ import {
   writeText,
 } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
-import { timestampId } from "../../utils/dates.mjs";
 import { enqueueReview, hasPendingMessageHash } from "./reviewQueue.mjs";
 import { runReviewWorker } from "./review.mjs";
 import {
@@ -57,7 +56,7 @@ import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
 import { acceptanceRows, decideAcceptance, sameVersion, workVersion } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
 import { establishContract } from "./translation.mjs";
-import { clearProcess, killConfirmed, processFile, readRunStatus, recordProcess, recordProcessOrKill, runMustStop } from "./processRecords.mjs";
+import { callStamp, clearProcess, killConfirmed, processFile, readRunStatus, recordProcess, recordProcessOrKill, runMustStop, workLockFile } from "./processRecords.mjs";
 
 export { recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 
@@ -311,9 +310,19 @@ export async function validateBoundedResume({
   validateWriterPolicy(control, maxCalls, maxMinutes);
   const resolvedPrompt = assertUnder(path.resolve(promptPath), paths.privateRoot, "Bounded prompt");
   if (!(await fileExists(resolvedPrompt))) throw new Error("Prompt file is missing.");
-  const pending = await listJson(paths.pendingDir);
-  const running = await listJson(paths.runningDir);
-  if (pending.length || running.length) throw new Error("Review queue must be idle before bounded resume.");
+  // Only this run's own review jobs hold it back; other runs' reviews go on beside it. A job that
+  // moved between listing and reading is skipped; one that cannot be read counts as this run's.
+  const runId = control.run?.run_id || null;
+  for (const file of [...await listJson(paths.pendingDir), ...await listJson(paths.runningDir)]) {
+    let owner;
+    try {
+      owner = (await readJson(file)).authorization?.run_id ?? null;
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      owner = runId;
+    }
+    if (owner === runId) throw new Error("This run's review queue must be idle before bounded resume.");
+  }
   await adapter.resolveExecutable("claude");
   return {
     valid: true,
@@ -338,14 +347,19 @@ export async function runBoundedResume({
   maxMinutes,
   startNewSession = false,
   runtimeState,
+  workLock = null,
 }) {
   control.runtime_state = runtimeState;
   const invocationStartedAt = Date.now();
-  const validation = await validateBoundedResume({
-    paths, control, adapter, promptPath, maxCalls, maxMinutes,
-  });
-  const release = await acquireLock(paths.boundedLockPath);
+  // The run's own work lock: taken by work-start before the run existed, or here on a resume. Other
+  // runs hold their own and work side by side (decision 2026-10-17).
+  const release = workLock || await acquireLock(workLockFile(paths, runtimeState.runId));
+  let validation = null;
   try {
+    // Inside the try: a run that fails its checks is closed, never left running.
+    validation = await validateBoundedResume({
+      paths, control, adapter, promptPath, maxCalls, maxMinutes,
+    });
     const claude = await adapter.resolveExecutable("claude");
     let sessionId = validation.session_id;
     const writerModel = validation.model;
@@ -371,7 +385,7 @@ export async function runBoundedResume({
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization is no longer active.");
       }
-      const stamp = timestampId();
+      const stamp = callStamp(runtimeState.runId);
       const stdoutPath = path.join(paths.queueRoot, stamp + "-claude.stdout.json");
       const streamPath = path.join(paths.queueRoot, stamp + "-claude.stream.jsonl");
       const stderrPath = path.join(paths.queueRoot, stamp + "-claude.stderr.log");
@@ -671,6 +685,15 @@ export async function runBoundedResume({
       await writeJson(payloadPath, payload);
       // The version the reviewer will read; a Gate A result for another version proves nothing here.
       const reviewVersion = await workVersion(paths.repoRoot);
+      // Decision 2026-10-19: what Gate A tested must be what the reviewer reads. A project that changed
+      // since Gate A, whoever changed it (another run in this folder, or a person), stops here, before
+      // a review is paid for.
+      if (gateAResult?.kind === "command" && gateAResult.work_version?.kind === "git" && !sameVersion(gateAResult.work_version, reviewVersion)) {
+        await writeBoundedState(paths, runtimeState, { ...proofState, status: "version_changed", changed_after: "gate_a", updated_at: new Date().toISOString(), tested_version: gateAResult.work_version, review_version: reviewVersion });
+        await recordIo(paths, runId, { event: "stop", status: "version_changed", role: "controller", provider: null, detail_ref: "gate_a" });
+        await consumeAuthorization(paths, control, "version_changed");
+        return 0;
+      }
       const enqueued = await enqueueReview({
         payload,
         paths,
@@ -736,7 +759,7 @@ export async function runBoundedResume({
       // its verdicts do not belong to any version Bridge can name.
       const versionAfterReview = await workVersion(paths.repoRoot);
       if (reviewVersion.kind === "git" && !sameVersion(reviewVersion, versionAfterReview)) {
-        await writeBoundedState(paths, runtimeState, { ...proofState, status: "version_changed", updated_at: new Date().toISOString(), review_version: reviewVersion, version_after_review: versionAfterReview });
+        await writeBoundedState(paths, runtimeState, { ...proofState, status: "version_changed", changed_after: "review_start", updated_at: new Date().toISOString(), review_version: reviewVersion, version_after_review: versionAfterReview });
         await recordIo(paths, runId, { event: "stop", status: "version_changed", role: "controller", provider: null, detail_ref: "review" });
         await consumeAuthorization(paths, control, "version_changed");
         return 0;
@@ -885,7 +908,7 @@ export async function runBoundedResume({
   } catch (error) {
     if ((await readRunStatus(paths, runtimeState.runId)) === "stopped") return 130;
     const currentState = await runtimeState.getState().catch(() => null);
-    const stateBelongsToThisInvocation = currentState?.session_id === validation.session_id
+    const stateBelongsToThisInvocation = Boolean(validation) && currentState?.session_id === validation.session_id
       && Number.isFinite(Date.parse(currentState?.updated_at))
       && Date.parse(currentState.updated_at) >= invocationStartedAt;
     const liveControl = await loadLiveControl(paths, runtimeState).catch(() => null);
@@ -893,8 +916,8 @@ export async function runBoundedResume({
     if (!stateBelongsToThisInvocation && authorizationStillActive) {
       await writeBoundedState(paths, runtimeState, {
         status: "controller_failure",
-        writer_model: validation.model,
-        session_id: validation.session_id,
+        writer_model: validation?.model ?? writerModelFor(control),
+        session_id: validation?.session_id ?? String(control.active_claude_session),
         updated_at: new Date().toISOString(),
         error: error.message,
         failure: failureSummary(controllerError({ phase: "controller" })),

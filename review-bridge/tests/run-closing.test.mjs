@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,28 +7,44 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { writeJson } from "../service/records/fileStore.mjs";
-import { consumeRun, readRun, recordRunState, RunEndedError, stopRunRecord } from "../service/records/runStore.mjs";
+import { consumeRun, createRunRuntimeState, readRun, recordRunState, RunEndedError, stopRunRecord } from "../service/records/runStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { authorizeWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
-import { stopRun } from "../features/workOrder/writerLoop.mjs";
+import { authorizeWorkPackage, cancelWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
+import { callStamp, workLockFile } from "../features/workOrder/processRecords.mjs";
+import { runBoundedResume, stopRun, validateBoundedResume } from "../features/workOrder/writerLoop.mjs";
 import { deliverOutcome } from "../features/workOrder/delivery.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// One authorized, running run in a throwaway project (an inline task: no model call is involved).
-async function runningRun(t) {
+// A throwaway project with Bridge configured, and plans for inline tasks (no model call is involved).
+async function project(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-closing-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
   await writeJson(paths.policyOverridePath, { schema_version: 4 });
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# demo\n");
-  const plan = await createWorkPackagePlan({
-    paths, task: "Update README.md only.", owner: "Fortes", workPackage: "closing", breakpoint: "return after review",
-    changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, "closing.plan.json"),
+  return paths;
+}
+
+async function planFor(paths, name) {
+  return await createWorkPackagePlan({
+    paths, task: "Update README.md only.", owner: "Fortes", workPackage: name, breakpoint: "return after review",
+    changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, name + ".plan.json"),
   });
+}
+
+// Authorizes a plan; the work lock it hands over is let go, as no loop works the run here.
+async function authorized(paths, plan) {
   const authorization = await authorizeWorkPackage({ paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
-  return { paths, runId: authorization.run.run_id };
+  await authorization.workLock();
+  return authorization;
+}
+
+// One authorized, running run in a throwaway project.
+async function runningRun(t) {
+  const paths = await project(t);
+  return { paths, runId: (await authorized(paths, await planFor(paths, "closing"))).run.run_id };
 }
 
 const passState = { status: "pass", review_gate: "PASS", call: 1, updated_at: new Date().toISOString() };
@@ -151,17 +168,69 @@ test("a run stopped for a new start names that run from its own record, and says
   assert.doesNotMatch(early, /replaced this one/);
 
   // A second stopped run whose new start did get its run.
-  const plan = await createWorkPackagePlan({
-    paths, task: "Update README.md only.", owner: "Fortes", workPackage: "closing-next", breakpoint: "return after review",
-    changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, "closing-next.plan.json"),
-  });
-  const successor = (await authorizeWorkPackage({ paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" })).run.run_id;
-  const other = await createWorkPackagePlan({
-    paths, task: "Update README.md only.", owner: "Fortes", workPackage: "closing-old", breakpoint: "return after review",
-    changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, "closing-old.plan.json"),
-  });
-  const replaced = (await authorizeWorkPackage({ paths, planPath: other.plan_path, approval: other.plan_sha256, executionMode: "fake_cli" })).run.run_id;
+  const successor = (await authorized(paths, await planFor(paths, "closing-next"))).run.run_id;
+  const replaced = (await authorized(paths, await planFor(paths, "closing-old"))).run.run_id;
   await stopRunRecord(paths, replaced, { closedReason: "superseded", supersededBy: successor });
   const late = await fsp.readFile((await deliverOutcome({ paths, runId: replaced, notify: false })).result_path, "utf8");
   assert.match(late, new RegExp("started again as a new version: run " + successor + " replaced this one\."));
+});
+
+// Decision 2026-10-17: runs work side by side, each under its own work lock, taken before the run
+// exists. A start that cannot take it leaves nothing; one that fails after the run exists closes it.
+test("a start whose run is locked by another process creates nothing", async (t) => {
+  const paths = await project(t);
+  const plan = await planFor(paths, "locked");
+  const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { windowsHide: true, stdio: "ignore" });
+  t.after(() => { try { holder.kill(); } catch {} });
+  await writeJson(workLockFile(paths, plan.proposed_run_id), { pid: holder.pid });
+  await assert.rejects(authorizeWorkPackage({ paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" }),
+    /already being started or worked by another process; nothing was created/);
+  await assert.rejects(readRun(paths, plan.proposed_run_id));
+});
+
+test("a run whose checks fail after it was created is closed and its lock let go, never left running", async (t) => {
+  const paths = await project(t);
+  const plan = await planFor(paths, "failing");
+  const authorization = await authorizeWorkPackage({ paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
+  const runId = authorization.run.run_id;
+  await assert.rejects(runBoundedResume({
+    paths, control: authorization.control, adapter: {}, promptPath: path.join(paths.privateRoot, "missing-prompt.txt"),
+    maxCalls: 1, maxMinutes: 1, startNewSession: true, runtimeState: createRunRuntimeState(paths, runId), workLock: authorization.workLock,
+  }), /Prompt file is missing/);
+  const run = await readRun(paths, runId);
+  assert.equal(run.status, "controller_failure");
+  assert.ok(run.closed_at);
+  await assert.rejects(fsp.access(workLockFile(paths, runId)));
+});
+
+test("with several runs active, cancel names the one to cancel and leaves the others running", async (t) => {
+  const paths = await project(t);
+  const first = (await authorized(paths, await planFor(paths, "first"))).run.run_id;
+  const second = (await authorized(paths, await planFor(paths, "second"))).run.run_id;
+  await assert.rejects(cancelWorkPackage({ paths }), /Several runs are active; name the one to cancel with --run/);
+  await cancelWorkPackage({ paths, runId: second });
+  assert.equal((await readRun(paths, second)).status, "cancelled");
+  assert.equal((await readRun(paths, first)).status, "running");
+  await assert.rejects(cancelWorkPackage({ paths, runId: second }), /No active run/);
+});
+
+test("only this run's own review jobs hold its start back; another run's review does not", async (t) => {
+  const paths = await project(t);
+  const authorization = await authorized(paths, await planFor(paths, "queued"));
+  const check = () => validateBoundedResume({
+    paths, control: authorization.control, adapter: { resolveExecutable: async () => "claude" },
+    promptPath: authorization.promptPath, maxCalls: 1, maxMinutes: 1,
+  });
+  await fsp.mkdir(paths.pendingDir, { recursive: true });
+  await writeJson(path.join(paths.pendingDir, "other.json"), { authorization: { run_id: "5e3b1a7c-2d4f-4a6b-8c9d-0e1f2a3b4c5d" } });
+  assert.equal((await check()).valid, true);
+  await writeJson(path.join(paths.pendingDir, "own.json"), { authorization: { run_id: authorization.run.run_id } });
+  await assert.rejects(check(), /This run's review queue must be idle/);
+});
+
+test("two runs' calls in the same millisecond never share a file name", () => {
+  const first = callStamp("1a2b3c4d-0000-4000-8000-000000000000");
+  const second = callStamp("5e6f7a8b-0000-4000-8000-000000000000");
+  assert.match(first, /^\d{8}T\d{9}Z-r1a2b3c4d$/);
+  assert.notEqual(first.slice(-9), second.slice(-9));
 });

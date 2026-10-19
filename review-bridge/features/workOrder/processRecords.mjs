@@ -3,13 +3,34 @@
 // lock and only then reads the recorded pid; a call records its pid and then reads the status.
 // Whichever side comes second sees the other, so a process started around a stop does not keep
 // running.
+import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { ensureDir, killProcessTree, readRun, writeJsonAtomic } from "../../service/index.mjs";
+import { timestampId } from "../../utils/dates.mjs";
 
 export function processFile(paths, runId) {
   return path.join(paths.runLocksDir, runId + ".process.json");
+}
+
+// The work lock of one run: held by the process working it, from just before the run is created
+// until its loop returns. Runs of different work orders hold different locks and work side by side.
+export function workLockFile(paths, runId) {
+  return path.join(paths.runLocksDir, runId + ".work.lock");
+}
+
+// The start lock of one work order, keyed by its file identity (workOrderIdentity): held from
+// looking for its running version until the new run exists, so two starts of one work order never
+// both find nothing to replace, however its path is spelled. Starts of different work orders take
+// different locks and do not wait for each other.
+export function startLockFile(paths, identity) {
+  return path.join(paths.runLocksDir, "start-" + createHash("sha256").update(String(identity)).digest("hex").slice(0, 16) + ".lock");
+}
+
+// File names for one call of one run: the time, then the run, so two runs never share a name.
+export function callStamp(runId) {
+  return timestampId() + "-r" + String(runId || "").slice(0, 8);
 }
 
 export async function recordProcess(paths, runId, record) {

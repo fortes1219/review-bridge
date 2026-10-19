@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
 import {
+  acquireLock,
   claimStartAuthorization,
   consumeRun,
   createAuthorization,
@@ -24,7 +25,7 @@ import { digest } from "../../utils/digest.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspaceEvidence.mjs";
 import { recheckGateA, selectGateA } from "./gateA.mjs";
 import { MAX_TRANSLATION_ATTEMPTS } from "./contract.mjs";
-import { processFile } from "./processRecords.mjs";
+import { processFile, startLockFile, workLockFile } from "./processRecords.mjs";
 import { DEFAULT_WRITER_MODEL, stopRun } from "./writerLoop.mjs";
 
 // The model calls that turn a work order into a contract run before any work, so the plan names
@@ -213,13 +214,35 @@ export async function createWorkPackagePlan({
 
 const RUNNING_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
 
-// The runs a start of this plan replaces: runs of the same work order file still running, or
-// stopped with a kill not yet confirmed. Saving the file replaces nothing; only a start does. A
-// running run whose record cannot be read refuses the start instead of being guessed at. A plan
-// already used (its run exists) replaces nothing; the start refuses that plan later anyway.
+// A work order is known by the file the file system says it is, never by how its path is spelled:
+// two spellings of one file (Abc and abc where names ignore case) give one identity, and two files
+// (Abc and abc where names keep case) give two. No setting such as core.ignoreCase and no rule per
+// operating system is consulted. Null when the file is gone. A file system that gives no file id
+// leaves the work order unidentified, and the start is refused rather than guessed at.
+export async function workOrderIdentity(paths, taskFile) {
+  let stat;
+  try {
+    stat = await fsp.stat(path.resolve(paths.repoRoot, ...String(taskFile).split("/")), { bigint: true });
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+  if (!stat.isFile() || !stat.ino || !stat.dev) {
+    throw new Error("The file system gives no file id for " + taskFile + ", so Bridge cannot tell which work order it is; the start is refused.");
+  }
+  return stat.dev.toString() + ":" + stat.ino.toString();
+}
+
+// The runs of the same work order file still running, or stopped with a kill not yet confirmed.
+// `unchanged` marks a running one sealed from the same work order text as this plan: that is not
+// an older version, and a start must not stop it. Saving the file replaces nothing; only a start
+// does. A running run whose record cannot be read refuses the start instead of being guessed at. A
+// plan already used (its run exists) replaces nothing; the start refuses that plan later anyway.
 export async function runningVersions(paths, plan) {
   if (!plan.task_file) return [];
   if (await readRun(paths, plan.proposed_run_id).then(() => true, () => false)) return [];
+  const identity = await workOrderIdentity(paths, plan.task_file);
+  if (!identity) throw new Error("The work order " + plan.task_file + " is missing.");
   const found = [];
   for (const run of await listRuns(paths)) {
     const unresolved = run.status === "stopped" && await fileExists(processFile(paths, run.run_id));
@@ -230,19 +253,22 @@ export async function runningVersions(paths, plan) {
     } catch {
       throw new Error("Run " + run.run_id + " is still running and its record cannot be read; stop it before starting " + plan.task_file + ".");
     }
-    if (control.run?.work_package?.task_file === plan.task_file) found.push(run.run_id);
+    // The same file, however each start spelled its path; a file that is gone is not this one.
+    const theirs = control.run?.work_package?.task_file;
+    if (!theirs || (theirs !== plan.task_file && (await workOrderIdentity(paths, theirs)) !== identity)) continue;
+    found.push({ runId: run.run_id, unchanged: RUNNING_STATUSES.has(run.status) && control.run.work_package.task === plan.task });
   }
   return found;
 }
 
-// The project's work lock is held by a work-start until its loop returns. A stopped version's
-// work-start returns soon after its calls are killed; the new version cannot run before that.
-export async function projectLockReleased(paths, { timeoutMs = 30_000 } = {}) {
+// A run's work lock is held by the work-start working it until its loop returns. A stopped
+// version's work-start returns soon after its calls are killed; the new version waits for that.
+export async function workLockReleased(paths, runId, { timeoutMs = 30_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let holder;
     try {
-      holder = await readJson(paths.boundedLockPath);
+      holder = await readJson(workLockFile(paths, runId));
     } catch (error) {
       if (error.code === "ENOENT") return true;
       holder = null; // being written or removed; look again
@@ -254,22 +280,38 @@ export async function projectLockReleased(paths, { timeoutMs = 30_000 } = {}) {
   }
 }
 
-// The old version's calls are stopped, and the stop confirmed, before anything of the new version
-// is made. A stop that cannot be confirmed, or an old work-start that does not let go of the
-// project, refuses the start; starting again retries it.
+// Called under the work order's start lock. The same work order text already running is refused
+// and that run goes on; only a work order that changed replaces its running version. The old
+// version's calls are stopped, and the stop confirmed, before anything of the new version is made.
+// A stop that cannot be confirmed, or an old work-start that does not let go of its run, refuses
+// the start; starting again retries it.
 async function stopEarlierVersions(paths, plan) {
+  const versions = await runningVersions(paths, plan);
+  const unchanged = versions.find((version) => version.unchanged);
+  if (unchanged) {
+    throw new Error("This work order is already running unchanged as run " + unchanged.runId + "; nothing was created. Edit the work order to start a new version, or stop that run first.");
+  }
   const stopped = [];
-  for (const runId of await runningVersions(paths, plan)) {
+  for (const { runId } of versions) {
     const result = await stopRun(paths, runId, { supersededBy: plan.proposed_run_id });
     if (result.exitCode === 2) {
       throw new Error("The version still running from " + plan.task_file + " could not be stopped: run " + runId + " (" + result.reason + "). Start again to retry the stop; the new version does not start before the old one has stopped.");
     }
     if (result.exitCode === 0) stopped.push(runId);
   }
-  if (stopped.length && !(await projectLockReleased(paths))) {
-    throw new Error("The old version of " + plan.task_file + " is stopped, but its work-start has not finished closing. Start again in a moment.");
+  for (const runId of stopped) {
+    if (!(await workLockReleased(paths, runId))) {
+      throw new Error("The old version of " + plan.task_file + " (run " + runId + ") is stopped, but its work-start has not finished closing. Start again in a moment.");
+    }
   }
   return stopped;
+}
+
+// A run created by a start that then failed is closed, never left running.
+async function closeFailedStart(paths, runId, error) {
+  const message = String(error?.message || error);
+  await recordRunState(paths, runId, { status: "controller_failure", error: message, updated_at: new Date().toISOString() }).catch(() => {});
+  await consumeRun(paths, runId, "controller_failure", null).catch(() => {});
 }
 
 export async function authorizeWorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
@@ -305,57 +347,114 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
     const recheck = await recheckGateA(paths.repoRoot, plan.gate_a);
     if (!recheck.ok) throw new Error("批准後專案的測試入口變了（" + recheck.reasons.join("；") + "），重新建 plan");
   }
-  // Every refusal above leaves the running version alone. From here the start replaces it: nothing
-  // of the old run (its authorization, contract or verdicts) is carried into the new one.
-  const superseded = await stopEarlierVersions(paths, plan);
-  const workPackage = await createImmutableWorkPackage(paths, {
-    work_package_id: plan.work_package_id,
-    task: plan.task,
-    acceptance_criteria: [],
-    scope: plan.scope,
-    budget: plan.budget,
-    breakpoint: plan.breakpoint,
-    rules: plan.rules || null,
-    contract_steps: plan.contract_steps || null,
-    gate_a: plan.gate_a || null,
-    task_file: plan.task_file || null,
-  }, () => Date.parse(plan.created_at));
-  const authorization = await createAuthorization(paths, {
-    authorizationId: "plan-" + plan.plan_sha256,
-    kind: "start",
-    // C4: the OS user running work-start, never the name typed into the plan.
-    authorizedBy: os.userInfo().username,
-    authorizedVia,
-    workPackageSha256: workPackage.record.content_sha256,
-    policySha256: snapshot.effective_policy_sha256,
-    ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,
-    sourcePlanSha256: plan.plan_sha256,
-  });
-  const workspaceEvidence = await createWorkspaceBaseline({
-    paths,
-    planSha256: plan.plan_sha256,
-    runId: plan.proposed_run_id,
-    allowedPaths: plan.scope.allowed_paths,
-    forbiddenPaths: plan.scope.forbidden_paths || [],
-  });
-  const started = await claimStartAuthorization(paths, authorization.authorization_id, {
-    runId: plan.proposed_run_id,
-    sessionId: plan.proposed_session_id,
-    executionMode,
-    workspaceEvidence,
-  });
-  // T0-09 M2: maintenance (uninstall or upgrade) may have begun after the claim checked the marker.
-  await cancelIfMaintenance(paths, started.run.run_id);
-  const promptPath = path.join(paths.queueRoot, "authorized-" + authorization.authorization_id + ".txt");
-  await writeText(promptPath, plan.task);
-  return {
-    plan,
-    authorization,
-    superseded,
-    run: started.run,
-    control: await loadControlView(paths, started.run.run_id),
-    promptPath,
+  // One start of a work order at a time, from looking for its running version until the new run
+  // exists; a second start meanwhile is refused and creates nothing.
+  let startLock = null;
+  let identity = null;
+  if (plan.task_file) {
+    identity = await workOrderIdentity(paths, plan.task_file);
+    if (!identity) throw new Error("The work order " + plan.task_file + " is missing.");
+    try {
+      startLock = await acquireLock(startLockFile(paths, identity));
+    } catch (error) {
+      throw new Error("Another start of " + plan.task_file + " is in progress; nothing was created. Try again in a moment (" + error.message + ").");
+    }
+  }
+  // A work order file replaced while this start runs (an editor that saves by renaming) has a new
+  // identity, so another start may hold another lock for it. Checked once the lock is held and again
+  // once the run exists; a change fails this start, and its run, if made, is closed.
+  const sameFileStill = async (moment) => {
+    if (identity && (await workOrderIdentity(paths, plan.task_file)) !== identity) {
+      throw new Error("The work order " + plan.task_file + " was replaced " + moment + "; Bridge cannot be sure no other start holds it, so this start is refused. Start again.");
+    }
   };
+  const letGoOfStart = async () => {
+    const held = startLock;
+    startLock = null;
+    await held?.();
+  };
+  let superseded;
+  let workLock;
+  try {
+    await sameFileStill("as this start began");
+    // Every refusal above leaves the running version alone. From here the start replaces it: nothing
+    // of the old run (its authorization, contract or verdicts) is carried into the new one.
+    superseded = await stopEarlierVersions(paths, plan);
+    // The new run's work lock is taken before the run exists and handed to the loop that works it: a
+    // start that cannot take it leaves nothing behind, and one plan cannot be started twice at once.
+    try {
+      workLock = await acquireLock(workLockFile(paths, plan.proposed_run_id));
+    } catch (error) {
+      throw new Error("This plan is already being started or worked by another process; nothing was created (" + error.message + ").");
+    }
+  } catch (error) {
+    await letGoOfStart();
+    throw error;
+  }
+  let started = null;
+  try {
+    // A used plan is refused before its baseline is rebuilt: that would overwrite the old run's proof.
+    if (await readRun(paths, plan.proposed_run_id).then(() => true, () => false)) {
+      throw new Error("Work plan already consumed, generate a new plan.");
+    }
+    const workPackage = await createImmutableWorkPackage(paths, {
+      work_package_id: plan.work_package_id,
+      task: plan.task,
+      acceptance_criteria: [],
+      scope: plan.scope,
+      budget: plan.budget,
+      breakpoint: plan.breakpoint,
+      rules: plan.rules || null,
+      contract_steps: plan.contract_steps || null,
+      gate_a: plan.gate_a || null,
+      task_file: plan.task_file || null,
+    }, () => Date.parse(plan.created_at));
+    const authorization = await createAuthorization(paths, {
+      authorizationId: "plan-" + plan.plan_sha256,
+      kind: "start",
+      // C4: the OS user running work-start, never the name typed into the plan.
+      authorizedBy: os.userInfo().username,
+      authorizedVia,
+      workPackageSha256: workPackage.record.content_sha256,
+      policySha256: snapshot.effective_policy_sha256,
+      ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,
+      sourcePlanSha256: plan.plan_sha256,
+    });
+    const workspaceEvidence = await createWorkspaceBaseline({
+      paths,
+      planSha256: plan.plan_sha256,
+      runId: plan.proposed_run_id,
+      allowedPaths: plan.scope.allowed_paths,
+      forbiddenPaths: plan.scope.forbidden_paths || [],
+    });
+    started = await claimStartAuthorization(paths, authorization.authorization_id, {
+      runId: plan.proposed_run_id,
+      sessionId: plan.proposed_session_id,
+      executionMode,
+      workspaceEvidence,
+    });
+    await sameFileStill("while this start ran");
+    // The new run exists: a later start of this work order finds it.
+    await letGoOfStart();
+    // T0-09 M2: maintenance (uninstall or upgrade) may have begun after the claim checked the marker.
+    await cancelIfMaintenance(paths, started.run.run_id);
+    const promptPath = path.join(paths.queueRoot, "authorized-" + authorization.authorization_id + ".txt");
+    await writeText(promptPath, plan.task);
+    return {
+      plan,
+      authorization,
+      superseded,
+      run: started.run,
+      control: await loadControlView(paths, started.run.run_id),
+      promptPath,
+      workLock,
+    };
+  } catch (error) {
+    if (started) await closeFailedStart(paths, started.run.run_id, error);
+    await letGoOfStart();
+    await workLock();
+    throw error;
+  }
 }
 
 // T0-09 M2: a run claimed while the maintenance marker appeared is closed as cancelled before any
@@ -372,7 +471,10 @@ export async function cancelIfMaintenance(paths, runId) {
 export async function cancelWorkPackage({ paths, runId = null, reason = "cancelled_by_human_owner" }) {
   const active = await listRuns(paths, { activeOnly: true });
   const selected = runId ? active.find((run) => run.run_id === runId) : active.length === 1 ? active[0] : null;
-  if (!selected) throw new Error("Specify exactly one active run to cancel.");
+  if (!selected) {
+    throw new Error(runId ? "No active run " + runId + " to cancel."
+      : active.length ? "Several runs are active; name the one to cancel with --run <run id>." : "No active run to cancel.");
+  }
   await consumeRun(paths, selected.run_id, "cancelled", null);
   return { ...(await readRun(paths, selected.run_id)), cancel_reason: requiredText(reason, "Cancel reason", 160) };
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -198,6 +198,68 @@ test("Gate A that switches the branch stops the run before the review", async (t
   assert.equal(record.status, "start_point_lost");
   assert.match(record.last_state.error, /^git_start:gate_a/);
   assert.equal(events.some((event) => event.event === "review.input"), false);
+});
+
+// Decision 2026-10-19: what Gate A tested must be what the reviewer reads. Here Gate A itself leaves
+// a change behind, the way another run working in the same folder would between the two.
+test("a project that changes after Gate A tested it stops the run before any review, and the result says why", async (t) => {
+  const rt = await install(t, { withGit: true });
+  await fsp.writeFile(path.join(rt.root, "gate.js"), "require('node:fs').appendFileSync('README.md', 'changed beside the run\\n');\n");
+  const manifest = JSON.parse(await fsp.readFile(path.join(rt.root, "package.json"), "utf8"));
+  await fsp.writeFile(path.join(rt.root, "package.json"), JSON.stringify({ ...manifest, scripts: { test: "node gate.js" } }));
+  rt.git("add", "-A");
+  rt.git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "gate that leaves a change");
+  const { exit, record, events, result } = await run(rt, "after-gate");
+  assert.equal(exit, 0, JSON.stringify(record.last_state));
+  assert.equal(record.status, "version_changed");
+  assert.equal(record.last_state.changed_after, "gate_a");
+  assert.notEqual(record.last_state.tested_version.fingerprint, record.last_state.review_version.fingerprint);
+  // No review is paid for, and no condition is passed.
+  assert.equal(events.some((event) => event.event === "review.input"), false);
+  assert.equal(events.some((event) => event.event === "acceptance"), false);
+  assert.match(result, /changed after Gate A tested it and before the reviewer read it/);
+  assert.match(result, /Another run working in this folder, or a person, may have changed files/);
+});
+
+// Decision 2026-10-17: runs of different work orders work side by side in one folder.
+test("two work orders started at the same time both run, side by side, and neither leaves a run behind", async (t) => {
+  const rt = await install(t, { withGit: true });
+  const plans = [];
+  for (const name of ["north", "south"]) {
+    const order = ".review-bridge/work-packages/" + name + ".md";
+    await fsp.writeFile(path.join(rt.root, order), ORDER);
+    const planArg = ".review-bridge/review-queue/" + name + ".plan.json";
+    const planned = rt.bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
+      "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2", "--out", planArg]);
+    assert.equal(planned.status, 0, planned.stderr);
+    plans.push({ name, planArg, plan: await readJson(path.join(rt.root, planArg)) });
+  }
+  const bootstrap = path.join(rt.root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+  const exits = await Promise.all(plans.map(({ planArg, plan }) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [bootstrap, "work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli", "--json"], {
+      cwd: rt.root, windowsHide: true, env: { ...process.env, FAKE_CLAUDE_SLEEP_MS: "2500", FAKE_CODEX_SLEEP_MS: "1500" }, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("close", (code) => resolve({ code, stderr }));
+  })));
+  for (const [index, { code, stderr }] of exits.entries()) assert.equal(code, 0, plans[index].name + ": " + stderr);
+  const records = await Promise.all(plans.map(({ plan }) => readJson(path.join(rt.paths.runsDir, plan.proposed_run_id + ".json"))));
+  for (const record of records) {
+    assert.equal(record.status, "pass", JSON.stringify(record.last_state));
+    assert.equal(record.closed_reason === "superseded", false);
+  }
+  // Each writer started before the other one finished: they worked at the same time, not in turn.
+  const [north, south] = await Promise.all(plans.map(({ plan }) => readIoEvents(rt.paths, plan.proposed_run_id)));
+  const at = (events, name) => events.find((event) => event.event === name).occurred_at;
+  assert.ok(at(north, "task.input") < at(south, "writer.result") && at(south, "task.input") < at(north, "writer.result"), "the two writers did not overlap");
+  // And the two reviews ran at the same time too: no project-wide review lock holds one back.
+  assert.ok(at(north, "review.input") < at(south, "review.result") && at(south, "review.input") < at(north, "review.result"), "the two reviews did not overlap");
+  // Nothing is left running, and each work order has its own result.
+  const active = (await Promise.all((await fsp.readdir(rt.paths.runsDir)).filter((file) => file.endsWith(".json"))
+    .map((file) => readJson(path.join(rt.paths.runsDir, file))))).filter((run) => ["running", "review_pending", "correction_pending", "interrupted"].includes(run.status));
+  assert.deepEqual(active, []);
+  for (const { name } of plans) assert.match(await fsp.readFile(path.join(rt.root, ".review-bridge", "work-packages", name + ".result.md"), "utf8"), /# Delivered/);
 });
 
 test("work that changes while the reviewer reads it stops the run; the verdicts are not counted", async (t) => {

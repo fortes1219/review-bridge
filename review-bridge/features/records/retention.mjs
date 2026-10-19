@@ -65,7 +65,9 @@ async function readOptionalText(file) {
 
 function stampOf(filePath) {
   const base = path.basename(String(filePath || ""));
-  const match = /^(\d{8}T\d{9}Z)-/.exec(base);
+  // The time, and the run when the name carries it (callStamp), so two runs' calls in the same
+  // millisecond are never taken for one another.
+  const match = /^(\d{8}T\d{9}Z(?:-r[0-9a-f]{8})?)-/.exec(base);
   return match ? match[1] : null;
 }
 
@@ -259,6 +261,7 @@ export async function mergeRun(paths, runId, { clock = Date.now, undelivered = f
   if (collected.eventsPresent) { await fsp.rm(collected.eventFile, { force: true }); deleted += 1; }
   if (collected.ioPresent) { await fsp.rm(collected.ioFile, { force: true }); deleted += 1; }
   await fsp.rm(path.join(paths.runLocksDir, runId + ".process.json"), { force: true });
+  await fsp.rm(path.join(paths.runLocksDir, runId + ".work.lock"), { force: true });
   return { run_id: runId, archive_file: archiveFile, already_archived: false, lines: lines.length, deleted };
 }
 

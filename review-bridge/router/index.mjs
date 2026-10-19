@@ -65,7 +65,7 @@ const COMMANDS = {
     run: (context) => workOrder.startWork({ ...context, guard: startGate(context) }),
   },
   "work-cancel": {
-    options: { "--reason": { key: "reason", type: "string" } },
+    options: { "--reason": { key: "reason", type: "string" }, "--run": { key: "runId", type: "string" } },
     run: (context) => workOrder.cancelWork(context),
   },
   "work-status": {

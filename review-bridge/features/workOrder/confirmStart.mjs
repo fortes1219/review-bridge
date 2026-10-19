@@ -30,7 +30,9 @@ export async function confirmWorkStart(paths, planPath, assumeYes) {
       + plan.budget.max_claude_minutes_per_call + " minute(s) per call",
     ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
     "Authorization expires at: " + plan.authorization_expires_at,
-    ...replaced.map((runId) => "Starting stops the version still running from this work order: run " + runId),
+    ...replaced.map(({ runId, unchanged }) => (unchanged
+      ? "This work order is already running unchanged as run " + runId + "; this start will be refused."
+      : "Starting stops the version still running from this work order: run " + runId)),
     "Task:",
     plan.task,
     "",

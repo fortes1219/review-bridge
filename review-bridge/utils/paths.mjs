@@ -46,6 +46,5 @@ export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName } = {}) {
     reviewPromptOverridePath: path.join(privateRoot, "review-bridge", "review-prompt.md"),
     reviewPromptPath: path.join(path.resolve(bridgeRoot), "review-prompt.md"),
     workerLockPath: path.join(queueRoot, "worker.node.lock"),
-    boundedLockPath: path.join(queueRoot, "bounded-resume.node.lock"),
   };
 }

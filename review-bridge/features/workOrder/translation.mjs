@@ -20,10 +20,9 @@ import {
   writeJson,
   writeText,
 } from "../../service/index.mjs";
-import { timestampId } from "../../utils/dates.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { failureSummary } from "./budget.mjs";
-import { killStartedAfterStop } from "./processRecords.mjs";
+import { callStamp, killStartedAfterStop } from "./processRecords.mjs";
 import {
   buildContract,
   checkTranslation,
@@ -74,7 +73,7 @@ async function ceilingStop({ paths, runId, usage, limits }) {
 
 async function translateOnce({ paths, runId, workPackage, adapter, steps, lines, locale, attempt, feedback, onSpawn }) {
   const prompt = composeTranslationPrompt({ workPackageId: workPackage.work_package_id, lines, gateA: workPackage.gate_a, locale, attempt, feedback });
-  const stamp = timestampId();
+  const stamp = callStamp(runId);
   const streamPath = path.join(paths.queueRoot, stamp + "-contract.stream.jsonl");
   const stderrPath = path.join(paths.queueRoot, stamp + "-contract.stderr.log");
   await writeText(path.join(paths.queueRoot, stamp + "-contract-prompt.txt"), prompt);
@@ -116,7 +115,7 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
 
 async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, candidate, sha256, locale, attempt, effort, onSpawn }) {
   const prompt = composeCheckPrompt({ workPackageId: workPackage.work_package_id, lines, candidate, sha256, locale, attempt });
-  const stamp = timestampId();
+  const stamp = callStamp(runId);
   const stdoutPath = path.join(paths.queueRoot, stamp + "-contract-check.stdout.log");
   const stderrPath = path.join(paths.queueRoot, stamp + "-contract-check.stderr.log");
   const resultPath = path.join(paths.queueRoot, stamp + "-contract-check.result.json");

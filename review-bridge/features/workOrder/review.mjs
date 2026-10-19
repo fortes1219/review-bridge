@@ -145,7 +145,10 @@ export async function runReviewWorker({
     throw new Error("Review prompt template is missing.");
   }
   const codex = await adapter.resolveExecutable("codex");
-  const release = await acquireLock(paths.workerLockPath);
+  // A run reviewing its own job takes no project lock: claiming the job by moving it from pending to
+  // running is atomic, so other runs' reviews go on beside it. The review command, which works
+  // through every pending job, still runs one at a time.
+  const release = only ? null : await acquireLock(paths.workerLockPath);
   const outcomes = [];
   try {
     const jobs = await listJson(paths.pendingDir);
@@ -341,7 +344,7 @@ export async function runReviewWorker({
       }
     }
   } finally {
-    await release();
+    await release?.();
   }
   return outcomes;
 }

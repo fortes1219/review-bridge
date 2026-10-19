@@ -99,6 +99,7 @@ export async function startWork({ paths, options, adapter, guard }) {
       maxMinutes: authorization.plan.budget.max_claude_minutes_per_call,
       startNewSession: true,
       runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
+      workLock: authorization.workLock,
     });
   } finally {
     // T0-07 V2.8 (a): every way out of a run delivers once; a failure here never masks the run's own exit.
@@ -121,7 +122,7 @@ export async function workStatus({ paths }) {
 }
 
 export async function cancelWork({ paths, options, adapter }) {
-  const cancelled = await cancelWorkPackage({ paths, reason: options.reason });
+  const cancelled = await cancelWorkPackage({ paths, runId: options.runId || null, reason: options.reason });
   // Codex 2026-10-14: the cancel itself delivers; the result reflects the workspace at this moment.
   await deliverOutcome({ paths, runId: cancelled.run_id, adapter, notify: true })
     .catch((error) => process.stderr.write("delivery failed: " + String(error?.message || error) + "\n"));
