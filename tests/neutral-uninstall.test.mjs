@@ -726,3 +726,20 @@ test("S2 a stop that throws after the service is already down is still recovered
   assert.equal(await serviceRunning(root), true);
   assert.equal(await exists(marker), false);
 });
+
+// RC3-LINUX-00: the cancel's restart failing with a reason keeps the marker and shows the reason.
+test("a cancel whose page service fails to restart with a reason shows that reason", async (t) => {
+  const root = await workspace(t);
+  await installWithService(root);
+  const marker = path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
+  const plan = await planNeutralUninstall({ target: root });
+  await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256, {
+    afterBackup: async (dir) => fsp.appendFile(path.join(dir, "files", "review-bridge", "rules.md"), "tampered"),
+    restartService: async () => ({ running: false, reason: "up exited 2 | port 4888 is taken" }),
+  }), /The cancel did not finish: the Bridge page service that was running did not restart: up exited 2 \| port 4888 is taken\. Nothing was deleted/);
+  assert.equal(await exists(marker), true, "the marker stays");
+  const again = await planNeutralUninstall({ target: root });
+  const finished = await applyNeutralUninstall(again, again.plan_sha256);
+  assert.equal(finished.service_restarted, true);
+  assert.equal(await serviceRunning(root), true);
+});

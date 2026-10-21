@@ -695,3 +695,43 @@ test("W3e a file written into a runtime directory after the rollback checked it 
   assert.equal(await fsp.readFile(path.join(root, "also-mine.txt"), "utf8"), "also not Bridge's\n");
   sameTree(await persistent(root), before, "after the automatic rollback was finished");
 });
+
+// RC3-LINUX-00: a restart that fails with a reason (the shape the installer's own restart returns)
+// is a failure on every path, and the person sees the reason; service_restarted stays a boolean.
+const failedRestart = async () => ({ running: false, reason: "up exited 2 | port 4888 is taken" });
+
+test("a page service that does not come back after an upgrade is a warning that says why", async (t) => {
+  const root = await workspace(t);
+  await installWithService(root);
+  await makeOld(root);
+  const { result } = await upgrade(root, { restartService: failedRestart });
+  assert.equal(result.ok, true);
+  assert.equal(result.service_restarted, false);
+  assert.ok(result.warnings.includes("The Bridge page service did not restart: up exited 2 | port 4888 is taken; start it with up."), JSON.stringify(result.warnings));
+});
+
+test("a failed upgrade whose page service does not come back keeps the marker and says why", async (t) => {
+  const root = await workspace(t);
+  await installWithService(root);
+  await makeOld(root);
+  await assert.rejects(upgrade(root, { afterConfig: async () => { throw new Error("injected"); }, restartService: failedRestart }),
+    /automatic rollback did not finish \(The Bridge page service that was running did not restart: up exited 2 \| port 4888 is taken, so Bridge stays blocked/);
+  assert.equal(await exists(markerOf(root)), true);
+  const { result } = await rollback(root);
+  assert.equal(result.service_restarted, true);
+  assert.equal(await serviceRunning(root), true);
+});
+
+test("a rollback whose page service does not come back keeps the marker and says why", async (t) => {
+  const root = await workspace(t);
+  await installWithService(root);
+  await makeOld(root);
+  crashAt(root, "afterServiceStop");
+  const plan = await planNeutralUpgradeRollback({ target: root });
+  assert.equal(plan.restart_service, true);
+  await assert.rejects(applyNeutralUpgradeRollback(plan, plan.plan_sha256, { restartService: failedRestart }),
+    /did not restart: up exited 2 \| port 4888 is taken; the marker stays/);
+  assert.equal(await exists(markerOf(root)), true);
+  const { result } = await rollback(root);
+  assert.equal(result.service_restarted, true);
+});

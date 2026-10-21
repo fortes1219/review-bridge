@@ -7,10 +7,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
+import { loadAdapterForInspection, resolveAdapterModule, UNSUPPORTED_ADAPTER } from "./review-bridge/router/platform.mjs";
 import {
   applyNeutralInstall, applyNeutralUninstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult,
   formatUpgradeRollbackPlan, formatUpgradeRollbackResult, loadInstalledServiceModules, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
@@ -177,20 +178,35 @@ async function runDisposableFakeScenarios(target, privateName = ".claude") {
   }
 }
 
-async function inspectNativeReadiness(roles) {
+// RC3-LINUX-00: the adapter for checks that call no model, on any platform. A platform without a
+// usable adapter gets one that finds no CLI, so its readiness is reported as not ready, never lost.
+async function inspectionAdapter() {
   const manifest = JSON.parse(await fsp.readFile(path.join(packageRoot, "review-bridge", "manifest.json"), "utf8"));
-  const targetKey = process.platform + "-" + process.arch;
-  const definition = manifest.adapters?.[targetKey];
-  if (!definition || !["active", "candidate"].includes(definition.status)) {
-    return {
-      ready: false,
-      platform: targetKey,
-      adapter_status: definition?.status || "unsupported",
-      missing: ["active platform adapter"],
-    };
-  }
-  const adapterPath = path.resolve(packageRoot, "review-bridge", definition.module);
-  const adapter = await import(pathToFileURL(adapterPath).href);
+  const bridgeRoot = path.join(packageRoot, "review-bridge");
+  const definition = loadAdapterForInspection(manifest, process.platform, process.arch, { bridgeRoot });
+  const adapter = definition ? await import(resolveAdapterModule(bridgeRoot, definition.module)) : UNSUPPORTED_ADAPTER;
+  return { definition, adapter, platform: process.platform + "-" + process.arch };
+}
+
+// One set of keys on every platform: an unverified or missing adapter only makes the values false.
+function nativeReadiness({ platform, definition, missing }) {
+  const eligible = definition?.eligible === true;
+  return {
+    ready: false,
+    cli_available: missing.length === 0,
+    authorization_ready: false,
+    reason: eligible
+      ? "Run up, open the page and pass the reviewer read-only check; then start work at an interactive terminal."
+      : "This platform's adapter is not verified: the reviewer read-only check and native work are not available here.",
+    platform,
+    adapter_status: definition?.status || "unsupported",
+    runtime_verified: definition?.runtime_verified === true,
+    missing: [...(eligible ? [] : ["verified platform adapter"]), ...missing],
+  };
+}
+
+async function inspectNativeReadiness(roles) {
+  const { definition, adapter, platform } = await inspectionAdapter();
   const missing = [];
   for (const executable of new Set([roles.writer, roles.reviewer])) {
     try {
@@ -199,16 +215,7 @@ async function inspectNativeReadiness(roles) {
       missing.push(executable + " CLI");
     }
   }
-  return {
-    ready: false,
-    cli_available: missing.length === 0,
-    authorization_ready: false,
-    reason: "Run up, open the page and pass the reviewer read-only check; then start work at an interactive terminal.",
-    platform: targetKey,
-    adapter_status: definition.status,
-    runtime_verified: definition.runtime_verified === true,
-    missing,
-  };
+  return nativeReadiness({ platform, definition, missing });
 }
 
 async function chooseRoles(options) {
@@ -234,17 +241,7 @@ async function rolesCheck(options) {
 }
 
 async function inspectSelectedRoles(roles) {
-  const manifest = JSON.parse(await fsp.readFile(path.join(packageRoot, "review-bridge", "manifest.json"), "utf8"));
-  const targetKey = process.platform + "-" + process.arch;
-  const definition = manifest.adapters?.[targetKey];
-  if (!definition || !["active", "candidate"].includes(definition.status)) {
-    return inspectRoleReadiness(roles, {
-      adapter: { async resolveExecutable() { throw new Error("Unsupported platform"); } },
-    });
-  }
-  const adapterPath = path.resolve(packageRoot, "review-bridge", definition.module);
-  const adapter = await import(pathToFileURL(adapterPath).href);
-  return inspectRoleReadiness(roles, { adapter });
+  return inspectRoleReadiness(roles, { adapter: (await inspectionAdapter()).adapter });
 }
 
 function formatRoleCheck(result) {

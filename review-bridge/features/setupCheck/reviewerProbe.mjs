@@ -353,6 +353,10 @@ export function createReviewerProbeService({
 }) {
   let inFlight = false;
   let sessionProof = null;
+  // RC3-LINUX-00: only an adapter the manifest marks active or candidate may start the check. The
+  // fake adapter and an experimental one are never eligible, so a page started with either can never
+  // hold a proof that a native work-start would accept.
+  const eligible = adapterConfig?.eligible === true;
 
   async function readiness() {
     return inspectRoleReadiness(roles, { adapter, ...(statusProbe ? { statusProbe } : {}) });
@@ -414,7 +418,9 @@ export function createReviewerProbeService({
       reviewer_readonly_proven: readonly.state === "proven" ? true : readonly.state === "not_run" ? "not_run" : false,
       reviewer_readonly: readonly,
       probe_supported: supported,
-      probe_available: supported && !inFlight && reviewer.cli_present && reviewer.authenticated === true,
+      probe_available: supported && eligible && !inFlight && reviewer.cli_present && reviewer.authenticated === true,
+      platform_eligible: eligible,
+      platform_status: adapterConfig?.status || "unsupported",
       probe_in_flight: inFlight,
       // T0-08: native work-start also requires terminal confirmation; this is the proof half.
       native_ready: readonly.state === "proven",
@@ -429,6 +435,7 @@ export function createReviewerProbeService({
   }
 
   async function run() {
+    if (!eligible) refuse("adapter_not_verified", "This platform's adapter is not verified; the reviewer read-only check is not available here.");
     if (inFlight) refuse("in_flight", "A reviewer check is already running.");
     inFlight = true;
     try {

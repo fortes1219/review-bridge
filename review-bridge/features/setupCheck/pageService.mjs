@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { fileExists, readJson, writeJsonAtomic } from "../../service/index.mjs";
+import { fileExists, isPidAlive, readJson, writeJsonAtomic } from "../../service/index.mjs";
 
 // T0-01 contract: "running" means the recorded process answers on its recorded
 // port with its own service id. Nothing here decides from a pid alone, a file's
@@ -23,16 +23,6 @@ export function serviceFiles(paths) {
     stdoutPath: path.join(paths.privateRoot, "logs", "watch.stdout.log"),
     stderrPath: path.join(paths.privateRoot, "logs", "watch.stderr.log"),
   };
-}
-
-export function isPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
 }
 
 // C1: written by the watch process itself right after listen succeeds.

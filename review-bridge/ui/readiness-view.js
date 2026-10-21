@@ -20,6 +20,7 @@ export const REASONS = Object.freeze({
   incomplete_run: "reviewer CLI 沒有完整跑完。",
   ambiguous_output: "reviewer 的輸出無法明確對應到固定的寫入測試。",
   unsupported_provider: "目前選的 reviewer 無法提供可驗證的唯讀沙箱證據，所以不能進行檢查。若要使用此檢查，請重新執行 init 並選擇 codex 作為 reviewer。",
+  adapter_not_verified: "這個平台的 adapter 尚未驗證，reviewer 唯讀實測與原生工作在這裡不開放。",
   configuration_changed: "角色、CLI、adapter、檢查程式或沙箱設定和檢查時不同。",
   fingerprint_unavailable: "目前讀不到用來比對的設定（例如 CLI 版本暫時查不出），無法確認和檢查時相同。",
   probe_error_after_start: "檢查程式在 reviewer CLI 啟動之後出錯。",
@@ -30,7 +31,7 @@ export const REASONS = Object.freeze({
 // that no model was used.
 const NOT_STARTED = new Set([
   "host_rejected", "origin_rejected", "token_rejected", "content_type_rejected", "invalid_body",
-  "method_not_allowed", "replayed_request", "reviewer_not_ready", "probe_not_started",
+  "method_not_allowed", "replayed_request", "reviewer_not_ready", "probe_not_started", "adapter_not_verified",
 ]);
 
 const NO_WORK = "這次檢查沒有啟動任何工作；";
@@ -76,12 +77,18 @@ function detailsFor(readonly) {
 export function readinessView(status) {
   const readonly = status.reviewer_readonly || { state: "not_run" };
   const supported = status.probe_supported !== false;
+  // RC3-LINUX-00: on an unverified platform the button is shown but never enabled.
+  const eligible = status.platform_eligible !== false;
   const view = {
     readonly: { text: "", tone: "", details: null },
     probe: { primaryVisible: false, primaryDisabled: true, retryVisible: false, note: "" },
     native: { text: "", tone: "bad" },
   };
-  if (!supported) {
+  if (!eligible) {
+    view.readonly = { text: REASONS.adapter_not_verified, tone: "bad", details: null };
+    view.probe.primaryVisible = true;
+    view.probe.primaryDisabled = true;
+  } else if (!supported) {
     view.readonly = { text: REASONS.unsupported_provider, tone: "bad", details: null };
   } else if (status.probe_in_flight) {
     view.readonly = { text: "檢查中（最多啟動一次 reviewer CLI，可能消耗模型額度），請稍候…", tone: "", details: null };
@@ -119,11 +126,13 @@ export function readinessView(status) {
     };
     view.probe.retryVisible = true;
   }
-  if (view.probe.primaryVisible && supported && !status.probe_available && !status.probe_in_flight) {
+  if (view.probe.primaryVisible && eligible && supported && !status.probe_available && !status.probe_in_flight) {
     view.probe.note = "Reviewer 需先安裝 CLI 並登入，才能進行檢查。";
   }
   if (view.probe.retryVisible) view.probe.retryDisabled = !status.probe_available;
-  view.native = readonly.state === "proven"
+  view.native = !eligible
+    ? { text: REASONS.adapter_not_verified, tone: "bad" }
+    : readonly.state === "proven"
     ? { text: "唯讀已確認。開工還要先有工作計畫，並由你在自己的終端機看完卡片輸入 y。", tone: "ok" }
     : { text: "還不能開始原生工作：reviewer 唯讀檢查還沒通過，新的原生工作被安全鎖住。", tone: "bad" };
   return view;
@@ -137,6 +146,7 @@ export function probeReplyText(reply, { before = null, after = null, refreshed =
   let first;
   if (reply?.error === "in_flight") first = "已有一個檢查在進行中，這次沒有送出。";
   else if (reply?.error === "unsupported_reviewer") first = REASONS.unsupported_provider;
+  else if (reply?.error === "adapter_not_verified") first = REASONS.adapter_not_verified + "檢查沒有開始，未使用模型。";
   else if (reply?.error && NOT_STARTED.has(reply.error)) first = "檢查沒有開始，未使用模型（" + reply.error + "）。";
   else if (reply?.network) first = "沒有收到回覆，不確定這次檢查有沒有開始。";
   else first = "檢查出錯，不確定有沒有啟動 reviewer CLI（" + (reply?.error || "unknown") + "）。";

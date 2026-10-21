@@ -144,7 +144,7 @@ The writer may hand parts of one work order to sub-agents in parallel; they shar
 | `codex exec` | — | `--ephemeral` cannot start sub-agents, and `--json` shows neither the spawn nor the sub-agents' usage |
 | Stopping | `taskkill /T` stops the sub-agents' commands | Interrupting the root turn leaves sub-agent turns running; every active turn is interrupted, then the tree is stopped |
 
-A call that ends without a final result (stopped, timed out, interrupted) still records what it spent, from the stream's per-message usage or the threads that reported, marked `partial`. A run with a partial record cannot claim that the token ceilings held exactly. POSIX stopping has not been exercised on a POSIX host.
+A call that ends without a final result (stopped, timed out, interrupted) still records what it spent, from the stream's per-message usage or the threads that reported, marked `partial`. A run with a partial record cannot claim that the token ceilings held exactly. Before any signal, stopping refuses the system's first process, Bridge itself and its ancestors, and any tree that holds one of them; it also refuses when the ancestry or the process list cannot be read, and sends no signal then. This protects Bridge and what started it; it cannot keep a wrong or forged pid record from pointing at another process of the same account. A process that ended but was not yet reaped (a zombie) counts as stopped. POSIX stopping has been run only in a clean Linux container as root; macOS has not been run.
 
 ## 9. Checking the structure
 

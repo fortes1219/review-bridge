@@ -243,3 +243,14 @@ test("T0-11 E1 probe_not_started is a 409 the page may call 'no model used'; any
   assert.equal(failed.status, 500);
   assert.equal(JSON.parse(failed.body).error, "probe_failed");
 });
+
+test("a platform whose adapter is not verified is refused by the service without a model call", async (t) => {
+  const service = fakeService();
+  service.run = async () => { const error = new Error("not verified"); error.code = "adapter_not_verified"; throw error; };
+  const watch = await startWatchServer({ service, uiRoot });
+  t.after(() => watch.close());
+  const response = await request(watch, { method: "POST", pathname: "/api/reviewer-probe", headers: validHeaders(watch), body: probeBody("0123456789abcdef-0201") });
+  assert.equal(response.status, 409);
+  assert.equal(JSON.parse(response.body).error, "adapter_not_verified");
+  assert.equal(service.state.runs, 0);
+});

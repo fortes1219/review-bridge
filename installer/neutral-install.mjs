@@ -626,13 +626,43 @@ async function stopPageService(target) {
   return (await runtime.service.checkService(runtime.paths)).running !== true;
 }
 
-// Restarts the page service through the installed runtime, the same way init starts it.
-async function startPageService(target) {
+const REASON_LIMIT = 200;
+const lastLine = (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, REASON_LIMIT) || "";
+
+// Restarts the page service through the installed runtime, the same way init starts it. A failure
+// carries what up said: its exit, the last line of its stdout (where up explains a failure) and of
+// its stderr, each clipped. The reason is shown to the person and never written into a marker.
+async function startPageServiceDetailed(target) {
   const runtimeRoot = path.join(target, privateName, "tools", "review-bridge");
-  if (!(await statOptional(path.join(runtimeRoot, "bootstrap.mjs")))) return false;
-  spawnSync(process.execPath, [path.join(runtimeRoot, "bootstrap.mjs"), "up"], { cwd: target, windowsHide: true, timeout: 30_000, stdio: "ignore" });
-  return await pageServiceRunning(target);
+  if (!(await statOptional(path.join(runtimeRoot, "bootstrap.mjs")))) return { running: false, reason: "the installed runtime has no bootstrap.mjs" };
+  const up = spawnSync(process.execPath, [path.join(runtimeRoot, "bootstrap.mjs"), "up"], {
+    cwd: target, windowsHide: true, timeout: 30_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (up.error?.code === "ETIMEDOUT") return { running: false, reason: "up timed out" };
+  if (up.error || up.status !== 0 || up.signal) {
+    const exit = up.signal || (up.status ?? up.error?.code ?? "error");
+    return { running: false, reason: ["up exited " + exit, lastLine(up.stdout), lastLine(up.stderr)].filter(Boolean).join(" | ") };
+  }
+  if (await pageServiceRunning(target)) return { running: true, reason: null };
+  return { running: false, reason: "up returned 0 but the service is not answering" };
 }
+
+// Every restart goes through here. A restart hook (tests, or a caller's own) may answer a boolean or
+// { running, reason }; either way the caller gets { running: boolean, reason }.
+async function restartOutcome(hook, target) {
+  let value;
+  try {
+    value = hook ? await hook(target) : await startPageServiceDetailed(target);
+  } catch (error) {
+    return { running: false, reason: String(error?.message || error).slice(0, REASON_LIMIT) };
+  }
+  if (value && typeof value === "object") {
+    return { running: value.running === true, reason: value.reason ? String(value.reason).slice(0, REASON_LIMIT) : null };
+  }
+  return { running: Boolean(value), reason: null };
+}
+
+const didNotRestart = (outcome) => "did not restart" + (outcome.reason ? ": " + outcome.reason : "");
 
 // Codex 2026-10-14: a missing run folder or a record that cannot be read is "cannot confirm", not "none".
 async function activeRuns(privateRoot) {
@@ -894,11 +924,12 @@ async function cancelTransaction(context, reason) {
   // Any stop that was attempted on a service that was running is checked, not assumed: it is
   // restarted unless it is verifiably running now, and an unconfirmed restart keeps the marker.
   if (context.journal?.service_was_running && (context.serviceStopped || context.serviceStopAttempted) && !(await pageServiceRunning(context.root))) {
-    restarted = await (context.restartService || startPageService)(context.root);
+    const outcome = await restartOutcome(context.restartService, context.root);
+    restarted = outcome.running;
     if (!restarted) {
       // Codex 2026-10-14: the page service the human had running is not back; the cancel is not
       // done. The marker stays so the next uninstall offers the cancel again and retries.
-      const incomplete = new Error("The cancel did not finish: the Bridge page service that was running did not restart. Nothing was deleted; run uninstall again to finish the cancel.");
+      const incomplete = new Error("The cancel did not finish: the Bridge page service that was running " + didNotRestart(outcome) + ". Nothing was deleted; run uninstall again to finish the cancel.");
       incomplete.cancelIncomplete = true;
       throw incomplete;
     }
@@ -1411,8 +1442,9 @@ function refusal(message) {
 // and upgrade --rollback offers the restart again (the T0-09 cancel rule).
 async function restartStoppedService(context) {
   if (!context.serviceStopAttempted || !context.marker.service_was_running || await pageServiceRunning(context.root)) return false;
-  if (!(await (context.hooks.restartService || startPageService)(context.root))) {
-    throw new Error("The Bridge page service that was running did not restart, so Bridge stays blocked for new work. Run: node bridge.mjs upgrade --rollback");
+  const outcome = await restartOutcome(context.hooks.restartService, context.root);
+  if (!outcome.running) {
+    throw new Error("The Bridge page service that was running " + didNotRestart(outcome) + ", so Bridge stays blocked for new work. Run: node bridge.mjs upgrade --rollback");
   }
   return true;
 }
@@ -1839,8 +1871,9 @@ async function applyUpgradeLocked(plan, hooks) {
   }
   let restarted = false;
   if (plan.service_running) {
-    restarted = await (hooks.restartService || startPageService)(root).catch(() => false);
-    if (!restarted) warnings.push("The Bridge page service did not restart; start it with up.");
+    const outcome = await restartOutcome(hooks.restartService, root);
+    restarted = outcome.running;
+    if (!restarted) warnings.push("The Bridge page service " + didNotRestart(outcome) + "; start it with up.");
   }
   return {
     ok: true, operation: "upgrade", target: root, from: plan.from, to: plan.to, backup_dir: context.marker.backup_dir,
@@ -1919,10 +1952,11 @@ export async function applyNeutralUpgradeRollback(plan, approval, hooks = {}) {
     if (plan.kind === "restore") result = await restoreUpgrade(context, plan, await readBackupManifest(marker));
     let restarted = false;
     if (plan.restart_service) {
-      restarted = await (hooks.restartService || startPageService)(plan.target);
+      const outcome = await restartOutcome(hooks.restartService, plan.target);
+      restarted = outcome.running;
       if (!restarted) {
         throw new Error("The rollback " + (plan.kind === "restore" ? "restored the files" : "changed nothing")
-          + ", but the Bridge page service that was running did not restart; the marker stays. Run upgrade --rollback again.");
+          + ", but the Bridge page service that was running " + didNotRestart(outcome) + "; the marker stays. Run upgrade --rollback again.");
       }
     }
     await fsp.rm(markerPath, { force: true });

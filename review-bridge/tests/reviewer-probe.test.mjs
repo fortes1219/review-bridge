@@ -35,7 +35,7 @@ function commandEvent(command, exitCode, output) {
 const TURN_START = JSON.stringify({ type: "turn.started" });
 const TURN_DONE = JSON.stringify({ type: "turn.completed", usage: {} });
 const THREAD_START = JSON.stringify({ type: "thread.started", thread_id: "secret-session" });
-const ADAPTER_CONFIG = Object.freeze({ id: "win32-node", module: "platforms/win32-x64/adapter.mjs" });
+const ADAPTER_CONFIG = Object.freeze({ id: "win32-node", module: "platforms/win32-x64/adapter.mjs", eligible: true });
 const deniedCommand = (input) =>
   commandEvent(`bash -lc 'echo probe > ${sentinelFrom(input)}'`, 1, "bash: line 1: " + sentinelFrom(input) + ": Read-only file system");
 const deniedStdout = (input) => [THREAD_START, TURN_START, deniedCommand(input), TURN_DONE].join("\n");
@@ -573,4 +573,31 @@ test("A4 an identity that cannot be computed is fingerprint_unavailable, not con
   assert.equal(unreadable.reason, "fingerprint_unavailable");
   version = "codex-cli 2.0.0";
   assert.equal((await probe.status()).reviewer_readonly.reason, "configuration_changed");
+});
+
+// RC3-LINUX-00: only an adapter the manifest marks active or candidate may start the check. The fake
+// adapter, an experimental one, and a definition without eligibility never may, so a page started
+// with any of them cannot hold a proof a native work-start would accept, even with the reviewer CLI
+// present and signed in.
+test("an adapter that is not eligible cannot start the check, and its button is closed from the start", async (t) => {
+  for (const [adapterConfig, platformStatus] of [
+    [{ target: "portable-fake", id: "portable-fake-cli", status: "fake", eligible: false }, "fake"],
+    [{ ...ADAPTER_CONFIG, status: "experimental", eligible: false }, "experimental"],
+    [{ id: ADAPTER_CONFIG.id, module: ADAPTER_CONFIG.module }, "unsupported"],
+  ]) {
+    const { calls, wrapped } = counted(scenarios.denied);
+    const { make } = await service(t, { runner: wrapped });
+    const probe = make({ adapterConfig });
+    const before = await probe.status();
+    assert.equal(before.checks.reviewer.cli_present, true);
+    assert.equal(before.checks.reviewer.authenticated, true);
+    assert.equal(before.probe_available, false, platformStatus);
+    assert.equal(before.platform_eligible, false);
+    assert.equal(before.platform_status, platformStatus);
+    await assert.rejects(probe.run(), (error) => error.code === "adapter_not_verified");
+    assert.equal(calls.length, 0, "no reviewer CLI was started");
+    const after = await probe.status();
+    assert.equal(after.reviewer_readonly_proven, "not_run");
+    assert.equal(after.native_ready, false);
+  }
 });

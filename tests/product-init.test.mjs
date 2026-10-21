@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
 import fsp from "node:fs/promises";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bridge = path.join(packageRoot, "bridge.mjs");
@@ -343,3 +345,126 @@ test("init --json adds the service URL", async (t) => {
   assert.equal(output.service_reason, "running");
   assert.equal(output.next_step.path, ".review-bridge/work-packages/TEMPLATE.md");
 });
+
+// RC3-LINUX-00: a page started with the fake CLI (as init starts it) can never hold the reviewer
+// proof that a native work-start asks the running page for. The fake work itself still runs.
+function post(url, { headers, body }) {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: "127.0.0.1", port: target.port, method: "POST", path: target.pathname, headers: { Host: target.host, ...headers } }, (response) => {
+      let data = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { data += chunk; });
+      response.on("end", () => resolve({ status: response.statusCode, body: data }));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+function get(url) {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    http.get({ host: "127.0.0.1", port: target.port, path: target.pathname, headers: { Host: target.host } }, (response) => {
+      let data = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { data += chunk; });
+      response.on("end", () => resolve(data));
+    }).once("error", reject);
+  });
+}
+
+test("a page started with the fake CLI cannot give a native work-start the reviewer proof, and fake work still runs", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-fake-page-"));
+  t.after(() => removeWorkspace(root));
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "fake-page-app", private: true }) + "\n");
+  const result = spawnSync(process.execPath, await scriptedInit(
+    bridge, "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes",
+  ), { cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(result.status, 0, result.stderr);
+  // The fake work runs as before.
+  assert.deepEqual(JSON.parse(result.stdout).fake_self_tests.map((entry) => entry.status), ["pass", "pass", "hard_stop", "rate_limited"]);
+  const runtime = path.join(root, ".review-bridge", "tools", "review-bridge");
+  const load = (relative) => import(pathToFileURL(path.join(runtime, ...relative.split("/"))).href);
+  const { getBridgePaths } = await load("utils/paths.mjs");
+  const { checkService } = await load("features/setupCheck/index.mjs");
+  const { checkReviewerProof } = await load("router/guards/nativeGate.mjs");
+  const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
+  const service = await checkService(paths);
+  assert.equal(service.running, true, service.reason);
+  assert.deepEqual([service.status.platform_eligible, service.status.platform_status, service.status.probe_available], [false, "fake", false]);
+  // Pressing the check on that page, with a request the page accepts, starts nothing.
+  const token = /name="review-bridge-session" content="([0-9a-f]+)"/.exec(await get(service.url))[1];
+  const origin = service.url.replace(/\/$/, "");
+  const pressed = await post(origin + "/api/reviewer-probe", {
+    headers: { Origin: origin, "Content-Type": "application/json", "x-review-bridge-token": token },
+    body: JSON.stringify({ confirm: "one_model_call", request_id: "0123456789abcdef-0301" }),
+  });
+  assert.equal(pressed.status, 409, pressed.body);
+  assert.equal(JSON.parse(pressed.body).error, "adapter_not_verified");
+  // So the proof a native work-start asks the running page for is not there.
+  const proof = await checkReviewerProof(paths);
+  assert.equal(proof.ok, false);
+  assert.equal(proof.reason, "reviewer_not_proven");
+});
+
+// RC3-LINUX-00: a copy of the package whose manifest marks this platform unverified, or does not
+// define it at all; its checksum line is refreshed the way a packaged release would carry it.
+async function packageForPlatform(t, change) {
+  const copy = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-platform-package-"));
+  t.after(() => fsp.rm(copy, { recursive: true, force: true }));
+  await fsp.cp(packageRoot, copy, { recursive: true, filter: (source) => !/[\\/](\.git|node_modules)([\\/]|$)/.test(source) });
+  const manifestFile = path.join(copy, "review-bridge", "manifest.json");
+  const manifest = JSON.parse(await fsp.readFile(manifestFile, "utf8"));
+  change(manifest.adapters, process.platform + "-" + process.arch);
+  const text = JSON.stringify(manifest, null, 2) + "\n";
+  await fsp.writeFile(manifestFile, text);
+  const sumsFile = path.join(copy, "SHA256SUMS.txt");
+  const hash = createHash("sha256").update(text).digest("hex");
+  const sums = (await fsp.readFile(sumsFile, "utf8")).replace(/^[0-9a-f]{64}  review-bridge\/manifest\.json$/m, hash + "  review-bridge/manifest.json");
+  await fsp.writeFile(sumsFile, sums);
+  return copy;
+}
+
+for (const [label, change, adapterStatus] of [
+  ["marks this platform experimental", (adapters, key) => { adapters[key].status = "experimental"; }, "experimental"],
+  ["has no definition for this platform", (adapters, key) => { delete adapters[key]; }, "unsupported"],
+]) {
+  test("init and roles-check where the manifest " + label + ": every readiness key is there, and nothing is ready", async (t) => {
+    const copy = await packageForPlatform(t, change);
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-platform-init-"));
+    t.after(() => removeWorkspace(root));
+    await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "platform-app", private: true }) + "\n");
+    const result = spawnSync(process.execPath, await scriptedInit(
+      path.join(copy, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes",
+    ), { cwd: copy, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    assert.equal(result.status, 0, result.stderr);
+    const realMode = JSON.parse(result.stdout).real_mode;
+    for (const key of ["ready", "cli_available", "authorization_ready", "reason", "platform", "adapter_status", "runtime_verified", "missing"]) {
+      assert.ok(Object.hasOwn(realMode, key), "real_mode." + key);
+    }
+    assert.deepEqual([realMode.ready, realMode.cli_available, realMode.authorization_ready], [false, false, false]);
+    assert.equal(realMode.adapter_status, adapterStatus);
+    assert.equal(realMode.missing[0], "verified platform adapter");
+    // roles-check: with an adapter the CLI is really looked for; without one it is reported missing.
+    const fakeDir = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-platform-cli-"));
+    t.after(() => fsp.rm(fakeDir, { recursive: true, force: true }));
+    const notExecutable = path.join(fakeDir, "not-a-cli.txt");
+    await fsp.writeFile(notExecutable, "not executable\n");
+    const check = spawnSync(process.execPath, [path.join(copy, "bridge.mjs"), "roles-check", "--writer", "claude", "--reviewer", "codex", "--json"], {
+      cwd: copy, encoding: "utf8", windowsHide: true, env: isolatedEnv({ CLAUDE_REVIEW_CLI: notExecutable, CODEX_REVIEW_CLI: notExecutable }),
+    });
+    assert.equal(check.status, 0, check.stderr);
+    const roles = JSON.parse(check.stdout);
+    for (const role of ["writer", "reviewer"]) {
+      if (adapterStatus === "unsupported") {
+        assert.equal(roles.checks[role].cli_present, false);
+        assert.equal(roles.checks[role].next_action, "install_cli");
+      } else {
+        assert.equal(roles.checks[role].cli_present, true);
+        assert.equal(roles.checks[role].authenticated, "unknown");
+      }
+    }
+    assert.equal(roles.native_ready, false);
+  });
+}

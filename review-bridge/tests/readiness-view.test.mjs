@@ -178,3 +178,17 @@ test("A5 every page text about the cost of a check limits CLI launches and promi
   const stale = readinessView(status({ state: "stale", reason: "configuration_changed", ...checked }));
   assert.match(stale.readonly.text, /最多啟動一次 reviewer CLI，可能消耗模型額度/);
 });
+
+test("on an unverified platform the button is shown closed from the start, and the page says why", () => {
+  const reason = "這個平台的 adapter 尚未驗證，reviewer 唯讀實測與原生工作在這裡不開放。";
+  const view = readinessView(status({}, { platform_eligible: false, probe_available: false }));
+  assert.equal(view.readonly.text, reason);
+  assert.equal(view.probe.primaryVisible, true);
+  assert.equal(view.probe.primaryDisabled, true);
+  assert.equal(view.probe.note, "");
+  assert.equal(view.native.text, reason);
+  assert.equal(probeReplyText({ ok: false, error: "adapter_not_verified" }), reason + "檢查沒有開始，未使用模型。");
+  // A verified platform, or a status from before this field, keeps the earlier behaviour.
+  assert.equal(readinessView(status({}, { platform_eligible: true })).probe.primaryDisabled, false);
+  assert.equal(readinessView(status({})).probe.primaryDisabled, false);
+});
