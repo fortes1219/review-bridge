@@ -214,26 +214,44 @@ export async function createWorkPackagePlan({
 
 const RUNNING_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
 
-// A work order is known by the file the file system says it is, never by how its path is spelled:
-// two spellings of one file (Abc and abc where names ignore case) give one identity, and two files
-// (Abc and abc where names keep case) give two. No setting such as core.ignoreCase and no rule per
-// operating system is consulted. Null when the file is gone. A file system that gives no file id
-// leaves the work order unidentified, and the start is refused rather than guessed at.
-export async function workOrderIdentity(paths, taskFile) {
-  let stat;
+// A work order is a place: the folder it is in and the name its entry has there (decision A,
+// 2026-10-22). Two spellings of one entry (Abc and abc where names ignore case) are one place; two
+// entries are two places, even two hard links to one file in one folder; a file replaced by an
+// editor that saves by renaming stays in the same place, so editing it makes a new version, not
+// another work order. Moving it to another folder or name makes another work order. The entry is
+// the one with exactly the spelled name; only when there is none, yet the path still reaches a file
+// (a folder that ignores case or Unicode form), the single entry whose name matches ignoring both.
+// Either way it must be the very file the path reaches. Anything else cannot be told apart and is
+// refused, never guessed. Null when nothing is at that path. No setting such as core.ignoreCase and
+// no rule per operating system is consulted. `stat` and `readdir` are seams for tests.
+export async function workOrderLocation(paths, taskFile, {
+  stat = (target) => fsp.stat(target, { bigint: true }), readdir = (target) => fsp.readdir(target),
+} = {}) {
+  const absolute = path.resolve(paths.repoRoot, ...String(taskFile).split("/"));
+  const folder = path.dirname(absolute);
+  const spelled = path.basename(absolute);
+  let file;
   try {
-    stat = await fsp.stat(path.resolve(paths.repoRoot, ...String(taskFile).split("/")), { bigint: true });
+    file = await stat(absolute);
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw error;
   }
-  if (!stat.isFile() || !stat.ino || !stat.dev) {
+  const where = await stat(folder);
+  if (!file.isFile() || !file.ino || !file.dev || !where.ino || !where.dev) {
     throw new Error("The file system gives no file id for " + taskFile + ", so Bridge cannot tell which work order it is; the start is refused.");
   }
-  return stat.dev.toString() + ":" + stat.ino.toString();
+  const names = await readdir(folder);
+  const fold = (name) => name.normalize("NFC").toLowerCase();
+  const candidates = names.includes(spelled) ? [spelled] : names.filter((name) => fold(name) === fold(spelled));
+  const unclear = "The work order " + taskFile + " cannot be told apart from the other entries in its folder; the start is refused.";
+  if (candidates.length !== 1) throw new Error(unclear);
+  const entry = await stat(path.join(folder, candidates[0]));
+  if (entry.ino !== file.ino || entry.dev !== file.dev) throw new Error(unclear);
+  return where.dev.toString() + ":" + where.ino.toString() + ":" + candidates[0];
 }
 
-// The runs of the same work order file still running, or stopped with a kill not yet confirmed.
+// The runs of the same work order (the same place) still running, or stopped with a kill not yet confirmed.
 // `unchanged` marks a running one sealed from the same work order text as this plan: that is not
 // an older version, and a start must not stop it. Saving the file replaces nothing; only a start
 // does. A running run whose record cannot be read refuses the start instead of being guessed at. A
@@ -241,8 +259,8 @@ export async function workOrderIdentity(paths, taskFile) {
 export async function runningVersions(paths, plan) {
   if (!plan.task_file) return [];
   if (await readRun(paths, plan.proposed_run_id).then(() => true, () => false)) return [];
-  const identity = await workOrderIdentity(paths, plan.task_file);
-  if (!identity) throw new Error("The work order " + plan.task_file + " is missing.");
+  const location = await workOrderLocation(paths, plan.task_file);
+  if (!location) throw new Error("The work order " + plan.task_file + " is missing.");
   const found = [];
   for (const run of await listRuns(paths)) {
     const unresolved = run.status === "stopped" && await fileExists(processFile(paths, run.run_id));
@@ -253,9 +271,9 @@ export async function runningVersions(paths, plan) {
     } catch {
       throw new Error("Run " + run.run_id + " is still running and its record cannot be read; stop it before starting " + plan.task_file + ".");
     }
-    // The same file, however each start spelled its path; a file that is gone is not this one.
+    // The same place, however each start spelled its path; the same test as the start lock's key.
     const theirs = control.run?.work_package?.task_file;
-    if (!theirs || (theirs !== plan.task_file && (await workOrderIdentity(paths, theirs)) !== identity)) continue;
+    if (!theirs || (await workOrderLocation(paths, theirs)) !== location) continue;
     found.push({ runId: run.run_id, unchanged: RUNNING_STATUSES.has(run.status) && control.run.work_package.task === plan.task });
   }
   return found;
@@ -350,22 +368,23 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
   // One start of a work order at a time, from looking for its running version until the new run
   // exists; a second start meanwhile is refused and creates nothing.
   let startLock = null;
-  let identity = null;
+  let location = null;
   if (plan.task_file) {
-    identity = await workOrderIdentity(paths, plan.task_file);
-    if (!identity) throw new Error("The work order " + plan.task_file + " is missing.");
+    location = await workOrderLocation(paths, plan.task_file);
+    if (!location) throw new Error("The work order " + plan.task_file + " is missing.");
     try {
-      startLock = await acquireLock(startLockFile(paths, identity));
+      startLock = await acquireLock(startLockFile(paths, location));
     } catch (error) {
       throw new Error("Another start of " + plan.task_file + " is in progress; nothing was created. Try again in a moment (" + error.message + ").");
     }
   }
-  // A work order file replaced while this start runs (an editor that saves by renaming) has a new
-  // identity, so another start may hold another lock for it. Checked once the lock is held and again
-  // once the run exists; a change fails this start, and its run, if made, is closed.
-  const sameFileStill = async (moment) => {
-    if (identity && (await workOrderIdentity(paths, plan.task_file)) !== identity) {
-      throw new Error("The work order " + plan.task_file + " was replaced " + moment + "; Bridge cannot be sure no other start holds it, so this start is refused. Start again.");
+  // The place is checked again once the lock is held and once the run exists: a save by renaming
+  // keeps it, but a work order deleted or moved meanwhile, or its folder replaced, does not, and
+  // then another start may hold another lock for it. A change fails this start; its run, if made,
+  // is closed.
+  const samePlaceStill = async (moment) => {
+    if (location && (await workOrderLocation(paths, plan.task_file)) !== location) {
+      throw new Error("The work order " + plan.task_file + " is no longer where it was " + moment + "; this start is refused. Start again.");
     }
   };
   const letGoOfStart = async () => {
@@ -376,7 +395,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
   let superseded;
   let workLock;
   try {
-    await sameFileStill("as this start began");
+    await samePlaceStill("as this start began");
     // Every refusal above leaves the running version alone. From here the start replaces it: nothing
     // of the old run (its authorization, contract or verdicts) is carried into the new one.
     superseded = await stopEarlierVersions(paths, plan);
@@ -433,7 +452,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
       executionMode,
       workspaceEvidence,
     });
-    await sameFileStill("while this start ran");
+    await samePlaceStill("while this start ran");
     // The new run exists: a later start of this work order finds it.
     await letGoOfStart();
     // T0-09 M2: maintenance (uninstall or upgrade) may have begun after the claim checked the marker.

@@ -264,11 +264,16 @@ test("two work orders started at the same time both run, side by side, and neith
 
 test("work that changes while the reviewer reads it stops the run; the verdicts are not counted", async (t) => {
   const rt = await install(t, { withGit: true });
-  const { exit, record, events } = await run(rt, "moving", { env: { FAKE_CODEX_TOUCH: "1" } });
+  const { exit, record, events, result } = await run(rt, "moving", { env: { FAKE_CODEX_TOUCH: "1" } });
   assert.equal(exit, 0, JSON.stringify(record.last_state));
   assert.equal(record.status, "version_changed");
   assert.notEqual(record.last_state.review_version.fingerprint, record.last_state.version_after_review.fingerprint);
   assert.equal(events.some((event) => event.event === "acceptance"), false);
+  // The result says the change came during the review, not after Gate A, and who may have made it.
+  assert.equal(record.last_state.changed_after, "review_start");
+  assert.match(result, /changed while the reviewer was reading it/);
+  assert.doesNotMatch(result, /changed after Gate A tested it/);
+  assert.match(result, /Another run working in this folder, or a person, may have changed files/);
 });
 
 // Codex review round 3 of the work proof. Each test was run against the code before its fix and failed.

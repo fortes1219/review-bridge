@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { loadContract } from "../features/workOrder/contract.mjs";
 import { workOrderChange } from "../features/workOrder/delivery.mjs";
 import { processFile, startLockFile, workLockFile } from "../features/workOrder/processRecords.mjs";
-import { workLockReleased, workOrderIdentity } from "../features/workOrder/workPackage.mjs";
+import { workLockReleased, workOrderLocation } from "../features/workOrder/workPackage.mjs";
 import { unsupportedContractStep } from "../features/workOrder/translation.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
@@ -67,6 +67,10 @@ async function planAt(rt, order, id, text) {
   const planned = rt.bridge(planArgs(order, id, planArg));
   assert.equal(planned.status, 0, planned.stderr);
   return { plan: await readJson(path.join(rt.root, planArg)), planArg, order };
+}
+
+async function planOf(rt, name, text) {
+  return await planWork(rt, name, text);
 }
 
 function start(rt, { plan, planArg }, env = {}) {
@@ -398,6 +402,56 @@ test("starting an edited work order again stops the running version first, and n
   assert.match(oldResult, new RegExp("started again as a new version: run " + second.plan.proposed_run_id + "[. ]"));
 });
 
+// The test above stops the old version before any review, so "nothing of it is carried over" holds
+// there trivially. Here the old version was already judged (its first review failed, with a finding)
+// and was in its correction call: none of that verdict, finding or correction reaches the new version.
+test("an old version's verdict and finding are not carried into the new version", async (t) => {
+  const rt = await install(t);
+  const order = ".review-bridge/work-packages/farm.md";
+  await fsp.writeFile(path.join(rt.root, order), SINGLE);
+  const planArg = ".review-bridge/review-queue/farm-two-calls.plan.json";
+  const twoCalls = planArgs(order, "farm", planArg).map((arg, index, all) => (all[index - 1] === "--max-claude-calls" ? "2" : arg));
+  const planned = rt.bridge(twoCalls);
+  assert.equal(planned.status, 0, planned.stderr);
+  const first = { plan: await readJson(path.join(rt.root, planArg)), planArg, order };
+  const child = spawn(process.execPath, [rt.bootstrap, "work-start", "--plan", planArg, "--approve", first.plan.plan_sha256, "--fake-cli", "--fake-scenario", "FAIL_THEN_PASS", "--json"], {
+    cwd: rt.root, windowsHide: true, env: { ...process.env, FAKE_CLAUDE_SLEEP_MS: "4000" }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const exit = new Promise((resolve) => child.once("close", resolve));
+  t.after(() => { try { child.kill(); } catch {} });
+  // Wait until the old version was judged FAIL and its correction call is running.
+  const deadline = Date.now() + 60_000;
+  let record = null;
+  while (Date.now() < deadline) {
+    const judged = (await eventsOf(rt, first).catch(() => [])).some((event) => event.event === "review.result" && event.gate === "FAIL");
+    record = await readJson(processFile(rt.paths, first.plan.proposed_run_id)).catch(() => null);
+    if (judged && record?.role === "writer" && record.call === 2) break;
+    await pause(100);
+  }
+  assert.equal(record?.call, 2, "the old version never reached its correction call");
+  t.after(() => { try { process.kill(record.pid); } catch {} });
+  const oldReview = (await eventsOf(rt, first)).find((event) => event.event === "review.result");
+  const oldClaim = oldReview.findings[0].claim;
+  assert.match(oldClaim, /fake defect/, "the old version really has a finding to carry");
+  const second = await planWork(rt, "farm", SINGLE + "- The cart is red.\n");
+  const started = start(rt, second);
+  assert.equal(started.status, 0, started.stderr);
+  await exit;
+  assert.equal((await runOf(rt, first)).closed_reason, "superseded");
+  // The new version has exactly its own review, a PASS with no findings, and no correction.
+  const newEvents = await eventsOf(rt, second);
+  const reviews = newEvents.filter((event) => event.event === "review.result");
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0].gate, "PASS");
+  assert.deepEqual(reviews[0].findings, []);
+  assert.equal(newEvents.some((event) => event.event === "fix.input"), false);
+  assert.equal(JSON.stringify(newEvents).includes(oldClaim), false, "the old finding reached the new version's records");
+  assert.ok(newEvents.find((event) => event.event === "acceptance").rows.every((row) => row.result === "proven"));
+  const newResult = await fsp.readFile(path.join(rt.paths.queueRoot, second.plan.proposed_run_id + ".result.md"), "utf8");
+  assert.match(newResult, /# Delivered/);
+  assert.equal(newResult.includes(oldClaim), false, "the old finding reached the new version's result");
+});
+
 test("the new version waits for the old work-start to let go of its run, and refuses if it does not", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-lock-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -421,47 +475,146 @@ test("the new version waits for the old work-start to let go of its run, and ref
   assert.equal(await workLockReleased(paths, oldRun, { timeoutMs: 0 }), true);
 });
 
-// An editor that saves by renaming gives the work order file a new identity. A start that sees its
-// work order replaced while it runs cannot be sure no other start holds another lock for it, so it
-// fails and leaves no run working. The start is held in its wait for the old version to close.
-test("a work order file replaced while a start runs fails that start and leaves no run working", async (t) => {
+// Decision A: a work order is a place. A save by renaming gives the file a new id but keeps its
+// place, so it is an edit, not another work order. Here it happens while a start runs: that start
+// goes on with the plan it sealed, a second start of the new text meanwhile is refused by the same
+// start lock, and only the person's later retry replaces the running version. Saving changes nothing
+// already authorized. The first start is held in its wait for the old version's work-start to close.
+const savedByRenaming = async (file, text) => {
+  await fsp.writeFile(file + ".tmp", text);
+  await fsp.rename(file + ".tmp", file);
+};
+
+test("a save by renaming while a start runs keeps the place: that start goes on, a second is refused, a retry replaces it", async (t) => {
+  const rt = await install(t);
+  const zero = await planWork(rt, "farm", SINGLE);
+  const old = await startSleeping(rt, zero);
+  t.after(() => { try { process.kill(old.record.pid); } catch {} });
+  old.child.kill("SIGKILL");
+  await old.exit;
+  const one = SINGLE + "- The cart is red.\n";
+  const first = await planWork(rt, "farm", one);
+  const closing = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"], { windowsHide: true, stdio: "ignore" });
+  t.after(() => { try { closing.kill(); } catch {} });
+  await fsp.writeFile(workLockFile(rt.paths, zero.plan.proposed_run_id), JSON.stringify({ pid: closing.pid }));
+  const child = spawn(process.execPath, [rt.bootstrap, "work-start", "--plan", first.planArg, "--approve", first.plan.plan_sha256, "--fake-cli", "--json"], {
+    cwd: rt.root, windowsHide: true, env: { ...process.env, FAKE_CLAUDE_SLEEP_MS: "60000" }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const exit = new Promise((resolve) => child.once("close", resolve));
+  t.after(() => { try { child.kill(); } catch {} });
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline && (await runOf(rt, zero)).superseded_by !== first.plan.proposed_run_id) await pause(100);
+  assert.equal((await runOf(rt, zero)).superseded_by, first.plan.proposed_run_id, "the first start never reached its wait");
+  // The person saves a new text by renaming: a new file id, the same place.
+  const file = path.join(rt.root, first.order);
+  const placeBefore = await workOrderLocation(rt.paths, first.plan.task_file);
+  const idBefore = (await fsp.stat(file, { bigint: true })).ino;
+  const two = one + "- The barn is blue.\n";
+  await savedByRenaming(file, two);
+  assert.notEqual((await fsp.stat(file, { bigint: true })).ino, idBefore, "the rename did not give the file a new id");
+  assert.equal(await workOrderLocation(rt.paths, first.plan.task_file), placeBefore);
+  // A start of the new text meanwhile is refused by the same start lock; nothing of it is made.
+  const second = { ...(await planOf(rt, "farm", two)) };
+  const refused = start(rt, second);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /Another start of .* is in progress; nothing was created/);
+  await assert.rejects(runOf(rt, second));
+  // The first start goes on with the text it sealed.
+  closing.kill();
+  const deadlineRun = Date.now() + 30_000;
+  let record = null;
+  while (Date.now() < deadlineRun && record?.role !== "writer") {
+    record = await readJson(processFile(rt.paths, first.plan.proposed_run_id)).catch(() => null);
+    if (record?.role !== "writer") await pause(100);
+  }
+  assert.equal(record?.role, "writer", "the first start never got to work");
+  t.after(() => { try { process.kill(record.pid); } catch {} });
+  const firstRun = await runOf(rt, first);
+  assert.equal(firstRun.status, "running");
+  assert.equal((await loadContract(rt.paths, firstRun.contract_sha256)).acceptance.length, 2, "the first start uses the text it sealed");
+  // Only the person's retry replaces it.
+  const retried = start(rt, second);
+  assert.equal(retried.status, 0, retried.stderr);
+  await exit;
+  assert.equal((await runOf(rt, first)).closed_reason, "superseded");
+  const secondRun = await runOf(rt, second);
+  assert.equal(secondRun.status, "pass");
+  assert.equal((await loadContract(rt.paths, secondRun.contract_sha256)).acceptance.length, 3);
+});
+
+test("between two starts a save by renaming keeps the place: the same text is refused, a new text replaces the run", async (t) => {
   const rt = await install(t);
   const first = await planWork(rt, "farm", SINGLE);
   const old = await startSleeping(rt, first);
   t.after(() => { try { process.kill(old.record.pid); } catch {} });
-  old.child.kill("SIGKILL");
-  await old.exit;
+  const file = path.join(rt.root, first.order);
+  const place = await workOrderLocation(rt.paths, first.plan.task_file);
+  const idBefore = (await fsp.stat(file, { bigint: true })).ino;
+  // Saved again with the same text, by renaming: the running run is not an older version.
+  await savedByRenaming(file, SINGLE);
+  assert.notEqual((await fsp.stat(file, { bigint: true })).ino, idBefore);
+  assert.equal(await workOrderLocation(rt.paths, first.plan.task_file), place);
+  const same = await planOf(rt, "farm", SINGLE);
+  const refused = start(rt, same);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, new RegExp("already running unchanged as run " + first.plan.proposed_run_id));
+  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal(alive(old.record.pid), true);
+  // Saved with a new text, by renaming: the new start replaces the running version.
   const edited = SINGLE + "- The cart is red.\n";
-  const second = await planWork(rt, "farm", edited);
-  // The old version's work-start seems to be closing for a while: the new start waits for it.
-  const closing = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"], { windowsHide: true, stdio: "ignore" });
-  t.after(() => { try { closing.kill(); } catch {} });
-  await fsp.writeFile(workLockFile(rt.paths, first.plan.proposed_run_id), JSON.stringify({ pid: closing.pid }));
-  const child = spawn(process.execPath, [rt.bootstrap, "work-start", "--plan", second.planArg, "--approve", second.plan.plan_sha256, "--fake-cli", "--json"], {
-    cwd: rt.root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+  await savedByRenaming(file, edited);
+  const changed = await planOf(rt, "farm", edited);
+  const started = start(rt, changed);
+  assert.equal(started.status, 0, started.stderr);
+  await old.exit;
+  assert.equal((await runOf(rt, first)).closed_reason, "superseded");
+  assert.equal((await runOf(rt, changed)).status, "pass");
+});
+
+test("two hard links to one file in one folder are two places, so two work orders", async (t) => {
+  const rt = await install(t);
+  const first = await planWork(rt, "farm", SINGLE);
+  const linked = ".review-bridge/work-packages/farm-link.md";
+  await fsp.link(path.join(rt.root, first.order), path.join(rt.root, linked));
+  assert.equal((await fsp.stat(path.join(rt.root, first.order), { bigint: true })).ino, (await fsp.stat(path.join(rt.root, linked), { bigint: true })).ino);
+  const second = await planAt(rt, linked, "farm-link", SINGLE);
+  assert.notEqual(await workOrderLocation(rt.paths, first.plan.task_file), await workOrderLocation(rt.paths, second.plan.task_file));
+  const old = await startSleeping(rt, first);
+  t.after(() => { try { process.kill(old.record.pid); } catch {} });
+  // The other link is another work order: it neither waits for, nor stops, nor is refused by the first.
+  const started = start(rt, second);
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal((await runOf(rt, second)).status, "pass");
+  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal(alive(old.record.pid), true);
+  const stopped = rt.bridge(["stop", first.plan.proposed_run_id]);
+  assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
+  await old.exit;
+});
+
+test("a place that cannot be told apart, or a file system without file ids, refuses rather than guesses", async () => {
+  const paths = { repoRoot: path.resolve("repo") };
+  const file = (ino) => ({ isFile: () => true, ino, dev: 7n });
+  const folder = { isFile: () => false, ino: 3n, dev: 7n };
+  const seams = (files, names) => ({
+    stat: async (target) => {
+      if (path.basename(target) === "w") return folder;
+      if (files[path.basename(target)]) return files[path.basename(target)];
+      const error = new Error("absent");
+      error.code = "ENOENT";
+      throw error;
+    },
+    readdir: async () => names,
   });
-  let stderr = "";
-  child.stderr.on("data", (chunk) => { stderr += chunk; });
-  const exit = new Promise((resolve) => child.once("close", resolve));
-  // Once the old run is stopped for this start, the start is in its wait: replace the work order
-  // file with the same text, as a save by renaming would.
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline && (await runOf(rt, first)).superseded_by !== second.plan.proposed_run_id) await pause(100);
-  assert.equal((await runOf(rt, first)).superseded_by, second.plan.proposed_run_id, "the new start never stopped the old version");
-  const before = await workOrderIdentity(rt.paths, second.plan.task_file);
-  const file = path.join(rt.root, second.order);
-  await fsp.writeFile(file + ".tmp", edited);
-  await fsp.rename(file + ".tmp", file);
-  assert.notEqual(await workOrderIdentity(rt.paths, second.plan.task_file), before, "the rename did not give the file a new identity");
-  closing.kill();
-  assert.notEqual(await exit, 0);
-  assert.match(stderr, /was replaced while this start ran; Bridge cannot be sure no other start holds it/);
-  // Nothing of this start is left working: its run, if made, is closed.
-  const run = await runOf(rt, second).catch(() => null);
-  if (run) {
-    assert.equal(run.status, "controller_failure");
-    assert.ok(run.closed_at);
-  }
+  // A file system that gives no file id.
+  await assert.rejects(workOrderLocation(paths, "w/farm.md", seams({ "farm.md": file(0n) }, ["farm.md"])), /gives no file id/);
+  // No entry has the spelled name and two match it ignoring case: neither is picked.
+  await assert.rejects(workOrderLocation(paths, "w/FARM.md", seams({ "FARM.md": file(5n), "farm.md": file(5n), "Farm.md": file(6n) }, ["farm.md", "Farm.md"])), /cannot be told apart/);
+  // The one entry that matches ignoring case is not the file the path reaches.
+  await assert.rejects(workOrderLocation(paths, "w/FARM.md", seams({ "FARM.md": file(5n), "farm.md": file(9n) }, ["farm.md"])), /cannot be told apart/);
+  // The place is the folder and the entry's own name, whichever spelling reaches it.
+  assert.equal(await workOrderLocation(paths, "w/FARM.md", seams({ "FARM.md": file(5n), "farm.md": file(5n) }, ["farm.md"])), "7:3:farm.md");
+  assert.equal(await workOrderLocation(paths, "w/gone.md", seams({}, [])), null);
 });
 
 test("the new version starts only after the old work-start has let go of its run", async (t) => {
@@ -496,7 +649,7 @@ test("a second start of a work order while the first is still starting is refuse
   // The first start is in progress: it holds the work order's start lock.
   const starting = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { windowsHide: true, stdio: "ignore" });
   t.after(() => { try { starting.kill(); } catch {} });
-  const lockFile = startLockFile(rt.paths, await workOrderIdentity(rt.paths, first.plan.task_file));
+  const lockFile = startLockFile(rt.paths, await workOrderLocation(rt.paths, first.plan.task_file));
   await fsp.mkdir(path.dirname(lockFile), { recursive: true });
   await fsp.writeFile(lockFile, JSON.stringify({ pid: starting.pid }));
   const refused = start(rt, second);
@@ -592,8 +745,8 @@ test("where names ignore case, farm.md and FARM.md are one work order: one start
   if (!(await ignoresCase(path.join(rt.root, ".review-bridge", "work-packages")))) return t.skip("this file system keeps case in names");
   const lower = await planWork(rt, "farm", SINGLE);
   const upper = await planWork(rt, "FARM", SINGLE);
-  const identity = await workOrderIdentity(rt.paths, lower.plan.task_file);
-  assert.equal(await workOrderIdentity(rt.paths, upper.plan.task_file), identity);
+  const location = await workOrderLocation(rt.paths, lower.plan.task_file);
+  assert.equal(await workOrderLocation(rt.paths, upper.plan.task_file), location);
   // Started at the same moment under the two spellings: exactly one run.
   const exits = await startTogether(rt, [lower, upper]);
   const runs = await Promise.all([lower, upper].map((work) => runOf(rt, work).catch(() => null)));
@@ -621,7 +774,7 @@ test("where names keep case and both files exist, farm.md and FARM.md are two wo
   const lower = await planAt(rt, ".review-bridge/work-packages/kept-case/farm.md", "farm-lower", SINGLE);
   const upper = await planAt(rt, ".review-bridge/work-packages/kept-case/FARM.md", "farm-upper", SINGLE);
   assert.deepEqual((await fsp.readdir(folder)).filter((name) => name.endsWith(".md")).sort(), ["FARM.md", "farm.md"]);
-  assert.notEqual(await workOrderIdentity(rt.paths, lower.plan.task_file), await workOrderIdentity(rt.paths, upper.plan.task_file));
+  assert.notEqual(await workOrderLocation(rt.paths, lower.plan.task_file), await workOrderLocation(rt.paths, upper.plan.task_file));
   const exits = await startTogether(rt, [lower, upper]);
   for (const [index, work] of [lower, upper].entries()) {
     assert.equal(exits[index].code, 0, exits[index].stderr);
