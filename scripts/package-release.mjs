@@ -4,12 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 
-import { generateChecksumManifest } from "./generate-checksums.mjs";
-import { verifyReleaseArchive } from "./verify-release-archive.mjs";
+import { LIST_NAME, verifyReleaseList } from "./release-list.mjs";
+import { verifyArchiveAgainstList, verifyReleaseArchive } from "./verify-release-archive.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const exportsRoot = path.dirname(packageRoot);
-const excludedDirectories = new Set(["node_modules", ".git", ".tmp"]);
 const UTF8_FLAG = 0x0800;
 const DEFLATE_METHOD = 8;
 const DOS_TIME = 0;
@@ -25,23 +24,6 @@ function crc32(buffer) {
   let crc = 0xffffffff;
   for (const byte of buffer) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff];
   return (crc ^ 0xffffffff) >>> 0;
-}
-
-async function collectFiles(directory, relative = "") {
-  const output = [];
-  const entries = await fsp.readdir(directory, { withFileTypes: true });
-  entries.sort((left, right) => left.name.localeCompare(right.name));
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) throw new Error(`Package source cannot contain a symlink: ${path.posix.join(relative, entry.name)}`);
-    const nextRelative = path.posix.join(relative, entry.name);
-    const absolute = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (!excludedDirectories.has(entry.name)) output.push(...await collectFiles(absolute, nextRelative));
-    } else if (entry.isFile() && !entry.name.endsWith(".zip") && !entry.name.endsWith(".sha256")) {
-      output.push({ absolute, relative: nextRelative });
-    }
-  }
-  return output;
 }
 
 function makeLocalHeader(entry) {
@@ -88,7 +70,7 @@ async function createZip(files) {
       throw new Error(`Unsafe release entry path: ${file.relative}`);
     }
     const name = Buffer.from(file.relative, "utf8");
-    const content = await fsp.readFile(file.absolute);
+    const { content } = file;
     const compressed = deflateRawSync(content, { level: 9 });
     const entry = { name, content, compressed, crc: crc32(content), localOffset };
     const header = makeLocalHeader(entry);
@@ -130,12 +112,18 @@ const destination = path.resolve(args.output || path.join(exportsRoot, defaultNa
 const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`;
 
 try {
-  await generateChecksumManifest(packageRoot);
-  const files = await collectFiles(packageRoot);
+  // The release carries exactly the release list (SHA256SUMS.txt) and the list itself. The list is
+  // never regenerated here: it is checked as it stands (paths, files, checksums), and the bytes that
+  // were checked are the bytes that are packed. The written archive is then read back and compared
+  // with the list entry by entry, content included.
+  const { text, files: listed } = await verifyReleaseList(packageRoot);
+  const files = [...listed.map((file) => ({ relative: file.path, content: file.content })), { relative: LIST_NAME, content: Buffer.from(text, "utf8") }]
+    .sort((left, right) => left.relative.localeCompare(right.relative));
   const archive = await createZip(files);
   await fsp.mkdir(path.dirname(destination), { recursive: true });
   await fsp.writeFile(temporary, archive, { flag: "wx" });
   const verified = await verifyReleaseArchive(temporary);
+  verifyArchiveAgainstList(await fsp.readFile(temporary), text);
 
   await fsp.rm(destination, { force: true });
   await fsp.rename(temporary, destination);

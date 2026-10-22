@@ -78,6 +78,8 @@ Fresh installation creates no CONTROL or model session and does not start a Clau
 
 Create the ZIP only with `npm run package:release`. The cross-platform Node packager writes `/` entry separators and verifies the actual central directory before publishing the archive. Windows PowerShell 5.1 `Compress-Archive` is not an accepted release path because its backslash entries can break macOS Finder extraction. Any backslash, absolute path, traversal segment, case collision, or missing required nested file fails the release.
 
+`SHA256SUMS.txt` is the release list: the archive carries exactly the files it names and the list itself, and `init` checks the same list. The packager never regenerates it; it checks every listed path, file and checksum, packs those bytes, then reads the archive back and compares it with the list entry by entry. A file is never released because it is on disk or tracked by Git: `npm run checksums` only re-hashes listed files, and a new file enters only when named (`npm run checksums -- --add <path>`, `--remove <path>` to drop one). Private folders (`.claude`, `.review-bridge`, `.git`, `node_modules`, `.tmp`) and environment files (`.env`, `.env.<anything>`; only `.env.example` is allowed) are refused by both commands, in any case and at any depth, and so is any listed path that passes through a link or a Windows junction at any step.
+
 ## Recovery Boundary
 
 Before mutation, the installer creates a checksum-verified snapshot outside the target repository. Failed apply operations roll back immediately. Successful operations retain an external rollback point.

@@ -1,6 +1,9 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { inflateRawSync } from "node:zlib";
+
+import { LIST_NAME, parseReleaseList, sha256 } from "./release-list.mjs";
 
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_FILE_SIGNATURE = 0x02014b50;
@@ -92,9 +95,72 @@ export function validateReleaseEntryNames(names, { requiredEntries = REQUIRED_EN
   return { ok: true, entries: names.length };
 }
 
+// Every entry's name and bytes, read back from the central directory and the local headers.
+export function readZipEntries(buffer) {
+  const eocdOffset = findEndOfCentralDirectory(buffer);
+  const totalEntries = buffer.readUInt16LE(eocdOffset + 10);
+  let offset = buffer.readUInt32LE(eocdOffset + 16);
+  const entries = [];
+  for (let index = 0; index < totalEntries; index += 1) {
+    if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== CENTRAL_FILE_SIGNATURE) {
+      throw new Error(`ZIP central-directory entry ${index + 1} is malformed.`);
+    }
+    const method = buffer.readUInt16LE(offset + 10);
+    const compressedSize = buffer.readUInt32LE(offset + 20);
+    const size = buffer.readUInt32LE(offset + 24);
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const localOffset = buffer.readUInt32LE(offset + 42);
+    const name = buffer.toString("utf8", offset + 46, offset + 46 + nameLength);
+    if (localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== 0x04034b50) {
+      throw new Error(`ZIP local header of ${name} is malformed.`);
+    }
+    const dataStart = localOffset + 30 + buffer.readUInt16LE(localOffset + 26) + buffer.readUInt16LE(localOffset + 28);
+    const stored = buffer.subarray(dataStart, dataStart + compressedSize);
+    if (stored.length !== compressedSize) throw new Error(`ZIP entry ${name} is truncated.`);
+    let content;
+    if (method === 0) content = Buffer.from(stored);
+    else if (method === 8) content = inflateRawSync(stored);
+    else throw new Error(`ZIP entry ${name} uses an unsupported compression method ${method}.`);
+    if (content.length !== size) throw new Error(`ZIP entry ${name} does not have its declared size.`);
+    entries.push({ name, content });
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return entries;
+}
+
+// The archive carries exactly the release list's files and the list itself, nothing more or less,
+// and each file has the listed sha256. Checking entry names alone does not show this.
+export function verifyArchiveAgainstList(buffer, listText) {
+  const listed = parseReleaseList(listText);
+  const archived = new Map();
+  for (const entry of readZipEntries(buffer)) {
+    if (archived.has(entry.name)) throw new Error(`Release archive carries ${entry.name} twice.`);
+    archived.set(entry.name, entry.content);
+  }
+  const expected = new Set([LIST_NAME, ...listed.map((entry) => entry.path)]);
+  for (const name of archived.keys()) {
+    if (!expected.has(name)) throw new Error(`Release archive carries a file the release list does not name: ${name}`);
+  }
+  for (const name of expected) {
+    if (!archived.has(name)) throw new Error(`Release archive is missing a listed file: ${name}`);
+  }
+  if (archived.get(LIST_NAME).toString("utf8") !== listText) throw new Error("Release archive carries a different release list.");
+  for (const entry of listed) {
+    if (sha256(archived.get(entry.path)) !== entry.sha256) throw new Error(`Release archive content does not match the release list: ${entry.path}`);
+  }
+  return { ok: true, entries: archived.size };
+}
+
+// Entry names are portable and safe, and the archive matches the release list it carries.
 export async function verifyReleaseArchive(file) {
   const buffer = await fsp.readFile(file);
-  return validateReleaseEntryNames(readZipEntryNames(buffer));
+  const names = validateReleaseEntryNames(readZipEntryNames(buffer));
+  const list = readZipEntries(buffer).find((entry) => entry.name === LIST_NAME);
+  if (!list) throw new Error(`Release archive is missing required entry: ${LIST_NAME}`);
+  verifyArchiveAgainstList(buffer, list.content.toString("utf8"));
+  return names;
 }
 
 const invokedAsScript = process.argv[1]
