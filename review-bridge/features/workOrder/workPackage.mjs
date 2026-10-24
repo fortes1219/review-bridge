@@ -213,13 +213,25 @@ export async function createWorkPackagePlan({
   return { ...plan, plan_path: resolvedOut };
 }
 
-// E8: how the work-order file reads now against the plan a card was printed from: "no_card" when
-// there is no such plan, "changed" when the file's SHA-256 is not the one sealed in it, else null.
-export async function workOrderSinceCard(planPath, taskFile) {
-  const card = await readJson(planPath).catch(() => null);
-  if (!card?.task_sha256) return "no_card";
+// E8: whether the work-order file still reads as the plan sealed it (the SHA-256 the card showed).
+export async function workOrderUnchanged(plan, taskFile) {
   const now = await fsp.readFile(path.resolve(taskFile), "utf8").catch(() => null);
-  return now !== null && digest(now.trim()) === card.task_sha256 ? null : "changed";
+  return now !== null && digest(now.trim()) === plan.task_sha256;
+}
+
+// E10: the first option given beside --yes that is not what the card showed, or null. The card is
+// the plan; --yes takes it as it is, so a different value is a conflict, never a change.
+export function optionAgainstCard(plan, options) {
+  const list = (value) => [...new Set(String(value).split(",").map((entry) => entry.trim()).filter(Boolean))].sort();
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const scope = plan.scope || {};
+  if (options.breakpoint !== undefined && String(options.breakpoint).trim() !== plan.breakpoint) return "--breakpoint";
+  if (options.changeTypes !== undefined && !same(list(String(options.changeTypes).toLowerCase()), scope.change_types)) return "--change-types";
+  if (options.allowedPaths !== undefined && !(scope.source === "explicit" && same(list(String(options.allowedPaths).replaceAll("\\", "/")), scope.allowed_paths))) return "--allow-paths";
+  if (options.owner !== undefined && String(options.owner).trim() !== plan.owner) return "--owner";
+  if (options.maxCalls !== undefined && Number(options.maxCalls) !== plan.budget?.max_claude_calls) return "--max-claude-calls";
+  if (options.maxMinutes !== undefined && Number(options.maxMinutes) !== plan.budget?.max_claude_minutes_per_call) return "--max-claude-minutes";
+  return null;
 }
 
 const RUNNING_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);

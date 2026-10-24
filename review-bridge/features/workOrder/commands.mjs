@@ -1,10 +1,11 @@
 // The work order's command entries: plan, start, status, cancel, stop, review, resume, and the
 // review queue's status and wait. Each owns its order of steps and what it prints.
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline/promises";
 
-import { assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadSingleActiveControlView } from "../../service/index.mjs";
+import { assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadSingleActiveControlView, planClaimed, readJson } from "../../service/index.mjs";
 import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
 import { GateAError } from "./gateA.mjs";
@@ -15,7 +16,8 @@ import {
   cancelWorkPackage,
   CHANGE_TYPES,
   createWorkPackagePlan,
-  workOrderSinceCard,
+  optionAgainstCard,
+  workOrderUnchanged,
   workPackageStatus,
 } from "./workPackage.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
@@ -253,6 +255,11 @@ const write = (line) => process.stdout.write(line + "\n");
 // the card printed here and runs `again` with --yes once they said yes (Owner 2026-10-25). The
 // gate's reviewer proof is asserted before either.
 async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerCheck, plan, again }) {
+  // E10: a plan whose card was not shown, or was answered no at the terminal, takes no later --yes.
+  const noCard = async () => {
+    if (!options.yes) await fsp.rm(plan.plan_path, { force: true });
+    return 1;
+  };
   if (options.fakeCli) {
     write("Reviewer read-only check: not needed with the fake CLI (no model is called)");
   } else {
@@ -261,7 +268,7 @@ async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerC
     });
     if (!check.ok) {
       for (const line of checkFailureLines(check, again)) write(line);
-      return 1;
+      return await noCard();
     }
     write("Reviewer read-only check: passed" + (check.already ? " (earlier in this page session)" : ""));
   }
@@ -284,7 +291,7 @@ async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerC
     }
     if (!/^y(?:es)?$/i.test(answer.trim())) {
       write("Not started. Nothing was authorized.");
-      return 1;
+      return await noCard();
     }
   }
   write("");
@@ -295,14 +302,21 @@ async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerC
   });
 }
 
-// E8: --yes is the yes to the card printed before it, from the plan at `planPath`. The work order
-// must still read as that card showed it; this is checked before planning again, so a refusal
-// leaves that card's plan as it was and a second --yes is refused the same way.
-async function yesMatchesCard({ planPath, taskFile, again }) {
-  const since = await workOrderSinceCard(planPath, taskFile);
-  if (since === "changed") write("The work order changed after you saw the card. Run: " + again + " and look again.");
-  if (since === "no_card") write("No card was shown for this work order, so there is no yes to run on. Run: " + again + " and show the person the card.");
-  return since === null;
+// E8, E10: --yes is the yes to the card printed before it, and one card is one yes. It takes that
+// card's plan at `planPath` as it is, without planning again: refused when there is no card, when
+// the work order no longer reads as the card showed it, when an option given beside --yes is not
+// what the card showed, when the card is past its "Valid until", or when it already started a run.
+async function cardForYes({ paths, planPath, taskFile, options, again }) {
+  const card = await readJson(planPath).catch(() => null);
+  const refuse = (line) => { write(line); return null; };
+  if (!card?.task_sha256) return refuse("No card was shown for this work order, so there is no yes to run on. Run: " + again + " and show the person the card.");
+  if (!(await workOrderUnchanged(card, taskFile))) return refuse("The work order changed after you saw the card. Run: " + again + " and look again.");
+  const option = optionAgainstCard(card, options);
+  if (option) return refuse(option + " is not what the card showed. Run: " + again + " --yes without it, or " + again + " to show the person a new card.");
+  if (await planClaimed(paths, card.plan_sha256)) return refuse("This card was already said yes to; one card starts one run. Run: " + again + " and show the person the new card.");
+  if (!(Date.parse(card.authorization_expires_at) > Date.now())) return refuse("The card was valid until " + card.authorization_expires_at + ". Run: " + again + " and show the person the new card.");
+  write("Plan from the card: " + shownPath(planPath));
+  return { ...card, plan_path: planPath };
 }
 
 async function planOrSay({ paths, options, command }) {
@@ -320,8 +334,9 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, gua
   }
   // Forward slashes: the command is pasted into any shell, bash included, and Windows takes them.
   const again = "review-bridge start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
-  if (options.yes && !(await yesMatchesCard({ planPath: planPathFor(paths, options), taskFile: options.taskFile, again }))) return 1;
-  const plan = await planOrSay({ paths, options, command: "start" });
+  const plan = options.yes
+    ? await cardForYes({ paths, planPath: planPathFor(paths, options), taskFile: options.taskFile, options, again })
+    : await planOrSay({ paths, options, command: "start" });
   if (!plan) return 1;
   return await runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerCheck, plan, again });
 }
@@ -344,8 +359,7 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
   // One plan per stopped run, so the card and its --yes name the same one.
   const planPath = path.join(paths.queueRoot, workPackage.work_package_id + ".resume-" + runId + ".plan.json");
   const again = "review-bridge resume " + runId + (options.fakeCli ? " --fake-cli" : "");
-  if (options.yes && !(await yesMatchesCard({ planPath, taskFile, again }))) return 1;
-  const plan = await planOrSay({
+  const plan = options.yes ? await cardForYes({ paths, planPath, taskFile, options, again }) : await planOrSay({
     paths,
     command: "resume",
     options: {

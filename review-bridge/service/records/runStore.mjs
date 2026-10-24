@@ -64,6 +64,11 @@ function runFile(paths, runId) {
   return path.join(paths.runsDir, assertId(runId, "Run id") + ".json");
 }
 
+// A plan started a run once its claim is written; claimStartAuthorization refuses any other run.
+export async function planClaimed(paths, planSha256) {
+  return await fileExists(claimFile(paths, "plan-" + planSha256));
+}
+
 function eventFile(paths, runId) {
   return path.join(paths.eventsDir, assertId(runId, "Run id") + ".jsonl");
 }

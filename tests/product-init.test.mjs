@@ -433,7 +433,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   const done = start("--fake-cli", "--yes", "--breakpoint", "after the review", "--change-types", "docs");
   assert.equal(done.status, 0, done.stderr);
   const lines = done.stdout.trimEnd().split(/\r?\n/);
-  assert.equal(lines[0], "Plan written to " + path.join(".review-bridge", "review-queue", "hello.plan.json"));
+  assert.equal(lines[0], "Plan from the card: " + path.join(".review-bridge", "review-queue", "hello.plan.json"));
   assert.equal(lines[1], "Reviewer read-only check: not needed with the fake CLI (no model is called)");
   for (const line of ["Work order:   " + order, "Stops:        after the review", "Changes:      docs", "Gate A:       not needed for docs-only work",
     "Budget:       2 writer call(s), up to 8 minute(s) each", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
@@ -500,9 +500,10 @@ test("an agent's start prints the card and stops; with --yes it runs and records
   assert.match(run.contract_sha256, /^[0-9a-f]{64}$/, "the contract sealed under this yes is on the run");
 });
 
-// E8: the yes is for the card the person saw. A work order edited between the card and --yes is
-// refused, and stays refused until a new card is shown; --yes with no card shown is refused too.
-test("--yes is refused when the work order changed after the card, or when no card was shown", async (t) => {
+// E8, E10: the yes is for the card the person saw, once. A work order edited between the card and
+// --yes is refused, and stays refused until a new card is shown; --yes with no card shown, with an
+// option the card did not show, or a second time on one card is refused too.
+test("--yes is refused when the work order changed after the card, when no card was shown, or when the card was used", async (t) => {
   const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-card-changed-");
   const noCard = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(noCard.status, 1, noCard.stderr);
@@ -523,9 +524,39 @@ test("--yes is refused when the work order changed after the card, or when no ca
   const card = cli(["start", order, "--fake-cli"]);
   assert.equal(card.status, 1);
   assert.match(card.stdout, /\n {2}│ # 工單：新增 READMe\n/, "the new card shows the edit");
-  const yes = cli(["start", order, "--fake-cli", "--yes"]);
+  const other = cli(["start", order, "--fake-cli", "--yes", "--change-types", "docs,code"]);
+  assert.equal(other.status, 1, other.stderr);
+  assert.equal(other.stdout, "--change-types is not what the card showed. Run: review-bridge start " + order + " --fake-cli --yes without it, or review-bridge start " + order + " --fake-cli to show the person a new card.\n");
+  const yes = cli(["start", order, "--fake-cli", "--yes", "--change-types", "docs"]);
   assert.equal(yes.status, 0, yes.stdout + yes.stderr);
+  assert.match(yes.stdout, /^Plan from the card: .*hello\.plan\.json\n/);
   assert.match(yes.stdout, /\nDelivered: .*\nResult file: /);
+  // E10: one card, one yes.
+  const again = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(again.status, 1, again.stderr);
+  assert.equal(again.stdout, "This card was already said yes to; one card starts one run. Run: review-bridge start " + order + " --fake-cli and show the person the new card.\n");
+  assert.equal((await listed("runs")).length, 1, "one run from one card");
+});
+
+// E10: a card never shown because the reviewer check did not pass leaves no plan that a later
+// --yes could start (a card answered no at a terminal is dropped the same way; the pty run shows it).
+test("a card not shown takes no later --yes; a card past its Valid until is refused", async (t) => {
+  const { order, cli, queue, listed } = await fourActionsProject(t, "review-bridge-card-once-");
+  const planFile = path.join(queue, "hello.plan.json");
+  const notShown = cli(["start", order]);
+  assert.equal(notShown.status, 1);
+  assert.match(notShown.stdout, /\nReviewer read-only check: not passed /);
+  assert.equal(await fsp.stat(planFile).catch(() => null), null, "the card was never shown");
+  assert.match(cli(["start", order, "--fake-cli", "--yes"]).stdout, /^No card was shown /);
+
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const plan = JSON.parse(await fsp.readFile(planFile, "utf8"));
+  await fsp.writeFile(planFile, JSON.stringify({ ...plan, authorization_expires_at: new Date(Date.now() - 1000).toISOString() }));
+  const old = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(old.status, 1, old.stderr);
+  assert.match(old.stdout, /^The card was valid until .*\. Run: review-bridge start .* and show the person the new card\.\n$/);
+  assert.deepEqual(await listed("runs"), []);
+  assert.deepEqual(await listed("authorizations"), []);
 });
 
 test("stop pauses a run and keeps its records, resume carries the work order on, clean clears records and refuses a running run", async (t) => {
@@ -583,13 +614,14 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
 });
 
 test("without the reviewer proof a real start is refused before any model call, with --yes or without", async (t) => {
-  const { order, cli, queue, listed } = await fourActionsProject(t, "review-bridge-no-proof-");
+  const { order, cli, listed } = await fourActionsProject(t, "review-bridge-no-proof-");
+  // A card to say yes to (shown with the fake CLI, so the native --yes below has one).
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const fakePage = /\nReviewer read-only check: not passed \(the Bridge page is running with the fake CLI\)\nRun: review-bridge down, then review-bridge start /;
   // The page init started runs the fake CLI, so it can never hold a proof.
-  for (const args of [[], ["--yes"]]) {
-    const refused = cli(["start", order, ...args]);
-    assert.equal(refused.status, 1, refused.stderr);
-    assert.match(refused.stdout, /\nReviewer read-only check: not passed \(the Bridge page is running with the fake CLI\)\nRun: review-bridge down, then review-bridge start /);
-  }
+  const refused = cli(["start", order, "--yes"]);
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stdout, fakePage);
   // No page at all: start starts one; with the CLIs absent the check cannot run, so nothing starts.
   cli(["down"]);
   const noPage = cli(["start", order, "--yes"]);
@@ -598,10 +630,14 @@ test("without the reviewer proof a real start is refused before any model call, 
   assert.doesNotMatch(noPage.stdout, /Checking that the reviewer/);
   // work-start goes through the same gate: no running page, no start.
   cli(["down"]);
-  const plan = (await fsp.readdir(queue)).find((name) => name.endsWith(".plan.json"));
-  const workStart = cli(["work-start", "--plan", ".review-bridge/review-queue/" + plan, "--yes"]);
+  const workStart = cli(["work-start", "--plan", ".review-bridge/review-queue/hello.plan.json", "--yes"]);
   assert.equal(workStart.status, 2);
   assert.match(workStart.stderr, /Native execution is unavailable: the Bridge page service is not running/);
+  // And without --yes: refused at the check too.
+  cli(["up", "--fake-cli"]);
+  const asked = cli(["start", order]);
+  assert.equal(asked.status, 1, asked.stderr);
+  assert.match(asked.stdout, fakePage);
   assert.deepEqual(await listed("runs"), []);
   assert.deepEqual(await listed("authorizations"), []);
 });
