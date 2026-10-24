@@ -6,7 +6,7 @@ import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
 
 test("Bridge state lives only in the neutral folder; a missing or provider folder is refused", () => {
   const target = path.resolve("sample-project");
-  const runtime = path.join(target, ".review-bridge", "tools", "review-bridge");
+  const runtime = path.resolve("review-bridge-folder", "review-bridge");
   const neutral = getBridgePaths(target, runtime, { privateRootName: ".review-bridge" });
 
   assert.equal(neutral.privateRoot, path.join(target, ".review-bridge"));

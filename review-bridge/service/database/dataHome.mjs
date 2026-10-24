@@ -11,3 +11,8 @@ export function bridgeDataHome({ env = process.env, platform = process.platform,
   if (platform === "darwin") return path.join(home, "Library", "Application Support", "ReviewBridge");
   return path.join(env.XDG_DATA_HOME || path.join(home, ".local", "share"), "review-bridge");
 }
+
+// The person's one PostgreSQL server, shared by all their projects.
+export function databaseRoot(dataHome = bridgeDataHome()) {
+  return path.join(dataHome, "postgres");
+}

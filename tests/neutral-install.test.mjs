@@ -18,7 +18,7 @@ async function workspace(t) {
   return root;
 }
 
-test("neutral install keeps existing agent settings byte-for-byte and verifies runtime", async (t) => {
+test("neutral install keeps existing agent settings byte-for-byte, verifies, and puts no runtime in the project", async (t) => {
   const root = await workspace(t);
   await fsp.mkdir(path.join(root, ".claude"));
   await fsp.mkdir(path.join(root, ".codex"));
@@ -32,8 +32,8 @@ test("neutral install keeps existing agent settings byte-for-byte and verifies r
   assert.deepEqual(await fsp.readFile(path.join(root, ".claude", "settings.local.json")), claude);
   assert.deepEqual(await fsp.readFile(path.join(root, ".codex", "config.toml")), codex);
   await assert.rejects(planNeutralInstall({ target: root, roles: plan.roles }), /already exists/);
-  await fsp.appendFile(path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs"), "\n// tamper\n");
-  await assert.rejects(verifyNeutralInstall(root), /checksum mismatch/);
+  // The project holds settings, the template and state; the runtime stays in the Bridge folder.
+  assert.equal(await fsp.stat(path.join(root, ".review-bridge", "tools")).catch(() => null), null);
 });
 
 test("Git project gets local private exclusion without changing tracked ignore or agent settings", async (t) => {

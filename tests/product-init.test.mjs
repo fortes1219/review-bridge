@@ -43,7 +43,7 @@ async function freePort() {
 
 // init starts the resident page service; stop it before the workspace is removed.
 function removeWorkspace(root) {
-  spawnSync(process.execPath, [path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs"), "down"], {
+  spawnSync(process.execPath, [path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "down"], {
     cwd: root, encoding: "utf8", windowsHide: true,
   });
   return fsp.rm(root, { recursive: true, force: true });
@@ -146,7 +146,7 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
   const queueEntries = await fsp.readdir(path.join(root, ".review-bridge", "review-queue"), { withFileTypes: true });
   assert.deepEqual(queueEntries.filter((entry) => entry.isFile()).map((entry) => entry.name), []);
 
-  const bootstrap = path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+  const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const doctor = spawnSync(process.execPath, [bootstrap, "doctor", "--fake-cli"], {
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
   });
@@ -255,7 +255,7 @@ test("init without installed or signed-in CLIs completes fake setup but stays vi
   assert.equal(output.real_mode.cli_available, false);
   assert.equal(output.fake_self_tests.length, 4);
   const blocked = spawnSync(process.execPath, [
-    path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs"), "work-start", "--plan", "x", "--approve", "x", "--yes",
+    path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "work-start", "--plan", "x", "--approve", "x", "--yes",
   ], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
   assert.equal(blocked.status, 2);
   assert.match(blocked.stderr, /Native execution is unavailable/);
@@ -321,7 +321,7 @@ test("init starts the resident service and prints exactly three plain lines", as
   assert.equal(session.url, url);
   assert.equal((await (await fetch(url + "api/status")).json()).service_id, session.service_id);
 
-  const bootstrap = path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+  const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const run = (...args) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true });
   assert.equal(run("up", "--fake-cli").stdout.trim(), "已在跑：" + url);
   assert.equal(run("down").status, 0);
@@ -384,7 +384,7 @@ test("a page started with the fake CLI cannot give a native work-start the revie
   assert.equal(result.status, 0, result.stderr);
   // The fake work runs as before.
   assert.deepEqual(JSON.parse(result.stdout).fake_self_tests.map((entry) => entry.status), ["pass", "pass", "hard_stop", "rate_limited"]);
-  const runtime = path.join(root, ".review-bridge", "tools", "review-bridge");
+  const runtime = path.join(packageRoot, "review-bridge");
   const load = (relative) => import(pathToFileURL(path.join(runtime, ...relative.split("/"))).href);
   const { getBridgePaths } = await load("utils/paths.mjs");
   const { checkService } = await load("features/setupCheck/index.mjs");

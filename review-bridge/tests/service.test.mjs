@@ -21,11 +21,10 @@ async function freePort() {
   return port;
 }
 
-// A minimal neutral layout: the copied runtime plus a bridge.json with roles and a watch block.
+// A minimal neutral layout: a bridge.json with roles and a watch block; the runtime is Bridge's own.
 async function workspace(t, watch) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-service-"));
-  const runtime = path.join(root, ".review-bridge", "tools", "review-bridge");
-  await fsp.cp(runtimeSource, runtime, { recursive: true });
+  const runtime = runtimeSource;
   await fsp.mkdir(path.join(root, ".review-bridge", "review-bridge"), { recursive: true });
   await fsp.writeFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), JSON.stringify({
     schema_version: 4,
@@ -173,7 +172,7 @@ test("T4 a session pointing at a port nobody listens on is unreachable; a malfor
   assert.equal((await checkService(malformed.paths)).reason, "no_session");
 });
 
-test("a runtime placed in a provider folder refuses to start instead of keeping state there", async (t) => {
+test("wherever the runtime sits, it keeps no state beside itself: a copy in a provider folder writes nothing there", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-provider-folder-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const runtime = path.join(root, ".claude", "tools", "review-bridge");
@@ -181,7 +180,9 @@ test("a runtime placed in a provider folder refuses to start instead of keeping 
   const result = spawnSync(process.execPath, [path.join(runtime, "bootstrap.mjs"), "status"], {
     cwd: root, encoding: "utf8", windowsHide: true,
   });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /must be installed under \.review-bridge\/tools\/; found \.claude/);
+  // status needs no settings and only reads; the copy in .claude/ gains nothing and no state appears.
+  assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await fsp.readdir(path.join(root, ".claude")), ["tools"]);
+  assert.deepEqual(await fsp.readdir(path.join(root, ".claude", "tools")), ["review-bridge"]);
+  assert.equal(await fsp.stat(path.join(root, ".review-bridge")).catch(() => null), null);
 });

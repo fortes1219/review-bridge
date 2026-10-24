@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import "./utils/nodeVersion.mjs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -13,21 +14,28 @@ import {
 } from "./router/platform.mjs";
 import { dispatchCommand } from "./router/index.mjs";
 import { inspectDoctor } from "./features/doctor/index.mjs";
-import { createFakeAdapter, readJson } from "./service/index.mjs";
-import { getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
+import { createFakeAdapter, fileExists, readJson } from "./service/index.mjs";
+import { bridgeUpgradeMarkerPath, getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
 import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
 
+// Bridge is installed in its own folder; the project it works on is named with --project <folder>,
+// or is the folder the command runs in. Nothing is looked up from where Bridge itself sits.
 const bridgeRoot = bridgeRootFrom(import.meta.url);
-const repoRoot = path.resolve(bridgeRoot, "../../..");
-const privateRootName = path.basename(path.dirname(path.dirname(bridgeRoot)));
-if (privateRootName !== PRIVATE_ROOT_NAME) {
-  throw new Error("Bridge runtime must be installed under " + PRIVATE_ROOT_NAME + "/tools/; found " + privateRootName + ".");
+const privateRootName = PRIVATE_ROOT_NAME;
+
+function takeProject(argv) {
+  const index = argv.indexOf("--project");
+  if (index < 0) return { repoRoot: process.cwd(), args: argv };
+  const value = argv[index + 1];
+  if (!value || value.startsWith("--")) throw new Error("Missing value for --project");
+  return { repoRoot: path.resolve(value), args: [...argv.slice(0, index), ...argv.slice(index + 2)] };
 }
 
 function printUsage() {
   process.stderr.write(
     [
-      "Usage: node bootstrap.mjs <command> [options]",
+      "Usage: review-bridge <command> [--project <folder>] [options]",
+      "       (the project is the current folder when --project is not given)",
       "",
       "Commands:",
       "  review           Run the Codex review worker",
@@ -52,10 +60,14 @@ function printUsage() {
 }
 
 async function main() {
-  const [command, ...args] = process.argv.slice(2);
+  const { repoRoot, args: argv } = takeProject(process.argv.slice(2));
+  const [command, ...args] = argv;
   if (!command || command === "--help" || command === "-h") {
     printUsage();
     return command ? 0 : 2;
+  }
+  if (await fileExists(bridgeUpgradeMarkerPath(path.dirname(bridgeRoot)))) {
+    throw new Error("Bridge 正在升級，或上一次升級沒有完成：回 Bridge 資料夾再跑一次 npm start。");
   }
   const manifestPath = path.join(bridgeRoot, "manifest.json");
   const manifest = await readJson(manifestPath);

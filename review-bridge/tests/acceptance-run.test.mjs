@@ -39,7 +39,7 @@ async function install(t, { withGit = false } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(init.status, 0, init.stderr);
-  const runtime = path.join(root, ".review-bridge", "tools", "review-bridge");
+  const runtime = runtimeSource;
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtime, "bootstrap.mjs"), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env },
   });
@@ -234,7 +234,7 @@ test("two work orders started at the same time both run, side by side, and neith
     assert.equal(planned.status, 0, planned.stderr);
     plans.push({ name, planArg, plan: await readJson(path.join(rt.root, planArg)) });
   }
-  const bootstrap = path.join(rt.root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+  const bootstrap = path.join(runtimeSource, "bootstrap.mjs");
   const exits = await Promise.all(plans.map(({ planArg, plan }) => new Promise((resolve) => {
     const child = spawn(process.execPath, [bootstrap, "work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli", "--json"], {
       cwd: rt.root, windowsHide: true, env: { ...process.env, FAKE_CLAUDE_SLEEP_MS: "2500", FAKE_CODEX_SLEEP_MS: "1500" }, stdio: ["ignore", "pipe", "pipe"],

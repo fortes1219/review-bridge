@@ -410,7 +410,7 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     const install = await planNeutralInstall({ target, roles: { writer: "claude", reviewer: "codex" } });
     await applyNeutralInstall(install, install.plan_sha256);
 
-    const bootstrap = path.join(target, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+    const bootstrap = path.join(sourceBridgeRoot, "bootstrap.mjs");
     const taskPath = path.join(target, ".review-bridge", "work-packages", "ac20.md");
     const planPath = path.join(target, ".review-bridge", "review-queue", "ac20.plan.json");
     await writeText(taskPath, "Update `README.md`.\n\tKeep the task multiline.\n");

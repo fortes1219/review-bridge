@@ -29,7 +29,7 @@ async function install(t, { withGit = false } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(port),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(init.status, 0, init.stderr);
-  const runtime = path.join(root, ".review-bridge", "tools", "review-bridge");
+  const runtime = runtimeSource;
   const bootstrap = path.join(runtime, "bootstrap.mjs");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [bootstrap, ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env },

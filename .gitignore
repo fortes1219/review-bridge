@@ -1,4 +1,6 @@
 node_modules/
+# Written by the install Guide while it upgrades Bridge in this folder.
+/upgrade-in-progress.json
 dist/
 coverage/
 *.zip

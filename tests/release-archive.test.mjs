@@ -140,7 +140,7 @@ test("REL-01 packing a workspace with private folders ships exactly the release 
   const unpacked = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-unpacked-"));
   const target = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-unpacked-target-"));
   t.after(async () => {
-    spawnSync(process.execPath, [path.join(target, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs"), "down"], { cwd: target, windowsHide: true });
+    spawnSync(process.execPath, [path.join(unpacked, "review-bridge", "bootstrap.mjs"), "down"], { cwd: target, windowsHide: true });
     await fsp.unlink(path.join(unpacked, "node_modules")).catch(() => {});
     await fsp.rm(unpacked, { recursive: true, force: true });
     await fsp.rm(target, { recursive: true, force: true });

@@ -33,7 +33,7 @@ const sha = (data) => createHash("sha256").update(data).digest("hex");
 async function workspace(t, { gitRepo = true } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-uninstall-"));
   t.after(async () => {
-    const bootstrap = path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+    const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
     spawnSync(process.execPath, [bootstrap, "down"], { cwd: root, windowsHide: true, stdio: "ignore" });
     await fsp.rm(root, { recursive: true, force: true });
   });
@@ -71,7 +71,7 @@ async function installWithService(root) {
 }
 
 async function serviceRunning(root) {
-  const runtimeRoot = path.join(root, ".review-bridge", "tools", "review-bridge");
+  const runtimeRoot = path.join(packageRoot, "review-bridge");
   const modules = await loadInstalledServiceModules(runtimeRoot);
   if (!modules) return false;
   return (await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }))).running;
@@ -221,7 +221,7 @@ test("V2 / V8k a run in progress, a changed plan, a failed backup and a changed 
 test("V3 maintenance blocks new work, and a run claimed as the marker appears is cancelled before any model call", async (t) => {
   const root = await workspace(t);
   await install(root);
-  const runtimeRoot = path.join(root, ".review-bridge", "tools", "review-bridge");
+  const runtimeRoot = path.join(packageRoot, "review-bridge");
   const { getBridgePaths } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "utils", "paths.mjs")).href);
   const { createWorkPackagePlan, authorizeWorkPackage, cancelIfMaintenance } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "features", "workOrder", "workPackage.mjs")).href);
   const { readRun } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "service", "records", "runStore.mjs")).href);
@@ -283,7 +283,7 @@ test("approval binds the plan; invalid targets, held locks, foreign markers, ins
   assert.equal(await exists(path.join(root, ".review-bridge")), false);
 });
 
-test("V8b / V8 during deletion the runtime is already gone, the marker stays until the end, and the install lock is held throughout", async (t) => {
+test("V8b / V8 during deletion the marker stays until the end, and the install lock is held throughout", async (t) => {
   const root = await workspace(t);
   await install(root);
   const seen = [];
@@ -292,7 +292,6 @@ test("V8b / V8 during deletion the runtime is already gone, the marker stays unt
     beforeDelete: async (name) => seen.push({
       name,
       lock: await exists(path.join(root, ".review-bridge-install.lock")),
-      bootstrap: await exists(path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs")),
       marker: await exists(path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"))),
     }),
     beforeVerify: async () => seen.push({ step: "verify", lock: await exists(path.join(root, ".review-bridge-install.lock")) }),
@@ -300,7 +299,6 @@ test("V8b / V8 during deletion the runtime is already gone, the marker stays unt
   assert.ok(seen.length > 3);
   assert.ok(seen.every((entry) => entry.lock === true), "the install lock exists for the whole transaction");
   const deletions = seen.filter((entry) => entry.name);
-  assert.ok(deletions.every((entry) => entry.bootstrap === false), "no bootstrap to start anything from");
   assert.ok(deletions.every((entry) => entry.marker === true), "the marker outlives the other deletions");
   assert.equal(await exists(path.join(root, ".review-bridge-install.lock")), false);
 });
@@ -699,7 +697,7 @@ test("S2 a stop that throws after the service is already down is still recovered
   const root = await workspace(t);
   await installWithService(root);
   const marker = path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
-  const bootstrap = path.join(root, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs");
+  const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const plan = await planNeutralUninstall({ target: root });
   assert.equal(plan.service_running, true);
   await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256, {

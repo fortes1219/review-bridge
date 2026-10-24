@@ -20,6 +20,8 @@ import { validateRoles } from "./role-readiness.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const privateName = ".review-bridge";
+// The one runtime every project runs from.
+const sourceRuntime = path.join(packageRoot, "review-bridge");
 
 function sha256(data) {
   return createHash("sha256").update(data).digest("hex");
@@ -169,7 +171,8 @@ function neutralBridgeConfig({ profileId, roles, profile, watch = { port: DEFAUL
     // T0-06 G1.3: the profile-approved verification rules; work-plan picks Gate A from here.
     gate_a: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
     readiness: { reviewer_readonly_proven: "not_run" },
-    default_policy_ref: ".review-bridge/tools/review-bridge/config/default-policy.json",
+    // In the Bridge folder, which every project shares.
+    default_policy_ref: "review-bridge/config/default-policy.json",
     project_override_ref: ".review-bridge/review-bridge/policy.override.json",
     active_runs: "derive_from_run_projections",
   };
@@ -304,9 +307,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
     }
     await fsp.mkdir(privateRoot);
     createdRoot = true;
-    const runtimeTarget = path.join(privateRoot, "tools", "review-bridge");
-    await fsp.mkdir(path.dirname(runtimeTarget), { recursive: true });
-    await fsp.cp(path.join(packageRoot, "review-bridge"), runtimeTarget, { recursive: true });
+    // The project holds only its settings, template and state; the runtime stays in the Bridge folder.
     const profile = await resolveProfile(plan.target, plan.profile.id);
     await writeJson(path.join(privateRoot, "review-bridge", "bridge.json"), neutralBridgeConfig({
       profileId: plan.profile.id, roles: plan.roles, profile,
@@ -333,7 +334,10 @@ async function applyNeutralInstallLocked(plan, claimed) {
       profile_id: plan.profile.id,
       roles: plan.roles,
       plan_sha256: claimed,
+      // The Bridge runtime and default policy these settings were last set up against.
       runtime_sha256: plan.runtime_sha256,
+      bridge_version: await runtimeVersion(sourceRuntime),
+      policy_identity: await sourcePolicyIdentity(),
       work_template_sha256: plan.work_template_sha256,
       rules_sha256: plan.rules_sha256,
       installed_files: installedFiles,
@@ -422,8 +426,6 @@ export async function verifyNeutralInstall(target) {
     if (!config.retention || typeof config.retention !== "object") throw new Error("Neutral install retention settings are invalid.");
     if (config.retention.days !== undefined) validateRetentionDays(config.retention.days);
   }
-  const runtimeSha = await runtimeFingerprint(path.join(privateRoot, "tools", "review-bridge"));
-  if (runtimeSha !== manifest.runtime_sha256) throw new Error("Neutral runtime checksum mismatch.");
   // T0-10: TEMPLATE.md is owner-editable (an upgrade keeps an edited one); it only has to exist.
   // work_template_sha256 records the template this version shipped, to tell an edited one apart.
   const templateText = await fsp.readFile(path.join(privateRoot, "work-packages", "TEMPLATE.md"), "utf8").catch(() => null);
@@ -434,7 +436,7 @@ export async function verifyNeutralInstall(target) {
   if (!rulesText.trim() || rulesText.length > 4000) throw new Error("Neutral rules digest must be 1 to 4000 characters.");
   const boundary = gitBoundary(root);
   if (boundary.repository && !boundary.ignored) throw new Error("Neutral Bridge state is not private in Git.");
-  return { valid: true, layout: "neutral", roles: manifest.roles, runtime_sha256: runtimeSha };
+  return { valid: true, layout: "neutral", roles: manifest.roles, runtime_sha256: manifest.runtime_sha256 };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -589,28 +591,18 @@ function projectKey(project) {
   return path.basename(project).replace(/[^A-Za-z0-9._-]/g, "_") + "-" + sha256(project).slice(0, 12);
 }
 
-// The page-service modules of an installed runtime: this layout first, then the core/ layout of
-// runtimes installed before the feature-based move, so an older install can still be upgraded.
-const INSTALLED_SERVICE_LAYOUTS = Object.freeze([
-  { paths: "utils/paths.mjs", service: "features/setupCheck/pageService.mjs" },
-  { paths: "core/paths.mjs", service: "core/service.mjs" },
-]);
-
+// The page-service modules of the Bridge runtime.
 export async function loadInstalledServiceModules(runtimeRoot) {
-  for (const layout of INSTALLED_SERVICE_LAYOUTS) {
-    const serviceFile = path.join(runtimeRoot, ...layout.service.split("/"));
-    if (!(await statOptional(serviceFile))) continue;
-    const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, ...layout.paths.split("/"))).href);
-    return { getBridgePaths, service: await import(pathToFileURL(serviceFile).href) };
-  }
-  return null;
+  const serviceFile = path.join(runtimeRoot, "features", "setupCheck", "pageService.mjs");
+  if (!(await statOptional(serviceFile))) return null;
+  const { getBridgePaths } = await import(pathToFileURL(path.join(runtimeRoot, "utils", "paths.mjs")).href);
+  return { getBridgePaths, service: await import(pathToFileURL(serviceFile).href) };
 }
 
 async function runtimeModules(target) {
-  const runtimeRoot = path.join(target, privateName, "tools", "review-bridge");
-  const modules = await loadInstalledServiceModules(runtimeRoot);
+  const modules = await loadInstalledServiceModules(sourceRuntime);
   if (!modules) return null;
-  return { runtimeRoot, service: modules.service, paths: modules.getBridgePaths(target, runtimeRoot, { privateRootName: privateName }) };
+  return { runtimeRoot: sourceRuntime, service: modules.service, paths: modules.getBridgePaths(target, sourceRuntime, { privateRootName: privateName }) };
 }
 
 async function pageServiceRunning(target) {
@@ -629,13 +621,12 @@ async function stopPageService(target) {
 const REASON_LIMIT = 200;
 const lastLine = (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, REASON_LIMIT) || "";
 
-// Restarts the page service through the installed runtime, the same way init starts it. A failure
+// Restarts the page service through Bridge's runtime, the same way init starts it. A failure
 // carries what up said: its exit, the last line of its stdout (where up explains a failure) and of
 // its stderr, each clipped. The reason is shown to the person and never written into a marker.
 async function startPageServiceDetailed(target) {
-  const runtimeRoot = path.join(target, privateName, "tools", "review-bridge");
-  if (!(await statOptional(path.join(runtimeRoot, "bootstrap.mjs")))) return { running: false, reason: "the installed runtime has no bootstrap.mjs" };
-  const up = spawnSync(process.execPath, [path.join(runtimeRoot, "bootstrap.mjs"), "up"], {
+  if (!(await statOptional(path.join(sourceRuntime, "bootstrap.mjs")))) return { running: false, reason: "the Bridge runtime has no bootstrap.mjs" };
+  const up = spawnSync(process.execPath, [path.join(sourceRuntime, "bootstrap.mjs"), "up", "--project", target], {
     cwd: target, windowsHide: true, timeout: 30_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   });
   if (up.error?.code === "ETIMEDOUT") return { running: false, reason: "up timed out" };
@@ -1252,9 +1243,13 @@ export async function applyNeutralUninstall(plan, approval, hooks = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// T0-10: neutral upgrade. The maintenance marker inside the project is the whole record: it holds
-// the backup location and, before each write, the version the upgrade is about to write, so an
-// interrupted upgrade is undone from the marker, the backup and tools/ alone (P2.12).
+// T0-10: upgrading a project's settings. Bridge itself is upgraded in its own folder through the
+// install Guide; every project already runs that new runtime. What is left per project is its
+// settings: bridge.json merged against the new defaults, the work template, authorizations bound to
+// the old default policy, and the tools/ copy an older setup left in the project, which nothing uses
+// any more. The maintenance marker inside the project is the whole record: it holds the backup
+// location and, before each write or removal, what the upgrade is about to do, so an interrupted
+// upgrade is undone from the marker and the backup alone (P2.12).
 // ---------------------------------------------------------------------------------------------
 
 const OWNER_EDITABLE_KEYS = Object.freeze(["watch", "retention", "locale", "gate_a"]);
@@ -1265,11 +1260,6 @@ const CONFIG_RELATIVE = "review-bridge/bridge.json";
 const TEMPLATE_RELATIVE = "work-packages/TEMPLATE.md";
 const TEMPLATE_NEW_RELATIVE = "work-packages/TEMPLATE.new.md";
 const MANIFEST_RELATIVE = "review-bridge-install.json";
-const RUNTIME_SIDES = Object.freeze(["previous", "next", "failed", "restore"]);
-
-function runtimeSide(kind, id) {
-  return "tools/.review-bridge-" + kind + "-" + id;
-}
 
 function inPrivate(privateRoot, relative) {
   return path.join(privateRoot, ...relative.split("/"));
@@ -1282,6 +1272,14 @@ function sameValue(left, right) {
 async function runtimeVersion(runtimeRoot) {
   const manifest = await readJsonOptional(path.join(runtimeRoot, "templates", "PACKAGE_MANIFEST.json")).catch(() => null);
   return typeof manifest?.version === "string" ? manifest.version : null;
+}
+
+async function policyIdentityOf(runtimeRoot) {
+  return policyIdentity(JSON.parse(await fsp.readFile(path.join(runtimeRoot, "config", "default-policy.json"), "utf8")));
+}
+
+async function sourcePolicyIdentity() {
+  return await policyIdentityOf(sourceRuntime);
 }
 
 async function hashOptional(file) {
@@ -1328,6 +1326,13 @@ async function templateDestination(privateRoot, manifest, templateNew, to) {
   throw new Error("You edited both " + TEMPLATE_NEW_RELATIVE + " and " + fallback + "; the upgrade will not overwrite either. Move one of them out of .review-bridge/work-packages/ and make a new plan.");
 }
 
+// The tools/ copy an older setup put in the project: its files, relative to .review-bridge/.
+async function legacyRuntimeFiles(privateRoot) {
+  const legacy = inPrivate(privateRoot, RUNTIME_RELATIVE);
+  if (!(await statOptional(legacy))) return [];
+  return (await fileSnapshot(legacy)).map(([name, hash]) => [RUNTIME_RELATIVE + "/" + name, hash]);
+}
+
 // P1.1: the read-only upgrade plan; P1.2: the refusals that need no lock.
 async function planFreshUpgrade(root, backupRootOverride) {
   const privateRoot = path.join(root, privateName);
@@ -1344,11 +1349,10 @@ async function planFreshUpgrade(root, backupRootOverride) {
   } catch (error) {
     throw new Error("The installed Bridge does not verify, so it will not be upgraded: " + error.message);
   }
-  const runtimeRoot = inPrivate(privateRoot, RUNTIME_RELATIVE);
-  const sourceRuntime = path.join(packageRoot, "review-bridge");
-  const from = { version: await runtimeVersion(runtimeRoot), runtime_sha256: manifest.runtime_sha256 };
+  const legacy = await legacyRuntimeFiles(privateRoot);
+  const from = { version: manifest.bridge_version ?? null, runtime_sha256: manifest.runtime_sha256 };
   const to = { version: await runtimeVersion(sourceRuntime), runtime_sha256: await runtimeFingerprint(sourceRuntime) };
-  if (from.runtime_sha256 === to.runtime_sha256) return { up_to_date: true, target: root, version: to.version, runtime_sha256: to.runtime_sha256 };
+  if (from.runtime_sha256 === to.runtime_sha256 && legacy.length === 0) return { up_to_date: true, target: root, version: to.version, runtime_sha256: to.runtime_sha256 };
   const config = JSON.parse(await fsp.readFile(inPrivate(privateRoot, CONFIG_RELATIVE), "utf8"));
   const defaults = await defaultConfigFor(root, config, manifest);
   if (config.schema_version !== defaults.schema_version) {
@@ -1362,14 +1366,15 @@ async function planFreshUpgrade(root, backupRootOverride) {
   const templateAction = templateNow === templateNew ? "unchanged" : templateModified ? "keep_and_write_new" : "replace";
   const templateNewPath = templateAction === "keep_and_write_new"
     ? await templateDestination(privateRoot, manifest, templateNew, to) : null;
-  const policy = {
-    from: policyIdentity(JSON.parse(await fsp.readFile(path.join(runtimeRoot, "config", "default-policy.json"), "utf8"))),
-    to: policyIdentity(JSON.parse(await fsp.readFile(path.join(sourceRuntime, "config", "default-policy.json"), "utf8"))),
-  };
+  // The policy before is what these settings were last set up against; an older setup's tools/
+  // copy carries it when the record does not.
+  const policyFrom = manifest.policy_identity
+    ?? (legacy.length ? await policyIdentityOf(inPrivate(privateRoot, RUNTIME_RELATIVE)).catch(() => null) : null);
+  const policy = { from: policyFrom, to: await sourcePolicyIdentity() };
   const persistent = persistentOnly((await fileSnapshot(privateRoot)).filter(([name]) => name !== MAINTENANCE_MARKER));
   const installed = new Set((manifest.installed_files || []).map(([name, hash]) => name + "\0" + hash));
   installed.add(MANIFEST_RELATIVE + "\0" + sha256(manifestBytes));
-  const userFiles = persistent.filter(([name, hash]) => !installed.has(name + "\0" + hash)).map(([name]) => name);
+  const userFiles = persistent.filter(([name, hash]) => !installed.has(name + "\0" + hash) && !name.startsWith(RUNTIME_RELATIVE + "/")).map(([name]) => name);
   const backupRoot = await resolveBackupRoot(root, backupRootOverride);
   return sealPlan({
     schema_version: 1,
@@ -1379,10 +1384,8 @@ async function planFreshUpgrade(root, backupRootOverride) {
     install_manifest_sha256: sha256(manifestBytes),
     from,
     to,
-    runtime_file_count: {
-      from: persistent.filter(([name]) => name.startsWith(RUNTIME_RELATIVE + "/")).length,
-      to: (await fileSnapshot(sourceRuntime)).length,
-    },
+    legacy_runtime_sha256: legacy.length ? sha256(JSON.stringify(legacy)) : null,
+    legacy_runtime_file_count: legacy.length,
     persistent_sha256: sha256(JSON.stringify(persistent)),
     persistent_count: persistent.length,
     user_file_count: userFiles.length,
@@ -1396,7 +1399,7 @@ async function planFreshUpgrade(root, backupRootOverride) {
       new_sha256: templateNew,
       new_path: templateNewPath,
     },
-    policy_changed: !sameValue(policy.from, policy.to),
+    policy_changed: policy.from !== null && !sameValue(policy.from, policy.to),
     policy,
     backup_root: backupRoot,
     backup_root_custom: Boolean(backupRootOverride),
@@ -1444,7 +1447,7 @@ async function restartStoppedService(context) {
   if (!context.serviceStopAttempted || !context.marker.service_was_running || await pageServiceRunning(context.root)) return false;
   const outcome = await restartOutcome(context.hooks.restartService, context.root);
   if (!outcome.running) {
-    throw new Error("The Bridge page service that was running " + didNotRestart(outcome) + ", so Bridge stays blocked for new work. Run: node bridge.mjs upgrade --rollback");
+    throw new Error("The Bridge page service that was running " + didNotRestart(outcome) + ", so Bridge stays blocked for new work. Run: review-bridge upgrade --rollback --target " + context.root);
   }
   return true;
 }
@@ -1481,7 +1484,7 @@ async function mergeSettings(context, plan) {
 
 // D5: unclaimed authorizations bound to the old default policy are invalidated and reported.
 async function writeInvalidations(context) {
-  const paths = getBridgePaths(context.root, inPrivate(context.privateRoot, RUNTIME_RELATIVE), { privateRootName: privateName });
+  const paths = getBridgePaths(context.root, sourceRuntime, { privateRootName: privateName });
   const current = policyIdentity(JSON.parse(await fsp.readFile(paths.defaultPolicyPath, "utf8")));
   const { records, report } = await planUpgradeInvalidations(paths, current);
   const json = (value) => Buffer.from(JSON.stringify(value, null, 2) + "\n", "utf8");
@@ -1493,10 +1496,23 @@ async function writeInvalidations(context) {
   return report;
 }
 
+// The older setup's tools/ copy goes, after the backup holds it. The marker names every file before
+// the first one is removed, so a rollback puts exactly those back.
+async function removeLegacyRuntime(context, plan) {
+  if (!plan.legacy_runtime_sha256) return 0;
+  const files = await legacyRuntimeFiles(context.privateRoot);
+  if (sha256(JSON.stringify(files)) !== plan.legacy_runtime_sha256) throw new Error("The old tools/ copy changed after the plan was shown.");
+  context.marker.removed = files.map(([name]) => name);
+  await markerSave(context);
+  await fsp.rm(inPrivate(context.privateRoot, RUNTIME_RELATIVE), { recursive: true });
+  const tools = inPrivate(context.privateRoot, "tools");
+  if ((await fsp.readdir(tools).catch(() => null))?.length === 0) await fsp.rmdir(tools);
+  return files.length;
+}
+
 async function writeUpgradeManifest(context, plan, report) {
   const manifest = JSON.parse(await fsp.readFile(inPrivate(context.privateRoot, MANIFEST_RELATIVE), "utf8"));
   const installed = new Map((manifest.installed_files || []).filter(([name]) => !name.startsWith(RUNTIME_RELATIVE + "/")));
-  for (const [name, hash] of await fileSnapshot(inPrivate(context.privateRoot, RUNTIME_RELATIVE))) installed.set(RUNTIME_RELATIVE + "/" + name, hash);
   // A file Bridge wrote over its own unedited copy stays Bridge's; an edited one stays the human's.
   for (const relative of [CONFIG_RELATIVE, TEMPLATE_RELATIVE]) {
     const written = context.marker.written[relative];
@@ -1509,6 +1525,7 @@ async function writeUpgradeManifest(context, plan, report) {
     runtime_sha256: plan.to.runtime_sha256,
     work_template_sha256: plan.template.new_sha256,
     bridge_version: plan.to.version,
+    policy_identity: plan.policy.to,
     installed_files: [...installed].sort((left, right) => left[0].localeCompare(right[0])),
     upgrades: [...(manifest.upgrades || []), {
       upgrade_id: context.marker.upgrade_id, from: plan.from, to: plan.to, backup_dir: context.marker.backup_dir,
@@ -1518,50 +1535,16 @@ async function writeUpgradeManifest(context, plan, report) {
   await writeRecorded(context, MANIFEST_RELATIVE, Buffer.from(JSON.stringify(next, null, 2) + "\n", "utf8"));
 }
 
-// P2.11 / P2.12: what undoing the upgrade means right now, from the marker, the backup and tools/.
+// P2.11 / P2.12: what undoing the upgrade means right now, from the marker and the backup. A file
+// goes back when it is now what the upgrade wrote, or is gone because the upgrade wrote or removed
+// it; a file the upgrade added and that is still its version goes; anything else may be a human's
+// change and is kept.
 async function upgradeRollbackActions(root, marker, backup) {
   const privateRoot = path.join(root, privateName);
-  const backupRuntime = backup.files
-    .filter(([name]) => name.startsWith(RUNTIME_RELATIVE + "/"))
-    .map(([name, hash]) => [name.slice(RUNTIME_RELATIVE.length + 1), hash])
-    .sort((left, right) => left[0].localeCompare(right[0]));
-  if (sha256(JSON.stringify(backupRuntime)) !== marker.from_runtime_sha256) throw new Error("The backup does not hold the runtime from before the upgrade; nothing was changed.");
-  const lists = { from: backupRuntime, to: marker.to_runtime_files || [] };
-  // Every runtime directory is compared file by file, extra and missing files included, with the
-  // runtime before (from the backup) and after (recorded in the marker before it was copied). A copy
-  // interrupted midway may be part of its list. Anything else may be a human's change: the rollback
-  // deletes none of it, refuses, and the marker stays (Codex 2026-10-15).
-  // A side directory may be part of a list: a copy cut short, or a purge interrupted midway.
-  const runtime = {};
-  const unknown = [];
-  for (const [key, relative] of [["current", RUNTIME_RELATIVE], ...RUNTIME_SIDES.map((kind) => [kind, runtimeSide(kind, marker.upgrade_id)])]) {
-    const dir = inPrivate(privateRoot, relative);
-    if (!(await statOptional(dir))) { runtime[key] = null; continue; }
-    const files = await fileSnapshot(dir);
-    const exact = Object.keys(lists).find((side) => sameValue(files, lists[side]));
-    if (exact) { runtime[key] = exact; continue; }
-    const part = key === "current" ? null : ["to", "from"].find((side) => {
-      const reference = new Map(lists[side]);
-      return files.every(([name, hash]) => reference.get(name) === hash);
-    });
-    if (part) { runtime[key] = part + "_part"; continue; }
-    const from = new Map(lists.from);
-    const to = new Map(lists.to);
-    const names = new Set([...files.map(([name]) => name), ...from.keys(), ...to.keys()]);
-    const present = new Map(files);
-    const closest = [...from].filter(([name, hash]) => present.get(name) === hash).length >= [...to].filter(([name, hash]) => present.get(name) === hash).length ? from : to;
-    for (const name of [...names].sort()) if (present.get(name) !== closest.get(name)) unknown.push(relative + "/" + name + (present.has(name) ? (closest.has(name) ? " (changed)" : " (added)") : " (missing)"));
-  }
-  if (unknown.length) {
-    throw new Error("A runtime under tools/ is neither the version before nor the version after the upgrade, so the rollback will not delete or replace it and the marker stays: "
-      + unknown.slice(0, 10).join(", ") + (unknown.length > 10 ? " and " + (unknown.length - 10) + " more" : "")
-      + ". Move your changes out of .review-bridge/, then run upgrade --rollback again.");
-  }
-  const source = runtime.current === "from" ? "current" : runtime.previous === "from" ? "previous" : "backup";
-  const outsideTools = ([name]) => !name.startsWith("tools/");
-  const before = new Map(persistentOnly(backup.files).filter(outsideTools));
-  const now = new Map(persistentOnly(await fileSnapshot(privateRoot)).filter(outsideTools));
+  const before = new Map(persistentOnly(backup.files));
+  const now = new Map(persistentOnly(await fileSnapshot(privateRoot)));
   const written = marker.written || {};
+  const removed = new Set(marker.removed || []);
   const restore = [];
   const remove = [];
   const kept = [];
@@ -1571,20 +1554,19 @@ async function upgradeRollbackActions(root, marker, backup) {
     const ours = written[name] ?? null;
     if (original !== undefined) {
       if (current === original) continue;
-      if (current === ours || (current === null && ours !== null)) restore.push(name);
+      if (current === ours || (current === null && (ours !== null || removed.has(name)))) restore.push(name);
       else kept.push([name, current]);
     } else if (ours !== null && current === ours) remove.push(name);
     else kept.push([name, current]);
   }
-  return { runtime, runtime_source: source, restore, remove, kept };
+  return { restore, remove, kept };
 }
 
 // Codex 2026-10-15: the rollback deletes or replaces only what it can show is Bridge's at the moment
 // it acts, not at the moment it planned. A file is first renamed to a private name next to it (one
 // atomic step), and only then hashed: a match is Bridge's and goes; anything else is linked back
-// under its own name, never over a file that appeared there meanwhile. A directory goes only through
-// rmdir, which the OS refuses while anything is in it. What cannot be shown to be Bridge's is kept,
-// and so is the maintenance marker.
+// under its own name, never over a file that appeared there meanwhile. What cannot be shown to be
+// Bridge's is kept, and so is the maintenance marker.
 function asideName(file, purpose = "rollback") {
   return file + ".rb-" + purpose + "-" + randomUUID().slice(0, 8);
 }
@@ -1617,44 +1599,6 @@ async function deleteIfExpected(file, expected) {
   return { kept: await putBack(aside, file), hash };
 }
 
-async function listTree(root, relative = "") {
-  const files = [];
-  const directories = [];
-  for (const entry of await fsp.readdir(path.join(root, relative), { withFileTypes: true })) {
-    const next = path.posix.join(relative, entry.name);
-    if (entry.isDirectory() && !entry.isSymbolicLink()) {
-      const inner = await listTree(root, next);
-      files.push(...inner.files);
-      directories.push(...inner.directories, next);
-    } else files.push(next);
-  }
-  return { files, directories };
-}
-
-// Empties a runtime directory of the files that match its list, then removes the directories the
-// OS lets go of. Everything else is reported as left over, relative to .review-bridge/.
-async function purgeRuntimeDir(privateRoot, relative, expectedList, leftovers) {
-  const root = inPrivate(privateRoot, relative);
-  if (!(await statOptional(root))) return;
-  const expected = new Map(expectedList || []);
-  const { files, directories } = await listTree(root);
-  for (const name of files) {
-    const result = await deleteIfExpected(path.join(root, ...name.split("/")), expected.get(name));
-    if (result.kept) leftovers.push(path.relative(privateRoot, result.kept).replaceAll("\\", "/"));
-  }
-  for (const name of [...directories, ""]) {
-    const target = name ? path.join(root, ...name.split("/")) : root;
-    try {
-      await fsp.rmdir(target);
-    } catch (error) {
-      if (error.code === "ENOENT") continue;
-      if (!["ENOTEMPTY", "EEXIST", "EPERM", "EBUSY"].includes(error.code)) throw error;
-      const shown = path.posix.join(relative, name);
-      if (!leftovers.some((entry) => entry.startsWith(shown + "/"))) leftovers.push(shown + "/");
-    }
-  }
-}
-
 function leftoverError(leftovers) {
   const error = new Error("The rollback will not delete or overwrite these, because it cannot show they are Bridge's: "
     + leftovers.slice(0, 10).join(", ") + (leftovers.length > 10 ? " and " + (leftovers.length - 10) + " more" : "")
@@ -1663,47 +1607,10 @@ function leftoverError(leftovers) {
   return error;
 }
 
-// P2.11 / P2.13: put the runtime and the files back.
+// P2.11 / P2.13: put the files back.
 async function restoreUpgrade(context, actions, backup) {
   const { privateRoot, marker } = context;
-  const relativeOf = (kind) => (kind === "current" ? RUNTIME_RELATIVE : runtimeSide(kind, marker.upgrade_id));
-  const dir = (kind) => inPrivate(privateRoot, relativeOf(kind));
-  const lists = {
-    from: backup.files.filter(([name]) => name.startsWith(RUNTIME_RELATIVE + "/")).map(([name, hash]) => [name.slice(RUNTIME_RELATIVE.length + 1), hash]),
-    to: marker.to_runtime_files || [],
-  };
-  const listOf = (kind) => (kind ? lists[kind.replace(/_part$/, "")] : []);
   const leftovers = [];
-  const purge = (kind, runtimeKind) => purgeRuntimeDir(privateRoot, relativeOf(kind), listOf(runtimeKind), leftovers);
-  const stopOnLeftovers = () => { if (leftovers.length) throw leftoverError(leftovers); };
-  // What each side directory holds now, as the plan classified it; updated as directories move.
-  const side = { ...actions.runtime };
-  if (actions.runtime_source !== "current") {
-    // The renames below never overwrite: a directory left in the way stops the rollback first.
-    await purge("failed", side.failed);
-    stopOnLeftovers();
-    side.failed = null;
-    if (await statOptional(dir("current"))) {
-      await fsp.rename(dir("current"), dir("failed"));
-      side.failed = side.current;
-    }
-    if (actions.runtime_source === "previous") {
-      await fsp.rename(dir("previous"), dir("current"));
-      side.previous = null;
-    } else {
-      await purge("restore", side.restore);
-      stopOnLeftovers();
-      for (const [name] of lists.from) {
-        const target = path.join(dir("restore"), ...name.split("/"));
-        await fsp.mkdir(path.dirname(target), { recursive: true });
-        await fsp.copyFile(path.join(marker.backup_dir, "files", ...RUNTIME_RELATIVE.split("/"), ...name.split("/")), target, fsConstants.COPYFILE_EXCL);
-      }
-      if ((await runtimeFingerprint(dir("restore"))) !== marker.from_runtime_sha256) throw new Error("The runtime copied back from the backup does not match the one before the upgrade.");
-      await fsp.rename(dir("restore"), dir("current"));
-      side.restore = null;
-    }
-  }
-  if (context.hooks.afterRuntimeRestored) await context.hooks.afterRuntimeRestored(context);
   const original = new Map(backup.files);
   const kept = [...actions.kept];
   let restored = 0;
@@ -1721,7 +1628,7 @@ async function restoreUpgrade(context, actions, backup) {
       moved = false;
     }
     const current = moved ? await hashOptional(aside) : null;
-    if (!(current === ours || (current === null && ours !== null))) {
+    if (!(current === ours || (current === null && (ours !== null || (marker.removed || []).includes(name))))) {
       const where = moved ? await putBack(aside, file) : file;
       if (where === file) kept.push([name, current]);
       else leftovers.push(path.relative(privateRoot, where).replaceAll("\\", "/"));
@@ -1740,6 +1647,7 @@ async function restoreUpgrade(context, actions, backup) {
     if (moved) await fsp.rm(aside);
     restored += 1;
   }
+  if (context.hooks.afterFilesRestored) await context.hooks.afterFilesRestored(context);
   for (const name of actions.remove) {
     const file = inPrivate(privateRoot, name);
     const result = await deleteIfExpected(file, marker.written?.[name]);
@@ -1747,13 +1655,10 @@ async function restoreUpgrade(context, actions, backup) {
     else if (result.kept === file) kept.push([name, result.hash]);
     else if (result.kept) leftovers.push(path.relative(privateRoot, result.kept).replaceAll("\\", "/"));
   }
-  for (const kind of RUNTIME_SIDES) await purge(kind, side[kind]);
   const manifest = JSON.parse(await fsp.readFile(inPrivate(privateRoot, MANIFEST_RELATIVE), "utf8"));
-  if (manifest.runtime_sha256 !== marker.from_runtime_sha256 || (await runtimeFingerprint(dir("current"))) !== marker.from_runtime_sha256) {
-    throw new Error("After the rollback the install record or the runtime is not the one from before the upgrade.");
-  }
-  stopOnLeftovers();
-  return { runtime_source: actions.runtime_source, restored, removed, kept };
+  if (manifest.runtime_sha256 !== marker.from_runtime_sha256) throw new Error("After the rollback the install record is not the one from before the upgrade.");
+  if (leftovers.length) throw leftoverError(leftovers);
+  return { restored, removed, kept };
 }
 
 // P2.11: any failure after the backup puts the project back as it was before the upgrade.
@@ -1765,10 +1670,10 @@ async function rollbackAfterFailure(context, error) {
     await restartStoppedService(context);
   } catch (rollbackError) {
     throw new Error("The upgrade failed (" + error.message + ") and the automatic rollback did not finish (" + rollbackError.message
-      + "). Bridge stays blocked for new work. Run: node bridge.mjs upgrade --rollback. The backup is in " + context.marker.backup_dir);
+      + "). Bridge stays blocked for new work. Run: review-bridge upgrade --rollback --target " + context.root + ". The backup is in " + context.marker.backup_dir);
   }
   await fsp.rm(context.markerPath, { force: true });
-  const failed = new Error("The upgrade failed and was rolled back; the installed Bridge is as before: " + error.message
+  const failed = new Error("The upgrade failed and was rolled back; the project's settings are as before: " + error.message
     + (result.kept.length ? ". Left as they are, because they changed during the upgrade: " + result.kept.map(([name]) => name).join(", ") : ""));
   failed.rolledBack = result;
   throw failed;
@@ -1785,7 +1690,7 @@ async function applyUpgradeLocked(plan, hooks) {
       schema_version: 4, upgrade_id: id, operation: "upgrade", started_at: new Date().toISOString(),
       from_version: plan.from.version, to_version: plan.to.version,
       from_runtime_sha256: plan.from.runtime_sha256, to_runtime_sha256: plan.to.runtime_sha256,
-      service_was_running: plan.service_running, backup_dir: null, backup_manifest_sha256: null, written: {},
+      service_was_running: plan.service_running, backup_dir: null, backup_manifest_sha256: null, written: {}, removed: [],
     },
   };
   // P2.2: the marker first. From here every Bridge start in this project fails closed.
@@ -1825,37 +1730,25 @@ async function applyUpgradeLocked(plan, hooks) {
     if (sha256(JSON.stringify(now)) !== plan.persistent_sha256 || changed) {
       throw refusal("A file changed after the backup: " + (changed ? changed[0] : "(set of files)") + ". Nothing was changed; make a new plan.");
     }
+    if ((await runtimeFingerprint(sourceRuntime)) !== plan.to.runtime_sha256) throw refusal("The Bridge folder changed after the plan was shown; make a new plan.");
     context.marker.backup_dir = backupDir;
     context.marker.backup_manifest_sha256 = backup.sha;
-    // The new runtime's file list, recorded before the copy, is how a rollback recognises it.
-    const toFiles = await fileSnapshot(path.join(packageRoot, "review-bridge"));
-    if (sha256(JSON.stringify(toFiles)) !== plan.to.runtime_sha256) throw refusal("The Bridge source changed after the plan was shown; make a new plan.");
-    context.marker.to_runtime_files = toFiles;
     await markerSave(context);
   } catch (error) {
     await releaseBeforeChange(context, error);
   }
-  const runtimeDir = inPrivate(privateRoot, RUNTIME_RELATIVE);
-  const nextDir = inPrivate(privateRoot, runtimeSide("next", id));
-  const previousDir = inPrivate(privateRoot, runtimeSide("previous", id));
   let settings;
   let report;
+  let legacyRemoved = 0;
   try {
     if (hooks.afterBackupVerified) await hooks.afterBackupVerified(context);
-    // P2.7
-    await fsp.cp(path.join(packageRoot, "review-bridge"), nextDir, { recursive: true });
-    if ((await runtimeFingerprint(nextDir)) !== plan.to.runtime_sha256) throw new Error("The copied runtime does not match the source it was planned from.");
-    if (hooks.afterPrepare) await hooks.afterPrepare(context);
-    // P2.8: only these two directories under tools/ are renamed; the marker stays throughout.
-    await fsp.rename(runtimeDir, previousDir);
-    if (hooks.betweenRenames) await hooks.betweenRenames(context);
-    await fsp.rename(nextDir, runtimeDir);
-    if (hooks.afterSwap) await hooks.afterSwap(context);
     // P2.9
     settings = await mergeSettings(context, plan);
     if (hooks.afterConfig) await hooks.afterConfig(context);
     // P2.10
     report = await writeInvalidations(context);
+    legacyRemoved = await removeLegacyRuntime(context, plan);
+    if (hooks.afterLegacyRemoved) await hooks.afterLegacyRemoved(context);
     await writeUpgradeManifest(context, plan, report);
     if (hooks.beforeVerify) await hooks.beforeVerify(context);
     await verifyNeutralInstall(root);
@@ -1864,11 +1757,6 @@ async function applyUpgradeLocked(plan, hooks) {
   }
   await fsp.rm(markerPath, { force: true });
   const warnings = [];
-  try {
-    await fsp.rm(previousDir, { recursive: true, force: true });
-  } catch (error) {
-    warnings.push("The previous runtime could not be deleted (" + error.message + "); delete " + previousDir + " by hand.");
-  }
   let restarted = false;
   if (plan.service_running) {
     const outcome = await restartOutcome(hooks.restartService, root);
@@ -1878,6 +1766,7 @@ async function applyUpgradeLocked(plan, hooks) {
   return {
     ok: true, operation: "upgrade", target: root, from: plan.from, to: plan.to, backup_dir: context.marker.backup_dir,
     kept_user_file_count: plan.user_file_count, config_added_keys: settings.added, template: settings.template, template_new_path: settings.template_new_path,
+    legacy_runtime_removed: legacyRemoved,
     invalidated_count: report.invalidated_count, invalidated_authorization_ids: report.invalidated_authorization_ids,
     service_restarted: restarted, reviewer_readonly: "not_run", warnings,
   };
@@ -1895,7 +1784,7 @@ export async function applyNeutralUpgrade(plan, approval, hooks = {}) {
 }
 
 // P2.12: the plan for an interrupted upgrade. It never reads the install manifest's verdict; only
-// the marker, the backup it names and what is under tools/ now.
+// the marker and the backup it names.
 export async function planNeutralUpgradeRollback({ target }) {
   const root = path.resolve(target);
   const stat = await statOptional(root);
@@ -1920,7 +1809,7 @@ export async function planNeutralUpgradeRollback({ target }) {
     from: { version: marker.from_version ?? null, runtime_sha256: marker.from_runtime_sha256 },
     restart_service: marker.service_was_running === true && !(await pageServiceRunning(root)),
   };
-  // Interrupted before the backup was recorded: the runtime and the settings were never touched.
+  // Interrupted before the backup was recorded: the settings were never touched.
   if (!marker.backup_dir) return sealPlan({ ...base, kind: "release" });
   let backup;
   try {
@@ -1948,7 +1837,7 @@ export async function applyNeutralUpgradeRollback(plan, approval, hooks = {}) {
     const markerPath = inPrivate(privateRoot, MAINTENANCE_MARKER);
     const marker = JSON.parse(await fsp.readFile(markerPath, "utf8"));
     const context = { root: plan.target, privateRoot, markerPath, marker, hooks };
-    let result = { runtime_source: null, restored: 0, removed: 0, kept: [] };
+    let result = { restored: 0, removed: 0, kept: [] };
     if (plan.kind === "restore") result = await restoreUpgrade(context, plan, await readBackupManifest(marker));
     let restarted = false;
     if (plan.restart_service) {
@@ -1976,9 +1865,9 @@ export function formatUpgradePlan(plan) {
     unchanged: "TEMPLATE.md：與新版相同，不動。",
   }[plan.template.action];
   return [
-    "升級 Review Bridge：" + plan.target,
+    "升級這個專案的 Bridge 設定：" + plan.target,
     versionText(plan.from) + " → " + versionText(plan.to),
-    "會換掉執行程式：" + plan.runtime_file_count.from + " 個檔換成 " + plan.runtime_file_count.to + " 個檔",
+    ...(plan.legacy_runtime_file_count ? ["會拿掉舊版留在專案裡的 tools/（" + plan.legacy_runtime_file_count + " 個檔，已經不用）"] : []),
     "會保留你的 " + plan.user_file_count + " 個檔（工單、結果、日檔、run 紀錄、授權、rules.md 等都不動）：",
     ...plan.user_files.map((name) => "  " + name),
     ...(plan.user_file_count > plan.user_files.length ? ["  …另外 " + (plan.user_file_count - plan.user_files.length) + " 個"] : []),
@@ -1988,7 +1877,7 @@ export function formatUpgradePlan(plan) {
     template,
     ...(plan.policy_changed ? ["新版的預設 policy 不同：升級後未開始的授權會失效，需重新建 plan。"] : []),
     ...(plan.service_running ? ["會先停掉網頁服務，升級後再啟動。"] : []),
-    "整份先備份到專案外，核對後才換：" + plan.backup_parent,
+    "整份先備份到專案外，核對後才改：" + plan.backup_parent,
     PROOF_LOSS_LINE,
   ].join("\n") + "\n";
 }
@@ -1996,8 +1885,9 @@ export function formatUpgradePlan(plan) {
 export function formatUpgradeResult(result) {
   if (result.up_to_date) return "已是這一版（" + (result.version || "未標版本") + "），沒有動任何檔。\n";
   return [
-    "已升級到 " + (result.to.version || "未標版本") + "（" + result.to.runtime_sha256.slice(0, 8) + "）",
+    "這個專案的設定已升級到 " + (result.to.version || "未標版本") + "（" + result.to.runtime_sha256.slice(0, 8) + "）",
     "保留了你的 " + result.kept_user_file_count + " 個檔；備份在 " + result.backup_dir,
+    ...(result.legacy_runtime_removed ? ["拿掉了舊的 tools/（" + result.legacy_runtime_removed + " 個檔）"] : []),
     ...(result.invalidated_count ? ["失效的授權 " + result.invalidated_count + " 個；要做那些工作得重新建 plan"] : []),
     ...(result.template === "keep_and_write_new" ? ["TEMPLATE.md 你改過，保留了；新版在 " + path.posix.basename(result.template_new_path)] : []),
     PROOF_REDO_LINE,
@@ -2008,19 +1898,13 @@ export function formatUpgradeResult(result) {
 export function formatUpgradeRollbackPlan(plan) {
   if (plan.kind === "release") {
     return [
-      "上一次升級在備份之前中斷，執行程式與設定都沒動。",
+      "上一次升級在備份之前中斷，設定都沒動。",
       "這次會：拿掉維護標記" + (plan.restart_service ? "、重新啟動網頁服務" : "") + "。",
     ].join("\n") + "\n";
   }
-  const runtime = {
-    current: "執行程式：現在那份就是升級前的，不用換",
-    previous: "執行程式取自 previous（升級前那份，還在 tools/ 底下）",
-    backup: "執行程式取自備份",
-  }[plan.runtime_source];
   const list = (items) => items.slice(0, 20).map((item) => "  " + (Array.isArray(item) ? item[0] : item));
   return [
     "上一次升級中斷，要退回升級前（" + (plan.from.version || "未標版本") + "）。",
-    runtime,
     ...(plan.restore.length ? ["從備份還原 " + plan.restore.length + " 個檔：", ...list(plan.restore)] : []),
     ...(plan.remove.length ? ["刪掉升級寫入的 " + plan.remove.length + " 個檔：", ...list(plan.remove)] : []),
     ...(plan.kept.length ? ["保留不動 " + plan.kept.length + " 個檔（升級期間被改過，既不是備份版也不是升級寫入的版本）：", ...list(plan.kept)] : []),

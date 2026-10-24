@@ -14,16 +14,14 @@ async function writeModule(runtimeRoot, relative, layout) {
     : "export const layout = \"" + layout + "\";\n", "utf8");
 }
 
-test("an installed runtime is read in its own layout: feature-based first, then the core/ layout of older installs", async (t) => {
+test("the runtime's page service is read from its feature-based layout; an older core/ layout is not read", async (t) => {
   const runtimeRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-installed-runtime-"));
   t.after(() => fsp.rm(runtimeRoot, { recursive: true, force: true }));
   assert.equal(await loadInstalledServiceModules(runtimeRoot), null, "no page service module means nothing to load");
 
   await writeModule(runtimeRoot, "core/paths.mjs", "core");
   await writeModule(runtimeRoot, "core/service.mjs", "core");
-  const older = await loadInstalledServiceModules(runtimeRoot);
-  assert.equal(older.service.layout, "core");
-  assert.equal(older.getBridgePaths().layout, "core");
+  assert.equal(await loadInstalledServiceModules(runtimeRoot), null, "an rc2 layout is not supported");
 
   await writeModule(runtimeRoot, "utils/paths.mjs", "feature");
   await writeModule(runtimeRoot, "features/setupCheck/pageService.mjs", "feature");

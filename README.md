@@ -50,7 +50,7 @@ It is not a general agent framework, a session synchronization protocol, or an a
 
 Do not ask an agent to install the Bridge. In File Explorer or Finder, extract the ZIP into any local directory outside the target project. Open a terminal in that extracted directory. Do not copy the ZIP or installer source into the target project.
 
-Run `node --version` and require Node.js 22 or newer before continuing. `init` automatically verifies the extracted package before it reads the target or installs anything. A missing, modified, or damaged packaged file produces one fail-closed error and no installation; users do not compare integrity values manually.
+Git, Node.js 22 or newer, and npm must already be installed; Bridge does not install them. Run `node --version` and require Node.js 22 or newer before continuing. After switching Node versions (for example with nvm), run `npm start` in the Bridge folder again: the `review-bridge` command belongs to one Node installation and is registered again for the new one. `init` automatically verifies the extracted package before it reads the target or installs anything. A missing, modified, or damaged packaged file produces one fail-closed error and no installation; users do not compare integrity values manually.
 
 ### Human-Approved Initialization
 

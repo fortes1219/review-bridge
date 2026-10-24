@@ -13,10 +13,15 @@ import {
   applyNeutralInstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeRollbackPlan,
   loadInstalledServiceModules, MAINTENANCE_MARKER, planNeutralInstall, planNeutralUpgrade, planNeutralUpgradeRollback, PROOF_LOSS_LINE, TRANSIENT_FILES,
 } from "../installer/neutral-install.mjs";
+import { policyIdentity } from "../review-bridge/service/index.mjs";
 
+// Bridge itself is upgraded in its own folder by the install Guide; every project already runs that
+// runtime. These tests cover what is left per project: its settings, its template, authorizations
+// bound to the old default policy, and the tools/ copy an older setup left in the project.
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bridge = path.join(packageRoot, "bridge.mjs");
 const sourceRuntime = path.join(packageRoot, "review-bridge");
+const sourceBootstrap = path.join(sourceRuntime, "bootstrap.mjs");
 const sourceModule = (relative) => pathToFileURL(path.join(sourceRuntime, ...relative.split("/"))).href;
 
 // Every default backup root points into a temporary folder; nothing touches the real user profile.
@@ -35,14 +40,14 @@ const exists = async (file) => Boolean(await fsp.stat(file).catch(() => null));
 const readJson = async (file) => JSON.parse(await fsp.readFile(file, "utf8"));
 const writeJson = (file, value) => fsp.writeFile(file, JSON.stringify(value, null, 2) + "\n");
 const privateOf = (root) => path.join(root, ".review-bridge");
-const runtimeOf = (root) => path.join(root, ".review-bridge", "tools", "review-bridge");
+const legacyOf = (root) => path.join(root, ".review-bridge", "tools", "review-bridge");
 const markerOf = (root) => path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
 const lockOf = (root) => path.join(root, ".review-bridge-install.lock");
 
 async function workspace(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-upgrade-"));
   t.after(async () => {
-    spawnSync(process.execPath, [path.join(runtimeOf(root), "bootstrap.mjs"), "down"], { cwd: root, windowsHide: true, stdio: "ignore" });
+    spawnSync(process.execPath, [sourceBootstrap, "down"], { cwd: root, windowsHide: true, stdio: "ignore" });
     await fsp.rm(root, { recursive: true, force: true });
   });
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "vue-test", dependencies: { vue: "latest" }, devDependencies: { vite: "latest" } }));
@@ -75,60 +80,12 @@ async function installWithService(root) {
 }
 
 async function serviceCheck(root) {
-  const runtimeRoot = runtimeOf(root);
-  const modules = await loadInstalledServiceModules(runtimeRoot);
-  if (!modules) return { running: false };
-  return await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }));
+  const modules = await loadInstalledServiceModules(sourceRuntime);
+  return await modules.service.checkService(modules.getBridgePaths(root, sourceRuntime, { privateRootName: ".review-bridge" }));
 }
 
 async function serviceRunning(root) {
   return (await serviceCheck(root)).running === true;
-}
-
-// The same fingerprint the installer records as runtime_sha256.
-async function fingerprint(root) {
-  const files = [];
-  async function visit(directory, relative = "") {
-    for (const entry of await fsp.readdir(directory, { withFileTypes: true })) {
-      const next = path.posix.join(relative, entry.name);
-      if (entry.isDirectory()) await visit(path.join(directory, entry.name), next);
-      else files.push([next, sha(await fsp.readFile(path.join(directory, entry.name)))]);
-    }
-  }
-  await visit(root);
-  files.sort((left, right) => left[0].localeCompare(right[0]));
-  return sha(JSON.stringify(files));
-}
-
-// "The old version": the installed runtime with another version string (and, if asked, another
-// default policy), and a bridge.json from before active_runs existed. The install record follows,
-// so the old install still verifies.
-async function makeOld(root, { policy = false } = {}) {
-  const runtimeRoot = runtimeOf(root);
-  const packageFile = path.join(runtimeRoot, "templates", "PACKAGE_MANIFEST.json");
-  const pkg = await readJson(packageFile);
-  pkg.version = "0.1.0-old";
-  await writeJson(packageFile, pkg);
-  if (policy) {
-    const policyFile = path.join(runtimeRoot, "config", "default-policy.json");
-    const defaults = await readJson(policyFile);
-    defaults.package_policy_id += "-old";
-    await writeJson(policyFile, defaults);
-  }
-  const configFile = path.join(privateOf(root), "review-bridge", "bridge.json");
-  const config = await readJson(configFile);
-  delete config.active_runs;
-  // Installs made before the rename still carry this key.
-  config.state_contract = "v4";
-  await writeJson(configFile, config);
-  const installFile = path.join(privateOf(root), "review-bridge-install.json");
-  const manifest = await readJson(installFile);
-  manifest.runtime_sha256 = await fingerprint(runtimeRoot);
-  const installed = new Map(manifest.installed_files);
-  for (const [name, hash] of await tree(runtimeRoot)) installed.set("tools/review-bridge/" + name, hash);
-  installed.set("review-bridge/bridge.json", sha(await fsp.readFile(configFile)));
-  manifest.installed_files = [...installed].sort((left, right) => left[0].localeCompare(right[0]));
-  await writeJson(installFile, manifest);
 }
 
 async function tree(root) {
@@ -142,6 +99,43 @@ async function tree(root) {
   }
   await visit(root);
   return files;
+}
+
+// A copy of the runtime with another default policy: what an older Bridge ran with.
+async function oldPolicyRuntime(t) {
+  const copy = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-old-runtime-"));
+  t.after(() => fsp.rm(copy, { recursive: true, force: true }));
+  await fsp.cp(sourceRuntime, copy, { recursive: true, filter: (source) => !source.startsWith(path.join(sourceRuntime, "tests")) });
+  const policyFile = path.join(copy, "config", "default-policy.json");
+  const defaults = await readJson(policyFile);
+  defaults.package_policy_id += "-old";
+  await writeJson(policyFile, defaults);
+  return copy;
+}
+
+// "Set up by an older Bridge": the install record names another runtime and version (and, if
+// asked, another default policy), bridge.json is from before active_runs existed, and, if asked,
+// the older setup's tools/ copy is in the project. The record follows, so it still verifies.
+async function makeOld(root, { policy = null, legacy = false } = {}) {
+  const configFile = path.join(privateOf(root), "review-bridge", "bridge.json");
+  const config = await readJson(configFile);
+  delete config.active_runs;
+  // Installs made before the rename still carry this key.
+  config.state_contract = "v4";
+  await writeJson(configFile, config);
+  const installFile = path.join(privateOf(root), "review-bridge-install.json");
+  const manifest = await readJson(installFile);
+  manifest.runtime_sha256 = sha("an older runtime " + randomUUID());
+  manifest.bridge_version = "0.1.0-old";
+  if (policy) manifest.policy_identity = policyIdentity(await readJson(path.join(policy, "config", "default-policy.json")));
+  const installed = new Map(manifest.installed_files);
+  if (legacy) {
+    await fsp.cp(sourceRuntime, legacyOf(root), { recursive: true });
+    for (const [name, hash] of await tree(legacyOf(root))) installed.set("tools/review-bridge/" + name, hash);
+  }
+  installed.set("review-bridge/bridge.json", sha(await fsp.readFile(configFile)));
+  manifest.installed_files = [...installed].sort((left, right) => left[0].localeCompare(right[0]));
+  await writeJson(installFile, manifest);
 }
 
 // Persistent data only: the transient files of the page service and the transaction are left out.
@@ -172,14 +166,14 @@ async function addUserData(root) {
 }
 
 function bootstrapRun(root, args, expected = 0) {
-  const result = spawnSync(process.execPath, [path.join(runtimeOf(root), "bootstrap.mjs"), ...args], {
+  const result = spawnSync(process.execPath, [sourceBootstrap, ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: childEnv, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(result.status, expected, [args[0], result.stdout, result.stderr].join("\n"));
   return result;
 }
 
-// One fake work package through the installed CLI, the same way init's self-test runs it.
+// One fake work package through the CLI, the same way init's self-test runs it.
 async function fakeRun(root, id) {
   const planPath = path.join(privateOf(root), "review-queue", id + ".plan.json");
   const taskPath = path.join(privateOf(root), "work-packages", id + ".md");
@@ -217,7 +211,7 @@ function crashAt(root, hook) {
   assert.equal(result.status, 9, "the child should exit at " + hook + ": " + result.stderr);
 }
 
-async function workApi(root, runtimeRoot = runtimeOf(root)) {
+async function workApi(root, runtimeRoot = sourceRuntime) {
   const { getBridgePaths } = await import(sourceModule("utils/paths.mjs"));
   return {
     paths: getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }),
@@ -234,10 +228,17 @@ async function makePlan(api, id) {
   });
 }
 
-test("W1 upgrade replaces the runtime, keeps every user file and editable setting, and work still runs", async (t) => {
+test("a project set up now holds no runtime and is already up to date", async (t) => {
   const root = await workspace(t);
   await install(root);
-  await makeOld(root);
+  assert.equal(await exists(path.join(privateOf(root), "tools")), false);
+  assert.equal((await planNeutralUpgrade({ target: root })).up_to_date, true);
+});
+
+test("W1 upgrade merges the settings, removes the old tools/ copy, keeps every user file and editable setting, and work still runs", async (t) => {
+  const root = await workspace(t);
+  await install(root);
+  await makeOld(root, { legacy: true });
   await fakeRun(root, "before-upgrade");
   await addUserData(root);
   const before = await persistent(root);
@@ -248,10 +249,14 @@ test("W1 upgrade replaces the runtime, keeps every user file and editable settin
   assert.deepEqual(plan.config_removed_keys, ["state_contract"]);
   assert.equal(plan.template.action, "keep_and_write_new");
   assert.equal(plan.policy_changed, false);
+  assert.ok(plan.legacy_runtime_file_count > 10);
+  assert.match(formatUpgradePlan(plan), /會拿掉舊版留在專案裡的 tools\/（\d+ 個檔，已經不用）/);
   // farm.md, farm.result.md, the day file, rules.md, TEMPLATE.md, bridge.json and the fake run's records.
   assert.ok(plan.user_file_count >= 8, "user files: " + plan.user_file_count);
+  assert.ok(plan.user_files.every((name) => !name.startsWith("tools/")), "the old copy is not counted as the person's");
   assert.equal(result.ok, true);
-  assert.equal(await fingerprint(runtimeOf(root)), await fingerprint(sourceRuntime), "the runtime is the new source");
+  assert.equal(result.legacy_runtime_removed, plan.legacy_runtime_file_count);
+  assert.equal(await exists(path.join(privateOf(root), "tools")), false, "the old tools/ copy is gone");
   const after = await persistent(root);
   // Work orders, results, the day file, run records, authorizations, rules.md, the policy override
   // and the edited TEMPLATE.md: bit for bit as before.
@@ -267,13 +272,14 @@ test("W1 upgrade replaces the runtime, keeps every user file and editable settin
   assert.equal(config.active_runs, "derive_from_run_projections", "the new key is added");
   assert.equal(Object.hasOwn(config, "state_contract"), false, "the retired key is removed");
   assert.equal(after.get("work-packages/TEMPLATE.new.md"), sha(await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md"))));
-  assert.equal([...after.keys()].filter((name) => name.startsWith("tools/") && !name.startsWith("tools/review-bridge/")).length, 0, "no previous or next runtime is left");
   assert.equal(await exists(markerOf(root)), false);
   assert.equal(await exists(lockOf(root)), false);
   const manifest = await readJson(path.join(privateOf(root), "review-bridge-install.json"));
   assert.equal(manifest.runtime_sha256, plan.to.runtime_sha256);
+  assert.equal(manifest.bridge_version, plan.to.version);
+  assert.ok(manifest.installed_files.every(([name]) => !name.startsWith("tools/")));
   assert.equal(manifest.upgrades.at(-1).backup_dir, result.backup_dir);
-  // The backup outside the project holds the whole folder from before.
+  // The backup outside the project holds the whole folder from before, the old copy included.
   const backup = await readJson(path.join(result.backup_dir, "backup-manifest.json"));
   assert.equal(backup.operation, "upgrade");
   for (const [name, hash] of before) assert.equal(new Map(backup.files).get(name), hash, "backed up: " + name);
@@ -285,15 +291,15 @@ test("W1 upgrade replaces the runtime, keeps every user file and editable settin
   sameTree(await tree(privateOf(root)), settled, "W9");
 });
 
-test("W2 a failure at each step rolls back: persistent data bit for bit, no marker, no lock, the page service as before", async (t) => {
+test("W2 a failure at each step rolls back: persistent data bit for bit, the old copy back, no marker, no lock, the page service as before", async (t) => {
   const root = await workspace(t);
   await installWithService(root);
-  await makeOld(root);
+  await makeOld(root, { legacy: true });
   await addUserData(root);
   const fail = async () => { throw new Error("injected"); };
-  for (const hook of ["afterPrepare", "betweenRenames", "afterConfig", "beforeVerify"]) {
+  for (const hook of ["afterConfig", "afterLegacyRemoved", "beforeVerify"]) {
     const before = await persistent(root);
-    await assert.rejects(upgrade(root, { [hook]: fail }), /The upgrade failed and was rolled back; the installed Bridge is as before: injected/, hook);
+    await assert.rejects(upgrade(root, { [hook]: fail }), /The upgrade failed and was rolled back; the project's settings are as before: injected/, hook);
     sameTree(await persistent(root), before, hook);
     assert.equal(await exists(markerOf(root)), false, hook + ": marker");
     assert.equal(await exists(lockOf(root)), false, hook + ": lock");
@@ -314,59 +320,40 @@ test("W2 a failure at each step rolls back: persistent data bit for bit, no mark
 test("W2b an automatic rollback that cannot finish keeps the marker and names upgrade --rollback", async (t) => {
   const root = await workspace(t);
   await install(root);
-  await makeOld(root);
+  await makeOld(root, { legacy: true });
   const before = await persistent(root);
   await assert.rejects(upgrade(root, {
-    afterConfig: async () => { throw new Error("injected"); },
-    afterRuntimeRestored: async () => { throw new Error("restore blocked"); },
-  }), /automatic rollback did not finish \(restore blocked\)\. Bridge stays blocked for new work\. Run: node bridge\.mjs upgrade --rollback\. The backup is in /);
+    afterLegacyRemoved: async () => { throw new Error("injected"); },
+    afterFilesRestored: async () => { throw new Error("restore blocked"); },
+  }), /automatic rollback did not finish \(restore blocked\)\. Bridge stays blocked for new work\. Run: review-bridge upgrade --rollback --target .+\. The backup is in /);
   assert.equal(await exists(markerOf(root)), true, "new work stays blocked");
-  const { plan } = await rollback(root);
-  assert.equal(plan.runtime_source, "current", "the runtime was already put back");
-  assert.ok(plan.restore.includes("review-bridge/bridge.json"));
+  await rollback(root);
   sameTree(await persistent(root), before, "after upgrade --rollback");
   assert.equal(await exists(markerOf(root)), false);
 });
 
-test("W3 a crash between the two renames: work is refused, the rollback plan takes the runtime from previous, and work runs again", async (t) => {
+test("W3 a crash after the old copy was removed: work is refused, the rollback puts the copy and the settings back, and work runs again", async (t) => {
   const root = await workspace(t);
   await install(root);
-  await makeOld(root);
+  await makeOld(root, { legacy: true });
   await fakeRun(root, "before-crash");
-  // The installed runtime is renamed away by the crash; the same policy is read from the source.
-  const api = await workApi(root, sourceRuntime);
+  const api = await workApi(root);
   const pending = await makePlan(api, "pending-1");
   const before = await persistent(root);
-  crashAt(root, "betweenRenames");
+  crashAt(root, "afterLegacyRemoved");
   assert.equal(await exists(markerOf(root)), true);
-  assert.equal(await exists(runtimeOf(root)), false, "review-bridge/ is not there");
-  const marker = await readJson(markerOf(root));
-  assert.equal(await exists(path.join(privateOf(root), "tools", ".review-bridge-previous-" + marker.upgrade_id)), true);
-  // The installed entry point is gone, and the state machine refuses new work while the marker is there.
-  assert.equal(await exists(path.join(runtimeOf(root), "bootstrap.mjs")), false);
+  assert.equal(await exists(legacyOf(root)), false, "the old copy is gone");
+  assert.ok((await readJson(markerOf(root))).removed.length > 10, "the marker names every removed file");
+  // The state machine refuses new work while the marker is there.
   await assert.rejects(api.authorizeWorkPackage({ paths: api.paths, planPath: pending.plan_path, approval: pending.plan_sha256, executionMode: "fake_cli" }), /Runtime upgrade is in progress/);
   const plan = await planNeutralUpgradeRollback({ target: root });
   assert.equal(plan.kind, "restore");
-  assert.equal(plan.runtime_source, "previous");
-  assert.match(formatUpgradeRollbackPlan(plan), /執行程式取自 previous/);
+  assert.ok(plan.restore.includes("tools/review-bridge/bootstrap.mjs"));
+  assert.ok(plan.restore.includes("review-bridge/bridge.json"));
   await applyNeutralUpgradeRollback(plan, plan.plan_sha256);
   sameTree(await persistent(root), before, "after rollback");
   assert.equal(await exists(lockOf(root)), false, "the stale lock was taken over and released");
   await fakeRun(root, "after-rollback");
-});
-
-test("W3 when previous is gone too, the runtime comes back from the backup", async (t) => {
-  const root = await workspace(t);
-  await install(root);
-  await makeOld(root);
-  const before = await persistent(root);
-  crashAt(root, "betweenRenames");
-  const marker = await readJson(markerOf(root));
-  await fsp.rm(path.join(privateOf(root), "tools", ".review-bridge-previous-" + marker.upgrade_id), { recursive: true });
-  const { plan } = await rollback(root);
-  assert.equal(plan.runtime_source, "backup");
-  assert.match(formatUpgradeRollbackPlan(plan), /執行程式取自備份/);
-  sameTree(await persistent(root), before, "runtime from the backup");
 });
 
 test("W3b interrupted after the page service stopped and before the backup: the plan only releases the marker and restarts what ran", async (t) => {
@@ -380,7 +367,7 @@ test("W3b interrupted after the page service stopped and before the backup: the 
   const plan = await planNeutralUpgradeRollback({ target: root });
   assert.equal(plan.kind, "release");
   assert.equal(plan.restart_service, true);
-  assert.equal(formatUpgradeRollbackPlan(plan), "上一次升級在備份之前中斷，執行程式與設定都沒動。\n這次會：拿掉維護標記、重新啟動網頁服務。\n");
+  assert.equal(formatUpgradeRollbackPlan(plan), "上一次升級在備份之前中斷，設定都沒動。\n這次會：拿掉維護標記、重新啟動網頁服務。\n");
   await applyNeutralUpgradeRollback(plan, plan.plan_sha256);
   assert.equal(await exists(markerOf(root)), false);
   assert.equal(await serviceRunning(root), true);
@@ -390,7 +377,7 @@ test("W3b interrupted after the page service stopped and before the backup: the 
   crashAt(root, "afterServiceStop");
   const quiet = await planNeutralUpgradeRollback({ target: root });
   assert.equal(quiet.restart_service, false);
-  assert.equal(formatUpgradeRollbackPlan(quiet), "上一次升級在備份之前中斷，執行程式與設定都沒動。\n這次會：拿掉維護標記。\n");
+  assert.equal(formatUpgradeRollbackPlan(quiet), "上一次升級在備份之前中斷，設定都沒動。\n這次會：拿掉維護標記。\n");
   await applyNeutralUpgradeRollback(quiet, quiet.plan_sha256);
   assert.equal(await serviceRunning(root), false);
   sameTree(await persistent(root), before, "release without service");
@@ -423,7 +410,6 @@ test("W3c interrupted after the settings merge, then bridge.json edited by hand:
   await writeJson(configPath, edited);
   const editedHash = sha(await fsp.readFile(configPath));
   const { plan, result } = await rollback(root);
-  assert.equal(plan.runtime_source, "previous");
   assert.deepEqual(plan.kept.map(([name]) => name), ["review-bridge/bridge.json"]);
   assert.match(formatUpgradeRollbackPlan(plan), /保留不動 1 個檔.*\n  review-bridge\/bridge\.json/);
   assert.deepEqual(result.kept.map(([name]) => name), ["review-bridge/bridge.json"]);
@@ -432,6 +418,46 @@ test("W3c interrupted after the settings merge, then bridge.json edited by hand:
   after.delete("review-bridge/bridge.json");
   before.delete("review-bridge/bridge.json");
   sameTree(after, before, "everything else");
+});
+
+test("W3d a file the person put back into tools/ after a crash is kept, and the rest of the copy comes back", async (t) => {
+  const root = await workspace(t);
+  await install(root);
+  await makeOld(root, { legacy: true });
+  const before = await persistent(root);
+  crashAt(root, "afterLegacyRemoved");
+  const prompt = path.join(legacyOf(root), "review-prompt.md");
+  await fsp.mkdir(path.dirname(prompt), { recursive: true });
+  await fsp.writeFile(prompt, "我的版本\n");
+  const { plan, result } = await rollback(root);
+  assert.deepEqual(plan.kept.map(([name]) => name), ["tools/review-bridge/review-prompt.md"]);
+  assert.deepEqual(result.kept.map(([name]) => name), ["tools/review-bridge/review-prompt.md"]);
+  assert.equal(await fsp.readFile(prompt, "utf8"), "我的版本\n", "the person's file is not overwritten");
+  const after = await persistent(root);
+  after.delete("tools/review-bridge/review-prompt.md");
+  before.delete("tools/review-bridge/review-prompt.md");
+  sameTree(after, before, "everything else is back");
+  assert.equal(await exists(markerOf(root)), false);
+});
+
+test("W3e a file written after the rollback plan was made stops that plan; the next plan keeps the file", async (t) => {
+  const root = await workspace(t);
+  await install(root);
+  await makeOld(root, { legacy: true });
+  crashAt(root, "afterLegacyRemoved");
+  const plan = await planNeutralUpgradeRollback({ target: root });
+  assert.ok(plan.restore.includes("tools/review-bridge/review-prompt.md"));
+  // Written after the plan looked, before the rollback gets to it.
+  const prompt = path.join(legacyOf(root), "review-prompt.md");
+  await fsp.mkdir(path.dirname(prompt), { recursive: true });
+  await fsp.writeFile(prompt, "not Bridge's\n");
+  await assert.rejects(applyNeutralUpgradeRollback(plan, plan.plan_sha256), /The project changed after the plan was shown; make a new plan/);
+  assert.equal(await fsp.readFile(prompt, "utf8"), "not Bridge's\n");
+  assert.equal(await exists(markerOf(root)), true, "the marker stays");
+  const { result } = await rollback(root);
+  assert.ok(result.kept.some(([name]) => name === "tools/review-bridge/review-prompt.md"));
+  assert.equal(await fsp.readFile(prompt, "utf8"), "not Bridge's\n");
+  assert.equal(await exists(markerOf(root)), false);
 });
 
 test("W4 work-start is refused once the marker is written; a run claimed just before cancels itself", async (t) => {
@@ -497,12 +523,6 @@ test("W5 / W6 / W8 approval binds the plan; running work, a failed verification,
   await fsp.rm(markerOf(root));
   // W6: a backup root inside the project.
   await assert.rejects(planNeutralUpgrade({ target: root, backupRoot: path.join(root, "backups") }), /must be outside the project/);
-  // W6: a changed runtime does not verify.
-  const runtimeFile = path.join(runtimeOf(root), "review-prompt.md");
-  const original = await fsp.readFile(runtimeFile);
-  await fsp.appendFile(runtimeFile, "\nchanged\n");
-  await assert.rejects(planNeutralUpgrade({ target: root }), /does not verify, so it will not be upgraded: Neutral runtime checksum mismatch/);
-  await fsp.writeFile(runtimeFile, original);
   // W8: a protected setting changed.
   const configPath = path.join(privateOf(root), "review-bridge", "bridge.json");
   const config = await readJson(configPath);
@@ -515,22 +535,25 @@ test("W5 / W6 / W8 approval binds the plan; running work, a failed verification,
 test("W7 a new default policy invalidates unstarted authorizations, reports them and refuses them with a new-plan message", async (t) => {
   const root = await workspace(t);
   await install(root);
-  await makeOld(root, { policy: true });
-  const api = await workApi(root);
-  const { snapshot } = await api.loadOrCreatePolicySnapshot(api.paths);
-  const workPackage = await api.createImmutableWorkPackage(api.paths, {
+  const old = await oldPolicyRuntime(t);
+  await makeOld(root, { policy: old });
+  // Made while the older Bridge (with its own default policy) ran.
+  const before = await workApi(root, old);
+  const { snapshot } = await before.loadOrCreatePolicySnapshot(before.paths);
+  const workPackage = await before.createImmutableWorkPackage(before.paths, {
     work_package_id: "wp-" + randomUUID(), task: "Unclaimed fixture.", acceptance_criteria: [],
     scope: { change_types: ["docs"], allowed_paths: ["README.md"] }, budget: { max_claude_calls: 1, max_claude_minutes_per_call: 1 }, breakpoint: "b",
   });
-  const authorization = await api.createAuthorization(api.paths, {
+  const authorization = await before.createAuthorization(before.paths, {
     authorizedBy: "Human Owner", workPackageSha256: workPackage.record.content_sha256, policySha256: snapshot.effective_policy_sha256,
     ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,
   });
-  const stalePlan = await makePlan(api, "stale-1");
+  const stalePlan = await makePlan(before, "stale-1");
   const { plan, result } = await upgrade(root);
   assert.equal(plan.policy_changed, true);
   assert.match(formatUpgradePlan(plan), /新版的預設 policy 不同：升級後未開始的授權會失效，需重新建 plan。/);
   assert.deepEqual(result.invalidated_authorization_ids, [authorization.authorization_id]);
+  const api = await workApi(root);
   assert.equal(await exists(path.join(api.paths.authorizationInvalidationsDir, authorization.authorization_id + ".json")), true);
   await assert.rejects(api.claimStartAuthorization(api.paths, authorization.authorization_id, { executionMode: "fake_cli" }), /Bridge was upgraded or its policy changed\. Make a new plan with work-plan/);
   await assert.rejects(api.authorizeWorkPackage({ paths: api.paths, planPath: stalePlan.plan_path, approval: stalePlan.plan_sha256, executionMode: "fake_cli" }), /Work plan is stale because effective policy changed: Bridge was upgraded or its policy changed\. Make a new plan with work-plan/);
@@ -561,7 +584,7 @@ test("W10 / W11 the CLI has no --yes and needs a terminal; the plan route works;
   assert.match(wrongKind.stderr, /That is not an upgrade rollback plan/);
   const applied = cli(["upgrade", "--target", root, "--plan", planFile, "--approve", approval]);
   assert.equal(applied.status, 0, applied.stderr);
-  assert.match(applied.stdout, /^已升級到 .+\n保留了你的 \d+ 個檔；備份在 .+\nreviewer 唯讀實測要在網頁上重做一次，才能做原生工作\n$/);
+  assert.match(applied.stdout, /^這個專案的設定已升級到 .+\n保留了你的 \d+ 個檔；備份在 .+\nreviewer 唯讀實測要在網頁上重做一次，才能做原生工作\n$/);
   const service = await serviceCheck(root);
   assert.equal(service.running, true);
   assert.equal(service.status.reviewer_readonly.state, "not_run");
@@ -618,82 +641,6 @@ test("W1b TEMPLATE.new.md left by an earlier upgrade is reused only while unedit
   await makeOld(root);
   await fsp.appendFile(path.join(work, "TEMPLATE.new." + version + ".md"), "也改了\n");
   await assert.rejects(planNeutralUpgrade({ target: root }), /You edited both work-packages\/TEMPLATE\.new\.md and work-packages\/TEMPLATE\.new\..+\.md; the upgrade will not overwrite either/);
-});
-
-test("W3d a runtime file changed, added or missing after a crash is never deleted: the rollback refuses and the marker stays", async (t) => {
-  const root = await workspace(t);
-  await install(root);
-  await makeOld(root);
-  const before = await persistent(root);
-  crashAt(root, "betweenRenames");
-  const id = (await readJson(markerOf(root))).upgrade_id;
-  const previous = path.join(privateOf(root), "tools", ".review-bridge-previous-" + id);
-  const next = path.join(privateOf(root), "tools", ".review-bridge-next-" + id);
-  const prompt = path.join(previous, "review-prompt.md");
-  const original = await fsp.readFile(prompt);
-  await fsp.appendFile(prompt, "\n我的修改\n");
-  await assert.rejects(planNeutralUpgradeRollback({ target: root }), (error) => error.message.includes(
-    "neither the version before nor the version after the upgrade, so the rollback will not delete or replace it and the marker stays: tools/.review-bridge-previous-" + id + "/review-prompt.md (changed)"));
-  assert.match(await fsp.readFile(prompt, "utf8"), /我的修改/);
-  assert.equal(await exists(markerOf(root)), true);
-  await fsp.writeFile(prompt, original);
-  await fsp.writeFile(path.join(next, "extra.txt"), "mine\n");
-  await assert.rejects(planNeutralUpgradeRollback({ target: root }), /tools\/\.review-bridge-next-[0-9a-f-]+\/extra\.txt \(added\)/);
-  await fsp.rm(path.join(next, "extra.txt"));
-  // A copy cut short (a part of the new list) is the upgrade's own and may go.
-  await fsp.rm(path.join(next, "review-prompt.md"));
-  const { plan } = await rollback(root);
-  assert.equal(plan.runtime.next, "to_part");
-  sameTree(await persistent(root), before, "after the cut-short copy");
-  // The new runtime in place with one file gone is not the new version any more: refused.
-  crashAt(root, "afterConfig");
-  await fsp.rm(path.join(runtimeOf(root), "review-prompt.md"));
-  await assert.rejects(planNeutralUpgradeRollback({ target: root }), /tools\/review-bridge\/review-prompt\.md \(missing\)/);
-  assert.equal(await exists(markerOf(root)), true);
-  await fsp.copyFile(path.join(sourceRuntime, "review-prompt.md"), path.join(runtimeOf(root), "review-prompt.md"));
-  await rollback(root);
-  sameTree(await persistent(root), before, "after the restored file");
-});
-
-test("W3e a file written into a runtime directory after the rollback checked it is kept, and so is the marker", async (t) => {
-  const root = await workspace(t);
-  await install(root);
-  await makeOld(root);
-  const before = await persistent(root);
-  crashAt(root, "betweenRenames");
-  const id = (await readJson(markerOf(root))).upgrade_id;
-  const next = path.join(privateOf(root), "tools", ".review-bridge-next-" + id);
-  const mine = path.join(next, "mine.txt");
-  const plan = await planNeutralUpgradeRollback({ target: root });
-  assert.equal(plan.runtime.next, "to");
-  // Written after the plan checked tools/, while the rollback is already running.
-  await assert.rejects(applyNeutralUpgradeRollback(plan, plan.plan_sha256, {
-    afterRuntimeRestored: async () => fsp.writeFile(mine, "not Bridge's\n"),
-  }), (error) => error.message.includes("tools/.review-bridge-next-" + id + "/mine.txt"));
-  assert.equal(await fsp.readFile(mine, "utf8"), "not Bridge's\n", "the file is still there");
-  assert.equal(await exists(markerOf(root)), true, "the marker stays");
-  // Once the human moves it out, the next rollback finishes.
-  await fsp.rename(mine, path.join(root, "mine.txt"));
-  await rollback(root);
-  sameTree(await persistent(root), before, "after the file was moved out");
-  // The automatic rollback keeps a file written into the moved-aside runtime the same way.
-  const failedMine = () => path.join(privateOf(root), "tools", ".review-bridge-failed-" + id2, "mine.txt");
-  let id2 = null;
-  await assert.rejects(upgrade(root, {
-    afterConfig: async (context) => { id2 = context.marker.upgrade_id; throw new Error("injected"); },
-    afterRuntimeRestored: async () => fsp.writeFile(failedMine(), "also not Bridge's\n"),
-  }), /automatic rollback did not finish.+mine\.txt/);
-  assert.equal(await fsp.readFile(failedMine(), "utf8"), "also not Bridge's\n");
-  assert.equal(await exists(markerOf(root)), true);
-  // The recovery the message gives: move the file out, then upgrade --rollback finishes.
-  await fsp.rename(failedMine(), path.join(root, "also-mine.txt"));
-  const { plan: resumed } = await rollback(root);
-  assert.equal(resumed.runtime_source, "current", "the automatic rollback already put the old runtime back");
-  assert.equal(resumed.runtime.failed, "to_part", "the half-cleaned failed directory is recognised");
-  assert.equal(await exists(path.join(privateOf(root), "tools", ".review-bridge-failed-" + id2)), false);
-  assert.equal(await exists(markerOf(root)), false);
-  assert.equal(await fsp.readFile(path.join(root, "also-mine.txt"), "utf8"), "also not Bridge's\n");
-  sameTree(await persistent(root), before, "after the automatic rollback was finished");
 });
 
 // RC3-LINUX-00: a restart that fails with a reason (the shape the installer's own restart returns)

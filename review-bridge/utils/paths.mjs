@@ -5,6 +5,14 @@ import { assertUnder } from "./pathGuard.mjs";
 // that does not name it is refused, never sent into a provider's own folder.
 export const PRIVATE_ROOT_NAME = ".review-bridge";
 
+// While the install Guide upgrades Bridge itself, this file sits in the Bridge folder (beside
+// bridge.mjs) and every command refuses to start. It is the only file Bridge writes there.
+export const BRIDGE_UPGRADE_MARKER = "upgrade-in-progress.json";
+
+export function bridgeUpgradeMarkerPath(bridgeFolder) {
+  return path.join(bridgeFolder, BRIDGE_UPGRADE_MARKER);
+}
+
 export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName } = {}) {
   const root = path.resolve(repoRoot);
   const runtimeRoot = path.resolve(bridgeRoot);

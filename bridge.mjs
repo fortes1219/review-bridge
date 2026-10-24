@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import "./review-bridge/utils/nodeVersion.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -10,6 +11,7 @@ import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
+import { commandLink, unlinkCommand } from "./installer/command-link.mjs";
 import { ensureDependencies } from "./installer/dependencies.mjs";
 import { formatGuideResult, installGuide, terminalUi } from "./installer/install-guide.mjs";
 import { readDefaultRoles } from "./installer/personal-settings.mjs";
@@ -22,6 +24,10 @@ import {
 } from "./installer/neutral-install.mjs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
+// The one runtime: every project's commands, self-tests and page service run from here.
+const runtimeRoot = path.join(packageRoot, "review-bridge");
+const bootstrapPath = path.join(runtimeRoot, "bootstrap.mjs");
+const INSTALLER_COMMANDS = new Set(["init", "roles-check", "uninstall", "upgrade"]);
 
 async function verifyReleaseIntegrity() {
   try {
@@ -108,7 +114,7 @@ async function confirmInstall(plan, assumeYes) {
 }
 
 async function runFakeScenarios(target, privateName) {
-  const bootstrap = path.join(target, privateName, "tools", "review-bridge", "bootstrap.mjs");
+  const bootstrap = bootstrapPath;
   const workRoot = path.join(target, privateName, "work-packages");
   const queueRoot = path.join(target, privateName, "review-queue");
   await fsp.mkdir(workRoot, { recursive: true });
@@ -361,16 +367,15 @@ async function init(options) {
   };
 }
 
-// Starts the resident page service through the installed runtime, then verifies it with
+// Starts the project's resident page service through Bridge's runtime, then verifies it with
 // the runtime's own health check (T0-01 C4). Nothing printed by `up` is parsed; a failure
-// to start leaves the install in place and is reported instead of rolled back.
+// to start leaves the project setup in place and is reported instead of rolled back.
 async function startService(target, fakeCli) {
-  const runtimeRoot = path.join(target, ".review-bridge", "tools", "review-bridge");
-  run(process.execPath, [path.join(runtimeRoot, "bootstrap.mjs"), "up", ...(fakeCli ? ["--fake-cli"] : [])], {
+  run(process.execPath, [bootstrapPath, "up", "--project", target, ...(fakeCli ? ["--fake-cli"] : [])], {
     cwd: target, expected: [0, 1, 2],
   });
   const modules = await loadInstalledServiceModules(runtimeRoot);
-  if (!modules) throw new Error("The installed runtime has no page service module.");
+  if (!modules) throw new Error("The Bridge runtime has no page service module.");
   const { checkService, serviceFiles } = modules.service;
   const paths = modules.getBridgePaths(target, runtimeRoot, { privateRootName: ".review-bridge" });
   const check = await checkService(paths);
@@ -411,6 +416,11 @@ function formatUninstallPlan(plan) {
 }
 
 function formatUninstallResult(result) {
+  if (result.operation === "remove_command") {
+    return result.removed
+      ? "已拿掉 review-bridge 指令。要刪掉 Bridge 本身，刪掉這個資料夾：" + result.bridge_folder + "\n"
+      : "review-bridge 指令沒有指向這份 Bridge" + (result.points_to ? "（指向 " + result.points_to + "）" : "") + "，沒有東西要拿掉。\n";
+  }
   if (result.kind === "cancel") return "已取消上一次的解除安裝" + (result.service_restarted ? "，網頁服務已重新啟動" : "") + "。\n";
   return [
     "已解除安裝",
@@ -419,10 +429,35 @@ function formatUninstallResult(result) {
   ].join("\n") + "\n";
 }
 
+// Without --target, uninstall takes away the review-bridge command (npm's global link) and nothing
+// else: personal data, the user PATH and the Bridge folder stay. Deleting the folder removes Bridge.
+async function removeCommand(options) {
+  if (Object.keys(options).some((key) => key !== "json")) throw new Error("uninstall without --target takes no other options; to remove a project's setup, add --target <folder>.");
+  const link = commandLink(packageRoot);
+  if (!link.linked) return { ok: true, operation: "remove_command", removed: false, points_to: link.points_to };
+  if (!process.stdin.isTTY) throw new Error("No terminal to confirm at. Run uninstall at an interactive terminal.");
+  process.stdout.write([
+    "會拿掉 review-bridge 指令（npm 全域連結，在 " + link.command_folder + "）。",
+    "個人資料（資料庫、settings.json）和使用者 PATH 都不動。",
+    "要刪掉 Bridge 本身，之後刪掉這個資料夾：" + packageRoot,
+  ].join("\n") + "\n");
+  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await terminal.question("要繼續嗎？[y/N] ");
+    if (!/^y(?:es)?$/i.test(answer.trim())) throw new Error("Uninstall cancelled by user.");
+  } finally {
+    terminal.close();
+  }
+  unlinkCommand(packageRoot);
+  if (commandLink(packageRoot).linked) throw new Error("npm finished, but review-bridge still points at " + packageRoot + ".");
+  return { ok: true, operation: "remove_command", removed: true, bridge_folder: packageRoot };
+}
+
 async function uninstall(options) {
   await verifyReleaseIntegrity();
+  if (options.target === undefined) return await removeCommand(options);
   if (options.yes) throw new Error("uninstall has no --yes. Use --plan-out <file>, then --plan <file> --approve <sha>, or confirm at an interactive terminal.");
-  const target = path.resolve(options.target || process.cwd());
+  const target = path.resolve(options.target);
   if (options.plan) {
     if (!options.approve) throw new Error("--plan needs --approve <sha>.");
     const plan = JSON.parse(await fsp.readFile(path.resolve(options.plan), "utf8"));
@@ -492,9 +527,18 @@ async function main() {
     process.stdout.write("Usage: npm start (in the Bridge folder) or review-bridge init [--writer claude|codex] [--reviewer claude|codex] [--yes] [--json]\n"
       + "       review-bridge init --target <workspace> [--profile auto] [--writer claude|codex] [--reviewer claude|codex] [--port <n>] [--yes] [--json]\n"
       + "       review-bridge roles-check [--writer claude|codex] [--reviewer claude|codex] [--json]\n"
-      + "       review-bridge uninstall [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
-      + "       review-bridge upgrade [--rollback] [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n");
+      + "       review-bridge uninstall (removes the review-bridge command; personal data stays)\n"
+      + "       review-bridge uninstall --target <workspace> [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
+      + "       review-bridge upgrade [--rollback] [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
+      + "       review-bridge <work-plan|work-start|work-status|up|down|ps|…> [--project <workspace>] (the current folder when not given)\n");
     return command ? 0 : 2;
+  }
+  // Every other command is the project runtime's: it runs from this Bridge folder, in the terminal
+  // it was typed in, against the project named by --project or the current folder.
+  if (!INSTALLER_COMMANDS.has(command)) {
+    const forwarded = spawnSync(process.execPath, [bootstrapPath, command, ...rest], { stdio: "inherit" });
+    if (forwarded.error) throw forwarded.error;
+    return forwarded.status ?? 1;
   }
   if (command === "roles-check") {
     const options = parseArgs(rest);
@@ -515,7 +559,6 @@ async function main() {
       : result.operation === "upgrade_rollback" ? formatUpgradeRollbackResult(result) : formatUpgradeResult(result));
     return 0;
   }
-  if (command !== "init") throw new Error("Unsupported command: " + command);
   const options = parseArgs(rest);
   const result = await init(options);
   process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n"
