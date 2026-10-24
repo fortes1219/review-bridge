@@ -39,7 +39,7 @@ import { resolveLocale } from "./i18n.mjs";
 import { loadSchema, parseCodexJsonl, reviewerUsageEvent, writerResultFromClaudeResult } from "./typedResults.mjs";
 import { parseClaudeStream, partialUsageFromStream, usageFromResult } from "./writerPrompt.mjs";
 
-// Until roles are honored everywhere (RC3-BLOCKER-01), each contract step has one provider that a
+// Until roles are honored everywhere (RC3-BLOCKER-02), each contract step has one provider that a
 // native run can actually call; any other configured provider is refused before a call is made.
 // The fake CLI stands in for every provider, so a fake run is not refused.
 const CALLABLE_PROVIDER = Object.freeze({ translate: "claude", check: "codex" });

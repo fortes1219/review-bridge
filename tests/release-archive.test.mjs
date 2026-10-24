@@ -141,6 +141,7 @@ test("REL-01 packing a workspace with private folders ships exactly the release 
   const target = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-unpacked-target-"));
   t.after(async () => {
     spawnSync(process.execPath, [path.join(target, ".review-bridge", "tools", "review-bridge", "bootstrap.mjs"), "down"], { cwd: target, windowsHide: true });
+    await fsp.unlink(path.join(unpacked, "node_modules")).catch(() => {});
     await fsp.rm(unpacked, { recursive: true, force: true });
     await fsp.rm(target, { recursive: true, force: true });
   });
@@ -149,6 +150,9 @@ test("REL-01 packing a workspace with private folders ships exactly the release 
     await fsp.writeFile(path.join(unpacked, entry.name), entry.content);
   }
   await fsp.writeFile(path.join(target, "package.json"), JSON.stringify({ name: "unpacked-release-target", private: true }) + "\n");
+  // The unpacked release uses this package's installed dependencies, as if npm ci had already run;
+  // the test does not reach the network.
+  await fsp.symlink(path.join(packageRoot, "node_modules"), path.join(unpacked, "node_modules"), "junction");
   const init = spawnSync(process.execPath, [path.join(unpacked, "bridge.mjs"), "init", "--target", target, "--writer", "claude", "--reviewer", "codex",
     "--yes", "--json", "--fake-cli", "--port", String(await freePort())], { cwd: unpacked, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(init.status, 0, init.stderr);

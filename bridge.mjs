@@ -10,6 +10,7 @@ import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
+import { ensureDependencies } from "./installer/dependencies.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
 import { loadAdapterForInspection, resolveAdapterModule, UNSUPPORTED_ADAPTER } from "./review-bridge/router/platform.mjs";
 import {
@@ -269,6 +270,8 @@ function missingRoleSteps(result) {
 
 async function init(options) {
   await verifyReleaseIntegrity();
+  // Bridge's own pg and PostgreSQL binaries, in its own node_modules, before any project is touched.
+  await ensureDependencies(packageRoot, { notify: (line) => process.stderr.write(line + "\n") });
   const roles = await chooseRoles(options);
   // Live readiness is reported, never forced: the fake self-tests below are model-free
   // and need no CLI or login, and native work stays blocked either way.

@@ -412,8 +412,13 @@ test("a page started with the fake CLI cannot give a native work-start the revie
 // define it at all; its checksum line is refreshed the way a packaged release would carry it.
 async function packageForPlatform(t, change) {
   const copy = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-platform-package-"));
-  t.after(() => fsp.rm(copy, { recursive: true, force: true }));
+  t.after(async () => {
+    await fsp.unlink(path.join(copy, "node_modules")).catch(() => {});
+    await fsp.rm(copy, { recursive: true, force: true });
+  });
   await fsp.cp(packageRoot, copy, { recursive: true, filter: (source) => !/[\\/](\.git|node_modules)([\\/]|$)/.test(source) });
+  // The copy uses this package's installed dependencies (init would otherwise run npm ci).
+  await fsp.symlink(path.join(packageRoot, "node_modules"), path.join(copy, "node_modules"), "junction");
   const manifestFile = path.join(copy, "review-bridge", "manifest.json");
   const manifest = JSON.parse(await fsp.readFile(manifestFile, "utf8"));
   change(manifest.adapters, process.platform + "-" + process.arch);
