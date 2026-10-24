@@ -15,10 +15,10 @@ import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fsp from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import pg from "pg";
 
+export { bridgeDataHome } from "./dataHome.mjs";
 import { postgresPackageName } from "./platformPackages.mjs";
 
 export const SERVER_USER = "bridge";
@@ -35,16 +35,6 @@ export async function postgresBinaries({ platform = process.platform, arch = pro
     throw new Error("The PostgreSQL binaries for " + platform + "-" + arch + " are not installed (" + name + "): " + error.message);
   }
   return Object.freeze({ initdb: binaries.initdb, pg_ctl: binaries.pg_ctl, postgres: binaries.postgres });
-}
-
-// Where Bridge keeps long-term data for this OS user: outside every project, worktree, npm cache
-// and installed runtime. REVIEW_BRIDGE_DATA_HOME overrides it (tests, or a person who wants it
-// elsewhere).
-export function bridgeDataHome({ env = process.env, platform = process.platform, home = os.homedir() } = {}) {
-  if (env.REVIEW_BRIDGE_DATA_HOME) return path.resolve(env.REVIEW_BRIDGE_DATA_HOME);
-  if (platform === "win32") return path.join(env.LOCALAPPDATA || path.join(home, "AppData", "Local"), "ReviewBridge");
-  if (platform === "darwin") return path.join(home, "Library", "Application Support", "ReviewBridge");
-  return path.join(env.XDG_DATA_HOME || path.join(home, ".local", "share"), "review-bridge");
 }
 
 // One server's files: the cluster itself, its password, its last chosen port, the server's own daily

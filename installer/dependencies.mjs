@@ -14,6 +14,16 @@ async function readJson(file) {
   return JSON.parse(await fsp.readFile(file, "utf8"));
 }
 
+// What an install puts into node_modules, as the lock file names it: each dependency and this
+// machine's PostgreSQL package, with its locked version (null when the lock does not name it).
+export async function lockedDependencies(packageRoot, { platform = process.platform, arch = process.arch } = {}) {
+  const manifest = await readJson(path.join(packageRoot, "package.json"));
+  const lock = await readJson(path.join(packageRoot, "package-lock.json"));
+  const binariesPackage = postgresPackageName({ platform, arch });
+  return [...Object.keys(manifest.dependencies || {}), ...(binariesPackage ? [binariesPackage] : [])]
+    .map((name) => ({ name, version: lock.packages?.["node_modules/" + name]?.version ?? null }));
+}
+
 // What is not as the lock file says: each named dependency and this machine's PostgreSQL package
 // at its locked version, and that package's three server binaries on disk. Empty means complete.
 export async function dependencyProblems(packageRoot, { platform = process.platform, arch = process.arch } = {}) {
@@ -56,16 +66,22 @@ export function npmEntry({ env = process.env, execPath = process.execPath } = {}
   return found;
 }
 
-// `npm ci` installs exactly the lock file into node_modules; dev dependencies are not installed.
-export function installWithNpm(packageRoot) {
-  const result = spawnSync(process.execPath, [npmEntry(), "ci", "--omit=dev", "--no-audit", "--no-fund"], {
+// Runs npm with this Node in packageRoot; a failure carries npm's last lines.
+export function runNpm(packageRoot, args) {
+  const result = spawnSync(process.execPath, [npmEntry(), ...args], {
     cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     const tail = String(result.stderr || result.stdout || "").trim().split(/\r?\n/).slice(-5).join(" | ");
-    throw new Error("npm ci failed in " + packageRoot + ": " + tail);
+    throw new Error("npm " + args[0] + " failed in " + packageRoot + ": " + tail);
   }
+  return result;
+}
+
+// `npm ci` installs exactly the lock file into node_modules; dev dependencies are not installed.
+export function installWithNpm(packageRoot) {
+  runNpm(packageRoot, ["ci", "--omit=dev", "--no-audit", "--no-fund"]);
 }
 
 // Installs the dependencies when they are not as locked, then checks again. Anything still missing

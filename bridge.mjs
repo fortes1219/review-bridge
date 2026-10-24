@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
 import { ensureDependencies } from "./installer/dependencies.mjs";
+import { formatGuideResult, installGuide, terminalUi } from "./installer/install-guide.mjs";
+import { readDefaultRoles } from "./installer/personal-settings.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
 import { loadAdapterForInspection, resolveAdapterModule, UNSUPPORTED_ADAPTER } from "./review-bridge/router/platform.mjs";
 import {
@@ -219,9 +221,18 @@ async function inspectNativeReadiness(roles) {
   return nativeReadiness({ platform, definition, missing });
 }
 
-async function chooseRoles(options) {
+// Setting up a project starts from the person's saved defaults for any role not given, and says so.
+async function chooseRoles(options, { useDefaults = false } = {}) {
   let writer = options.writer;
   let reviewer = options.reviewer;
+  const saved = useDefaults && !(writer && reviewer) ? await readDefaultRoles() : null;
+  if (saved) {
+    writer ||= saved.writer;
+    reviewer ||= saved.reviewer;
+    if (!options.json) {
+      process.stdout.write(`使用你的預設角色：writer ${saved.writer}、reviewer ${saved.reviewer}（這次要改，加上 --writer／--reviewer）\n`);
+    }
+  }
   if (writer && reviewer) return validateRoles({ writer, reviewer });
   if (options.yes || options.json) {
     throw new Error("Select both --writer and --reviewer explicitly.");
@@ -268,11 +279,23 @@ function missingRoleSteps(result) {
     .map(([role, check]) => ({ role, provider: check.provider, next_action: check.next_action }));
 }
 
+// Without --target, init is the install Guide: Bridge is installed where it was cloned, and no
+// project is touched.
+async function installBridge(options) {
+  const interactive = process.stdin.isTTY && process.stdout.isTTY;
+  return await installGuide(packageRoot, options, {
+    ui: interactive ? terminalUi() : null,
+    write: options.json ? () => {} : (text) => process.stdout.write(text),
+    inspectProvider: async (provider) => (await inspectSelectedRoles({ writer: provider, reviewer: provider })).checks.writer,
+  });
+}
+
 async function init(options) {
   await verifyReleaseIntegrity();
+  if (options.target === undefined) return await installBridge(options);
   // Bridge's own pg and PostgreSQL binaries, in its own node_modules, before any project is touched.
   await ensureDependencies(packageRoot, { notify: (line) => process.stderr.write(line + "\n") });
-  const roles = await chooseRoles(options);
+  const roles = await chooseRoles(options, { useDefaults: true });
   // Live readiness is reported, never forced: the fake self-tests below are model-free
   // and need no CLI or login, and native work stays blocked either way.
   const roleReadiness = await inspectSelectedRoles(roles);
@@ -283,7 +306,7 @@ async function init(options) {
       process.stdout.write("Selected roles are not ready. Setup continues with fake self-tests only; complete the steps above before native work.\n");
     }
   }
-  const target = path.resolve(options.target || process.cwd());
+  const target = path.resolve(options.target);
   const stat = await fsp.lstat(target).catch(() => null);
   if (!stat?.isDirectory() || stat.isSymbolicLink()) {
     throw new Error("--target must be an existing, non-symlink workspace directory.");
@@ -466,10 +489,11 @@ function formatInitResult(result) {
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   if (!command || ["-h", "--help"].includes(command)) {
-    process.stdout.write("Usage: node bridge.mjs init [--target <workspace>] [--profile auto] [--writer claude|codex] [--reviewer claude|codex] [--port <n>] [--yes] [--json]\n"
-      + "       node bridge.mjs roles-check [--writer claude|codex] [--reviewer claude|codex] [--json]\n"
-      + "       node bridge.mjs uninstall [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
-      + "       node bridge.mjs upgrade [--rollback] [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n");
+    process.stdout.write("Usage: npm start (in the Bridge folder) or review-bridge init [--writer claude|codex] [--reviewer claude|codex] [--yes] [--json]\n"
+      + "       review-bridge init --target <workspace> [--profile auto] [--writer claude|codex] [--reviewer claude|codex] [--port <n>] [--yes] [--json]\n"
+      + "       review-bridge roles-check [--writer claude|codex] [--reviewer claude|codex] [--json]\n"
+      + "       review-bridge uninstall [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
+      + "       review-bridge upgrade [--rollback] [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n");
     return command ? 0 : 2;
   }
   if (command === "roles-check") {
@@ -494,7 +518,8 @@ async function main() {
   if (command !== "init") throw new Error("Unsupported command: " + command);
   const options = parseArgs(rest);
   const result = await init(options);
-  process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n" : formatInitResult(result));
+  process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n"
+    : result.operation === "install_bridge" ? formatGuideResult(result) : formatInitResult(result));
   return 0;
 }
 
