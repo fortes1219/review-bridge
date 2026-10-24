@@ -3,7 +3,7 @@
 The Review Bridge controller (the `review-bridge` command, installed by npm) owns the review
 state machine. This project's Bridge state lives in `.review-bridge/`.
 
-- Claude is the writer. Codex is the independent reviewer.
+- The writer and the independent reviewer are the ones chosen at init.
 - Runtime authorization comes only from an immutable authorization that references the exact work-package and effective-policy checksums.
 - Active execution is derived from `.review-bridge/review-queue/runs/*.json`; there is no mutable global active-run list.
 - An inactive, missing, malformed, exhausted, or consumed authorization fails closed.

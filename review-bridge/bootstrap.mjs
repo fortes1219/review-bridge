@@ -32,6 +32,22 @@ function takeProject(argv) {
   return { repoRoot: path.resolve(value), args: [...argv.slice(0, index), ...argv.slice(index + 2)] };
 }
 
+function assertPlatformContract(implementation) {
+  if (typeof implementation.resolveExecutable !== "function"
+      || typeof implementation.buildInvocation !== "function"
+      || typeof implementation.notify !== "function") {
+    throw new Error("Selected adapter does not implement the platform contract.");
+  }
+}
+
+async function platformAdapter(manifest) {
+  const adapterDefinition = selectAdapter(manifest, process.platform, process.arch);
+  const moduleUrl = resolveAdapterModule(bridgeRoot, adapterDefinition.module);
+  const implementation = await import(moduleUrl);
+  assertPlatformContract(implementation);
+  return { adapterDefinition, adapterSource: fileURLToPath(moduleUrl), implementation };
+}
+
 async function main() {
   const { repoRoot, args: argv } = takeProject(process.argv.slice(2));
   const [command, ...args] = argv;
@@ -50,24 +66,25 @@ async function main() {
     throw new Error("Unknown command: " + command + ". Run: review-bridge --help");
   }
   const fakeRequested = args.includes("--fake-cli");
-  // T0-08: native model calls are allowed only for start and work-start confirmed at an interactive
-  // terminal (no --approve, no --yes, stdin and stdout both a TTY). This is an operating restriction, not
-  // proof of a human: an agent under the same OS account can still drive a terminal. Every other
-  // model entry point (review, bounded-resume) stays closed in native mode.
-  const gate = nativeGateDecision({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
+  // Native model calls are allowed only for the commands that start work on a person's yes (start,
+  // resume, work-start); every other model entry point (review, bounded-resume) stays closed.
+  const gate = nativeGateDecision({ command, args });
   if (!gate.allowed) throw new Error(gate.message);
-  // N7: and only after the reviewer read-only check passed in the running page service. start runs
-  // that check itself first and its gate asserts the proof before it asks.
-  if (gate.mode === "native_terminal" && command !== "start") await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
+  // N7: and only after the reviewer read-only check passed in the running page service. start and
+  // resume run that check themselves first, and their gate asserts the proof before the yes.
+  if (gate.mode === "native" && !["start", "resume"].includes(command)) await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "up", "down", "ps", "prune", "rm", "stop"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "up", "down", "ps", "prune", "rm", "clean", "stop"]);
+  // Native start and resume take this machine's adapter only after the reviewer check and the yes,
+  // so without the proof they are refused the same way on every platform, adapter or not.
+  const checksFirst = !fakeRequested && ["start", "resume"].includes(command);
   let adapterDefinition = null;
   let implementation = {};
   let adapterSource = null;
   if (fakeRequested) {
-    if (!["start", "work-start", "doctor", "watch", "up"].includes(command)) {
-      throw new Error("--fake-cli is supported only by start, work-start, doctor, watch, and up. Leave --fake-cli out.");
+    if (!["start", "resume", "work-start", "doctor", "watch", "up"].includes(command)) {
+      throw new Error("--fake-cli is supported only by start, resume, work-start, doctor, watch, and up. Leave --fake-cli out.");
     }
     implementation = createFakeAdapter(bridgeRoot, fakeScenario);
     // The fake adapter is never eligible: a page started with it cannot run the reviewer check, so it
@@ -90,11 +107,8 @@ async function main() {
       adapterDefinition = { target: targetKey(process.platform, process.arch), status: "unsupported", eligible: false };
       implementation = UNSUPPORTED_ADAPTER;
     }
-  } else if (!modelFreeCommands.has(command)) {
-    adapterDefinition = selectAdapter(manifest, process.platform, process.arch);
-    const moduleUrl = resolveAdapterModule(bridgeRoot, adapterDefinition.module);
-    adapterSource = fileURLToPath(moduleUrl);
-    implementation = await import(moduleUrl);
+  } else if (!modelFreeCommands.has(command) && !checksFirst) {
+    ({ adapterDefinition, adapterSource, implementation } = await platformAdapter(manifest));
   }
   if (command === "doctor") {
     const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
@@ -105,18 +119,14 @@ async function main() {
     ) + "\n");
     return 0;
   }
-  if (!modelFreeCommands.has(command)
-      && (typeof implementation.resolveExecutable !== "function"
-        || typeof implementation.buildInvocation !== "function"
-        || typeof implementation.notify !== "function")) {
-    throw new Error("Selected adapter does not implement the platform contract.");
-  }
+  if (!modelFreeCommands.has(command) && !checksFirst) assertPlatformContract(implementation);
   return await dispatchCommand({
     command,
     args,
     bridgeRoot,
     repoRoot,
-    adapter: implementation,
+    adapter: checksFirst ? null : implementation,
+    loadAdapter: async () => (await platformAdapter(manifest)).implementation,
     adapterId: adapterDefinition?.id || null,
     adapterDefinition,
     adapterSource,

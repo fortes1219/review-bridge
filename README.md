@@ -20,7 +20,7 @@ Then it sets the current folder up and prints the next commands:
 - creates `.review-bridge/` with the project settings, the work-order template and the queue; in a Git repository it is kept out of Git through `.git/info/exclude` (tracked `.gitignore` is never edited);
 - runs four fake self-tests (`PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, `RATE_LIMIT`) that call no model;
 - starts the local page on `127.0.0.1`;
-- adds a `/review-bridge` command for Claude Code (`.claude/commands/review-bridge.md`, only if there is none) and the same note on how a work order is run to `AGENTS.md` (appended, never overwritten). `uninstall` removes both again unless you edited them.
+- adds a `/review-bridge` command for Claude Code (`.claude/commands/review-bridge.md`, only if there is none) and the same steps for any agent to `AGENTS.md` (appended, never overwritten). `uninstall` removes both again unless you edited them.
 
 It changes no application file and nothing else in `.claude/` or `.codex/`. Options answer the questions instead (`--writer`, `--reviewer`, `--profile <type|none>`, `--target <folder>`); without a terminal, or with `--yes`, nothing is asked and the defaults are used.
 
@@ -42,6 +42,19 @@ review-bridge start .review-bridge/work-packages/add-readme.md
 
 `start` seals the work order with its scope, budget and verification into a plan (asking where the work should stop for you and what it will change), checks once per page session that the reviewer cannot write files, shows what you are authorizing, and asks `Start this work? [y/N]`. Your answer is the only authorization. It then prints one line per step and ends with the result file. Bridge never commits, pushes or deploys.
 
+The same four actions work for you or through an agent:
+
+| You want to | Command |
+|---|---|
+| start a work order | `review-bridge start <file>` |
+| pause it (its records are kept) | `review-bridge stop <run_id>` |
+| carry it on | `review-bridge resume <run_id>` |
+| clear finished records | `review-bridge clean [<run_id>]` |
+
+`review-bridge status` shows what is running and the run ids.
+
+**Through an agent.** In Claude Code type `/review-bridge start <file>` (or `stop`, `resume`, `clean`); Codex reads the same steps from `AGENTS.md`. Without a terminal, `start` and `resume` print the card and stop with `Needs authorization`; the agent shows you the card word for word and runs the command again with `--yes` only after you say yes. The authorization records that the yes came through an agent.
+
 ## Commands
 
 <!-- commands:start -->
@@ -51,17 +64,19 @@ review-bridge start .review-bridge/work-packages/add-readme.md
 Usage: review-bridge <command> [options]
 
 Commands:
-  init           Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
-  start <file>   Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
-  status         Show Bridge's review queue and its latest review (the page service: ps; the current work: work-status)
-  stop <run_id>  Stop a running work order: end its model process and close the run
-  up             Start the local page service in the background
-  down           Stop the local page service
-  ps             Show whether the local page service is running, and its address
-  watch          Run the local page in this terminal until Ctrl+C
-  upgrade        Move this folder's setup to the installed Review Bridge version, with a backup
-  uninstall      Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
-  doctor         Check which platform adapter this machine uses, without running any work
+  init              Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
+  start <file>      Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+  stop <run_id>     Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
+  resume <run_id>   Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start
+  clean [<run_id>]  Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
+  status            Show what Bridge is doing now: the page, the work and its runs, and the review queue
+  up                Start the local page service in the background
+  down              Stop the local page service
+  ps                Show whether the local page service is running, and its address
+  watch             Run the local page in this terminal until Ctrl+C
+  upgrade           Move this folder's setup to the installed Review Bridge version, with a backup
+  uninstall         Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
+  doctor            Check which platform adapter this machine uses, without running any work
 
 Options:
   -v, --version   Print the version
@@ -120,22 +135,12 @@ Options:
       Writer calls this work may use (number; default: 2)
   --max-claude-minutes <1-15>
       Minutes each writer call may run (number; default: 8)
+  --yes
+      The person said yes to the card; an agent adds this after showing them the card (boolean)
   --project <folder>
       The project folder (string; default: the current folder)
 
-3 more option(s) for tests and agents: review-bridge start --help --all
-```
-
-### status
-
-```text
-Usage: review-bridge status [options]
-
-Show Bridge's review queue and its latest review (the page service: ps; the current work: work-status)
-
-Options:
-  --project <folder>
-      The project folder (string; default: the current folder)
+2 more option(s) for tests and agents: review-bridge start --help --all
 ```
 
 ### stop
@@ -143,9 +148,53 @@ Options:
 ```text
 Usage: review-bridge stop <run_id> [options]
 
-Stop a running work order: end its model process and close the run
+Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
 
 Options:
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
+### resume
+
+```text
+Usage: review-bridge resume <run_id> [options]
+
+Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start
+
+Options:
+  --yes
+      The person said yes to the card; an agent adds this after showing them the card (boolean)
+  --project <folder>
+      The project folder (string; default: the current folder)
+
+2 more option(s) for tests and agents: review-bridge resume --help --all
+```
+
+### clean
+
+```text
+Usage: review-bridge clean [<run_id>] [options]
+
+Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
+
+Options:
+  --json
+      Print the result as JSON (without a run id) (boolean)
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
+### status
+
+```text
+Usage: review-bridge status [options]
+
+Show what Bridge is doing now: the page, the work and its runs, and the review queue
+
+Options:
+  --json
+      Print the result as JSON (boolean)
   --project <folder>
       The project folder (string; default: the current folder)
 ```
@@ -313,15 +362,15 @@ Options:
 ```text
 Usage: review-bridge work-start [options]
 
-Start a sealed plan after the person confirms it at the terminal
+Start a sealed plan on the person's yes (start does this for you)
 
 Options:
   --plan <file>
       The plan written by work-plan (string; required)
   --approve <sha>
-      The plan's SHA-256; refused for real models (string)
+      The plan's SHA-256, as the person's yes (string)
   --yes
-      Answer yes; refused unless --fake-cli is given (boolean)
+      The person said yes to the card; an agent adds this after showing them the card (boolean)
   --fake-cli
       Use the built-in fake CLI instead of a model (tests and self-checks) (boolean)
   --fake-scenario <name>
@@ -383,7 +432,7 @@ Options:
 ```text
 Usage: review-bridge bounded-resume [options]
 
-Resume the authorized writer session (internal; refused with real models)
+Internal: resume the writer session of the one active run (refused with real models; resume <run_id> is the command for people)
 
 Options:
   --prompt <file>
@@ -417,7 +466,7 @@ Options:
 ```text
 Usage: review-bridge prune [options]
 
-Fold finished runs into day files and drop records past retention
+Same as clean without a run id
 
 Options:
   --json
@@ -431,7 +480,7 @@ Options:
 ```text
 Usage: review-bridge rm <run_id> [options]
 
-Remove one finished run (folds it first)
+Same as clean <run_id>
 
 Options:
   --project <folder>
@@ -476,7 +525,7 @@ npm uninstall -g review-bridge    # remove a project's setup first: review-bridg
 - A missing, malformed, expired or consumed authorization fails closed.
 - The writer and the reviewer run in separate sessions; the reviewer is read-only.
 - Bridge runs the verification command itself before the reviewer's verdict can pass.
-- Native model work starts only from `start` (or `work-start`) confirmed at an interactive terminal, after the reviewer's read-only check passed in the local page service; `start` runs that check first.
+- Native model work starts only on your yes to the card (at the terminal, or through an agent with `--yes`) and only after the reviewer's read-only check passed in the local page service; `start` and `resume` run that check first. Keeping an agent from saying yes on its own is the agent tool's job (its permission prompts), not Bridge's.
 - Bridge state must be on a local filesystem; synchronized and network folders (OneDrive, Dropbox, iCloud Drive, UNC, NFS, SMB) are refused.
 
 ## Platforms

@@ -16,7 +16,7 @@ const deliverQuietly = ({ paths, adapter }) => (runId) => workOrder.deliverOutco
 
 // T0-08: the same gate as bootstrap again, because dispatchCommand can be called without it.
 const startGate = ({ command, args, paths, options }) => async () => {
-  assertNativeAllowed({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
+  assertNativeAllowed({ command, args });
   if (!options.fakeCli) await assertReviewerProof(paths);
 };
 
@@ -26,6 +26,10 @@ const PROVIDER = "<claude|codex>";
 const FAKE_CLI = { key: "fakeCli", type: "boolean", internal: true, help: "Use the built-in fake CLI instead of a model (tests and self-checks)" };
 const FAKE_SCENARIO = { key: "fakeScenario", type: "string", value: "<name>", default: "PASS", internal: true, help: "Fake CLI outcome: PASS, FAIL_THEN_PASS, HARD_STOP or RATE_LIMIT" };
 const JSON_OUT = { key: "json", type: "boolean", help: "Print the result as JSON" };
+// The person's yes to the card, relayed by an agent: without a terminal start and resume print the
+// card and stop, and the agent runs the same command again with --yes once the person said yes.
+const YES = { key: "yes", type: "boolean", help: "The person said yes to the card; an agent adds this after showing them the card" };
+const reviewerCheckFor = (context) => ({ onStart }) => setupCheck.ensureReviewerChecked({ paths: context.paths, onStart });
 const WORK_ORDER_OPTIONS = {
   "--breakpoint": { key: "breakpoint", type: "string", value: "<text>", default: "after the review, asked at a terminal", help: "Where the work stops and comes back to you" },
   "--change-types": { key: "changeTypes", type: "string", value: "<list>", default: "docs, asked at a terminal", help: "What the work may change, comma-separated: docs, code, tests, config, contract, schema, migration, external-behavior" },
@@ -59,31 +63,45 @@ export const COMMANDS = {
     summary: "Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it",
     options: {
       ...WORK_ORDER_OPTIONS,
-      "--yes": { key: "yes", type: "boolean", internal: true, help: "Answer yes; refused unless --fake-cli is given" },
+      "--yes": YES,
       "--fake-cli": FAKE_CLI,
       "--fake-scenario": FAKE_SCENARIO,
     },
-    run: (context) => workOrder.startWorkOrder({
-      ...context,
-      guard: startGate(context),
-      reviewerCheck: ({ onStart }) => setupCheck.ensureReviewerChecked({ paths: context.paths, onStart }),
-    }),
-  },
-  // status and wait only read the review queue; every other command needs the configuration.
-  status: {
-    audience: "human",
-    configFree: true,
-    summary: "Show Bridge's review queue and its latest review (the page service: ps; the current work: work-status)",
-    options: {},
-    run: (context) => workOrder.reviewQueueStatus(context),
+    run: (context) => workOrder.startWorkOrder({ ...context, guard: startGate(context), reviewerCheck: reviewerCheckFor(context) }),
   },
   stop: {
     audience: "human",
     takesRunId: true,
     usage: "<run_id>",
-    summary: "Stop a running work order: end its model process and close the run",
+    summary: "Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)",
     options: {},
     run: (context) => workOrder.stopWork(context),
+  },
+  resume: {
+    audience: "human",
+    takesRunId: true,
+    usage: "<run_id>",
+    summary: "Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start",
+    options: { "--yes": YES, "--fake-cli": FAKE_CLI, "--fake-scenario": FAKE_SCENARIO },
+    run: (context) => workOrder.resumeWorkOrder({ ...context, guard: startGate(context), reviewerCheck: reviewerCheckFor(context) }),
+  },
+  clean: {
+    audience: "human",
+    takesRunId: "optional",
+    usage: "[<run_id>]",
+    summary: "Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)",
+    options: { "--json": { ...JSON_OUT, help: "Print the result as JSON (without a run id)" } },
+    run: (context) => (context.runId
+      ? records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) })
+      : records.runPrune(context.paths, { json: Boolean(context.options.json), deliver: deliverQuietly(context) })),
+  },
+  // status and wait only read; every other command needs the configuration.
+  status: {
+    audience: "human",
+    configFree: true,
+    summary: "Show what Bridge is doing now: the page, the work and its runs, and the review queue",
+    options: { "--json": { ...JSON_OUT } },
+    run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.checkService(context.paths) }),
   },
   up: {
     audience: "human",
@@ -168,11 +186,11 @@ export const COMMANDS = {
   },
   "work-start": {
     audience: "agent",
-    summary: "Start a sealed plan after the person confirms it at the terminal",
+    summary: "Start a sealed plan on the person's yes (start does this for you)",
     options: {
       "--plan": { key: "planPath", type: "string", value: "<file>", required: true, help: "The plan written by work-plan" },
-      "--approve": { key: "approval", type: "string", value: "<sha>", internal: true, help: "The plan's SHA-256; refused for real models" },
-      "--yes": { key: "yes", type: "boolean", internal: true, help: "Answer yes; refused unless --fake-cli is given" },
+      "--approve": { key: "approval", type: "string", value: "<sha>", internal: true, help: "The plan's SHA-256, as the person's yes" },
+      "--yes": YES,
       "--fake-cli": FAKE_CLI,
       "--fake-scenario": FAKE_SCENARIO,
       // T0-07 V3.3: the status JSON is opt-in; the default is three plain lines.
@@ -207,7 +225,7 @@ export const COMMANDS = {
   },
   "bounded-resume": {
     audience: "agent",
-    summary: "Resume the authorized writer session (internal; refused with real models)",
+    summary: "Internal: resume the writer session of the one active run (refused with real models; resume <run_id> is the command for people)",
     options: {
       "--prompt": { key: "promptPath", type: "string", value: "<file>", required: true, help: "The prompt file" },
       "--max-claude-calls": { key: "maxCalls", type: "number", value: "<1-2>", default: "2", help: "Writer calls" },
@@ -225,7 +243,7 @@ export const COMMANDS = {
   },
   prune: {
     audience: "agent",
-    summary: "Fold finished runs into day files and drop records past retention",
+    summary: "Same as clean without a run id",
     options: { "--json": { ...JSON_OUT } },
     run: (context) => records.runPrune(context.paths, { json: Boolean(context.options.json), deliver: deliverQuietly(context) }),
   },
@@ -233,7 +251,7 @@ export const COMMANDS = {
     audience: "agent",
     takesRunId: true,
     usage: "<run_id>",
-    summary: "Remove one finished run (folds it first)",
+    summary: "Same as clean <run_id>",
     options: {},
     run: (context) => records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) }),
   },
@@ -265,8 +283,9 @@ export function helpHint(command) {
 export function parseCommandLine(command, args) {
   const entry = COMMANDS[command];
   if (!entry) throw new Error("Unknown command: " + command + "." + helpHint(null));
-  const runId = entry.takesRunId ? args[0] : null;
-  let rest = entry.takesRunId ? args.slice(1) : args;
+  const hasRunId = entry.takesRunId === true || (entry.takesRunId === "optional" && args[0] !== undefined && !args[0].startsWith("--"));
+  const runId = hasRunId ? args[0] : null;
+  let rest = hasRunId ? args.slice(1) : args;
   const positional = entry.positional && rest[0] !== undefined && !rest[0].startsWith("--") ? rest[0] : null;
   if (positional !== null) rest = rest.slice(1);
   let options;
@@ -282,7 +301,9 @@ export function parseCommandLine(command, args) {
   return { runId, options };
 }
 
-export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
+// `loadAdapter` is how start and resume take the platform adapter when it was not given: only after
+// the reviewer check and the yes.
+export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, loadAdapter = null, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
   const entry = COMMANDS[command];
   if (!entry?.run) throw new Error("Unknown command: " + command + "." + helpHint(null));
@@ -290,5 +311,5 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   if (!entry.configFree && !(await fileExists(paths.bridgeConfigPath))) {
     throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
   }
-  return await entry.run({ command, args, paths, options, runId, adapter, adapterId, adapterDefinition, adapterSource });
+  return await entry.run({ command, args, paths, options, runId, adapter, loadAdapter, adapterId, adapterDefinition, adapterSource });
 }

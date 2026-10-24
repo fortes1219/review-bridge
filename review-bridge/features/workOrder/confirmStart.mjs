@@ -39,8 +39,10 @@ export async function startCard(paths, plan) {
   ].join("\n");
 }
 
-// The human reads the sealed plan at the terminal and answers y; the answer approves that plan's SHA.
-export async function confirmWorkStart(paths, planPath, assumeYes) {
+// The person reads the sealed plan and says y; the answer approves that plan's SHA. At a terminal
+// it is asked here; without one the card is printed with the command an agent runs once the person
+// said yes, and null is returned: nothing starts.
+export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask = true, again = null } = {}) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
   const plan = await readJson(resolvedPlan);
   if (plan.schema_version !== 4 || plan.operation !== "start_work_package") {
@@ -65,6 +67,10 @@ export async function confirmWorkStart(paths, planPath, assumeYes) {
     plan.task,
     "",
   ].join("\n"));
+  if (!ask) {
+    process.stdout.write("Needs authorization. If the person says yes, run again: " + again + " --yes\n");
+    return null;
+  }
   const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
     const answer = await terminal.question("Authorize this work package? [y/N] ");

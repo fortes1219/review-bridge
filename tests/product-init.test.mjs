@@ -16,10 +16,13 @@ const bridge = path.join(packageRoot, "bridge.mjs");
 // platform adapter fails closed instead of falling back to an installed, signed-in CLI.
 const isolatedHome = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-no-cli-home-"));
 process.on("exit", () => { try { fsSync.rmSync(isolatedHome, { recursive: true, force: true }); } catch {} });
+// stop needs the OS process tools (ps on POSIX), so the system directories stay on PATH.
 function isolatedEnv(overrides = {}) {
+  const system = process.platform === "win32"
+    ? [process.env.SystemRoot && path.join(process.env.SystemRoot, "System32")]
+    : ["/usr/bin", "/bin"];
   const env = {
-    PATH: [path.dirname(process.execPath), process.env.SystemRoot && path.join(process.env.SystemRoot, "System32")]
-      .filter(Boolean).join(path.delimiter),
+    PATH: [path.dirname(process.execPath), ...system].filter(Boolean).join(path.delimiter),
     HOME: isolatedHome,
     USERPROFILE: isolatedHome,
     TEMP: os.tmpdir(),
@@ -136,11 +139,12 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
   assert.equal(doctor.status, 0, doctor.stderr);
   assert.equal(JSON.parse(doctor.stdout).native_readiness.ready, false);
   assert.equal(JSON.parse(doctor.stdout).native_readiness.reviewer_readonly_proven, "not_run");
-  // T0-08 G2: native work-start only at an interactive terminal; every other model entry point closed.
+  // Native work-start needs the reviewer proof, which a page started with the fake CLI never holds,
+  // whichever way the yes comes; every other model entry point is closed.
   for (const { args, input, reason } of [
-    { args: ["work-start", "--plan", "anything", "--approve", "anything"], reason: /with --approve or --yes/ },
-    { args: ["work-start", "--plan", "anything", "--yes"], reason: /with --approve or --yes/ },
-    { args: ["work-start", "--plan", "anything"], input: "y\n", reason: /must run at an interactive terminal/ },
+    { args: ["work-start", "--plan", "anything", "--approve", "anything"], reason: /the reviewer read-only check has not passed/ },
+    { args: ["work-start", "--plan", "anything", "--yes"], reason: /the reviewer read-only check has not passed/ },
+    { args: ["work-start", "--plan", "anything"], input: "y\n", reason: /the reviewer read-only check has not passed/ },
     { args: ["review"], reason: /for review: only start/ },
     { args: ["bounded-resume"], reason: /for bounded-resume: only start/ },
   ]) {
@@ -412,7 +416,7 @@ test("a chosen project type that does not fit the folder is set up and stopped a
 });
 
 // B1: one command from a work order to its result. With the fake CLI the reviewer check is not
-// needed and --yes stands in for the person's answer; for real models both are refused.
+// needed and --yes, after the card, stands in for the person's answer.
 test("start plans a Chinese work order, shows the card, runs one line per step and ends with the result file", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-start-"));
   t.after(() => removeWorkspace(root));
@@ -425,6 +429,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   const start = (...args) => spawnSync(process.execPath, [bridge, "start", order, ...args], {
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
+  assert.equal(start("--fake-cli", "--breakpoint", "after the review", "--change-types", "docs").status, 1, "the card --yes is for");
   const done = start("--fake-cli", "--yes", "--breakpoint", "after the review", "--change-types", "docs");
   assert.equal(done.status, 0, done.stderr);
   const lines = done.stdout.trimEnd().split(/\r?\n/);
@@ -443,13 +448,162 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     "  Reviewer checking the work",
   ]);
   assert.match(done.stdout, /\nDelivered: .*\nResult file: .*hello\.result\.md\nTokens: /);
+});
 
-  // Real models: --yes is refused, and so is a start without a terminal; nothing is planned.
-  for (const args of [["--yes"], []]) {
-    const refused = start(...args, "--breakpoint", "b", "--change-types", "docs");
-    assert.equal(refused.status, 2);
-    assert.match(refused.stderr, /Native execution is unavailable.*Run/);
+// E: four actions for people (start, stop, resume, clean) on three routes: a person at a terminal
+// (the pty acceptance run), VS Code's terminal (the same CLI) and an agent with no terminal. An
+// agent's start and resume print the card and stop; the agent runs them again with --yes once the
+// person said yes. All with the fake CLI: no model is called.
+async function fourActionsProject(t, prefix) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
+  t.after(() => removeWorkspace(root));
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  const order = ".review-bridge/work-packages/hello.md";
+  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
+  const cli = (args, env = {}) => spawnSync(process.execPath, [bridge, ...args], {
+    cwd: root, encoding: "utf8", env: isolatedEnv(env), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  const queue = path.join(root, ".review-bridge", "review-queue");
+  const listed = async (folder) => (await fsp.readdir(path.join(queue, folder)).catch(() => [])).filter((name) => name.endsWith(".json"));
+  return { root, order, cli, queue, listed };
+}
+
+test("an agent's start prints the card and stops; with --yes it runs and records the yes as the agent's", async (t) => {
+  const { root, order, cli, queue, listed } = await fourActionsProject(t, "review-bridge-agent-start-");
+  const card = cli(["start", order, "--fake-cli"]);
+  assert.equal(card.status, 1);
+  const lines = card.stdout.trimEnd().split(/\r?\n/);
+  for (const line of ["Stops:        after the review", "Changes:      docs", "Gate A:       not needed for docs-only work",
+    "Budget:       2 writer call(s), up to 8 minute(s) each", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
+    assert.ok(lines.includes(line), line);
   }
+  assert.ok(lines.some((line) => line.startsWith("Contract:     ")) && lines.some((line) => line.startsWith("Valid until:  ")));
+  assert.equal(lines.at(-1), "Needs authorization. If the person says yes, run again: review-bridge start " + order + " --fake-cli --yes");
+  assert.deepEqual(await listed("runs"), [], "nothing started");
+  assert.deepEqual(await listed("authorizations"), [], "nothing authorized");
+
+  const yes = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(yes.status, 0, yes.stderr);
+  assert.match(yes.stdout, /\nDelivered: .*\nResult file: /);
+  const [authorizationFile] = await listed("authorizations");
+  const authorization = JSON.parse(await fsp.readFile(path.join(queue, "authorizations", authorizationFile), "utf8"));
+  assert.equal(authorization.authorized_via, "agent");
+  const text = await fsp.readFile(path.join(root, order), "utf8");
+  const { createHash } = await import("node:crypto");
+  assert.equal(authorization.work_order_sha256, createHash("sha256").update(text.trim()).digest("hex"));
+  const [runFile] = await listed("runs");
+  const run = JSON.parse(await fsp.readFile(path.join(queue, "runs", runFile), "utf8"));
+  assert.equal(run.authorized_via, "agent");
+  assert.match(run.contract_sha256, /^[0-9a-f]{64}$/, "the contract sealed under this yes is on the run");
+});
+
+// E8: the yes is for the card the person saw. A work order edited between the card and --yes is
+// refused, and stays refused until a new card is shown; --yes with no card shown is refused too.
+test("--yes is refused when the work order changed after the card, or when no card was shown", async (t) => {
+  const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-card-changed-");
+  const noCard = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(noCard.status, 1, noCard.stderr);
+  assert.equal(noCard.stdout, "No card was shown for this work order, so there is no yes to run on. Run: review-bridge start " + order + " --fake-cli and show the person the card.\n");
+
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const file = path.join(root, order);
+  await fsp.writeFile(file, (await fsp.readFile(file, "utf8")).replace("README", "READMe"));
+  const refusal = "The work order changed after you saw the card. Run: review-bridge start " + order + " --fake-cli and look again.\n";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const changed = cli(["start", order, "--fake-cli", "--yes"]);
+    assert.equal(changed.status, 1, changed.stderr);
+    assert.equal(changed.stdout, refusal, "refused again: the card's plan was left as it was");
+  }
+  assert.deepEqual(await listed("runs"), [], "nothing started");
+  assert.deepEqual(await listed("authorizations"), [], "nothing authorized");
+
+  const card = cli(["start", order, "--fake-cli"]);
+  assert.equal(card.status, 1);
+  assert.match(card.stdout, /\n {2}│ # 工單：新增 READMe\n/, "the new card shows the edit");
+  const yes = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(yes.status, 0, yes.stdout + yes.stderr);
+  assert.match(yes.stdout, /\nDelivered: .*\nResult file: /);
+});
+
+test("stop pauses a run and keeps its records, resume carries the work order on, clean clears records and refuses a running run", async (t) => {
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-four-actions-");
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1, "the card the yes below is for");
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], {
+    cwd: root, env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "30000" }), windowsHide: true, stdio: "ignore",
+  });
+  const exited = new Promise((resolve) => child.once("close", resolve));
+  let runId = null;
+  for (const until = Date.now() + 30_000; !runId && Date.now() < until;) {
+    for (const name of await fsp.readdir(path.join(queue, "run-locks")).catch(() => [])) {
+      if (!name.endsWith(".process.json")) continue;
+      const record = JSON.parse(await fsp.readFile(path.join(queue, "run-locks", name), "utf8").catch(() => "{}"));
+      if (record.role === "writer") runId = name.replace(".process.json", "");
+    }
+    if (!runId) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(runId, "the writer never started");
+
+  const busy = cli(["clean", runId]);
+  assert.equal(busy.status, 1);
+  assert.match(busy.stdout, /進行中，先 stop/);
+  const stopped = cli(["stop", runId]);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  await exited;
+  const record = JSON.parse(await fsp.readFile(path.join(queue, "runs", runId + ".json"), "utf8"));
+  assert.equal(record.status, "stopped", "paused, and its record is kept");
+
+  const status = cli(["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running, 1 run\\(s\\) on record\\n  " + runId + "  stopped +  hello  ", "m"));
+  assert.match(status.stdout, /\nReview queue: pending \d+, running \d+, done \d+, failed \d+\n/);
+
+  const card = cli(["resume", runId, "--fake-cli"]);
+  assert.equal(card.status, 1);
+  assert.match(card.stdout, new RegExp("^Carrying on run " + runId + " \\(" + order.replaceAll(".", "\\.") + "\\) as a new run\\n"));
+  assert.match(card.stdout, new RegExp("\\nNeeds authorization\\. If the person says yes, run again: review-bridge resume " + runId + " --fake-cli --yes\\n$"));
+  const resumed = cli(["resume", runId, "--fake-cli", "--yes"]);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stdout, /\nDelivered: .*\nResult file: /);
+  const runs = await fsp.readdir(path.join(queue, "runs"));
+  assert.equal(runs.length, 2);
+  const carried = JSON.parse(await fsp.readFile(path.join(queue, "runs", runs.find((name) => name !== runId + ".json")), "utf8"));
+  assert.equal(carried.status, "pass");
+  assert.equal(carried.authorized_via, "agent");
+
+  const cleaned = cli(["clean", runId]);
+  assert.equal(cleaned.status, 0, cleaned.stdout + cleaned.stderr);
+  assert.equal(await fsp.stat(path.join(queue, "runs", runId + ".json")).catch(() => null), null);
+  const all = cli(["clean", "--json"]);
+  assert.equal(all.status, 0, all.stderr);
+  assert.equal(typeof JSON.parse(all.stdout), "object");
+});
+
+test("without the reviewer proof a real start is refused before any model call, with --yes or without", async (t) => {
+  const { order, cli, queue, listed } = await fourActionsProject(t, "review-bridge-no-proof-");
+  // The page init started runs the fake CLI, so it can never hold a proof.
+  for (const args of [[], ["--yes"]]) {
+    const refused = cli(["start", order, ...args]);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stdout, /\nReviewer read-only check: not passed \(the Bridge page is running with the fake CLI\)\nRun: review-bridge down, then review-bridge start /);
+  }
+  // No page at all: start starts one; with the CLIs absent the check cannot run, so nothing starts.
+  cli(["down"]);
+  const noPage = cli(["start", order, "--yes"]);
+  assert.equal(noPage.status, 1, noPage.stderr);
+  assert.match(noPage.stdout, /\nReviewer read-only check: not passed \((the reviewer CLI is not installed and signed in|this platform's adapter is not verified, so the check is not available here)\)\n/);
+  assert.doesNotMatch(noPage.stdout, /Checking that the reviewer/);
+  // work-start goes through the same gate: no running page, no start.
+  cli(["down"]);
+  const plan = (await fsp.readdir(queue)).find((name) => name.endsWith(".plan.json"));
+  const workStart = cli(["work-start", "--plan", ".review-bridge/review-queue/" + plan, "--yes"]);
+  assert.equal(workStart.status, 2);
+  assert.match(workStart.stderr, /Native execution is unavailable: the Bridge page service is not running/);
+  assert.deepEqual(await listed("runs"), []);
+  assert.deepEqual(await listed("authorizations"), []);
 });
 
 // RC3-LINUX-00: a page started with the fake CLI (as init starts it) can never hold the reviewer

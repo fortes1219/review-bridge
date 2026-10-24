@@ -2,7 +2,7 @@
 // option by hand. The README's command list is rendered from the same functions.
 import { COMMANDS, PROJECT_OPTION } from "./index.mjs";
 
-const HUMAN_ORDER = ["init", "start", "status", "stop", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor"];
+const HUMAN_ORDER = ["init", "start", "stop", "resume", "clean", "status", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor"];
 
 function commandsFor(audience) {
   const names = Object.keys(COMMANDS).filter((name) => COMMANDS[name].audience === audience);

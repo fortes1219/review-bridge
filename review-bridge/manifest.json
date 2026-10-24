@@ -3,6 +3,8 @@
   "entrypoint": "bootstrap.mjs",
   "commands": [
     "start",
+    "resume",
+    "clean",
     "review",
     "bounded-resume",
     "work-plan",

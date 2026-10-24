@@ -34,13 +34,13 @@ export async function agentFileTexts() {
   return {
     command: [
       "---",
-      "description: Run a Review Bridge work order; the person answers the start question",
-      "argument-hint: <work order .md>",
+      "description: Start, pause, carry on or clear a Review Bridge work order; the person says yes to the card",
+      "argument-hint: start <file> | stop <run_id> | resume <run_id> | clean [<run_id>]",
       "---",
       "",
-      guide.replaceAll("{{file}}", "$ARGUMENTS"),
+      guide.replaceAll("{{args}}", "$ARGUMENTS"),
     ].join("\n"),
-    section: [SECTION_START, "## Review Bridge", "", guide.replaceAll("{{file}}", "<file>").trimEnd(), SECTION_END, ""].join("\n"),
+    section: [SECTION_START, "## Review Bridge", "", guide.replaceAll("{{args}}", "start <file>, stop <run_id>, resume <run_id> or clean [<run_id>]").trimEnd(), SECTION_END, ""].join("\n"),
   };
 }
 

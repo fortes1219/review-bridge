@@ -151,11 +151,12 @@ test("install adds the /review-bridge command and appends to AGENTS.md; a projec
   await applyNeutralInstall(plan, plan.plan_sha256);
   const command = await fsp.readFile(path.join(root, ".claude", "commands", "review-bridge.md"), "utf8");
   assert.match(command, /^---\ndescription: .+\nargument-hint: .+\n---\n/);
-  assert.match(command, /review-bridge start \$ARGUMENTS/);
-  assert.match(command, /never answer its question/);
+  assert.match(command, /^argument-hint: start <file> \| stop <run_id> \| resume <run_id> \| clean \[<run_id>\]$/m);
+  assert.match(command, /four actions \(\$ARGUMENTS\)/);
+  assert.match(command, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with `--yes`/);
   const after = await fsp.readFile(path.join(root, "AGENTS.md"));
   assert.deepEqual(after.subarray(0, agents.length), agents, "the existing text is kept byte for byte");
-  assert.match(after.subarray(agents.length).toString("utf8"), /^\n\n<!-- review-bridge:start -->\n## Review Bridge\n[\s\S]*review-bridge start <file>[\s\S]*<!-- review-bridge:end -->\n$/);
+  assert.match(after.subarray(agents.length).toString("utf8"), /^\n\n<!-- review-bridge:start -->\n## Review Bridge\n[\s\S]*`review-bridge <action> <file\|run_id>`[\s\S]*<!-- review-bridge:end -->\n$/);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
 
   const second = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-neutral-test-"));

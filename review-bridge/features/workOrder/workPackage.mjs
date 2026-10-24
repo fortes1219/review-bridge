@@ -213,6 +213,15 @@ export async function createWorkPackagePlan({
   return { ...plan, plan_path: resolvedOut };
 }
 
+// E8: how the work-order file reads now against the plan a card was printed from: "no_card" when
+// there is no such plan, "changed" when the file's SHA-256 is not the one sealed in it, else null.
+export async function workOrderSinceCard(planPath, taskFile) {
+  const card = await readJson(planPath).catch(() => null);
+  if (!card?.task_sha256) return "no_card";
+  const now = await fsp.readFile(path.resolve(taskFile), "utf8").catch(() => null);
+  return now !== null && digest(now.trim()) === card.task_sha256 ? null : "changed";
+}
+
 const RUNNING_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
 
 // A work order is a place: the folder it is in and the name its entry has there (decision A,
@@ -435,6 +444,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
       // C4: the OS user running work-start, never the name typed into the plan.
       authorizedBy: os.userInfo().username,
       authorizedVia,
+      workOrderSha256: plan.task_file ? plan.task_sha256 : null,
       workPackageSha256: workPackage.record.content_sha256,
       policySha256: snapshot.effective_policy_sha256,
       ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,

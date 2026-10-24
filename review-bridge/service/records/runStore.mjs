@@ -313,6 +313,8 @@ export async function createAuthorization(paths, {
   kind = "start",
   authorizedBy,
   authorizedVia = null,
+  // The sealed work-order text the person said yes to (start's card shows it line by line).
+  workOrderSha256 = null,
   workPackageSha256,
   policySha256,
   ttlSeconds,
@@ -350,6 +352,7 @@ export async function createAuthorization(paths, {
     work_package_sha256: workPackageSha256,
     effective_policy_sha256: policySha256,
   };
+  if (workOrderSha256) record.work_order_sha256 = workOrderSha256;
   if (sourcePlanSha256) record.source_plan_sha256 = sourcePlanSha256;
   if (!record.authorized_by) throw new Error("Authorization owner is required.");
   if (kind === "budget_extension") {

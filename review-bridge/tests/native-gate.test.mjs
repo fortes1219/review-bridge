@@ -12,41 +12,24 @@ import { assertNativeAllowed, checkReviewerProof, NATIVE_MODEL_COMMANDS, nativeG
 import { writeServiceSession } from "../features/setupCheck/pageService.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const tty = { stdinIsTTY: true, stdoutIsTTY: true };
-
-test("G1 native work-start is allowed only without --approve/--yes at an interactive terminal", () => {
-  assert.deepEqual(nativeGateDecision({ command: "work-start", args: ["--plan", "p"], ...tty }), { allowed: true, mode: "native_terminal" });
-  for (const flag of ["--approve", "--yes"]) {
-    const decision = nativeGateDecision({ command: "work-start", args: ["--plan", "p", flag, "x"], ...tty });
-    assert.equal(decision.allowed, false);
-    assert.equal(decision.reason, "flag_confirmation");
-    assert.match(decision.message, /^Native execution is unavailable with --approve or --yes/);
-  }
-  for (const io of [{ stdinIsTTY: false, stdoutIsTTY: true }, { stdinIsTTY: true, stdoutIsTTY: false }, { stdinIsTTY: false, stdoutIsTTY: false }]) {
-    const decision = nativeGateDecision({ command: "work-start", args: ["--plan", "p"], ...io });
-    assert.equal(decision.allowed, false, JSON.stringify(io));
-    assert.equal(decision.reason, "not_a_terminal");
+// Owner 2026-10-25: the yes may come from the terminal or through an agent (--yes / --approve);
+// the gate no longer looks at the terminal. The reviewer proof (G4) still gates every native start.
+test("G1 start, resume and work-start are allowed in native mode with or without a terminal and with --yes or --approve", () => {
+  for (const command of ["start", "resume", "work-start"]) {
+    for (const args of [[], ["--yes"], ["--approve", "x"]]) {
+      assert.deepEqual(nativeGateDecision({ command, args }), { allowed: true, mode: "native" }, command + " " + args.join(" "));
+    }
   }
 });
 
-test("G1 every other model entry point is closed in native mode, even at a terminal", () => {
-  for (const command of NATIVE_MODEL_COMMANDS.filter((name) => !["start", "work-start"].includes(name))) {
-    const decision = nativeGateDecision({ command, args: [], ...tty });
+test("G1 every other model entry point is closed in native mode", () => {
+  for (const command of NATIVE_MODEL_COMMANDS.filter((name) => !["start", "resume", "work-start"].includes(name))) {
+    const decision = nativeGateDecision({ command, args: [] });
     assert.equal(decision.allowed, false, command);
     assert.equal(decision.reason, "entry_point");
-    assert.match(decision.message, new RegExp("for " + command + ": only start"));
+    assert.match(decision.message, new RegExp("for " + command + ": only start and resume may call a model\\. Run: review-bridge start <file>$"));
   }
-  assert.deepEqual([...NATIVE_MODEL_COMMANDS].sort(), ["bounded-resume", "review", "start", "work-start"]);
-});
-
-test("G1 start is confirmed at a terminal like work-start: no --yes, no --approve, no piped input", () => {
-  assert.deepEqual(nativeGateDecision({ command: "start", args: ["w.md"], ...tty }), { allowed: true, mode: "native_terminal" });
-  for (const flag of ["--yes", "--approve"]) {
-    assert.equal(nativeGateDecision({ command: "start", args: ["w.md", flag], ...tty }).reason, "flag_confirmation");
-  }
-  const piped = nativeGateDecision({ command: "start", args: ["w.md"], stdinIsTTY: false, stdoutIsTTY: true });
-  assert.equal(piped.reason, "not_a_terminal");
-  assert.match(piped.message, /Run it in a terminal window: review-bridge start <file>$/);
+  assert.deepEqual([...NATIVE_MODEL_COMMANDS].sort(), ["bounded-resume", "resume", "review", "start", "work-start"]);
 });
 
 test("G1 fake mode and model-free commands are unchanged", () => {
@@ -59,25 +42,17 @@ test("G1 fake mode and model-free commands are unchanged", () => {
   assert.throws(() => assertNativeAllowed({ command: "review", args: [] }), (error) => error.nativeGate === "entry_point");
 });
 
-test("G3 dispatchCommand refuses native work-start on its own, without bootstrap, and creates no authorization", async (t) => {
+test("G3 without the reviewer proof dispatchCommand refuses native work-start, with --yes, --approve or neither, and authorizes nothing", async (t) => {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-native-gate-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
   const adapter = { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} };
-  await assert.rejects(
-    dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x", "--approve", "x"], repoRoot, bridgeRoot, adapter }),
-    /with --approve or --yes/,
-  );
-  await assert.rejects(
-    dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x", "--yes"], repoRoot, bridgeRoot, adapter }),
-    /with --approve or --yes/,
-  );
-  // The test runner's stdin is not a terminal, so the plain form is refused here too.
-  if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+  for (const args of [["--plan", "x", "--approve", "x"], ["--plan", "x", "--yes"], ["--plan", "x"]]) {
     await assert.rejects(
-      dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args: ["--plan", "x"], repoRoot, bridgeRoot, adapter }),
-      /must run at an interactive terminal/,
+      dispatchCommand({ privateRootName: ".review-bridge", command: "work-start", args, repoRoot, bridgeRoot, adapter }),
+      /Native execution is unavailable: the Bridge page service is not running/,
+      args.join(" "),
     );
   }
   const authorizations = await fsp.readdir(paths.authorizationsDir).catch(() => []);

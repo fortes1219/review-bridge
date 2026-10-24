@@ -56,6 +56,11 @@ export async function ensureReviewerChecked({ paths, onStart = () => {} }) {
   if (service.status?.platform_eligible !== true) {
     return { ok: false, reason: service.status?.platform_status === "fake" ? "page_runs_fake_cli" : "adapter_not_verified", url };
   }
+  // The page's own answer to whether its button would start a check: nothing is announced as a
+  // model call when none can be made.
+  if (service.status?.probe_available !== true) {
+    return { ok: false, reason: service.status?.probe_in_flight ? "in_flight" : service.status?.probe_supported === false ? "unsupported_reviewer" : "reviewer_not_ready", url };
+  }
   onStart(service.status?.roles?.reviewer || "reviewer");
   const port = service.session.port;
   const response = await pageRequest(port, {

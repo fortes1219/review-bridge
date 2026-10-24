@@ -278,11 +278,13 @@ test("every command's --help exits 0 and lists each option with its type, defaul
 test("--help lists the commands for people; --help --all adds the ones for agents and scripts", () => {
   const run = (...args) => spawnSync(process.execPath, [bridge, ...args], { cwd: packageRoot, encoding: "utf8", windowsHide: true });
   const listed = (text) => text.split("\n").filter((line) => /^  [a-z]/.test(line)).map((line) => line.trim().split(/\s/)[0]);
-  const human = ["init", "start", "status", "stop", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor"];
+  const human = ["init", "start", "stop", "resume", "clean", "status", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor"];
   const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "roles-check"];
   assert.deepEqual(listed(run("--help").stdout), human);
   assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());
-  assert.match(run("status", "--help").stdout, /the page service: ps; the current work: work-status/);
+  assert.match(run("status", "--help").stdout, /Show what Bridge is doing now: the page, the work and its runs, and the review queue/);
+  assert.match(run("prune", "--help").stdout, /Same as clean without a run id/);
+  assert.match(run("rm", "--help").stdout, /Same as clean <run_id>/);
 });
 
 test("README's Commands section is what the command table renders", () => {
