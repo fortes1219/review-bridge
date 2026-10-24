@@ -30,13 +30,23 @@ test("G1 native work-start is allowed only without --approve/--yes at an interac
 });
 
 test("G1 every other model entry point is closed in native mode, even at a terminal", () => {
-  for (const command of NATIVE_MODEL_COMMANDS.filter((name) => name !== "work-start")) {
+  for (const command of NATIVE_MODEL_COMMANDS.filter((name) => !["start", "work-start"].includes(name))) {
     const decision = nativeGateDecision({ command, args: [], ...tty });
     assert.equal(decision.allowed, false, command);
     assert.equal(decision.reason, "entry_point");
-    assert.match(decision.message, new RegExp("for " + command + ": only work-start"));
+    assert.match(decision.message, new RegExp("for " + command + ": only start"));
   }
-  assert.deepEqual([...NATIVE_MODEL_COMMANDS].sort(), ["bounded-resume", "review", "work-start"]);
+  assert.deepEqual([...NATIVE_MODEL_COMMANDS].sort(), ["bounded-resume", "review", "start", "work-start"]);
+});
+
+test("G1 start is confirmed at a terminal like work-start: no --yes, no --approve, no piped input", () => {
+  assert.deepEqual(nativeGateDecision({ command: "start", args: ["w.md"], ...tty }), { allowed: true, mode: "native_terminal" });
+  for (const flag of ["--yes", "--approve"]) {
+    assert.equal(nativeGateDecision({ command: "start", args: ["w.md", flag], ...tty }).reason, "flag_confirmation");
+  }
+  const piped = nativeGateDecision({ command: "start", args: ["w.md"], stdinIsTTY: false, stdoutIsTTY: true });
+  assert.equal(piped.reason, "not_a_terminal");
+  assert.match(piped.message, /Run it in a terminal window: review-bridge start <file>$/);
 });
 
 test("G1 fake mode and model-free commands are unchanged", () => {
@@ -142,4 +152,11 @@ test("G5 at an interactive terminal, native work-start still refuses until the p
     }
   }
   assert.deepEqual(await fsp.readdir(rt.paths.authorizationsDir).catch(() => []), []);
+});
+
+// B1: start's reviewer check is the setup check's, reached through its public entry, the way the
+// router calls it (the fake-CLI runs skip that step, so they cannot show the wiring).
+test("start's reviewer check is wired to an entry the setup check exports", async () => {
+  const setupCheck = await import("../features/setupCheck/index.mjs");
+  assert.equal(typeof setupCheck.ensureReviewerChecked, "function");
 });

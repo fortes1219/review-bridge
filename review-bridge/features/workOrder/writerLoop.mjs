@@ -180,12 +180,14 @@ const CONTRACT_EXIT_CODES = Object.freeze({
 });
 
 // A work-order run gets its contract once, before the writer's first call; a resumed run keeps it.
-async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId }) {
+async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep }) {
   const workPackage = control.run.work_package;
   if (!workPackage.task_file) return { sha256: null, exitCode: null };
   if (control.run.contract_sha256) return { sha256: control.run.contract_sha256, exitCode: null };
   if (!workPackage.contract_steps) throw new Error("The work package names no contract steps; build a new plan.");
   const runId = runtimeState.runId;
+  onStep("Writer (" + workPackage.contract_steps.translate.provider + ") turns the work order into a contract; reviewer ("
+    + workPackage.contract_steps.check.provider + ") checks it");
   const policy = control.codex_policy || {};
   const translated = await establishContract({
     paths, runId, workPackage, adapter, limits: effectiveLimits(control), executionMode: control.execution_mode,
@@ -197,6 +199,7 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
   if ((await readRunStatus(paths, runId)) === "stopped") return { sha256: null, exitCode: 130 };
   if (translated.status === "sealed") {
     await runtimeState.recordContract(translated.sha256);
+    onStep("Contract sealed");
     return { sha256: translated.sha256, exitCode: null };
   }
   const { status, detail, problems = [], questions = [], failure = null, ...ceiling } = translated;
@@ -348,6 +351,8 @@ export async function runBoundedResume({
   startNewSession = false,
   runtimeState,
   workLock = null,
+  // One line per step for the person watching (start); the run's records do not depend on it.
+  onStep = () => {},
 }) {
   control.runtime_state = runtimeState;
   const invocationStartedAt = Date.now();
@@ -373,7 +378,7 @@ export async function runBoundedResume({
     const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
     const unconfirmable = await unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId });
     if (unconfirmable !== null) return unconfirmable;
-    const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId });
+    const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep });
     if (sealed.exitCode !== null) return sealed.exitCode;
     const contractSha256 = sealed.sha256;
     // The work-proof seal: the baseline hash as authorized, and every window this controller writes.
@@ -452,6 +457,7 @@ export async function runBoundedResume({
         "--json-schema", writerSchemaArg,
       ];
       const invocation = adapter.buildInvocation("claude", claude, claudeArgs);
+      onStep("Writer working (call " + call + " of " + maxCalls + ")");
       const callStartedAt = Date.now();
       const baselinePath = currentControl.workspace_evidence?.baseline_path || null;
       const processResult = await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "writer" }, () => runProcess({
@@ -613,7 +619,8 @@ export async function runBoundedResume({
         // The version Gate A tests is recorded with its result, so a condition proven by Gate A can
         // be tied to the version the reviewer later reads.
         const testedVersion = await workVersion(paths.repoRoot);
-        gateAResult = { ...(await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "gate_a" }, () => runGateA({
+        onStep(workPackage.gate_a.kind === "command" ? "Gate A: running " + workPackage.gate_a.command : "Gate A: not needed for docs-only work");
+        gateAResult ={ ...(await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "gate_a" }, () => runGateA({
           paths, gateA: workPackage.gate_a,
           stdoutPath: path.join(paths.queueRoot, stamp + "-gate-a.stdout.log"),
           stderrPath: path.join(paths.queueRoot, stamp + "-gate-a.stderr.log"),
@@ -623,6 +630,7 @@ export async function runBoundedResume({
         await clearProcess(paths, runId);
         if ((await readRunStatus(paths, runId)) === "stopped") return 130;
         await recordIo(paths, runId, { ...gateAResult, call });
+        if (gateAResult.kind === "command") onStep("Gate A " + (gateAResult.passed ? "passed" : "failed"));
         const afterGateProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "gate_a" });
         if (afterGateProof !== null) return afterGateProof;
         if (gateAResult.kind === "command" && !gateAResult.passed) {
@@ -713,6 +721,7 @@ export async function runBoundedResume({
         throw new Error("Bounded correction did not create a new review job.");
       }
       const ownJobId = await enqueuedJobId(paths, enqueued);
+      onStep("Reviewer checking the work");
       const reviewOutcomes = await runReviewWorker({
         paths, control: currentControl, adapter, noNotification: true, only: ownJobId,
       });

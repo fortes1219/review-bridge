@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
 import { runGuide } from "./installer/install-guide.mjs";
+import { renderCommandHelp, renderMainHelp } from "./review-bridge/router/help.mjs";
+import { COMMANDS, parseCommandLine } from "./review-bridge/router/index.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
 import { loadAdapterForInspection, resolveAdapterModule, UNSUPPORTED_ADAPTER } from "./review-bridge/router/platform.mjs";
 import {
@@ -25,23 +27,6 @@ const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRoot = path.join(packageRoot, "review-bridge");
 const bootstrapPath = path.join(runtimeRoot, "bootstrap.mjs");
 const INSTALLER_COMMANDS = new Set(["init", "roles-check", "uninstall", "upgrade"]);
-
-function parseArgs(values) {
-  const options = {};
-  for (let index = 0; index < values.length; index += 1) {
-    const token = values[index];
-    if (token === "--yes" || token === "--json" || token === "--fake-cli" || token === "--rollback") {
-      options[token.slice(2)] = true;
-      continue;
-    }
-    if (!token.startsWith("--")) throw new Error("Unexpected argument: " + token);
-    const value = values[index + 1];
-    if (!value || value.startsWith("--")) throw new Error("Missing value for " + token);
-    options[token.slice(2)] = value;
-    index += 1;
-  }
-  return options;
-}
 
 function run(command, args, { cwd = packageRoot, expected = [0] } = {}) {
   const result = spawnSync(command, args, {
@@ -106,6 +91,7 @@ async function runFakeScenarios(target, privateName) {
       "--max-claude-calls", "2",
       "--max-claude-minutes", "1",
       "--out", planPath,
+      "--json",
     ], { cwd: target }), scenario.name + " work plan");
     const completed = jsonOutput(run(process.execPath, [
       bootstrap,
@@ -342,6 +328,9 @@ function formatUninstallPlan(plan) {
     ...(plan.user_file_count > plan.user_files.length ? ["  …另外 " + (plan.user_file_count - plan.user_files.length) + " 個"] : []),
     "整份先備份到專案外，核對後才刪：" + plan.backup_root,
     ...(plan.git_exclusion?.present ? ["會從 " + plan.git_exclusion.path + " 拿掉安裝時加的這一行：" + plan.git_exclusion.pattern] : []),
+    ...Object.values(plan.agent_files_state || {}).map((part) => (part.unchanged
+      ? "會移除安裝時加的 " + part.path + (part.path === "AGENTS.md" ? " 那一段" : "")
+      : part.path + " 裡安裝時加的內容你改過，留著不動")),
   ].join("\n") + "\n";
 }
 
@@ -412,47 +401,19 @@ async function upgrade(options) {
   return rollback ? await applyNeutralUpgradeRollback(plan, plan.plan_sha256) : await applyNeutralUpgrade(plan, plan.plan_sha256);
 }
 
-const HELP = `Usage: review-bridge <command> [options]
-
-Set up a project (run in the project folder):
-  init                         Ask for the writer, the reviewer and the project type, then set
-                               up .review-bridge/ here. Questions answered by options are not asked.
-    --target <folder>          Set up this folder instead of the current one
-    --writer <claude|codex>    Writer role (default: your saved default, else claude)
-    --reviewer <claude|codex>  Reviewer role (default: your saved default, else codex)
-    --profile <type|none>      Project type (default: what detection finds, else none)
-    --port <n>                 Local page port
-    --yes                      Ask nothing; use the defaults
-    --json                     Ask nothing; print the result as JSON
-
-Work (in the project folder, or with --project <folder>):
-  work-plan <file>             Plan a work order from .review-bridge/work-packages/
-  work-start --plan <file>     Confirm and run a planned work order
-  work-status, work-cancel, stop <run_id>
-  up, down, ps, watch          The local page service
-  status, wait, prune, rm <run_id>, doctor
-
-Maintain a project:
-  upgrade [--target <folder>] [--rollback]
-  uninstall --target <folder>
-  roles-check [--writer <claude|codex>] [--reviewer <claude|codex>]
-
-Options:
-  -v, --version                Print the version
-  -h, --help                   Print this help
-
-Update Review Bridge: npm i -g review-bridge@latest
-Remove Review Bridge: npm uninstall -g review-bridge
-`;
-
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
+  const all = rest.includes("--all");
   if (!command || ["-h", "--help", "help"].includes(command)) {
-    process.stdout.write(HELP);
+    process.stdout.write(renderMainHelp({ all }));
     return command ? 0 : 2;
   }
   if (["-v", "--version"].includes(command)) {
     process.stdout.write(JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).version + "\n");
+    return 0;
+  }
+  if (COMMANDS[command] && (rest.includes("--help") || rest.includes("-h"))) {
+    process.stdout.write(renderCommandHelp(command, { all }));
     return 0;
   }
   // Every other command is the project runtime's, run in the terminal it was typed in, against the
@@ -463,25 +424,25 @@ async function main() {
     return forwarded.status ?? 1;
   }
   if (command === "roles-check") {
-    const options = parseArgs(rest);
+    const { options } = parseCommandLine(command, rest);
     const result = await rolesCheck(options);
     process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n" : formatRoleCheck(result));
     return 0;
   }
   if (command === "uninstall") {
-    const options = parseArgs(rest);
+    const { options } = parseCommandLine(command, rest);
     const result = await uninstall(options);
     process.stdout.write(options.json || result.plan_written ? JSON.stringify(result, null, 2) + "\n" : formatUninstallResult(result));
     return 0;
   }
   if (command === "upgrade") {
-    const options = parseArgs(rest);
+    const { options } = parseCommandLine(command, rest);
     const result = await upgrade(options);
     process.stdout.write(options.json || result.plan_written ? JSON.stringify(result, null, 2) + "\n"
       : result.operation === "upgrade_rollback" ? formatUpgradeRollbackResult(result) : formatUpgradeResult(result));
     return 0;
   }
-  const options = parseArgs(rest);
+  const { options } = parseCommandLine(command, rest);
   const result = await init(options);
   if (!result.printed) process.stdout.write(JSON.stringify(result, null, 2) + "\n");
   return 0;
@@ -490,7 +451,7 @@ async function main() {
 try {
   process.exitCode = await main();
 } catch (error) {
-  const failed = ["uninstall", "upgrade"].includes(process.argv[2]) ? process.argv[2] : "init";
+  const failed = INSTALLER_COMMANDS.has(process.argv[2]) ? process.argv[2] : "init";
   process.stderr.write("Review Bridge " + failed + " failed closed: " + error.message + "\n");
   process.exitCode = 2;
 }

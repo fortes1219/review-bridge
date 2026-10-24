@@ -21,6 +21,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: README commands match the command table
+        run: node scripts/render-commands.mjs --check
       - run: npm test
       - name: Runtime tests
         run: node --test "review-bridge/tests/*.test.mjs"

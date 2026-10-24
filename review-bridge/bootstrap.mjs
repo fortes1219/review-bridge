@@ -12,7 +12,8 @@ import {
   targetKey,
   UNSUPPORTED_ADAPTER,
 } from "./router/platform.mjs";
-import { dispatchCommand } from "./router/index.mjs";
+import { COMMANDS, dispatchCommand } from "./router/index.mjs";
+import { renderCommandHelp, renderMainHelp } from "./router/help.mjs";
 import { inspectDoctor } from "./features/doctor/index.mjs";
 import { createFakeAdapter, readJson } from "./service/index.mjs";
 import { getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
@@ -31,55 +32,33 @@ function takeProject(argv) {
   return { repoRoot: path.resolve(value), args: [...argv.slice(0, index), ...argv.slice(index + 2)] };
 }
 
-function printUsage() {
-  process.stderr.write(
-    [
-      "Usage: review-bridge <command> [--project <folder>] [options]",
-      "       (the project is the current folder when --project is not given)",
-      "",
-      "Commands:",
-      "  review           Run the Codex review worker",
-      "  bounded-resume   Resume the authorized Claude writer session",
-      "  work-plan       Create a checksum-gated first/next work package plan",
-      "  work-start      Authorize and run a planned work package end to end",
-      "  work-status     Show human-readable work package state",
-      "  work-cancel     Consume the active authorization",
-      "  status           Show queue and latest-review status",
-      "  wait             Wait for the next queued report",
-      "  doctor           Validate platform selection without running work",
-      "  watch            Open the local setup page (loopback only)",
-      "  up               Start the resident page service in the background",
-      "  down             Stop the resident page service",
-      "  ps               Show whether the resident page service is running",
-      "  prune            Fold finished runs into day files and drop records past retention",
-      "  rm <run_id>      Remove one finished run (folds it first)",
-      "  stop <run_id>    Stop a running work package: kill its model process and close the run",
-      "",
-    ].join("\n"),
-  );
-}
-
 async function main() {
   const { repoRoot, args: argv } = takeProject(process.argv.slice(2));
   const [command, ...args] = argv;
+  const all = args.includes("--all");
   if (!command || command === "--help" || command === "-h") {
-    printUsage();
+    (command ? process.stdout : process.stderr).write(renderMainHelp({ all }));
     return command ? 0 : 2;
+  }
+  if (COMMANDS[command] && (args.includes("--help") || args.includes("-h"))) {
+    process.stdout.write(renderCommandHelp(command, { all }));
+    return 0;
   }
   const manifestPath = path.join(bridgeRoot, "manifest.json");
   const manifest = await readJson(manifestPath);
   if (command !== "doctor" && !manifest.commands.includes(command)) {
-    throw new Error("Unsupported review bridge command: " + command);
+    throw new Error("Unknown command: " + command + ". Run: review-bridge --help");
   }
   const fakeRequested = args.includes("--fake-cli");
-  // T0-08: native model calls are allowed only for work-start confirmed at an interactive terminal
-  // (no --approve, no --yes, stdin and stdout both a TTY). This is an operating restriction, not
+  // T0-08: native model calls are allowed only for start and work-start confirmed at an interactive
+  // terminal (no --approve, no --yes, stdin and stdout both a TTY). This is an operating restriction, not
   // proof of a human: an agent under the same OS account can still drive a terminal. Every other
   // model entry point (review, bounded-resume) stays closed in native mode.
   const gate = nativeGateDecision({ command, args, stdinIsTTY: Boolean(process.stdin.isTTY), stdoutIsTTY: Boolean(process.stdout.isTTY) });
   if (!gate.allowed) throw new Error(gate.message);
-  // N7: and only after the reviewer read-only check passed in the running page service.
-  if (gate.mode === "native_terminal") await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
+  // N7: and only after the reviewer read-only check passed in the running page service. start runs
+  // that check itself first and its gate asserts the proof before it asks.
+  if (gate.mode === "native_terminal" && command !== "start") await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
   const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "up", "down", "ps", "prune", "rm", "stop"]);
@@ -87,8 +66,8 @@ async function main() {
   let implementation = {};
   let adapterSource = null;
   if (fakeRequested) {
-    if (!["work-start", "doctor", "watch", "up"].includes(command)) {
-      throw new Error("--fake-cli is supported only by work-start, doctor, watch, and up.");
+    if (!["start", "work-start", "doctor", "watch", "up"].includes(command)) {
+      throw new Error("--fake-cli is supported only by start, work-start, doctor, watch, and up. Leave --fake-cli out.");
     }
     implementation = createFakeAdapter(bridgeRoot, fakeScenario);
     // The fake adapter is never eligible: a page started with it cannot run the reviewer check, so it

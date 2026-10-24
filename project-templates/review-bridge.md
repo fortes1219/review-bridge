@@ -1,7 +1,7 @@
 # Review Bridge Boundary
 
-The Stop hook is only an event trigger. The controller under
-`.review-bridge/tools/review-bridge/` owns the review state machine.
+The Review Bridge controller (the `review-bridge` command, installed by npm) owns the review
+state machine. This project's Bridge state lives in `.review-bridge/`.
 
 - Claude is the writer. Codex is the independent reviewer.
 - Runtime authorization comes only from an immutable authorization that references the exact work-package and effective-policy checksums.

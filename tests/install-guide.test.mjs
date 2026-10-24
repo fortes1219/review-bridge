@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { CANCELLED, doneMessage, ROOT_REFUSAL, runGuide } from "../installer/install-guide.mjs";
 import { readDefaultRoles, saveDefaultRoles, settingsFile } from "../installer/personal-settings.mjs";
 import { listProfiles } from "../installer/project-profile.mjs";
+import { COMMANDS, PROJECT_OPTION } from "../review-bridge/router/index.mjs";
 import { nodeTooOld } from "../review-bridge/utils/nodeVersion.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -63,7 +64,7 @@ function stubSetup({ fail = null } = {}) {
         if (label === fail) throw new Error(label + " broke");
       });
     }
-    return { ok: true, target: settings.target, roles: settings.roles, profile: settings.profileId === "none" ? null : settings.profileId };
+    return { ok: true, target: settings.target, roles: settings.roles, profile: settings.profileId === "none" ? null : settings.profileId, url: "http://localhost:8080/" };
   };
   return { seen, setUpProject };
 }
@@ -102,7 +103,7 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
     { start: "Checking the setup" }, { done: "Checking the setup" },
     { start: "Running the four fake self-tests" }, { done: "Running the four fake self-tests" },
     { start: "Starting the local page" }, { done: "Starting the local page" },
-    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/\n  review-bridge work-plan .review-bridge/work-packages/<file>.md" },
+    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/\n  review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" },
   ]);
   assert.deepEqual(run.setup.seen.map(({ target, roles, profileId }) => ({ target, roles, profileId })),
     [{ target: run.project, roles: { writer: "claude", reviewer: "codex" }, profileId: "node-backend" }]);
@@ -209,10 +210,11 @@ test("an option the Guide does not know is refused", async (t) => {
   await assert.rejects(run.run, /Unknown option for init: --install-location/);
 });
 
-test("Done names cd when the project is not the current folder", () => {
+test("Done names cd when the project is not the current folder, then start and the page", () => {
   const cwd = path.join(os.tmpdir(), "work");
-  assert.equal(doneMessage(path.join(cwd, "my app"), cwd),
-    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/\n  review-bridge work-plan .review-bridge/work-packages/<file>.md");
+  assert.equal(doneMessage(path.join(cwd, "my app"), cwd, "http://localhost:8081/"),
+    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/\n  review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/");
+  assert.match(doneMessage(cwd, cwd, null), /\n  page: not running; start it with review-bridge up$/);
 });
 
 test("--version prints the package version and --help describes the npm command", () => {
@@ -246,4 +248,44 @@ test("an unreadable settings file is refused, never taken as nothing saved", asy
   await fsp.mkdir(dataHome, { recursive: true });
   await fsp.writeFile(settingsFile(dataHome), "{ not json");
   await assert.rejects(readDefaultRoles({ dataHome }), /Your Review Bridge settings are not readable/);
+});
+
+// C1 / C3: every command's help comes from the command table, exits 0 and lists every option.
+test("every command's --help exits 0 and lists each option with its type, default and help line", () => {
+  const run = (...args) => spawnSync(process.execPath, [bridge, ...args], { cwd: packageRoot, encoding: "utf8", windowsHide: true });
+  for (const [name, entry] of Object.entries(COMMANDS)) {
+    const options = { ...entry.options, ...(entry.installer ? {} : PROJECT_OPTION) };
+    const all = run(name, "--help", "--all");
+    assert.equal(all.status, 0, name + ": " + all.stderr);
+    assert.match(all.stdout, new RegExp("^Usage: review-bridge " + name), name);
+    const lines = all.stdout.split("\n");
+    for (const [flag, option] of Object.entries(options)) {
+      const line = lines.findIndex((text) => text === "  " + flag + (option.value ? " " + option.value : ""));
+      assert.ok(line >= 0, name + " " + flag + " is listed");
+      const detail = lines[line + 1];
+      assert.ok(detail.includes(option.help) && detail.includes(option.type), name + " " + flag + ": " + detail);
+      if (option.default) assert.ok(detail.includes("default: " + option.default), name + " " + flag + " default");
+    }
+    const plain = run(name, "-h");
+    assert.equal(plain.status, 0);
+    const shown = plain.stdout.split("\n");
+    for (const [flag, option] of Object.entries(options)) {
+      assert.equal(shown.includes("  " + flag + (option.value ? " " + option.value : "")), !option.internal, name + " " + flag);
+    }
+  }
+});
+
+test("--help lists the commands for people; --help --all adds the ones for agents and scripts", () => {
+  const run = (...args) => spawnSync(process.execPath, [bridge, ...args], { cwd: packageRoot, encoding: "utf8", windowsHide: true });
+  const listed = (text) => text.split("\n").filter((line) => /^  [a-z]/.test(line)).map((line) => line.trim().split(/\s/)[0]);
+  const human = ["init", "start", "status", "stop", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor"];
+  const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "roles-check"];
+  assert.deepEqual(listed(run("--help").stdout), human);
+  assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());
+  assert.match(run("status", "--help").stdout, /the page service: ps; the current work: work-status/);
+});
+
+test("README's Commands section is what the command table renders", () => {
+  const check = spawnSync(process.execPath, [path.join(packageRoot, "scripts", "render-commands.mjs"), "--check"], { cwd: packageRoot, encoding: "utf8", windowsHide: true });
+  assert.equal(check.status, 0, check.stderr);
 });

@@ -11,6 +11,34 @@ export function contractStepsLine(steps) {
     + " and " + steps.max_attempts + " check(s) by the reviewer (" + steps.check.provider + "), " + steps.minutes_per_call + " minute(s) per call";
 }
 
+// start's card: what the answer authorizes, in the words a person checks it by. Every line comes
+// from the sealed plan. The numbered acceptance conditions are written only after the answer (the
+// translation is part of the authorized work), so the card shows the work order as it is sealed.
+export async function startCard(paths, plan) {
+  const replaced = await runningVersions(paths, plan);
+  const gate = plan.gate_a?.kind === "command" ? "runs " + plan.gate_a.command + " after each writer call" : "not needed for docs-only work";
+  const scope = plan.scope.source === "explicit"
+    ? plan.scope.allowed_paths.join(", ")
+    : "the whole project except protected files (" + plan.scope.forbidden_paths.length + " patterns)";
+  return [
+    "Work order:   " + plan.task_file,
+    "Stops:        " + plan.breakpoint,
+    "Changes:      " + plan.scope.change_types.join(", "),
+    "Scope:        " + scope,
+    "Gate A:       " + gate,
+    "Budget:       " + plan.budget.max_claude_calls + " writer call(s), up to " + plan.budget.max_claude_minutes_per_call + " minute(s) each",
+    ...(plan.contract_steps ? ["Contract:     " + contractStepsLine(plan.contract_steps).replace(/^Before the work: /, "")] : []),
+    "Valid until:  " + plan.authorization_expires_at,
+    ...replaced.map(({ runId, unchanged }) => (unchanged
+      ? "This work order is already running unchanged as run " + runId + "; this start will be refused."
+      : "Starting stops the version still running from this work order: run " + runId)),
+    "",
+    "The work order, as it will be sealed:",
+    ...plan.task.trimEnd().split(/\r?\n/).map((line) => "  │ " + line),
+    "",
+  ].join("\n");
+}
+
 // The human reads the sealed plan at the terminal and answers y; the answer approves that plan's SHA.
 export async function confirmWorkStart(paths, planPath, assumeYes) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");

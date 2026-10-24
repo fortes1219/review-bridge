@@ -1,6 +1,8 @@
-// The command table: each command's options, whether it needs the configuration, and which
-// feature entry it goes to. The router wires features together (the work order's delivery into
-// the records and the setup page) and adds the start gate; the order of steps is the features'.
+// The command table: each command's summary, its options (type, default, one line of help), who it
+// is for, whether it needs the configuration, and which feature entry it goes to. Help, the
+// README's command list and option parsing all read this one table. The router wires features
+// together (the work order's delivery into the records, the reviewer check into start) and adds
+// the start gate; the order of steps is the features'.
 import { parseOptions } from "./args.mjs";
 import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mjs";
 import * as records from "../features/records/index.mjs";
@@ -18,77 +20,95 @@ const startGate = ({ command, args, paths, options }) => async () => {
   if (!options.fakeCli) await assertReviewerProof(paths);
 };
 
-const COMMANDS = {
-  review: {
+const PROVIDER = "<claude|codex>";
+// Options shared by several commands. `internal` options are for tests and agents and are shown
+// only by --help --all, like the agent commands.
+const FAKE_CLI = { key: "fakeCli", type: "boolean", internal: true, help: "Use the built-in fake CLI instead of a model (tests and self-checks)" };
+const FAKE_SCENARIO = { key: "fakeScenario", type: "string", value: "<name>", default: "PASS", internal: true, help: "Fake CLI outcome: PASS, FAIL_THEN_PASS, HARD_STOP or RATE_LIMIT" };
+const JSON_OUT = { key: "json", type: "boolean", help: "Print the result as JSON" };
+const WORK_ORDER_OPTIONS = {
+  "--breakpoint": { key: "breakpoint", type: "string", value: "<text>", default: "after the review, asked at a terminal", help: "Where the work stops and comes back to you" },
+  "--change-types": { key: "changeTypes", type: "string", value: "<list>", default: "docs, asked at a terminal", help: "What the work may change, comma-separated: docs, code, tests, config, contract, schema, migration, external-behavior" },
+  "--allow-paths": { key: "allowedPaths", type: "string", value: "<list>", default: "the whole project except protected files", help: "Limit the work to these paths, comma-separated" },
+  "--owner": { key: "owner", type: "string", value: "<name>", default: "your OS user name", help: "Who owns the work" },
+  "--work-package": { key: "workPackage", type: "string", value: "<id>", default: "the work order's file name", help: "Name of the work package" },
+  "--max-claude-calls": { key: "maxCalls", type: "number", value: "<1-2>", default: "2", help: "Writer calls this work may use" },
+  "--max-claude-minutes": { key: "maxMinutes", type: "number", value: "<1-15>", default: "8", help: "Minutes each writer call may run" },
+};
+
+export const COMMANDS = {
+  init: {
+    audience: "human",
+    installer: true,
+    summary: "Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type",
     options: {
-      "--dry-run": { key: "dryRun", type: "boolean" },
-      "--validate-only": { key: "validateOnly", type: "boolean" },
-      "--no-notification": { key: "noNotification", type: "boolean" },
+      "--target": { key: "target", type: "string", value: "<folder>", default: "the current folder", help: "Set up this folder instead" },
+      "--writer": { key: "writer", type: "string", value: PROVIDER, default: "your saved default, else claude", help: "Writer role" },
+      "--reviewer": { key: "reviewer", type: "string", value: PROVIDER, default: "your saved default, else codex", help: "Reviewer role" },
+      "--profile": { key: "profile", type: "string", value: "<type|none>", default: "what detection finds, else none", help: "Project type; its test command becomes Gate A" },
+      "--port": { key: "port", type: "number", value: "<n>", default: "8080, or the next free port", help: "Port of the local page" },
+      "--yes": { key: "yes", type: "boolean", help: "Ask nothing; use the defaults" },
+      "--json": { key: "json", type: "boolean", help: "Ask nothing; print the result as JSON" },
+      "--fake-cli": { ...FAKE_CLI, key: "fake-cli" },
     },
-    run: (context) => workOrder.reviewWork(context),
   },
-  "bounded-resume": {
-    options: {
-      "--prompt": { key: "promptPath", type: "string" },
-      "--max-claude-calls": { key: "maxCalls", type: "number" },
-      "--max-claude-minutes": { key: "maxMinutes", type: "number" },
-      "--validate-only": { key: "validateOnly", type: "boolean" },
-    },
-    run: (context) => workOrder.resumeWork(context),
-  },
-  "work-plan": {
-    options: {
-      "--task": { key: "task", type: "string" },
-      "--task-file": { key: "taskFile", type: "string" },
-      "--owner": { key: "owner", type: "string" },
-      "--work-package": { key: "workPackage", type: "string" },
-      "--breakpoint": { key: "breakpoint", type: "string" },
-      "--change-types": { key: "changeTypes", type: "string" },
-      "--allow-paths": { key: "allowedPaths", type: "string" },
-      "--max-claude-calls": { key: "maxCalls", type: "number" },
-      "--max-claude-minutes": { key: "maxMinutes", type: "number" },
-      "--out": { key: "outPath", type: "string" },
-      "--plain": { key: "plain", type: "boolean" },
-    },
-    // `work-plan <file>` is the same as `work-plan --task-file <file>`.
+  start: {
+    audience: "human",
     positional: "taskFile",
-    run: (context) => workOrder.planWork(context),
-  },
-  "work-start": {
+    usage: "<file>",
+    summary: "Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it",
     options: {
-      "--plan": { key: "planPath", type: "string" },
-      "--approve": { key: "approval", type: "string" },
-      "--yes": { key: "yes", type: "boolean" },
-      "--fake-cli": { key: "fakeCli", type: "boolean" },
-      "--fake-scenario": { key: "fakeScenario", type: "string" },
-      // T0-07 V3.3: the status JSON is opt-in; the default is three plain lines.
-      "--json": { key: "json", type: "boolean" },
+      ...WORK_ORDER_OPTIONS,
+      "--yes": { key: "yes", type: "boolean", internal: true, help: "Answer yes; refused unless --fake-cli is given" },
+      "--fake-cli": FAKE_CLI,
+      "--fake-scenario": FAKE_SCENARIO,
     },
-    run: (context) => workOrder.startWork({ ...context, guard: startGate(context) }),
-  },
-  "work-cancel": {
-    options: { "--reason": { key: "reason", type: "string" }, "--run": { key: "runId", type: "string" } },
-    run: (context) => workOrder.cancelWork(context),
-  },
-  "work-status": {
-    options: {},
-    run: (context) => workOrder.workStatus(context),
+    run: (context) => workOrder.startWorkOrder({
+      ...context,
+      guard: startGate(context),
+      reviewerCheck: ({ onStart }) => setupCheck.ensureReviewerChecked({ paths: context.paths, onStart }),
+    }),
   },
   // status and wait only read the review queue; every other command needs the configuration.
   status: {
-    options: {},
+    audience: "human",
     configFree: true,
+    summary: "Show Bridge's review queue and its latest review (the page service: ps; the current work: work-status)",
+    options: {},
     run: (context) => workOrder.reviewQueueStatus(context),
   },
-  wait: {
-    options: { "--timeout-minutes": { key: "timeoutMinutes", type: "number" } },
-    configFree: true,
-    run: (context) => workOrder.waitForReview(context),
+  stop: {
+    audience: "human",
+    takesRunId: true,
+    usage: "<run_id>",
+    summary: "Stop a running work order: end its model process and close the run",
+    options: {},
+    run: (context) => workOrder.stopWork(context),
+  },
+  up: {
+    audience: "human",
+    summary: "Start the local page service in the background",
+    options: { "--fake-cli": FAKE_CLI },
+    run: (context) => setupCheck.upService(context),
+  },
+  down: {
+    audience: "human",
+    summary: "Stop the local page service",
+    options: {},
+    run: (context) => setupCheck.downService(context),
+  },
+  ps: {
+    audience: "human",
+    summary: "Show whether the local page service is running, and its address",
+    options: {},
+    run: (context) => setupCheck.showService(context),
   },
   watch: {
+    audience: "human",
+    summary: "Run the local page in this terminal until Ctrl+C",
     options: {
-      "--port": { key: "port", type: "number" },
-      "--fake-cli": { key: "fakeCli", type: "boolean" },
+      "--port": { key: "port", type: "number", value: "<n>", default: "the port init chose", help: "Port of the local page" },
+      "--fake-cli": FAKE_CLI,
     },
     run: (context) => setupCheck.startWatch({
       ...context,
@@ -96,49 +116,179 @@ const COMMANDS = {
       daily: () => records.runPrune(context.paths, { deliver: deliverQuietly(context) }),
     }),
   },
-  up: {
-    options: { "--fake-cli": { key: "fakeCli", type: "boolean" } },
-    run: (context) => setupCheck.upService(context),
+  upgrade: {
+    audience: "human",
+    installer: true,
+    summary: "Move this folder's setup to the installed Review Bridge version, with a backup",
+    options: {
+      "--target": { key: "target", type: "string", value: "<folder>", default: "the current folder", help: "Upgrade this folder instead" },
+      "--rollback": { key: "rollback", type: "boolean", help: "Undo the last upgrade from its backup" },
+      "--plan-out": { key: "plan-out", type: "string", value: "<file>", help: "Write the plan to a file instead of asking" },
+      "--plan": { key: "plan", type: "string", value: "<file>", help: "Apply a plan written by --plan-out (needs --approve)" },
+      "--approve": { key: "approve", type: "string", value: "<sha>", help: "The plan's SHA-256, as printed by --plan-out" },
+      "--backup-root": { key: "backup-root", type: "string", value: "<folder>", default: "Review Bridge's backup folder", help: "Where the backup goes" },
+      "--json": { ...JSON_OUT },
+      "--yes": { key: "yes", type: "boolean", internal: true, help: "Refused: confirm at a terminal, or use --plan-out then --plan --approve" },
+    },
   },
-  down: {
-    options: {},
-    run: (context) => setupCheck.downService(context),
+  uninstall: {
+    audience: "human",
+    installer: true,
+    summary: "Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)",
+    options: {
+      "--target": { key: "target", type: "string", value: "<folder>", required: true, help: "The folder to remove the setup from" },
+      "--plan-out": { key: "plan-out", type: "string", value: "<file>", help: "Write the plan to a file instead of asking" },
+      "--plan": { key: "plan", type: "string", value: "<file>", help: "Apply a plan written by --plan-out (needs --approve)" },
+      "--approve": { key: "approve", type: "string", value: "<sha>", help: "The plan's SHA-256, as printed by --plan-out" },
+      "--backup-root": { key: "backup-root", type: "string", value: "<folder>", default: "Review Bridge's backup folder", help: "Where the backup goes" },
+      "--json": { ...JSON_OUT },
+      "--yes": { key: "yes", type: "boolean", internal: true, help: "Refused: confirm at a terminal, or use --plan-out then --plan --approve" },
+    },
   },
-  ps: {
+  doctor: {
+    audience: "human",
+    configFree: true,
+    summary: "Check which platform adapter this machine uses, without running any work",
+    options: { "--fake-cli": FAKE_CLI },
+  },
+  "work-plan": {
+    audience: "agent",
+    positional: "taskFile",
+    usage: "<file>",
+    summary: "Seal a work order into a plan without starting it (start does this for you)",
+    options: {
+      ...WORK_ORDER_OPTIONS,
+      "--task-file": { key: "taskFile", type: "string", value: "<file>", help: "The work order, instead of giving it first" },
+      "--task": { key: "task", type: "string", value: "<text>", internal: true, help: "Work text instead of a work order file (needs --allow-paths)" },
+      "--out": { key: "outPath", type: "string", value: "<file>", default: ".review-bridge/review-queue/<name>.plan.json", help: "Where the plan is written" },
+      "--plain": { key: "plain", type: "boolean", help: "Print a short summary of the plan" },
+      "--json": { ...JSON_OUT },
+    },
+    run: (context) => workOrder.planWork(context),
+  },
+  "work-start": {
+    audience: "agent",
+    summary: "Start a sealed plan after the person confirms it at the terminal",
+    options: {
+      "--plan": { key: "planPath", type: "string", value: "<file>", required: true, help: "The plan written by work-plan" },
+      "--approve": { key: "approval", type: "string", value: "<sha>", internal: true, help: "The plan's SHA-256; refused for real models" },
+      "--yes": { key: "yes", type: "boolean", internal: true, help: "Answer yes; refused unless --fake-cli is given" },
+      "--fake-cli": FAKE_CLI,
+      "--fake-scenario": FAKE_SCENARIO,
+      // T0-07 V3.3: the status JSON is opt-in; the default is three plain lines.
+      "--json": { ...JSON_OUT, help: "Print the run's state as JSON at the end" },
+    },
+    run: (context) => workOrder.startWork({ ...context, guard: startGate(context) }),
+  },
+  "work-status": {
+    audience: "agent",
+    summary: "Show the current work: each run's state, as JSON",
     options: {},
-    run: (context) => setupCheck.showService(context),
+    run: (context) => workOrder.workStatus(context),
+  },
+  "work-cancel": {
+    audience: "agent",
+    summary: "Cancel the active authorization so the run cannot continue",
+    options: {
+      "--reason": { key: "reason", type: "string", value: "<text>", required: true, help: "Why it is cancelled" },
+      "--run": { key: "runId", type: "string", value: "<run_id>", default: "the only active run", help: "Which run" },
+    },
+    run: (context) => workOrder.cancelWork(context),
+  },
+  review: {
+    audience: "agent",
+    summary: "Run the review worker on queued work (internal; refused with real models)",
+    options: {
+      "--dry-run": { key: "dryRun", type: "boolean", help: "Show what would be reviewed" },
+      "--validate-only": { key: "validateOnly", type: "boolean", help: "Only check that a review could run" },
+      "--no-notification": { key: "noNotification", type: "boolean", help: "Do not show a desktop notification" },
+    },
+    run: (context) => workOrder.reviewWork(context),
+  },
+  "bounded-resume": {
+    audience: "agent",
+    summary: "Resume the authorized writer session (internal; refused with real models)",
+    options: {
+      "--prompt": { key: "promptPath", type: "string", value: "<file>", required: true, help: "The prompt file" },
+      "--max-claude-calls": { key: "maxCalls", type: "number", value: "<1-2>", default: "2", help: "Writer calls" },
+      "--max-claude-minutes": { key: "maxMinutes", type: "number", value: "<1-15>", default: "8", help: "Minutes per writer call" },
+      "--validate-only": { key: "validateOnly", type: "boolean", help: "Only check that the resume could run" },
+    },
+    run: (context) => workOrder.resumeWork(context),
+  },
+  wait: {
+    audience: "agent",
+    configFree: true,
+    summary: "Wait for the next queued review report and print its path",
+    options: { "--timeout-minutes": { key: "timeoutMinutes", type: "number", value: "<1-1440>", default: "120", help: "How long to wait" } },
+    run: (context) => workOrder.waitForReview(context),
   },
   prune: {
-    options: { "--json": { key: "json", type: "boolean" } },
+    audience: "agent",
+    summary: "Fold finished runs into day files and drop records past retention",
+    options: { "--json": { ...JSON_OUT } },
     run: (context) => records.runPrune(context.paths, { json: Boolean(context.options.json), deliver: deliverQuietly(context) }),
   },
   rm: {
-    options: {},
+    audience: "agent",
     takesRunId: true,
+    usage: "<run_id>",
+    summary: "Remove one finished run (folds it first)",
+    options: {},
     run: (context) => records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) }),
   },
-  stop: {
-    options: {},
-    takesRunId: true,
-    run: (context) => workOrder.stopWork(context),
+  "roles-check": {
+    audience: "agent",
+    installer: true,
+    summary: "Check that the writer and reviewer CLIs are installed and signed in, without a model call",
+    options: {
+      "--writer": { key: "writer", type: "string", value: PROVIDER, help: "Writer role, asked at a terminal when not given" },
+      "--reviewer": { key: "reviewer", type: "string", value: PROVIDER, help: "Reviewer role, asked at a terminal when not given" },
+      "--json": { ...JSON_OUT },
+      "--yes": { key: "yes", type: "boolean", internal: true, help: "Ask nothing" },
+    },
   },
 };
 
-export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
-  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
+// Every command that is not the installer's also takes the project folder (bootstrap reads it
+// before the command's own options).
+export const PROJECT_OPTION = Object.freeze({
+  "--project": { key: "project", type: "string", value: "<folder>", default: "the current folder", help: "The project folder" },
+});
+
+// The help line printed after a refusal of the command line itself.
+export function helpHint(command) {
+  return COMMANDS[command] ? " Run: review-bridge " + command + " --help" : " Run: review-bridge --help";
+}
+
+// Splits a command line into the run id, the positional work order and the options of the table.
+export function parseCommandLine(command, args) {
   const entry = COMMANDS[command];
-  const runId = entry?.takesRunId ? args[0] : null;
-  let rest = entry?.takesRunId ? args.slice(1) : args;
-  const positional = entry?.positional && rest[0] !== undefined && !rest[0].startsWith("--") ? rest[0] : null;
+  if (!entry) throw new Error("Unknown command: " + command + "." + helpHint(null));
+  const runId = entry.takesRunId ? args[0] : null;
+  let rest = entry.takesRunId ? args.slice(1) : args;
+  const positional = entry.positional && rest[0] !== undefined && !rest[0].startsWith("--") ? rest[0] : null;
   if (positional !== null) rest = rest.slice(1);
-  const options = parseOptions(rest, entry?.options || {});
+  let options;
+  try {
+    options = parseOptions(rest, entry.options);
+  } catch (error) {
+    throw new Error(error.message.replace(/\.$/, "") + "." + helpHint(command));
+  }
   if (positional !== null) {
     if (options[entry.positional] !== undefined) throw new Error("Give the work order once: either " + positional + " or --task-file.");
     options[entry.positional] = positional;
   }
-  if (!entry?.configFree && !(await fileExists(paths.bridgeConfigPath))) {
-    throw new Error(command + " requires the runtime configuration created by init.");
+  return { runId, options };
+}
+
+export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
+  const entry = COMMANDS[command];
+  if (!entry?.run) throw new Error("Unknown command: " + command + "." + helpHint(null));
+  const { runId, options } = parseCommandLine(command, args);
+  if (!entry.configFree && !(await fileExists(paths.bridgeConfigPath))) {
+    throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
   }
-  if (!entry) throw new Error("Unsupported command: " + command);
   return await entry.run({ command, args, paths, options, runId, adapter, adapterId, adapterDefinition, adapterSource });
 }

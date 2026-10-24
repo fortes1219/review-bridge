@@ -425,6 +425,7 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
       "--max-claude-calls", "1",
       "--max-claude-minutes", "1",
       "--out", planPath,
+      "--json",
     ], { cwd: target, encoding: "utf8" });
     assert.equal(planned.status, 0, planned.stderr);
     const workPlan = JSON.parse(planned.stdout);

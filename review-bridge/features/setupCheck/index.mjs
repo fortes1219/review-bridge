@@ -2,4 +2,5 @@
 // running service's identity check that the start gate reads the reviewer proof through.
 export * from "./commands.mjs";
 export { checkService } from "./pageService.mjs";
+export { ensureReviewerChecked } from "./reviewerCheck.mjs";
 export { startWatch } from "./startWatch.mjs";

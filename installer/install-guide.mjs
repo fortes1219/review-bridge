@@ -31,12 +31,13 @@ export function runningAsRoot() {
   return process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() === 0;
 }
 
-export function doneMessage(target, cwd) {
+export function doneMessage(target, cwd, url) {
   const lines = ["Done. Now:", ""];
   const relative = path.relative(cwd, target);
   if (relative) lines.push("  cd " + (relative.includes(" ") ? "\"" + relative + "\"" : relative));
   lines.push("  put a work order .md in .review-bridge/work-packages/");
-  lines.push("  review-bridge work-plan .review-bridge/work-packages/<file>.md");
+  lines.push("  review-bridge start .review-bridge/work-packages/<file>.md");
+  lines.push("  page: " + (url || "not running; start it with review-bridge up"));
   return lines.join("\n");
 }
 
@@ -108,7 +109,7 @@ export async function runGuide(options, {
     target, roles, profileId, watchPort: options.port === undefined ? undefined : Number(options.port), fakeCli: Boolean(options["fake-cli"]),
   }, step);
   await saveDefaultRoles(roles, { dataHome });
-  const message = doneMessage(target, cwd);
+  const message = doneMessage(target, cwd, result.url);
   if (interactive) ui.outro(message);
   else if (!options.json) write(message + "\n");
   return { ...result, printed: !options.json };

@@ -91,6 +91,7 @@ Features never import each other. When one flow needs another feature's capabili
 
 | Command | Wiring done by the router | Order owned by |
 |---|---|---|
+| `start` | Passes the start gate as `guard`, and the setup check's `ensureReviewerChecked` (start the page if needed; run the check there, as the page's button does) as `reviewerCheck` | `workOrder.startWorkOrder`: plan → `reviewerCheck()` unless already proven in this page session → card → `guard()` → human answers `Start this work? [y/N]` → authorize → writer loop, one line per step → deliver |
 | `work-start` | Passes the start gate (interactive terminal only, reviewer read-only proof in the running page) as `guard` | `workOrder.startWork`: check options → `guard()` → human confirms → authorize → writer loop → deliver |
 | `prune` | Passes the work order's delivery as `deliver` | `records.runPrune`: deliver pending results → fold → delete past retention |
 | `rm` | Passes `deliver` | `records.removeRecord`: deliver → fold → remove → report an undelivered result |

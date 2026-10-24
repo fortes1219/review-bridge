@@ -63,7 +63,8 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     devDependencies: { typescript: "latest", vite: "latest" },
   }, null, 2) + "\n", "utf8");
 
-  const result = spawnSync(process.execPath, [bridge, "init", "--writer", "claude", "--reviewer", "codex", "--fake-cli", "--port", String(await freePort())], {
+  const port = await freePort();
+  const result = spawnSync(process.execPath, [bridge, "init", "--writer", "claude", "--reviewer", "codex", "--fake-cli", "--port", String(port)], {
     cwd: root,
     encoding: "utf8",
     env: isolatedEnv(),
@@ -80,7 +81,8 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     "Done. Now:",
     "",
     "  put a work order .md in .review-bridge/work-packages/",
-    "  review-bridge work-plan .review-bridge/work-packages/<file>.md",
+    "  review-bridge start .review-bridge/work-packages/<file>.md",
+    "  page: http://localhost:" + port + "/",
   ]);
   assert.doesNotMatch(result.stdout, /SHA-?256|plan_sha256|[0-9a-f]{64}|\[y\/N\]/i);
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
@@ -139,8 +141,8 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
     { args: ["work-start", "--plan", "anything", "--approve", "anything"], reason: /with --approve or --yes/ },
     { args: ["work-start", "--plan", "anything", "--yes"], reason: /with --approve or --yes/ },
     { args: ["work-start", "--plan", "anything"], input: "y\n", reason: /must run at an interactive terminal/ },
-    { args: ["review"], reason: /for review: only work-start/ },
-    { args: ["bounded-resume"], reason: /for bounded-resume: only work-start/ },
+    { args: ["review"], reason: /for review: only start/ },
+    { args: ["bounded-resume"], reason: /for bounded-resume: only start/ },
   ]) {
     const blocked = spawnSync(process.execPath, [bootstrap, ...args], {
       cwd: root,
@@ -158,7 +160,7 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
   });
   assert.equal(removed.status, 2);
-  assert.match(removed.stderr, /Unsupported review bridge command: enqueue/);
+  assert.match(removed.stderr, /Unknown command: enqueue\. Run: review-bridge --help/);
   assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "review-queue", "authorizations")), []);
 });
 
@@ -179,7 +181,9 @@ test("role-first init supports either provider pairing without touching existing
   assert.deepEqual(JSON.parse(result.stdout).roles, { writer: "codex", reviewer: "claude" });
   assert.equal(await fsp.readFile(path.join(root, ".claude", "settings.local.json"), "utf8"), "{\"keep\":true}\n");
   assert.equal(await fsp.readFile(path.join(root, ".codex", "config.toml"), "utf8"), "keep = true\n");
-  assert.deepEqual(await fsp.readdir(path.join(root, ".claude")), ["settings.local.json"]);
+  // B3: the only addition is Bridge's own /review-bridge command.
+  assert.deepEqual(await fsp.readdir(path.join(root, ".claude")), ["commands", "settings.local.json"]);
+  assert.deepEqual(await fsp.readdir(path.join(root, ".claude", "commands")), ["review-bridge.md"]);
   assert.deepEqual(await fsp.readdir(path.join(root, ".codex")), ["config.toml"]);
   await fsp.access(path.join(root, ".review-bridge", "review-bridge-install.json"));
 });
@@ -279,7 +283,7 @@ test("roles-check with an unprobeable CLI reports sign-in unknown, never ready",
   assert.equal(output.native_ready, false);
 });
 
-test("init starts the resident service and ends with cd, the work folder and the work-plan command", async (t) => {
+test("init starts the resident service and ends with cd, the work folder, the start command and the page", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-service-init-"));
   t.after(() => removeWorkspace(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({
@@ -292,12 +296,13 @@ test("init starts the resident service and ends with cd, the work folder and the
   ], { cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(result.status, 0, result.stderr);
   const workFolder = path.join(root, ".review-bridge", "work-packages");
-  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/).slice(-5), [
+  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/).slice(-6), [
     "Done. Now:",
     "",
     "  cd " + path.relative(packageRoot, root),
     "  put a work order .md in .review-bridge/work-packages/",
-    "  review-bridge work-plan .review-bridge/work-packages/<file>.md",
+    "  review-bridge start .review-bridge/work-packages/<file>.md",
+    "  page: " + url,
   ]);
   await fsp.access(workFolder);
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
@@ -345,7 +350,12 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   const file = ".review-bridge/work-packages/add-readme.md";
   const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
 
-  const planned = run(file, "--breakpoint", "after the review", "--change-types", "docs");
+  // D4: two lines by default; JSON only with --json.
+  const plain = run(file, "--breakpoint", "after the review", "--change-types", "docs");
+  assert.equal(plain.status, 0, plain.stderr);
+  const planFile = path.join(".review-bridge", "review-queue", "add-readme.plan.json");
+  assert.deepEqual(plain.stdout.trimEnd().split(/\r?\n/), ["Plan written to " + planFile, "Next: review-bridge work-start --plan " + planFile]);
+  const planned = run(file, "--breakpoint", "after the review", "--change-types", "docs", "--json");
   assert.equal(planned.status, 0, planned.stderr);
   const output = JSON.parse(planned.stdout);
   assert.equal(output.work_package, "add-readme");
@@ -355,17 +365,91 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
 
   // A type-none project has no Gate A rules: docs-only work needs none; other work is refused as before.
   assert.equal(output.gate_a.kind, "not_applicable");
-  const code = run(file, "--breakpoint", "after the review", "--change-types", "code");
+  const code = run(file, "--breakpoint", "after the review", "--change-types", "code", "--json");
   assert.equal(code.status, 1);
   assert.deepEqual(JSON.parse(code.stdout), { valid: false, reason: "no_gate_a", checked: [] });
+  const codePlain = run(file, "--breakpoint", "after the review", "--change-types", "code");
+  assert.equal(codePlain.status, 1);
+  assert.match(codePlain.stdout, /--change-types docs\n$/);
 
-  // Without a terminal the breakpoint and the change types are still required.
+  // Without a terminal the breakpoint and the change types are still required, and the refusal
+  // says what to add (C4).
   const bare = run(file);
   assert.equal(bare.status, 2);
-  assert.match(bare.stderr, /required/);
+  assert.match(bare.stderr, /A breakpoint is required\. Add --breakpoint "<where to stop>" or answer the prompt\./);
+  const noTypes = run(file, "--breakpoint", "after the review");
+  assert.equal(noTypes.status, 2);
+  assert.match(noTypes.stderr, /The change types are required\. Add --change-types docs/);
   const twice = run(file, "--task-file", file, "--breakpoint", "x", "--change-types", "docs");
   assert.equal(twice.status, 2);
   assert.match(twice.stderr, /Give the work order once/);
+});
+
+// The Owner's case: an empty folder set up as vue-frontend. A chosen type is used as chosen;
+// the mismatch stops code work at Gate A, not at setup.
+test("a chosen project type that does not fit the folder is set up and stopped at Gate A", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-chosen-type-"));
+  t.after(() => removeWorkspace(root));
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--profile", "vue-frontend", "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  assert.equal(config.profile_id, "vue-frontend");
+  assert.deepEqual(config.gate_a.rules, [{ command: "npm test", package_script: "test" }]);
+
+  await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "fix.md"), "# Work order: fix\n\nIt works.\n");
+  const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ".review-bridge/work-packages/fix.md", ...args], {
+    cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
+  });
+  const code = run("--breakpoint", "after the review", "--change-types", "code", "--json");
+  assert.equal(code.status, 1);
+  const refused = JSON.parse(code.stdout);
+  assert.equal(refused.valid, false);
+  assert.equal(refused.reason, "no_gate_a");
+  assert.deepEqual(refused.checked.map((rule) => rule.command), ["npm test"]);
+  assert.equal(run("--breakpoint", "after the review", "--change-types", "docs").status, 0);
+});
+
+// B1: one command from a work order to its result. With the fake CLI the reviewer check is not
+// needed and --yes stands in for the person's answer; for real models both are refused.
+test("start plans a Chinese work order, shows the card, runs one line per step and ends with the result file", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-start-"));
+  t.after(() => removeWorkspace(root));
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  const order = ".review-bridge/work-packages/hello.md";
+  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
+  const start = (...args) => spawnSync(process.execPath, [bridge, "start", order, ...args], {
+    cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  const done = start("--fake-cli", "--yes", "--breakpoint", "after the review", "--change-types", "docs");
+  assert.equal(done.status, 0, done.stderr);
+  const lines = done.stdout.trimEnd().split(/\r?\n/);
+  assert.equal(lines[0], "Plan written to " + path.join(".review-bridge", "review-queue", "hello.plan.json"));
+  assert.equal(lines[1], "Reviewer read-only check: not needed with the fake CLI (no model is called)");
+  for (const line of ["Work order:   " + order, "Stops:        after the review", "Changes:      docs", "Gate A:       not needed for docs-only work",
+    "Budget:       2 writer call(s), up to 8 minute(s) each", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
+    assert.ok(lines.includes(line), line);
+  }
+  const steps = lines.filter((line) => /^ {2}[A-Z]/.test(line));
+  assert.deepEqual(steps, [
+    "  Writer (claude) turns the work order into a contract; reviewer (codex) checks it",
+    "  Contract sealed",
+    "  Writer working (call 1 of 2)",
+    "  Gate A: not needed for docs-only work",
+    "  Reviewer checking the work",
+  ]);
+  assert.match(done.stdout, /\nDelivered: .*\nResult file: .*hello\.result\.md\nTokens: /);
+
+  // Real models: --yes is refused, and so is a start without a terminal; nothing is planned.
+  for (const args of [["--yes"], []]) {
+    const refused = start(...args, "--breakpoint", "b", "--change-types", "docs");
+    assert.equal(refused.status, 2);
+    assert.match(refused.stderr, /Native execution is unavailable.*Run/);
+  }
 });
 
 // RC3-LINUX-00: a page started with the fake CLI (as init starts it) can never hold the reviewer

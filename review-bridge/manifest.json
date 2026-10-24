@@ -2,6 +2,7 @@
   "schema_version": 2,
   "entrypoint": "bootstrap.mjs",
   "commands": [
+    "start",
     "review",
     "bounded-resume",
     "work-plan",

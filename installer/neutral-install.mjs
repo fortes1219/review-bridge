@@ -15,6 +15,7 @@ import {
   policyIdentity,
   TERMINAL_RUN_STATUSES as RUN_TERMINAL,
 } from "../review-bridge/service/index.mjs";
+import { AGENT_COMMAND_RELATIVE, agentFilesState, planAgentFiles, undoAgentFiles, writeAgentFiles } from "./agent-files.mjs";
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
 
@@ -121,13 +122,15 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
   const selected = validateRoles(roles);
   const profile = await resolveProfile(root, profileId);
   const detection = await detectProject(root, profile);
-  // A named type must fit the folder; no type has nothing to fit.
-  if (profile.profile_id !== null && detection.evidence.length === 0) throw new Error("The selected profile has no project evidence.");
+  // Only a detected type must fit the folder. A type the person chose is used as chosen; if it
+  // does not fit, its Gate A rules fail at work time, where that check belongs.
+  if (profileId === "auto" && profile.profile_id !== null && detection.evidence.length === 0) throw new Error("The selected profile has no project evidence.");
   if (await statOptional(path.join(root, privateName))) {
     throw new Error("Bridge neutral state already exists; fresh install cannot overwrite it.");
   }
   const boundary = gitBoundary(root);
   if (boundary.repository) await assertSafeExcludePath(boundary.excludePath);
+  const agentFiles = await planAgentFiles(root);
   const plan = {
     schema_version: 1,
     operation: "install_neutral",
@@ -141,10 +144,14 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     work_template_sha256: sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md"))),
     rules_sha256: sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "rules.md"))),
     git: boundary,
+    agent_files: agentFiles,
     changes: [
       ...(boundary.repository && !boundary.ignored ? ["Keep Bridge private state out of Git using local Git exclusion"] : []),
       "Install Bridge-owned state under .review-bridge/",
-      "Leave .claude/ and .codex/ untouched",
+      ...(agentFiles.command.action === "create" ? ["Add the /review-bridge command for Claude Code: " + agentFiles.command.path] : []),
+      ...(agentFiles.agents.action === "create" ? ["Create AGENTS.md with how to run a work order"]
+        : agentFiles.agents.action === "append" ? ["Append how to run a work order to AGENTS.md"] : []),
+      "Leave everything else in .claude/ and .codex/ untouched",
       "Serve the local page at http://localhost:" + watchPort + "/ (the next free port if it is taken)",
       "Run four fake scenarios in a disposable copy",
     ],
@@ -290,6 +297,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
   let wroteExclude = false;
   let addedPrefixNewline = false;
   let createdRoot = false;
+  let agentRecord = null;
   try {
     if (plan.git.repository && !plan.git.ignored) {
       await assertSafeExcludePath(excludePath);
@@ -328,6 +336,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
     }
     await fsp.mkdir(path.join(privateRoot, "review-bridge", "policy-snapshots"), { recursive: true });
     await fsp.mkdir(path.join(privateRoot, "reviews"), { recursive: true });
+    agentRecord = await writeAgentFiles(plan.target, plan.agent_files);
     const installedFiles = await fileSnapshot(privateRoot);
     await writeJson(path.join(privateRoot, "review-bridge-install.json"), {
       schema_version: 1,
@@ -343,9 +352,11 @@ async function applyNeutralInstallLocked(plan, claimed) {
       rules_sha256: plan.rules_sha256,
       installed_files: installedFiles,
       git_exclusion: wroteExclude ? { path: excludePath, pattern: plan.git.pattern, added_prefix_newline: addedPrefixNewline } : null,
+      agent_files: agentRecord,
     });
     return { ok: true, target: plan.target, profile: plan.profile.id, roles: plan.roles, private_root: privateRoot };
   } catch (error) {
+    if (agentRecord) await undoAgentFiles(plan.target, agentRecord).catch(() => {});
     if (createdRoot && path.resolve(privateRoot) === path.resolve(plan.target, privateName)) {
       await fsp.rm(privateRoot, { recursive: true, force: true });
     }
@@ -391,7 +402,8 @@ async function rollbackFreshNeutralInstallLocked(plan) {
     if (remaining.length === 0) await fsp.rm(exclusion.path, { force: true });
     else await fsp.writeFile(exclusion.path, remaining);
   }
-  return { rolled_back: true, target };
+  const agentFiles = await undoAgentFiles(target, manifest.agent_files || null);
+  return { rolled_back: true, target, agent_files: agentFiles };
 }
 
 export async function verifyNeutralInstall(target) {
@@ -688,9 +700,19 @@ function persistentOnly(files) {
   return files.filter(([name]) => !TRANSIENT_FILES.includes(name));
 }
 
-async function treeHash(root) {
+// `skip` leaves out a file Bridge itself added there (init's /review-bridge command), which
+// uninstall removes on purpose, together with the folders init made for it; so a folder that
+// holds no other file counts as absent.
+async function treeHash(root, skip = null) {
   if (!(await statOptional(root))) return null;
-  return sha256(JSON.stringify(await fileSnapshot(root)));
+  const files = (await fileSnapshot(root)).filter(([name]) => name !== skip);
+  return skip !== null && files.length === 0 ? null : sha256(JSON.stringify(files));
+}
+
+const COMMAND_IN_CLAUDE = AGENT_COMMAND_RELATIVE.slice(".claude/".length);
+
+async function agentTreeHashes(root) {
+  return { ".claude": await treeHash(path.join(root, ".claude"), COMMAND_IN_CLAUDE), ".codex": await treeHash(path.join(root, ".codex")) };
 }
 
 function excludeSuffix(exclusion) {
@@ -751,6 +773,9 @@ async function planFreshUninstall(root, backupRootOverride) {
     user_file_count: userFiles.length,
     user_files: userFiles.slice(0, 20),
     git_exclusion: await excludeState(manifest.git_exclusion || null),
+    // What init added for agents, and whether each part is still as written (an edited one stays).
+    agent_files: manifest.agent_files || null,
+    agent_files_state: await agentFilesState(root, manifest.agent_files || null),
     backup_root: backupRoot,
     backup_root_custom: Boolean(backupRootOverride),
     service_running: await pageServiceRunning(root),
@@ -1024,8 +1049,9 @@ async function verifyUninstalled(context) {
   if (await statOptional(path.join(context.root, privateName))) problems.push(".review-bridge/ still exists");
   const status = gitStatusLines(context.root);
   if (status && status.some((line) => line.includes(privateName + "/"))) problems.push("git status still lists .review-bridge/");
+  const trees = await agentTreeHashes(context.root);
   for (const name of [".claude", ".codex"]) {
-    if ((await treeHash(path.join(context.root, name))) !== (context.journal.agent_trees?.[name] ?? null)) problems.push(name + "/ changed during uninstall");
+    if (trees[name] !== (context.journal.agent_trees?.[name] ?? null)) problems.push(name + "/ changed during uninstall");
   }
   if (problems.length) throw new Error("Uninstall verification failed: " + problems.join("; "));
 }
@@ -1091,7 +1117,7 @@ async function applyFreshUninstall(plan, hooks) {
       schema_version: JOURNAL_SCHEMA, transaction_id: transactionId, operation: "uninstall", state: "started", project, target: root,
       backup_root: plan.backup_root, default_index_root: samePathText(defaultRoot, plan.backup_root) ? null : defaultRoot,
       backup_dir: backupDir, service_was_running: plan.service_running, git_exclusion: plan.git_exclusion,
-      agent_trees: { ".claude": await treeHash(path.join(root, ".claude")), ".codex": await treeHash(path.join(root, ".codex")) },
+      agent_files: plan.agent_files || null, agent_trees: await agentTreeHashes(root),
       created_at: new Date().toISOString(),
     };
     if (hooks.failJournal) throw new Error("injected journal failure");
@@ -1170,11 +1196,13 @@ async function applyFreshUninstall(plan, hooks) {
   if (hooks.afterDelete) await hooks.afterDelete(context);
   const exclusion = await restoreExclusion(plan.git_exclusion);
   await journalWrite(context, { step: "f_exclusion", exclusion });
+  const agentFiles = await undoAgentFiles(root, plan.agent_files || null);
+  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles });
   if (hooks.beforeVerify) await hooks.beforeVerify(context);
   await finishTransaction(context, exclusion);
   return {
     ok: true, operation: "uninstall", target: root, backup_dir: context.journal.backup_dir,
-    file_count: backup.manifest.files.length, user_file_count: plan.user_file_count, exclusion,
+    file_count: backup.manifest.files.length, user_file_count: plan.user_file_count, exclusion, agent_files: agentFiles,
   };
 }
 
@@ -1220,8 +1248,10 @@ async function applyResumeUninstall(plan, hooks) {
   }
   const exclusion = await restoreExclusion(journal.git_exclusion);
   await journalWrite(context, { step: "f_exclusion", exclusion });
+  const agentFiles = await undoAgentFiles(root, journal.agent_files || null);
+  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles });
   await finishTransaction(context, exclusion);
-  return { ok: true, operation: "uninstall", kind: plan.kind, target: root, backup_dir: journal.backup_dir, exclusion };
+  return { ok: true, operation: "uninstall", kind: plan.kind, target: root, backup_dir: journal.backup_dir, exclusion, agent_files: agentFiles };
 }
 
 // U1.4 / U2.1: approval binds the exact plan; it is rebuilt under the install lock before acting.

@@ -20,7 +20,13 @@ const MAX_OUTPUT = 4 * 1024 * 1024;
 const DENIAL_PATTERNS = Object.freeze([
   ["read_only_file_system", /read-only file system|EROFS/i],
   ["permission_denied", /permission denied|EACCES/i],
-  ["access_denied", /access is denied|access denied/i],
+  ["access_denied", /access is denied|access denied|access to the path\b[\s\S]*?\bis denied/i],
+  // Chinese Windows: 「對路徑 '…' 的存取被拒」「拒絕存取」「拒絕存取權」.
+  ["access_denied", /存取被拒|拒絕存取/],
+  // PowerShell names the .NET error in ASCII in every language. Codex's Windows sandbox starts
+  // PowerShell in a console of its own, in the local code page, and reads it as UTF-8, so on a
+  // Chinese Windows the message itself arrives broken and only this line is still readable.
+  ["access_denied", /\bUnauthorizedAccessException\b/],
   ["operation_not_permitted", /operation not permitted|EPERM/i],
 ]);
 const RATE_LIMIT = /rate.?limit|usage limit|too many requests|\b429\b/i;
@@ -81,6 +87,9 @@ export function defaultProbeRunner({ invocation, cwd, input, timeoutMs }) {
       return;
     }
     child.on("spawn", () => { started = true; });
+    // Decoded as one stream, so a character split across two chunks is not broken.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
     child.stdout.on("data", (chunk) => { if (stdout.length < MAX_OUTPUT) stdout += chunk; });
     child.stderr.on("data", (chunk) => { if (stderr.length < MAX_OUTPUT) stderr += chunk; });

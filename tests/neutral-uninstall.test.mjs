@@ -741,3 +741,44 @@ test("a cancel whose page service fails to restart with a reason shows that reas
   assert.equal(finished.service_restarted, true);
   assert.equal(await serviceRunning(root), true);
 });
+
+// B3: what init added for agents goes with the uninstall; an edited part stays, and the check that
+// .claude/ is unchanged still holds for everything else in it.
+test("uninstall removes the /review-bridge command and the AGENTS.md note, restoring AGENTS.md byte for byte", async (t) => {
+  const root = await workspace(t);
+  const agents = Buffer.from("# Rules\n\nKeep this.\n");
+  await fsp.writeFile(path.join(root, "AGENTS.md"), agents);
+  const claudeBefore = await tree(path.join(root, ".claude"));
+  await install(root);
+  assert.equal(await exists(path.join(root, ".claude", "commands", "review-bridge.md")), true);
+  const { plan, result } = await uninstall(root);
+  assert.deepEqual(plan.agent_files_state, {
+    command: { path: ".claude/commands/review-bridge.md", unchanged: true },
+    agents: { path: "AGENTS.md", unchanged: true },
+  });
+  assert.deepEqual(result.agent_files, { command: "removed", agents: "removed" });
+  assert.deepEqual(await fsp.readFile(path.join(root, "AGENTS.md")), agents);
+  assert.deepEqual(await tree(path.join(root, ".claude")), claudeBefore);
+  assert.equal(await exists(path.join(root, ".claude", "commands")), false);
+
+  const edited = await workspace(t);
+  await install(edited);
+  await fsp.appendFile(path.join(edited, ".claude", "commands", "review-bridge.md"), "mine\n");
+  const kept = await uninstall(edited);
+  assert.deepEqual(kept.plan.agent_files_state.command, { path: ".claude/commands/review-bridge.md", unchanged: false });
+  assert.deepEqual(kept.result.agent_files, { command: "kept_changed", agents: "removed" });
+  assert.match(await fsp.readFile(path.join(edited, ".claude", "commands", "review-bridge.md"), "utf8"), /mine\n$/);
+  assert.equal(await exists(path.join(edited, "AGENTS.md")), false, "an AGENTS.md init created is removed");
+});
+
+test("an uninstall that crashed after deleting finishes removing the agent files under the next plan", async (t) => {
+  const root = await workspace(t);
+  await install(root);
+  await crashAt(root, "afterDelete");
+  assert.equal(await exists(path.join(root, ".claude", "commands", "review-bridge.md")), true, "the crash came before the agent files");
+  const plan = await planNeutralUninstall({ target: root });
+  const result = await applyNeutralUninstall(plan, plan.plan_sha256);
+  assert.deepEqual(result.agent_files, { command: "removed", agents: "removed" });
+  assert.equal(await exists(path.join(root, ".claude", "commands")), false);
+  assert.equal(await exists(path.join(root, "AGENTS.md")), false);
+});

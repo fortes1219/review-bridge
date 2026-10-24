@@ -7,7 +7,7 @@ import { inspectStateFilesystem } from "../../utils/filesystem.mjs";
 
 export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = process.version }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
-    throw new Error("doctor requires the runtime configuration created by init.");
+    throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
   }
   const bridgeConfig = await readJson(paths.bridgeConfigPath);
   const neutralLayout = path.basename(paths.privateRoot) === ".review-bridge";

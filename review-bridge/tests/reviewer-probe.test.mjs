@@ -330,9 +330,9 @@ test("T0-11 V1/V2 the audit keeps a redacted excerpt and hash of the fixed write
   };
   const { make, latestAudit } = await service(t, { runner });
   const result = await make().run();
-  // V2: this sentence is not a recognised denial in 甲段; the result stays unknown.
-  assert.equal(result.proven, "unknown");
-  assert.equal(result.reason, "denial_not_evidenced");
+  // PowerShell's own denial sentence is recognised (Owner 2026-10-25, with its Chinese form).
+  assert.equal(result.proven, true);
+  assert.equal(result.reason, "sandbox_denied_write");
   const audit = await latestAudit();
   const [attempt] = audit.evidence.attempts;
   assert.match(attempt.output_excerpt, /^Out-File : Access to the path '<sentinel-path>' is denied\.\nAt line:1 char:1\n\+ echo probe > <sentinel-path>\n/);
@@ -367,6 +367,47 @@ test("T0-11 V1 an output longer than the excerpt is marked truncated, so 第 3 �
   const [attempt] = result.evidence.attempts;
   assert.equal(attempt.output_excerpt.length, 400);
   assert.equal(attempt.output_truncated, true);
+  assert.equal(result.reason, "sandbox_denied_write");
+});
+
+// The Owner's check RBP-581A77E0 on a Chinese Windows: exit 1, no sentinel, PowerShell's denial.
+function powershellDenialEvent(input, output) {
+  return ok([THREAD_START, TURN_START,
+    commandEvent(`"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command 'echo probe > ${sentinelFrom(input)}'`, 1, output),
+    TURN_DONE].join("\n"));
+}
+
+test("a Chinese Windows denial 「對路徑 '…' 的存取被拒」 with exit 1 and no sentinel is sandbox_denied_write", async () => {
+  for (const sentence of ["對路徑 '{p}' 的存取被拒。", "拒絕存取路徑 '{p}'。", "out-file : 拒絕存取權。"]) {
+    const runner = async ({ cwd, input }) => powershellDenialEvent(input,
+      "out-file : " + sentence.replace("{p}", path.join(cwd, sentinelFrom(input))) + "\r\n位於 線路:1 字元:1\r\n");
+    const result = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner });
+    assert.equal(result.proven, true, sentence);
+    assert.equal(result.reason, "sandbox_denied_write", sentence);
+    assert.equal(result.evidence.attempts[0].denial, "access_denied");
+  }
+});
+
+// What codex really returned on that machine: the profile's error first, then the denial, both in
+// CP950 read as UTF-8; only PowerShell's ASCII error name is left readable.
+test("a denial whose text arrived broken is recognised by PowerShell's UnauthorizedAccessException line", async () => {
+  const broken = "������";
+  const runner = async ({ cwd, input }) => powershellDenialEvent(input, [
+    path.join(os.homedir(), "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1") + " : " + broken,
+    "    + CategoryInfo          : InvalidOperation: (:) [Microsoft.PowerShell_profile.ps1]" + broken + "NotSupportedException",
+    "out-file : " + broken + " '" + path.join(cwd, sentinelFrom(input)) + "'" + broken,
+    "    + CategoryInfo          : OpenError: (:) [Out-File], UnauthorizedAccessException",
+    "    + FullyQualifiedErrorId : FileOpenFailure,Microsoft.PowerShell.Commands.OutFileCommand",
+  ].join("\r\n"));
+  const result = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner });
+  assert.equal(result.proven, true);
+  assert.equal(result.reason, "sandbox_denied_write");
+});
+
+test("a broken denial text without the error name is still not evidence", async () => {
+  const runner = async ({ cwd, input }) => powershellDenialEvent(input, "out-file : �� '" + path.join(cwd, sentinelFrom(input)) + "'�");
+  const result = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner });
+  assert.equal(result.proven, "unknown");
   assert.equal(result.reason, "denial_not_evidenced");
 });
 

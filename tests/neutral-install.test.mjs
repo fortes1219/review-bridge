@@ -137,3 +137,58 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   await assert.rejects(verifyNeutralInstall(root), /Watch port/);
   await assert.rejects(planNeutralInstall({ target: root, roles: plan.roles, watchPort: 70000 }));
 });
+
+// B3: init adds Claude Code's /review-bridge command and the same note in AGENTS.md.
+test("install adds the /review-bridge command and appends to AGENTS.md; a project's own command file is kept", async (t) => {
+  const root = await workspace(t);
+  const agents = Buffer.from("# Project rules\r\n\r\nNo trailing newline here.");
+  await fsp.writeFile(path.join(root, "AGENTS.md"), agents);
+  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  assert.deepEqual(plan.agent_files, {
+    command: { path: ".claude/commands/review-bridge.md", action: "create" },
+    agents: { path: "AGENTS.md", action: "append" },
+  });
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  const command = await fsp.readFile(path.join(root, ".claude", "commands", "review-bridge.md"), "utf8");
+  assert.match(command, /^---\ndescription: .+\nargument-hint: .+\n---\n/);
+  assert.match(command, /review-bridge start \$ARGUMENTS/);
+  assert.match(command, /never answer its question/);
+  const after = await fsp.readFile(path.join(root, "AGENTS.md"));
+  assert.deepEqual(after.subarray(0, agents.length), agents, "the existing text is kept byte for byte");
+  assert.match(after.subarray(agents.length).toString("utf8"), /^\n\n<!-- review-bridge:start -->\n## Review Bridge\n[\s\S]*review-bridge start <file>[\s\S]*<!-- review-bridge:end -->\n$/);
+  assert.equal((await verifyNeutralInstall(root)).valid, true);
+
+  const second = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-neutral-test-"));
+  t.after(() => fsp.rm(second, { recursive: true, force: true }));
+  await fsp.mkdir(path.join(second, ".claude", "commands"), { recursive: true });
+  await fsp.writeFile(path.join(second, ".claude", "commands", "review-bridge.md"), "my own command\n");
+  await fsp.writeFile(path.join(second, "AGENTS.md"), after);
+  const kept = await planNeutralInstall({ target: second, profileId: "none", roles: { writer: "claude", reviewer: "codex" } });
+  assert.deepEqual(kept.agent_files, {
+    command: { path: ".claude/commands/review-bridge.md", action: "keep" },
+    agents: { path: "AGENTS.md", action: "keep" },
+  });
+  await applyNeutralInstall(kept, kept.plan_sha256);
+  assert.equal(await fsp.readFile(path.join(second, ".claude", "commands", "review-bridge.md"), "utf8"), "my own command\n");
+  assert.deepEqual(await fsp.readFile(path.join(second, "AGENTS.md")), after);
+});
+
+test("install rollback removes the agent files it wrote and restores AGENTS.md; an edited one is kept", async (t) => {
+  const root = await workspace(t);
+  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  const rolled = await rollbackFreshNeutralInstall(plan);
+  assert.deepEqual(rolled.agent_files, { command: "removed", agents: "removed" });
+  assert.equal(await fsp.stat(path.join(root, ".claude")).catch(() => null), null, "the folders init made are gone too");
+  assert.equal(await fsp.stat(path.join(root, "AGENTS.md")).catch(() => null), null, "an AGENTS.md init created is gone");
+
+  const edited = await workspace(t);
+  await fsp.writeFile(path.join(edited, "AGENTS.md"), "# Rules\n");
+  const again = await planNeutralInstall({ target: edited, roles: { writer: "claude", reviewer: "codex" } });
+  await applyNeutralInstall(again, again.plan_sha256);
+  await fsp.appendFile(path.join(edited, "AGENTS.md"), "My own line.\n");
+  await fsp.appendFile(path.join(edited, ".claude", "commands", "review-bridge.md"), "edited\n");
+  assert.deepEqual((await rollbackFreshNeutralInstall(again)).agent_files, { command: "kept_changed", agents: "kept_changed" });
+  assert.match(await fsp.readFile(path.join(edited, "AGENTS.md"), "utf8"), /My own line\.\n$/);
+  assert.match(await fsp.readFile(path.join(edited, ".claude", "commands", "review-bridge.md"), "utf8"), /edited\n$/);
+});

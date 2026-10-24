@@ -2,9 +2,10 @@
 // review queue's status and wait. Each owns its order of steps and what it prints.
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline/promises";
 
 import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "../../service/index.mjs";
-import { confirmWorkStart, contractStepsLine } from "./confirmStart.mjs";
+import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
 import { GateAError } from "./gateA.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
@@ -18,17 +19,22 @@ import {
 } from "./workPackage.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
 
+export const DEFAULT_BREAKPOINT = "after the review";
+const DEFAULT_CHANGE_TYPES = Object.freeze(["docs"]);
+
 // For a work-order file the rest has defaults: the work package is the file name, the plan goes
 // to review-queue/<name>.plan.json, the owner is the signed-in OS user. The breakpoint and the
-// change types have no default; at a terminal they are asked, otherwise they are required. The
-// prompt library is loaded only then, like every other dependency of the runtime.
+// change types are asked at a terminal with a default that Enter takes; the work order has no
+// field that names its change types, so they are never guessed from its text. Without a terminal
+// both are required. The prompt library is loaded only then, like every other dependency of the
+// runtime.
 async function askMissing(options, clack) {
   const asked = {};
   if (!options.breakpoint) {
     const answer = await clack.text({
       message: "Where should the work stop and come back to you?",
-      placeholder: "after the review",
-      validate: (value) => (String(value || "").trim() ? undefined : "A breakpoint is required."),
+      placeholder: DEFAULT_BREAKPOINT,
+      defaultValue: DEFAULT_BREAKPOINT,
     });
     if (clack.isCancel(answer)) return null;
     asked.breakpoint = answer;
@@ -37,6 +43,7 @@ async function askMissing(options, clack) {
     const answer = await clack.multiselect({
       message: "What will this work change?",
       options: CHANGE_TYPES.map((type) => ({ value: type, label: type })),
+      initialValues: [...DEFAULT_CHANGE_TYPES],
       required: true,
     });
     if (clack.isCancel(answer)) return null;
@@ -45,43 +52,62 @@ async function askMissing(options, clack) {
   return asked;
 }
 
-export async function planWork({ paths, options }) {
+// The plan step work-plan and start share: { plan }, { cancelled }, or { refused } when Gate A has
+// no approved command for non-docs work (T0-06 G2.3; nothing is written).
+async function planFromOptions({ paths, options, command }) {
   const named = options.workPackage || (options.taskFile ? path.basename(options.taskFile, path.extname(options.taskFile)) : null);
   const outPath = options.outPath || (options.taskFile && named ? path.join(paths.queueRoot, named + ".plan.json") : null);
-  if (!outPath) throw new Error("work-plan requires --out.");
+  if (!outPath) throw new Error(command + " needs a work order. Run: review-bridge " + command + " .review-bridge/work-packages/<file>.md");
   let answers = {};
   if (options.taskFile && (!options.breakpoint || !options.changeTypes) && process.stdin.isTTY && process.stdout.isTTY) {
     const clack = await import("@clack/prompts");
     answers = await askMissing(options, clack);
     if (answers === null) {
       clack.cancel("Operation cancelled.");
-      return 1;
+      return { cancelled: true };
     }
   }
-  let plan;
+  const breakpoint = options.breakpoint || answers.breakpoint;
+  const changeTypes = options.changeTypes || answers.changeTypes;
+  if (options.taskFile && !breakpoint) throw new Error("A breakpoint is required. Add --breakpoint \"<where to stop>\" or answer the prompt.");
+  if (options.taskFile && !changeTypes) throw new Error("The change types are required. Add --change-types " + DEFAULT_CHANGE_TYPES.join(",") + " (any of " + CHANGE_TYPES.join(", ") + ") or answer the prompt.");
   try {
-    plan = await createWorkPackagePlan({
-      paths,
-      task: options.task,
-      taskFile: options.taskFile,
-      owner: options.owner || (options.taskFile ? os.userInfo().username : undefined),
-      workPackage: named,
-      breakpoint: options.breakpoint || answers.breakpoint,
-      changeTypes: options.changeTypes || answers.changeTypes,
-      allowedPaths: options.allowedPaths,
-      maxCalls: options.maxCalls ?? 2,
-      maxMinutes: options.maxMinutes ?? 8,
-      outPath,
-    });
+    return {
+      plan: await createWorkPackagePlan({
+        paths,
+        task: options.task,
+        taskFile: options.taskFile,
+        owner: options.owner || (options.taskFile ? os.userInfo().username : undefined),
+        workPackage: named,
+        breakpoint,
+        changeTypes,
+        allowedPaths: options.allowedPaths,
+        maxCalls: options.maxCalls ?? 2,
+        maxMinutes: options.maxMinutes ?? 8,
+        outPath,
+      }),
+    };
   } catch (error) {
-    // T0-06 G2.3: no approved test entry point for non-docs work; nothing is written.
     if (!(error instanceof GateAError)) throw error;
-    process.stdout.write(options.plain
-      ? error.plain() + "\n"
-      : JSON.stringify({ valid: false, reason: error.reason, checked: error.checked }, null, 2) + "\n");
+    return { refused: error };
+  }
+}
+
+function gateARefusal(error, json) {
+  return json
+    ? JSON.stringify({ valid: false, reason: error.reason, checked: error.checked }, null, 2) + "\n"
+    : error.plain() + "\nOnly docs-only work can start without one. Add a test script to the project, or plan the work as docs: --change-types docs\n";
+}
+
+export async function planWork({ paths, options }) {
+  const planned = await planFromOptions({ paths, options, command: "work-plan" });
+  if (planned.cancelled) return 1;
+  if (planned.refused) {
+    process.stdout.write(options.plain ? planned.refused.plain() + "\n" : gateARefusal(planned.refused, options.json));
     return 1;
   }
-  // JSON stays the default because the installer and tests read it; --plain is the human summary (C5.2).
+  const { plan } = planned;
+  // --plain is the human summary (C5.2); --json is what scripts and tests read.
   if (options.plain) {
     process.stdout.write([
       plan.task_file ? "工單：" + plan.task_file : "工作包：" + plan.work_package_id,
@@ -95,35 +121,40 @@ export async function planWork({ paths, options }) {
     ].join("\n") + "\n");
     return 0;
   }
-  process.stdout.write(JSON.stringify({
-    valid: true,
-    plan_path: plan.plan_path,
-    work_package: plan.work_package || plan.work_package_id,
-    owner: plan.owner,
-    breakpoint: plan.breakpoint,
-    scope: plan.scope,
-    gate_a: plan.gate_a,
-    budget: plan.budget,
-    next_command: "work-start --plan <plan_path>",
-  }, null, 2) + "\n");
+  if (options.json) {
+    process.stdout.write(JSON.stringify({
+      valid: true,
+      plan_path: plan.plan_path,
+      work_package: plan.work_package || plan.work_package_id,
+      owner: plan.owner,
+      breakpoint: plan.breakpoint,
+      scope: plan.scope,
+      gate_a: plan.gate_a,
+      budget: plan.budget,
+      next_command: "work-start --plan <plan_path>",
+    }, null, 2) + "\n");
+    return 0;
+  }
+  const shown = shownPath(plan.plan_path);
+  process.stdout.write("Plan written to " + shown + "\nNext: review-bridge work-start --plan " + shown + "\n");
   return 0;
 }
 
-// `guard` is the router's start gate (T0-08 native terminal, reviewer read-only proof); it runs
-// after the options are checked and before the human is asked.
-export async function startWork({ paths, options, adapter, guard }) {
-  if (!options.planPath) throw new Error("work-start requires --plan.");
-  if (options.fakeScenario && !options.fakeCli) {
-    throw new Error("--fake-scenario requires --fake-cli.");
-  }
-  await guard();
-  const approval = options.approval || await confirmWorkStart(paths, options.planPath, Boolean(options.yes));
+// A path as the person can paste it back: relative to where they are when that is shorter.
+function shownPath(file) {
+  const relative = path.relative(process.cwd(), file);
+  const shown = relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : file;
+  return /\s/.test(shown) ? "\"" + shown + "\"" : shown;
+}
+
+// Authorizes the approved plan and runs it to its end; every way out delivers once.
+async function runAuthorized({ paths, options, adapter, approval, authorizedVia, onStep }) {
   const authorization = await authorizeWorkPackage({
     paths,
     planPath: options.planPath,
     approval,
     executionMode: options.fakeCli ? "fake_cli" : "native",
-    authorizedVia: options.approval ? "approve_flag" : options.yes ? "yes_flag" : "terminal",
+    authorizedVia,
   });
   // The replaced version is delivered here too, in case its own work-start is gone.
   for (const runId of authorization.superseded) {
@@ -142,6 +173,7 @@ export async function startWork({ paths, options, adapter, guard }) {
       startNewSession: true,
       runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
       workLock: authorization.workLock,
+      onStep,
     });
   } finally {
     // T0-07 V2.8 (a): every way out of a run delivers once; a failure here never masks the run's own exit.
@@ -156,6 +188,100 @@ export async function startWork({ paths, options, adapter, guard }) {
     process.stdout.write(JSON.stringify(await workPackageStatus(paths, authorization.run.run_id), null, 2) + "\n");
   }
   return exitCode;
+}
+
+// `guard` is the router's start gate (T0-08 native terminal, reviewer read-only proof); it runs
+// after the options are checked and before the human is asked.
+export async function startWork({ paths, options, adapter, guard }) {
+  if (!options.planPath) throw new Error("work-start needs a plan. Run: review-bridge work-plan <file> first, or review-bridge start <file> to do both.");
+  if (options.fakeScenario && !options.fakeCli) {
+    throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
+  }
+  await guard();
+  const approval = options.approval || await confirmWorkStart(paths, options.planPath, Boolean(options.yes));
+  return await runAuthorized({
+    paths, options, adapter, approval,
+    authorizedVia: options.approval ? "approve_flag" : options.yes ? "yes_flag" : "terminal",
+  });
+}
+
+const CHECK_REFUSALS = Object.freeze({
+  page_not_running: "the Bridge page could not be started",
+  page_runs_fake_cli: "the Bridge page is running with the fake CLI",
+  adapter_not_verified: "this platform's adapter is not verified, so the check is not available here",
+  reviewer_not_ready: "the reviewer CLI is not installed and signed in",
+  unsupported_reviewer: "the selected reviewer cannot prove it is read-only",
+  in_flight: "a check is already running",
+  probe_not_started: "the check did not start",
+});
+
+function checkFailureLines(check, file) {
+  const why = CHECK_REFUSALS[check.reason] || check.reason;
+  const next = check.reason === "page_runs_fake_cli"
+    ? "Run: review-bridge down, then review-bridge start " + file
+    : check.reason === "reviewer_not_ready"
+      ? "Sign the reviewer in (codex login), then run: review-bridge start " + file
+      : "Run: review-bridge start " + file + " again" + (check.url ? ", or open " + check.url + " and press Check" : "");
+  return [
+    "Reviewer read-only check: not passed (" + why + ")",
+    ...(check.diagnostic_id ? ["Record: " + check.audit_path + " (" + check.diagnostic_id + ")"] : []),
+    next,
+  ];
+}
+
+// `start <file>`: the human's one command from a work order to its result. It plans the work,
+// makes sure the reviewer read-only check has passed (once per page session; `reviewerCheck` is
+// the router's, run in the page service), shows the card, asks once, and runs. The answer at
+// this question is the only authorization; nothing else asks for one.
+export async function startWorkOrder({ paths, options, adapter, guard, reviewerCheck }) {
+  if (!options.taskFile) throw new Error("start needs a work order. Run: review-bridge start .review-bridge/work-packages/<file>.md");
+  if (options.fakeScenario && !options.fakeCli) {
+    throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
+  }
+  const file = shownPath(path.resolve(options.taskFile));
+  const planned = await planFromOptions({ paths, options, command: "start" });
+  if (planned.cancelled) return 1;
+  if (planned.refused) {
+    process.stdout.write(gateARefusal(planned.refused, false));
+    return 1;
+  }
+  const { plan } = planned;
+  const write = (line) => process.stdout.write(line + "\n");
+  write("Plan written to " + shownPath(plan.plan_path));
+  if (options.fakeCli) {
+    write("Reviewer read-only check: not needed with the fake CLI (no model is called)");
+  } else {
+    const check = await reviewerCheck({
+      onStart: (reviewer) => write("Checking that the reviewer (" + reviewer + ") cannot write files: one model call..."),
+    });
+    if (!check.ok) {
+      for (const line of checkFailureLines(check, file)) write(line);
+      return 1;
+    }
+    write("Reviewer read-only check: passed" + (check.already ? " (earlier in this page session)" : ""));
+  }
+  write("");
+  write(await startCard(paths, plan));
+  await guard();
+  if (!options.yes) {
+    const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
+    let answer;
+    try {
+      answer = await terminal.question("Start this work? [y/N] ");
+    } finally {
+      terminal.close();
+    }
+    if (!/^y(?:es)?$/i.test(answer.trim())) {
+      write("Not started. Nothing was authorized.");
+      return 1;
+    }
+  }
+  write("");
+  return await runAuthorized({
+    paths, options: { ...options, planPath: plan.plan_path }, adapter, approval: plan.plan_sha256,
+    authorizedVia: options.yes ? "yes_flag" : "terminal",
+    onStep: (step) => write("  " + step),
+  });
 }
 
 export async function workStatus({ paths }) {

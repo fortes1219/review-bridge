@@ -9,21 +9,23 @@
 
 import { checkService } from "../../features/setupCheck/index.mjs";
 
-export const NATIVE_MODEL_COMMANDS = Object.freeze(["work-start", "review", "bounded-resume"]);
+export const NATIVE_MODEL_COMMANDS = Object.freeze(["start", "work-start", "review", "bounded-resume"]);
+// The commands a person confirms at a terminal; each asks once before any model is called.
+const CONFIRMED_COMMANDS = Object.freeze(["start", "work-start"]);
 
 const PREFIX = "Native execution is unavailable";
 
 export function nativeGateDecision({ command, args = [], stdinIsTTY = false, stdoutIsTTY = false }) {
   if (args.includes("--fake-cli")) return { allowed: true, mode: "fake_cli" };
   if (!NATIVE_MODEL_COMMANDS.includes(command)) return { allowed: true, mode: "model_free" };
-  if (command !== "work-start") {
-    return { allowed: false, reason: "entry_point", message: PREFIX + " for " + command + ": only work-start, confirmed at an interactive terminal, may call a model." };
+  if (!CONFIRMED_COMMANDS.includes(command)) {
+    return { allowed: false, reason: "entry_point", message: PREFIX + " for " + command + ": only start, confirmed at an interactive terminal, may call a model. Run: review-bridge start <file>" };
   }
   if (args.includes("--approve") || args.includes("--yes")) {
-    return { allowed: false, reason: "flag_confirmation", message: PREFIX + " with --approve or --yes: run work-start without them and confirm at an interactive terminal." };
+    return { allowed: false, reason: "flag_confirmation", message: PREFIX + " with --approve or --yes: the person confirms at the terminal. Run: review-bridge " + command + " without them, in a terminal." };
   }
   if (!stdinIsTTY || !stdoutIsTTY) {
-    return { allowed: false, reason: "not_a_terminal", message: PREFIX + ": work-start must run at an interactive terminal (stdin and stdout); piped input is refused." };
+    return { allowed: false, reason: "not_a_terminal", message: PREFIX + ": " + command + " must run at an interactive terminal (stdin and stdout); piped input is refused. Run it in a terminal window: review-bridge start <file>" };
   }
   return { allowed: true, mode: "native_terminal" };
 }
@@ -48,11 +50,11 @@ export function assertNativeAllowed(input) {
 export async function checkReviewerProof(paths, { check = checkService } = {}) {
   const service = await check(paths);
   if (!service.running) {
-    return { ok: false, reason: "watch_not_running", detail: service.reason, message: PREFIX + ": the Bridge page service is not running (" + service.reason + "). Run up, open the page and pass the reviewer read-only check." };
+    return { ok: false, reason: "watch_not_running", detail: service.reason, message: PREFIX + ": the Bridge page service is not running (" + service.reason + "). Run: review-bridge start <file> (it starts the page and runs the check first)" };
   }
   const state = service.status?.reviewer_readonly?.state || "unknown";
   if (service.status?.reviewer_readonly_proven !== true || state !== "proven") {
-    return { ok: false, reason: "reviewer_not_proven", detail: state, message: PREFIX + ": the reviewer read-only check has not passed in the running Bridge page (state: " + state + "). Open the page and run the check." };
+    return { ok: false, reason: "reviewer_not_proven", detail: state, message: PREFIX + ": the reviewer read-only check has not passed (state: " + state + "). Run: review-bridge start <file> (it runs the check first) or open " + service.url + " and press Check." };
   }
   return { ok: true, reason: "proven", detail: state };
 }
