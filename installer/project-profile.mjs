@@ -125,14 +125,37 @@ async function autoProfileMatches(target, profile) {
   return Object.values(rules).some((value) => Array.isArray(value) && value.length > 0);
 }
 
-export async function resolveProfile(target, requestedId) {
-  if (requestedId !== "auto") return await loadProfile(requestedId);
+// No project type: nothing is detected, no review terms are added and Gate A has no rules, so only
+// docs-only work can pass it. Recorded as profile_id null; `--profile none` selects it.
+export const UNBOUND_PROFILE = Object.freeze({
+  schema_version: 2,
+  profile_id: null,
+  display_name: "none",
+  verification_rules: Object.freeze([]),
+});
+
+export async function listProfiles() {
+  const profiles = [];
+  for (const id of await listProfileIds()) profiles.push(await loadProfile(id));
+  return profiles;
+}
+
+// The profiles whose detection rules hold for the target; a folder that is not there yet matches none.
+export async function matchingProfiles(target) {
+  if (!(await exists(target))) return [];
   const matched = [];
-  for (const id of await listProfileIds()) {
-    const profile = await loadProfile(id);
+  for (const profile of await listProfiles()) {
     if (await autoProfileMatches(target, profile)) matched.push(profile);
   }
-  if (matched.length === 0) throw new Error("Auto profile detection found no supported project profile.");
+  return matched;
+}
+
+export async function resolveProfile(target, requestedId) {
+  if (requestedId === null || requestedId === "none") return UNBOUND_PROFILE;
+  if (requestedId !== "auto") return await loadProfile(requestedId);
+  const matched = await matchingProfiles(target);
+  // Detection may find nothing, as in an empty folder; the project is then set up without a type.
+  if (matched.length === 0) return UNBOUND_PROFILE;
   if (matched.length > 1) {
     throw new Error("Auto profile detection is ambiguous; choose --profile explicitly from: " + matched.map((profile) => profile.profile_id).join(", "));
   }

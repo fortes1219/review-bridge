@@ -6,10 +6,10 @@ This document describes how the Review Bridge source is organized today: the run
 
 | Package | Location | Runs where | Job |
 |---|---|---|---|
-| Runtime | `review-bridge/` | Copied into a target project at `.review-bridge/tools/review-bridge/` | Work orders, the setup page, records, diagnostics |
-| Installer | `installer/`, `bridge.mjs` | From this repository, against a target project | Install, upgrade, upgrade rollback, uninstall |
+| Runtime | `review-bridge/` | From the npm package, against the project named by `--project` or the current folder | Work orders, the setup page, records, diagnostics |
+| Installer | `installer/`, `bridge.mjs` | From the npm package, against a target project | Project setup (the `init` Guide), upgrade, upgrade rollback, uninstall |
 
-Every `bridge.mjs` command (`init`, `roles-check`, `upgrade`, `uninstall`) first checks the package against `SHA256SUMS.txt`, then hands the work to `installer/neutral-install.mjs`.
+The `bridge.mjs` commands `init`, `roles-check`, `upgrade` and `uninstall` hand the work to `installer/` (`init` through `installer/install-guide.mjs`); every other command goes to `review-bridge/bootstrap.mjs`. npm installs, verifies, upgrades and removes the package itself.
 
 ## 2. Runtime layers
 
@@ -159,4 +159,4 @@ A call that ends without a final result (stopped, timed out, interrupted) still 
 
 - `npm test` runs the installer tests in `tests/`; `node --test review-bridge/tests/*.test.mjs` runs the runtime tests.
 - The test files have not yet been regrouped by layer.
-- Every file listed in `SHA256SUMS.txt` must match before `bridge.mjs` runs; refresh the entries of files you change.
+- `npm pack --dry-run` lists what a release carries; only the `files` list in `package.json` is shipped.

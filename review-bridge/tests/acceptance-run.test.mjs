@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,9 @@ import { getBridgePaths } from "../utils/paths.mjs";
 
 const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(runtimeSource, "..");
+// init saves the default roles in the data home; keep it out of the real user profile.
+const dataHome = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-data-home-"));
+process.on("exit", () => { try { fs.rmSync(dataHome, { recursive: true, force: true }); } catch {} });
 
 async function freePort() {
   const net = await import("node:net");
@@ -37,7 +41,7 @@ async function install(t, { withGit = false } = {}) {
   }
   const init = spawnSync(process.execPath, [
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
-  ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
   const runtime = runtimeSource;
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtime, "bootstrap.mjs"), ...args], {

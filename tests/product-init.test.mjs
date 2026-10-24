@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
 import fsp from "node:fs/promises";
@@ -54,32 +53,9 @@ async function scriptedInit(...args) {
   return [...args, "--json", "--fake-cli", "--port", String(await freePort())];
 }
 
-test("init fails closed with one readable line when release integrity is damaged", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-integrity-target-"));
-  const damagedPackage = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-integrity-package-"));
-  t.after(() => Promise.all([
-    fsp.rm(root, { recursive: true, force: true }),
-    fsp.rm(damagedPackage, { recursive: true, force: true }),
-  ]));
-  await fsp.cp(packageRoot, damagedPackage, { recursive: true });
-  await fsp.appendFile(path.join(damagedPackage, "README.md"), "\ndamaged after packaging\n", "utf8");
-
-  const result = spawnSync(process.execPath, [path.join(damagedPackage, "bridge.mjs"), "init", "--target", root, "--yes"], {
-    cwd: damagedPackage,
-    encoding: "utf8",
-    env: isolatedEnv(),
-    windowsHide: true,
-  });
-
-  assert.equal(result.status, 2);
-  assert.equal(result.stdout, "");
-  assert.equal(result.stderr.trim(), "Review Bridge init failed closed: Release integrity check failed. Download and extract a fresh package.");
-  assert.equal(await fsp.stat(path.join(root, ".review-bridge")).catch(() => null), null);
-});
-
-test("human init approval shows actionable scope without exposing internal checksum", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-human-init-"));
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+test("init without a terminal asks nothing, prints no plan, and ends with the next commands", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-plain-init-"));
+  t.after(() => removeWorkspace(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({
     name: "clean-vue-app",
     private: true,
@@ -87,23 +63,28 @@ test("human init approval shows actionable scope without exposing internal check
     devDependencies: { typescript: "latest", vite: "latest" },
   }, null, 2) + "\n", "utf8");
 
-  const result = spawnSync(process.execPath, [bridge, "init", "--target", root, "--writer", "claude", "--reviewer", "codex"], {
-    cwd: packageRoot,
+  const result = spawnSync(process.execPath, [bridge, "init", "--writer", "claude", "--reviewer", "codex", "--fake-cli", "--port", String(await freePort())], {
+    cwd: root,
     encoding: "utf8",
     env: isolatedEnv(),
-    input: "n\n",
     windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
   });
 
-  assert.equal(result.status, 2);
-  assert.match(result.stdout, new RegExp(`Target workspace: ${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-  assert.match(result.stdout, /Operation: install/);
-  assert.match(result.stdout, /Detected profile: Vue and TypeScript frontend \(vue-frontend\)/);
-  assert.doesNotMatch(result.stdout, /SHA-?256|plan_sha256|[0-9a-f]{64}/i);
-  assert.match(result.stdout, /Planned changes:/);
-  assert.match(result.stdout, /PASS, FAIL_THEN_PASS, HARD_STOP, and RATE_LIMIT with fake CLIs/);
-  assert.match(result.stderr, /Installation cancelled by user/);
-  assert.equal(await fsp.stat(path.join(root, ".review-bridge")).catch(() => null), null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/), [
+    "Setting up .review-bridge/...",
+    "Checking the setup...",
+    "Running the four fake self-tests...",
+    "Starting the local page...",
+    "Done. Now:",
+    "",
+    "  put a work order .md in .review-bridge/work-packages/",
+    "  review-bridge work-plan .review-bridge/work-packages/<file>.md",
+  ]);
+  assert.doesNotMatch(result.stdout, /SHA-?256|plan_sha256|[0-9a-f]{64}|\[y\/N\]/i);
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  assert.equal(config.profile_id, "vue-frontend");
 });
 
 test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", async (t) => {
@@ -223,14 +204,31 @@ test("same provider for both roles remains blocked until separate sessions are p
   assert.equal(config.roles.reviewer.provider_id, "codex");
 });
 
-test("non-interactive init requires an explicit writer and reviewer", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-roles-required-"));
+test("init without a terminal takes claude and codex when no role is given or saved, and sets up an empty folder as type none", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-"));
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-home-"));
+  t.after(() => Promise.all([removeWorkspace(root), fsp.rm(home, { recursive: true, force: true })]));
+  const env = isolatedEnv({ REVIEW_BRIDGE_DATA_HOME: home });
+  const result = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root), {
+    cwd: packageRoot, encoding: "utf8", env, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.deepEqual(output.roles, { writer: "claude", reviewer: "codex" });
+  assert.equal(output.profile, null);
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  assert.equal(config.profile_id, null);
+  assert.deepEqual(config.gate_a, { profile_id: null, rules: [] });
+});
+
+test("init with an unknown --profile is refused and writes nothing", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-unknown-profile-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const result = spawnSync(process.execPath, [bridge, "init", "--target", root, "--yes"], {
+  const result = spawnSync(process.execPath, [bridge, "init", "--target", root, "--profile", "cobol-mainframe", "--yes"], {
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
   });
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /Select both --writer and --reviewer explicitly/);
+  assert.match(result.stderr, /Unsupported profile: cobol-mainframe/);
   assert.deepEqual(await fsp.readdir(root), []);
 });
 
@@ -261,20 +259,6 @@ test("init without installed or signed-in CLIs completes fake setup but stays vi
   assert.match(blocked.stderr, /Native execution is unavailable/);
 });
 
-test("interactive init shows the missing step instead of labelling roles ready", async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-no-cli-prompt-"));
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
-  const result = spawnSync(process.execPath, [bridge, "init", "--target", root, "--writer", "codex", "--reviewer", "claude"], {
-    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), input: "n\n", windowsHide: true,
-  });
-  assert.equal(result.status, 2);
-  assert.match(result.stdout, /writer: codex — CLI not found/);
-  assert.match(result.stdout, /Next: install the codex CLI/);
-  assert.match(result.stdout, /Selected roles are not ready/);
-  assert.doesNotMatch(result.stdout, /\bsigned in\b(?! required)/);
-  assert.deepEqual(await fsp.readdir(root), []);
-});
-
 test("roles-check with an unprobeable CLI reports sign-in unknown, never ready", async (t) => {
   const fakeDir = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-fake-cli-"));
   t.after(() => fsp.rm(fakeDir, { recursive: true, force: true }));
@@ -295,7 +279,7 @@ test("roles-check with an unprobeable CLI reports sign-in unknown, never ready",
   assert.equal(output.native_ready, false);
 });
 
-test("init starts the resident service and prints exactly three plain lines", async (t) => {
+test("init starts the resident service and ends with cd, the work folder and the work-plan command", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-service-init-"));
   t.after(() => removeWorkspace(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({
@@ -307,11 +291,15 @@ test("init starts the resident service and prints exactly three plain lines", as
     bridge, "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(port),
   ], { cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/), [
-    "工作資料夾：" + path.join(root, ".review-bridge", "work-packages"),
-    "網頁：" + url,
-    "下一步：在 VS Code 打開 .review-bridge/work-packages/TEMPLATE.md",
+  const workFolder = path.join(root, ".review-bridge", "work-packages");
+  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/).slice(-5), [
+    "Done. Now:",
+    "",
+    "  cd " + path.relative(packageRoot, root),
+    "  put a work order .md in .review-bridge/work-packages/",
+    "  review-bridge work-plan .review-bridge/work-packages/<file>.md",
   ]);
+  await fsp.access(workFolder);
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
   assert.deepEqual(config.watch, { port, strict_port: false });
   assert.equal((await fsp.readFile(path.join(root, ".review-bridge", "watch-url.txt"), "utf8")).trim(), url);
@@ -344,6 +332,40 @@ test("init --json adds the service URL", async (t) => {
   assert.equal(output.service_started, true);
   assert.equal(output.service_reason, "running");
   assert.equal(output.next_step.path, ".review-bridge/work-packages/TEMPLATE.md");
+});
+
+test("work-plan <file> plans a work order with the file name, the OS user and the queue as defaults", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-work-plan-file-"));
+  t.after(() => removeWorkspace(root));
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "add-readme.md"), "# Work order: add a README\n\nA README exists.\n");
+  const file = ".review-bridge/work-packages/add-readme.md";
+  const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
+
+  const planned = run(file, "--breakpoint", "after the review", "--change-types", "docs");
+  assert.equal(planned.status, 0, planned.stderr);
+  const output = JSON.parse(planned.stdout);
+  assert.equal(output.work_package, "add-readme");
+  assert.equal(output.owner, os.userInfo().username);
+  assert.equal(output.plan_path, path.join(root, ".review-bridge", "review-queue", "add-readme.plan.json"));
+  await fsp.access(output.plan_path);
+
+  // A type-none project has no Gate A rules: docs-only work needs none; other work is refused as before.
+  assert.equal(output.gate_a.kind, "not_applicable");
+  const code = run(file, "--breakpoint", "after the review", "--change-types", "code");
+  assert.equal(code.status, 1);
+  assert.deepEqual(JSON.parse(code.stdout), { valid: false, reason: "no_gate_a", checked: [] });
+
+  // Without a terminal the breakpoint and the change types are still required.
+  const bare = run(file);
+  assert.equal(bare.status, 2);
+  assert.match(bare.stderr, /required/);
+  const twice = run(file, "--task-file", file, "--breakpoint", "x", "--change-types", "docs");
+  assert.equal(twice.status, 2);
+  assert.match(twice.stderr, /Give the work order once/);
 });
 
 // RC3-LINUX-00: a page started with the fake CLI (as init starts it) can never hold the reviewer
@@ -409,7 +431,7 @@ test("a page started with the fake CLI cannot give a native work-start the revie
 });
 
 // RC3-LINUX-00: a copy of the package whose manifest marks this platform unverified, or does not
-// define it at all; its checksum line is refreshed the way a packaged release would carry it.
+// define it at all.
 async function packageForPlatform(t, change) {
   const copy = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-platform-package-"));
   t.after(async () => {
@@ -417,17 +439,13 @@ async function packageForPlatform(t, change) {
     await fsp.rm(copy, { recursive: true, force: true });
   });
   await fsp.cp(packageRoot, copy, { recursive: true, filter: (source) => !/[\\/](\.git|node_modules)([\\/]|$)/.test(source) });
-  // The copy uses this package's installed dependencies (init would otherwise run npm ci).
+  // The copy uses this package's installed dependencies, as npm would have installed them.
   await fsp.symlink(path.join(packageRoot, "node_modules"), path.join(copy, "node_modules"), "junction");
   const manifestFile = path.join(copy, "review-bridge", "manifest.json");
   const manifest = JSON.parse(await fsp.readFile(manifestFile, "utf8"));
   change(manifest.adapters, process.platform + "-" + process.arch);
   const text = JSON.stringify(manifest, null, 2) + "\n";
   await fsp.writeFile(manifestFile, text);
-  const sumsFile = path.join(copy, "SHA256SUMS.txt");
-  const hash = createHash("sha256").update(text).digest("hex");
-  const sums = (await fsp.readFile(sumsFile, "utf8")).replace(/^[0-9a-f]{64}  review-bridge\/manifest\.json$/m, hash + "  review-bridge/manifest.json");
-  await fsp.writeFile(sumsFile, sums);
   return copy;
 }
 

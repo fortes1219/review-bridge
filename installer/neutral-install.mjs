@@ -121,7 +121,8 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
   const selected = validateRoles(roles);
   const profile = await resolveProfile(root, profileId);
   const detection = await detectProject(root, profile);
-  if (detection.evidence.length === 0) throw new Error("The selected profile has no project evidence.");
+  // A named type must fit the folder; no type has nothing to fit.
+  if (profile.profile_id !== null && detection.evidence.length === 0) throw new Error("The selected profile has no project evidence.");
   if (await statOptional(path.join(root, privateName))) {
     throw new Error("Bridge neutral state already exists; fresh install cannot overwrite it.");
   }

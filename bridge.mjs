@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import "./review-bridge/utils/nodeVersion.mjs";
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,10 +11,7 @@ import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
-import { commandLink, unlinkCommand } from "./installer/command-link.mjs";
-import { ensureDependencies } from "./installer/dependencies.mjs";
-import { formatGuideResult, installGuide, terminalUi } from "./installer/install-guide.mjs";
-import { readDefaultRoles } from "./installer/personal-settings.mjs";
+import { runGuide } from "./installer/install-guide.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
 import { loadAdapterForInspection, resolveAdapterModule, UNSUPPORTED_ADAPTER } from "./review-bridge/router/platform.mjs";
 import {
@@ -28,27 +25,6 @@ const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRoot = path.join(packageRoot, "review-bridge");
 const bootstrapPath = path.join(runtimeRoot, "bootstrap.mjs");
 const INSTALLER_COMMANDS = new Set(["init", "roles-check", "uninstall", "upgrade"]);
-
-async function verifyReleaseIntegrity() {
-  try {
-    const manifest = await fsp.readFile(path.join(packageRoot, "SHA256SUMS.txt"), "utf8");
-    const lines = manifest.split(/\r?\n/).filter(Boolean);
-    if (lines.length === 0) throw new Error("empty checksum manifest");
-    for (const line of lines) {
-      const match = /^([0-9a-f]{64})  (.+)$/.exec(line);
-      if (!match) throw new Error("invalid checksum manifest");
-      const relative = match[2].replaceAll("/", path.sep);
-      const absolute = path.resolve(packageRoot, relative);
-      if (absolute === packageRoot || !absolute.startsWith(packageRoot + path.sep)) {
-        throw new Error("checksum path escapes package root");
-      }
-      const actual = createHash("sha256").update(await fsp.readFile(absolute)).digest("hex");
-      if (actual !== match[1]) throw new Error("checksum mismatch");
-    }
-  } catch {
-    throw new Error("Release integrity check failed. Download and extract a fresh package.");
-  }
-}
 
 function parseArgs(values) {
   const options = {};
@@ -88,28 +64,6 @@ function jsonOutput(result, label) {
     return JSON.parse(result.stdout);
   } catch {
     throw new Error(label + " did not return valid JSON.");
-  }
-}
-
-async function confirmInstall(plan, assumeYes) {
-  if (assumeYes) return;
-  process.stdout.write([
-    "Target workspace: " + (typeof plan.target === "string" ? plan.target : plan.target.root),
-    "Operation: " + plan.operation,
-    "Review Bridge will install private controller files under .review-bridge/.",
-    "Detected profile: " + (plan.profile.label || plan.profile.display_name) + " (" + plan.profile.id + ")",
-    "Planned changes:",
-    ...plan.changes.map((change) => "  - " + change),
-    "Application files will not be changed during init.",
-    "The next step runs PASS, FAIL_THEN_PASS, HARD_STOP, and RATE_LIMIT with fake CLIs.",
-    "",
-  ].join("\n"));
-  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = await terminal.question("Continue and run the four no-token self-tests? [y/N] ");
-    if (!/^y(?:es)?$/i.test(answer.trim())) throw new Error("Installation cancelled by user.");
-  } finally {
-    terminal.close();
   }
 }
 
@@ -227,18 +181,10 @@ async function inspectNativeReadiness(roles) {
   return nativeReadiness({ platform, definition, missing });
 }
 
-// Setting up a project starts from the person's saved defaults for any role not given, and says so.
-async function chooseRoles(options, { useDefaults = false } = {}) {
+// roles-check asks at a terminal for any role not given.
+async function chooseRoles(options) {
   let writer = options.writer;
   let reviewer = options.reviewer;
-  const saved = useDefaults && !(writer && reviewer) ? await readDefaultRoles() : null;
-  if (saved) {
-    writer ||= saved.writer;
-    reviewer ||= saved.reviewer;
-    if (!options.json) {
-      process.stdout.write(`使用你的預設角色：writer ${saved.writer}、reviewer ${saved.reviewer}（這次要改，加上 --writer／--reviewer）\n`);
-    }
-  }
   if (writer && reviewer) return validateRoles({ writer, reviewer });
   if (options.yes || options.json) {
     throw new Error("Select both --writer and --reviewer explicitly.");
@@ -254,7 +200,6 @@ async function chooseRoles(options, { useDefaults = false } = {}) {
 }
 
 async function rolesCheck(options) {
-  await verifyReleaseIntegrity();
   return inspectSelectedRoles(await chooseRoles(options));
 }
 
@@ -285,51 +230,36 @@ function missingRoleSteps(result) {
     .map(([role, check]) => ({ role, provider: check.provider, next_action: check.next_action }));
 }
 
-// Without --target, init is the install Guide: Bridge is installed where it was cloned, and no
-// project is touched.
-async function installBridge(options) {
-  const interactive = process.stdin.isTTY && process.stdout.isTTY;
-  return await installGuide(packageRoot, options, {
-    ui: interactive ? terminalUi() : null,
-    write: options.json ? () => {} : (text) => process.stdout.write(text),
+// init is the Guide (installer/install-guide.mjs): it asks what the command line left open, then
+// sets the project up here in four steps, the same with or without a terminal.
+async function init(options) {
+  return await runGuide(options, {
+    packageRoot,
+    interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) && !options.yes && !options.json,
+    write: (text) => process.stdout.write(text),
     inspectProvider: async (provider) => (await inspectSelectedRoles({ writer: provider, reviewer: provider })).checks.writer,
+    setUpProject,
   });
 }
 
-async function init(options) {
-  await verifyReleaseIntegrity();
-  if (options.target === undefined) return await installBridge(options);
-  // Bridge's own pg and PostgreSQL binaries, in its own node_modules, before any project is touched.
-  await ensureDependencies(packageRoot, { notify: (line) => process.stderr.write(line + "\n") });
-  const roles = await chooseRoles(options, { useDefaults: true });
-  // Live readiness is reported, never forced: the fake self-tests below are model-free
-  // and need no CLI or login, and native work stays blocked either way.
-  const roleReadiness = await inspectSelectedRoles(roles);
-  const missingSteps = missingRoleSteps(roleReadiness);
-  if (!options.yes) {
-    process.stdout.write(formatRoleCheck(roleReadiness));
-    if (missingSteps.length > 0) {
-      process.stdout.write("Selected roles are not ready. Setup continues with fake self-tests only; complete the steps above before native work.\n");
-    }
-  }
-  const target = path.resolve(options.target);
-  const stat = await fsp.lstat(target).catch(() => null);
-  if (!stat?.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error("--target must be an existing, non-symlink workspace directory.");
-  }
-  const filesystem = assertSupportedStateFilesystem(target);
-  const watchPort = options.port === undefined ? undefined : Number(options.port);
+async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, step) {
   if (watchPort !== undefined && (!Number.isInteger(watchPort) || watchPort < 1 || watchPort > 65535)) {
     throw new Error("--port must be 1 through 65535.");
   }
-  const plan = await planNeutralInstall({ target, profileId: options.profile || "auto", roles, watchPort });
-  await confirmInstall(plan, Boolean(options.yes));
-  await applyNeutralInstall(plan, plan.plan_sha256);
+  const filesystem = assertSupportedStateFilesystem(target);
+  // Live readiness is reported, never forced: the fake self-tests below are model-free
+  // and need no CLI or login, and native work stays blocked either way.
+  const roleReadiness = await inspectSelectedRoles(roles);
+  const plan = await step("Setting up .review-bridge/", async () => {
+    const planned = await planNeutralInstall({ target, profileId, roles, watchPort });
+    await applyNeutralInstall(planned, planned.plan_sha256);
+    return planned;
+  });
   let verification;
   let scenarios;
   try {
-    verification = await verifyNeutralInstall(target);
-    scenarios = await runDisposableFakeScenarios(target, ".review-bridge");
+    verification = await step("Checking the setup", () => verifyNeutralInstall(target));
+    scenarios = await step("Running the four fake self-tests", () => runDisposableFakeScenarios(target, ".review-bridge"));
   } catch (error) {
     try {
       await rollbackFreshNeutralInstall(plan);
@@ -339,7 +269,7 @@ async function init(options) {
     throw new Error(`Setup failed and was rolled back: ${error.message}`);
   }
   const realMode = await inspectNativeReadiness(roles);
-  const service = await startService(target, Boolean(options["fake-cli"]));
+  const service = await step("Starting the local page", () => startService(target, fakeCli));
   return {
     ok: true,
     target,
@@ -350,7 +280,7 @@ async function init(options) {
     state_filesystem: filesystem,
     roles,
     role_readiness: roleReadiness,
-    role_next_steps: missingSteps,
+    role_next_steps: missingRoleSteps(roleReadiness),
     fake_self_tests: scenarios,
     fake_runtime_verified: verification.valid === true,
     real_mode: realMode,
@@ -416,11 +346,6 @@ function formatUninstallPlan(plan) {
 }
 
 function formatUninstallResult(result) {
-  if (result.operation === "remove_command") {
-    return result.removed
-      ? "已拿掉 review-bridge 指令。要刪掉 Bridge 本身，刪掉這個資料夾：" + result.bridge_folder + "\n"
-      : "review-bridge 指令沒有指向這份 Bridge" + (result.points_to ? "（指向 " + result.points_to + "）" : "") + "，沒有東西要拿掉。\n";
-  }
   if (result.kind === "cancel") return "已取消上一次的解除安裝" + (result.service_restarted ? "，網頁服務已重新啟動" : "") + "。\n";
   return [
     "已解除安裝",
@@ -429,33 +354,9 @@ function formatUninstallResult(result) {
   ].join("\n") + "\n";
 }
 
-// Without --target, uninstall takes away the review-bridge command (npm's global link) and nothing
-// else: personal data, the user PATH and the Bridge folder stay. Deleting the folder removes Bridge.
-async function removeCommand(options) {
-  if (Object.keys(options).some((key) => key !== "json")) throw new Error("uninstall without --target takes no other options; to remove a project's setup, add --target <folder>.");
-  const link = commandLink(packageRoot);
-  if (!link.linked) return { ok: true, operation: "remove_command", removed: false, points_to: link.points_to };
-  if (!process.stdin.isTTY) throw new Error("No terminal to confirm at. Run uninstall at an interactive terminal.");
-  process.stdout.write([
-    "會拿掉 review-bridge 指令（npm 全域連結，在 " + link.command_folder + "）。",
-    "個人資料（資料庫、settings.json）和使用者 PATH 都不動。",
-    "要刪掉 Bridge 本身，之後刪掉這個資料夾：" + packageRoot,
-  ].join("\n") + "\n");
-  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = await terminal.question("要繼續嗎？[y/N] ");
-    if (!/^y(?:es)?$/i.test(answer.trim())) throw new Error("Uninstall cancelled by user.");
-  } finally {
-    terminal.close();
-  }
-  unlinkCommand(packageRoot);
-  if (commandLink(packageRoot).linked) throw new Error("npm finished, but review-bridge still points at " + packageRoot + ".");
-  return { ok: true, operation: "remove_command", removed: true, bridge_folder: packageRoot };
-}
-
+// Removes one project's setup. Review Bridge itself is removed by npm: npm uninstall -g review-bridge.
 async function uninstall(options) {
-  await verifyReleaseIntegrity();
-  if (options.target === undefined) return await removeCommand(options);
+  if (options.target === undefined) throw new Error("uninstall needs --target <folder>. To remove Review Bridge itself, run: npm uninstall -g review-bridge");
   if (options.yes) throw new Error("uninstall has no --yes. Use --plan-out <file>, then --plan <file> --approve <sha>, or confirm at an interactive terminal.");
   const target = path.resolve(options.target);
   if (options.plan) {
@@ -483,7 +384,6 @@ async function uninstall(options) {
 
 // T0-10 P1.3 / P1.4: the same three routes as uninstall, for the upgrade and for its rollback.
 async function upgrade(options) {
-  await verifyReleaseIntegrity();
   if (options.yes) throw new Error("upgrade has no --yes. Use --plan-out <file>, then --plan <file> --approve <sha>, or confirm at an interactive terminal.");
   const target = path.resolve(options.target || process.cwd());
   const rollback = options.rollback === true;
@@ -512,29 +412,51 @@ async function upgrade(options) {
   return rollback ? await applyNeutralUpgradeRollback(plan, plan.plan_sha256) : await applyNeutralUpgrade(plan, plan.plan_sha256);
 }
 
-function formatInitResult(result) {
-  return [
-    ...(result.service_notice ? [result.service_notice] : []),
-    "工作資料夾：" + result.work_folder,
-    "網頁：" + (result.url || "沒有啟動（" + result.service_reason + "），執行 review-bridge up"),
-    "下一步：在 VS Code 打開 " + result.next_step.path,
-  ].join("\n") + "\n";
-}
+const HELP = `Usage: review-bridge <command> [options]
+
+Set up a project (run in the project folder):
+  init                         Ask for the writer, the reviewer and the project type, then set
+                               up .review-bridge/ here. Questions answered by options are not asked.
+    --target <folder>          Set up this folder instead of the current one
+    --writer <claude|codex>    Writer role (default: your saved default, else claude)
+    --reviewer <claude|codex>  Reviewer role (default: your saved default, else codex)
+    --profile <type|none>      Project type (default: what detection finds, else none)
+    --port <n>                 Local page port
+    --yes                      Ask nothing; use the defaults
+    --json                     Ask nothing; print the result as JSON
+
+Work (in the project folder, or with --project <folder>):
+  work-plan <file>             Plan a work order from .review-bridge/work-packages/
+  work-start --plan <file>     Confirm and run a planned work order
+  work-status, work-cancel, stop <run_id>
+  up, down, ps, watch          The local page service
+  status, wait, prune, rm <run_id>, doctor
+
+Maintain a project:
+  upgrade [--target <folder>] [--rollback]
+  uninstall --target <folder>
+  roles-check [--writer <claude|codex>] [--reviewer <claude|codex>]
+
+Options:
+  -v, --version                Print the version
+  -h, --help                   Print this help
+
+Update Review Bridge: npm i -g review-bridge@latest
+Remove Review Bridge: npm uninstall -g review-bridge
+`;
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
-  if (!command || ["-h", "--help"].includes(command)) {
-    process.stdout.write("Usage: npm start (in the Bridge folder) or review-bridge init [--writer claude|codex] [--reviewer claude|codex] [--yes] [--json]\n"
-      + "       review-bridge init --target <workspace> [--profile auto] [--writer claude|codex] [--reviewer claude|codex] [--port <n>] [--yes] [--json]\n"
-      + "       review-bridge roles-check [--writer claude|codex] [--reviewer claude|codex] [--json]\n"
-      + "       review-bridge uninstall (removes the review-bridge command; personal data stays)\n"
-      + "       review-bridge uninstall --target <workspace> [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
-      + "       review-bridge upgrade [--rollback] [--target <workspace>] [--backup-root <dir>] [--plan-out <file> | --plan <file> --approve <sha>] [--json]\n"
-      + "       review-bridge <work-plan|work-start|work-status|up|down|ps|…> [--project <workspace>] (the current folder when not given)\n");
+  if (!command || ["-h", "--help", "help"].includes(command)) {
+    process.stdout.write(HELP);
     return command ? 0 : 2;
   }
-  // Every other command is the project runtime's: it runs from this Bridge folder, in the terminal
-  // it was typed in, against the project named by --project or the current folder.
+  if (["-v", "--version"].includes(command)) {
+    process.stdout.write(JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).version + "\n");
+    return 0;
+  }
+  // Every other command is the project runtime's, run in the terminal it was typed in, against the
+  // project named by --project or the current folder.
   if (!INSTALLER_COMMANDS.has(command)) {
     const forwarded = spawnSync(process.execPath, [bootstrapPath, command, ...rest], { stdio: "inherit" });
     if (forwarded.error) throw forwarded.error;
@@ -561,8 +483,7 @@ async function main() {
   }
   const options = parseArgs(rest);
   const result = await init(options);
-  process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n"
-    : result.operation === "install_bridge" ? formatGuideResult(result) : formatInitResult(result));
+  if (!result.printed) process.stdout.write(JSON.stringify(result, null, 2) + "\n");
   return 0;
 }
 

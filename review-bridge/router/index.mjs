@@ -50,6 +50,8 @@ const COMMANDS = {
       "--out": { key: "outPath", type: "string" },
       "--plain": { key: "plain", type: "boolean" },
     },
+    // `work-plan <file>` is the same as `work-plan --task-file <file>`.
+    positional: "taskFile",
     run: (context) => workOrder.planWork(context),
   },
   "work-start": {
@@ -126,7 +128,14 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
   const entry = COMMANDS[command];
   const runId = entry?.takesRunId ? args[0] : null;
-  const options = parseOptions(entry?.takesRunId ? args.slice(1) : args, entry?.options || {});
+  let rest = entry?.takesRunId ? args.slice(1) : args;
+  const positional = entry?.positional && rest[0] !== undefined && !rest[0].startsWith("--") ? rest[0] : null;
+  if (positional !== null) rest = rest.slice(1);
+  const options = parseOptions(rest, entry?.options || {});
+  if (positional !== null) {
+    if (options[entry.positional] !== undefined) throw new Error("Give the work order once: either " + positional + " or --task-file.");
+    options[entry.positional] = positional;
+  }
   if (!entry?.configFree && !(await fileExists(paths.bridgeConfigPath))) {
     throw new Error(command + " requires the runtime configuration created by init.");
   }

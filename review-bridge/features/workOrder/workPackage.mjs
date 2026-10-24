@@ -91,9 +91,10 @@ export async function snapshotRules(paths) {
   return { path: relative, sha256: sha256Of(text), text };
 }
 
-const allowedChangeTypes = new Set([
+export const CHANGE_TYPES = Object.freeze([
   "docs", "code", "tests", "config", "contract", "schema", "migration", "external-behavior",
 ]);
+const allowedChangeTypes = new Set(CHANGE_TYPES);
 
 function planDigest(plan) {
   const copy = structuredClone(plan);

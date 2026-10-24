@@ -1,5 +1,8 @@
 // The work order's command entries: plan, start, status, cancel, stop, review, resume, and the
 // review queue's status and wait. Each owns its order of steps and what it prints.
+import os from "node:os";
+import path from "node:path";
+
 import { assertRunResumable, createRunRuntimeState, loadSingleActiveControlView } from "../../service/index.mjs";
 import { confirmWorkStart, contractStepsLine } from "./confirmStart.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
@@ -9,27 +12,66 @@ import { queueStatus, waitForPending } from "./reviewQueue.mjs";
 import {
   authorizeWorkPackage,
   cancelWorkPackage,
+  CHANGE_TYPES,
   createWorkPackagePlan,
   workPackageStatus,
 } from "./workPackage.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
 
+// For a work-order file the rest has defaults: the work package is the file name, the plan goes
+// to review-queue/<name>.plan.json, the owner is the signed-in OS user. The breakpoint and the
+// change types have no default; at a terminal they are asked, otherwise they are required. The
+// prompt library is loaded only then, like every other dependency of the runtime.
+async function askMissing(options, clack) {
+  const asked = {};
+  if (!options.breakpoint) {
+    const answer = await clack.text({
+      message: "Where should the work stop and come back to you?",
+      placeholder: "after the review",
+      validate: (value) => (String(value || "").trim() ? undefined : "A breakpoint is required."),
+    });
+    if (clack.isCancel(answer)) return null;
+    asked.breakpoint = answer;
+  }
+  if (!options.changeTypes) {
+    const answer = await clack.multiselect({
+      message: "What will this work change?",
+      options: CHANGE_TYPES.map((type) => ({ value: type, label: type })),
+      required: true,
+    });
+    if (clack.isCancel(answer)) return null;
+    asked.changeTypes = answer.join(",");
+  }
+  return asked;
+}
+
 export async function planWork({ paths, options }) {
-  if (!options.outPath) throw new Error("work-plan requires --out.");
+  const named = options.workPackage || (options.taskFile ? path.basename(options.taskFile, path.extname(options.taskFile)) : null);
+  const outPath = options.outPath || (options.taskFile && named ? path.join(paths.queueRoot, named + ".plan.json") : null);
+  if (!outPath) throw new Error("work-plan requires --out.");
+  let answers = {};
+  if (options.taskFile && (!options.breakpoint || !options.changeTypes) && process.stdin.isTTY && process.stdout.isTTY) {
+    const clack = await import("@clack/prompts");
+    answers = await askMissing(options, clack);
+    if (answers === null) {
+      clack.cancel("Operation cancelled.");
+      return 1;
+    }
+  }
   let plan;
   try {
     plan = await createWorkPackagePlan({
       paths,
       task: options.task,
       taskFile: options.taskFile,
-      owner: options.owner,
-      workPackage: options.workPackage,
-      breakpoint: options.breakpoint,
-      changeTypes: options.changeTypes,
+      owner: options.owner || (options.taskFile ? os.userInfo().username : undefined),
+      workPackage: named,
+      breakpoint: options.breakpoint || answers.breakpoint,
+      changeTypes: options.changeTypes || answers.changeTypes,
       allowedPaths: options.allowedPaths,
       maxCalls: options.maxCalls ?? 2,
       maxMinutes: options.maxMinutes ?? 8,
-      outPath: options.outPath,
+      outPath,
     });
   } catch (error) {
     // T0-06 G2.3: no approved test entry point for non-docs work; nothing is written.

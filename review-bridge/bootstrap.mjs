@@ -14,8 +14,8 @@ import {
 } from "./router/platform.mjs";
 import { dispatchCommand } from "./router/index.mjs";
 import { inspectDoctor } from "./features/doctor/index.mjs";
-import { createFakeAdapter, fileExists, readJson } from "./service/index.mjs";
-import { bridgeUpgradeMarkerPath, getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
+import { createFakeAdapter, readJson } from "./service/index.mjs";
+import { getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
 import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
 
 // Bridge is installed in its own folder; the project it works on is named with --project <folder>,
@@ -65,9 +65,6 @@ async function main() {
   if (!command || command === "--help" || command === "-h") {
     printUsage();
     return command ? 0 : 2;
-  }
-  if (await fileExists(bridgeUpgradeMarkerPath(path.dirname(bridgeRoot)))) {
-    throw new Error("Bridge 正在升級，或上一次升級沒有完成：回 Bridge 資料夾再跑一次 npm start。");
   }
   const manifestPath = path.join(bridgeRoot, "manifest.json");
   const manifest = await readJson(manifestPath);
