@@ -123,11 +123,12 @@ Features never import each other. When one flow needs another feature's capabili
 | `records/dayFiles` | Retention days and pruning old day files |
 | `records/probeAudit` | Reviewer read-only check records (used by both the setup page and prune) |
 | `records/failureRecords` | Writing a failure record beside its evidence |
+| `records/runRecords` | The run recorder: each run event, and the facts it carries, into the database; the start's held events; `clean <run_id>`'s delete |
 | `database/postgresServer` | The person's embedded PostgreSQL server: create, start, stop, connect. Owns no table |
 | `database/migrate`, `database/migrations/` | Dated migration files, each applied once in its own transaction; a changed applied file stops everything |
 | `database/index` | `openDatabase()`: the cluster on first use, the server started, the `bridge` database and the migrations; one pool per process. Imported only by the commands that keep records, not re-exported |
 
-The work order's records (RC3-BLOCKER-01 step 2) are `workOrder/workOrderRecords`: projects, work orders and their versions, plans (one per card), authorizations and claims, contracts. `start`, `resume` and `work-plan` decide which work order a file is (same file name; otherwise a renamed file whose old file is gone and whose text is close) and record the plan; `--yes` finds its card there; the start writes the work order, its version, the authorization and its claim in one transaction around the file authorization. Runs, events, verdicts and delivery are still files, and every read except the card's goes to the files (step 3 and 4 move them).
+The work order's records (RC3-BLOCKER-01 step 2) are `workOrder/workOrderRecords`: projects, work orders and their versions, plans (one per card), authorizations and claims, contracts. `start`, `resume` and `work-plan` decide which work order a file is (same file name; otherwise a renamed file whose old file is gone and whose text is close) and record the plan; `--yes` finds its card there; the start writes the work order, its version, the authorization and its claim in one transaction around the file authorization. Runs, their events, Gate A, verdicts, findings, acceptance and delivery go to the database through `records/runRecords` (step 3): `appendProjectionEvent` and `appendIoEvent` hand each event to the recorder the router installs for a project with an id, one transaction per event (the run's row locked, the next sequence, the event and its fact rows, the state columns). Every read except the card's still goes to the files (step 4 switches them).
 
 The same entry also re-exports three pure tools for the installer: `getBridgePaths`, `inspectStateFilesystem`, `canonical`.
 

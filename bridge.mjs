@@ -129,7 +129,7 @@ async function runDisposableFakeScenarios(target, privateName = ".claude") {
     try {
       return await runFakeScenarios(disposable, privateName);
     } finally {
-      run(process.execPath, [bootstrapPath, "clean", "--project"], { cwd: disposable, expected: [0, 1, 2] });
+      run(process.execPath, [bootstrapPath, "clean", "--all"], { cwd: disposable, expected: [0, 1, 2] });
     }
   } finally {
     await fsp.rm(disposable, { recursive: true, force: true });

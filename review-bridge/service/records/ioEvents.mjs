@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { appendJsonLineDurable } from "./fileStore.mjs";
+import { runRecorder } from "./runRecords.mjs";
 
 export const IO_EVENT_SCHEMA_VERSION = 1;
 export const IO_EVENT_TYPES = Object.freeze([
@@ -39,6 +40,8 @@ export async function appendIoEvent(paths, runId, event, clock = Date.now) {
     occurred_at: new Date(clock()).toISOString(),
     ...event,
   };
+  // The database first (RC3-BLOCKER-01 step 3); the file line is the running copy.
+  await runRecorder()?.io(record);
   await appendJsonLineDurable(ioEventFile(paths, runId), record);
   return record;
 }

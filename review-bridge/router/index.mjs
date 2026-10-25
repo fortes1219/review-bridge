@@ -8,8 +8,17 @@ import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mj
 import * as records from "../features/records/index.mjs";
 import * as setupCheck from "../features/setupCheck/index.mjs";
 import * as workOrder from "../features/workOrder/index.mjs";
-import { fileExists } from "../service/index.mjs";
+import { createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson } from "../service/index.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
+
+// clean <run_id> also removes the run from the person's database: one delete, and every row it owns
+// goes with it; its authorization and claim stay, so its card never takes another yes.
+const forgetRunRecords = ({ paths }) => async (runId) => {
+  const config = await readJson(paths.bridgeConfigPath).catch(() => null);
+  if (!config?.project_id) return 0;
+  const { openDatabase } = await import("../service/database/index.mjs");
+  return await deleteRunRecords(await openDatabase(), runId);
+};
 
 // A run is given its result before the records fold or remove it; the human is not notified.
 const deliverQuietly = ({ paths, adapter }) => (runId) => workOrder.deliverOutcome({ paths, runId, adapter, notify: false });
@@ -94,13 +103,13 @@ export const COMMANDS = {
     usage: "[<run_id>]",
     summary: "Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)",
     options: {
-      "--project": { key: "project", type: "boolean", help: "Clear this project's work orders, versions, plans and contracts from your database (refused while a run is running)" },
+      "--all": { key: "all", type: "boolean", help: "Clear this project's work orders, versions, plans and contracts from your database (refused while a run is running)" },
       "--json": { ...JSON_OUT, help: "Print the result as JSON (without a run id)" },
     },
-    run: (context) => (context.options.project
+    run: (context) => (context.options.all
       ? workOrder.clearProjectRecords(context)
       : context.runId
-        ? records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) })
+        ? records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context), forget: forgetRunRecords(context) })
         : records.runPrune(context.paths, { json: Boolean(context.options.json), deliver: deliverQuietly(context) })),
   },
   // status and wait only read; every other command needs the configuration.
@@ -261,7 +270,7 @@ export const COMMANDS = {
     usage: "<run_id>",
     summary: "Same as clean <run_id>",
     options: {},
-    run: (context) => records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) }),
+    run: (context) => records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context), forget: forgetRunRecords(context) }),
   },
   "roles-check": {
     audience: "agent",
@@ -309,6 +318,14 @@ export function parseCommandLine(command, args) {
   return { runId, options };
 }
 
+// RC3-BLOCKER-01 step 3: in a project with an id, every run fact this process writes also goes to the
+// person's database, which is opened on the first one (a command that writes none never opens it).
+async function recordRunsOf(paths) {
+  const config = await readJson(paths.bridgeConfigPath).catch(() => null);
+  if (!config?.project_id) return;
+  installRunRecorder(createRunRecorder(async () => (await import("../service/database/index.mjs")).openDatabase()));
+}
+
 // `loadAdapter` is how start and resume take the platform adapter when it was not given: only after
 // the reviewer check and the yes.
 export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, loadAdapter = null, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
@@ -319,5 +336,6 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   if (!entry.configFree && !(await fileExists(paths.bridgeConfigPath))) {
     throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
   }
+  await recordRunsOf(paths);
   return await entry.run({ command, args, paths, options, runId, adapter, loadAdapter, adapterId, adapterDefinition, adapterSource });
 }

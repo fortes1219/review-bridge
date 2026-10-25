@@ -304,7 +304,9 @@ export async function startServer(root, { binaries, timeoutSeconds = 60 }) {
   }
   // Whether this call is the one that launched the server is not reported: when several start at
   // once, every pg_ctl that waited sees the winner's server ready and exits 0 (measured on Windows).
-  if (!(await serverRunning(root, { binaries }))) {
+  // A port found free can be taken by another process before the server binds it; the server then
+  // stops at once with "could not create any TCP/IP sockets", and another free port is tried.
+  for (let attempt = 1; !(await serverRunning(root, { binaries })); attempt += 1) {
     let settings = await readSettings(paths);
     if (!(await portFree(settings.port))) {
       settings = { ...settings, port: await freePort() };
@@ -314,11 +316,14 @@ export async function startServer(root, { binaries, timeoutSeconds = 60 }) {
       "start", "-D", paths.data, "-w", "-t", String(timeoutSeconds),
       "-o", "-h " + LISTEN_HOST + " -p " + settings.port,
     ], { timeoutMs: (timeoutSeconds + 30) * 1000, outputFile: paths.control, cwd: paths.root });
-    if (result.code !== 0 && !(await serverRunning(root, { binaries }))) {
-      const latest = (await serverLogFiles(root)).at(-1);
-      const log = latest ? await fsp.readFile(latest, "utf8").catch(() => "") : "";
-      throw new Error("PostgreSQL did not start within " + timeoutSeconds + "s: " + lastLines(result.stderr || result.stdout) + " | log: " + lastLines(log, 3));
+    if (result.code === 0 || (await serverRunning(root, { binaries }))) break;
+    const latest = (await serverLogFiles(root)).at(-1);
+    const log = latest ? await fsp.readFile(latest, "utf8").catch(() => "") : "";
+    if (attempt < 3 && /could not create any TCP\/IP sockets/.test(log.split(/\r?\n/).slice(-5).join("\n"))) {
+      await writeSettings(paths, { ...settings, port: await freePort() });
+      continue;
     }
+    throw new Error("PostgreSQL did not start within " + timeoutSeconds + "s: " + lastLines(result.stderr || result.stdout) + " | log: " + lastLines(log, 3));
   }
   await waitUntilReady(root, deadline);
   return { port: await runningPort(paths) };

@@ -591,7 +591,7 @@ test("the card names the work order: new, then updated, renamed or copied; the r
   }
 });
 
-test("two --yes to one card at once start one run; clean --project clears the project's records", async (t) => {
+test("two --yes to one card at once start one run; clean --all clears the project's records", async (t) => {
   const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-two-yes-");
   const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
@@ -609,14 +609,69 @@ test("two --yes to one card at once start one run; clean --project clears the pr
   assert.equal((await listed("runs")).length, 1);
   assert.equal((await queryRecords("select count(*)::int as n from authorization_claims c join authorizations a using (authorization_id) join plans p using (plan_sha256) where p.project_id = $1", [projectId]))[0].n, 1);
 
-  const cleared = cli(["clean", "--project"]);
+  const cleared = cli(["clean", "--all"]);
   assert.equal(cleared.status, 0, cleared.stderr);
-  assert.match(cleared.stdout, /^Cleared this project's records: 1 work order\(s\), 1 version\(s\), 1 plan\(s\), 1 authorization\(s\), 1 contract\(s\)\.\n/);
+  assert.match(cleared.stdout, /^Cleared this project's records: 1 work order\(s\), 1 version\(s\), 1 plan\(s\), 1 authorization\(s\), 1 contract\(s\), 1 run\(s\)\.\n/);
   assert.equal((await queryRecords("select count(*)::int as n from plans where project_id = $1", [projectId]))[0].n, 0);
   assert.ok((await queryRecords("select cleared_at from projects where project_id = $1", [projectId]))[0].cleared_at);
   const after = cli(["start", order, "--fake-cli"]);
   assert.equal(after.status, 2);
-  assert.match(after.stderr, /records were cleared \(clean --project\)/);
+  assert.match(after.stderr, /records were cleared \(clean --all\)/);
+  // --project <folder> keeps its one meaning: the folder to work on, here with clean --all too.
+  const elsewhere = spawnSync(process.execPath, [bridge, "clean", "--all", "--project", root], { cwd: os.tmpdir(), encoding: "utf8", env: isolatedEnv(), windowsHide: true });
+  assert.equal(elsewhere.status, 2);
+  assert.match(elsewhere.stderr, /records were cleared \(clean --all\)/, "the project named by --project was the one looked at");
+});
+
+// RC3-BLOCKER-01 step 3: the run, its one timeline, each condition's verdict, Gate A and the delivery
+// are in the database; a stopped run is recorded as stopped; clean <run_id> is one delete that takes
+// every row the run owns and keeps its authorization and claim.
+test("a run's events, verdicts, Gate A and delivery are in the database; stop and clean <run_id> follow", async (t) => {
+  const { order, cli, queue } = await fourActionsProject(t, "review-bridge-run-records-");
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  const [runFile] = (await fsp.readdir(path.join(queue, "runs"))).filter((name) => name.endsWith(".json"));
+  const runId = runFile.slice(0, -5);
+  const file = JSON.parse(await fsp.readFile(path.join(queue, "runs", runFile), "utf8"));
+  const [run] = await queryRecords("select status, outcome, contract_sha256, last_event_sequence from runs where run_id = $1", [runId]);
+  assert.deepEqual({ status: run.status, outcome: run.outcome, contract: run.contract_sha256 }, { status: "pass", outcome: "delivered", contract: file.contract_sha256 });
+  const types = (await queryRecords("select type from run_events where run_id = $1 order by sequence", [runId])).map((row) => row.type);
+  assert.equal(types.length, run.last_event_sequence, "one sequence, no gaps");
+  for (const type of ["run_started", "contract_sealed", "task.input", "gate_a_result", "review.result", "acceptance", "run_terminal", "run_delivered"]) assert.ok(types.includes(type), type);
+  assert.deepEqual(await queryRecords("select ac_id, verdict, result from acceptance_rows where run_id = $1", [runId]), [{ ac_id: "AC1", verdict: "pass", result: "proven" }]);
+  assert.deepEqual(await queryRecords("select ac_id, verdict from review_verdicts where run_id = $1", [runId]), [{ ac_id: "AC1", verdict: "pass" }]);
+  assert.deepEqual(await queryRecords("select kind, passed from gate_a_results where run_id = $1", [runId]), [{ kind: "not_applicable", passed: null }]);
+  const [delivered] = await queryRecords("select payload from run_events where run_id = $1 and type = 'run_delivered'", [runId]);
+  assert.equal(delivered.payload.outcome, "delivered");
+  assert.equal(delivered.payload.sha256, file.result_sha256);
+
+  // A run stopped from another process is recorded as stopped there too.
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const { spawn } = await import("node:child_process");
+  const slow = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: path.dirname(path.dirname(queue)), env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "30000" }), windowsHide: true, stdio: "ignore" });
+  const ended = new Promise((resolve) => slow.once("close", resolve));
+  let stoppedId = null;
+  for (const until = Date.now() + 30_000; !stoppedId && Date.now() < until;) {
+    for (const name of await fsp.readdir(path.join(queue, "run-locks")).catch(() => [])) {
+      if (!name.endsWith(".process.json")) continue;
+      const record = JSON.parse(await fsp.readFile(path.join(queue, "run-locks", name), "utf8").catch(() => "{}"));
+      if (record.role === "writer") stoppedId = name.replace(".process.json", "");
+    }
+    if (!stoppedId) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(stoppedId, "the writer never started");
+  assert.equal(cli(["stop", stoppedId]).status, 0);
+  await ended;
+  const [stopped] = await queryRecords("select status, closed_reason from runs where run_id = $1", [stoppedId]);
+  assert.equal(stopped.status, "stopped");
+
+  // clean <run_id>: one delete takes the run's rows; its authorization and claim stay.
+  const owned = async () => Object.fromEntries(await Promise.all(["runs", "run_events", "gate_a_results", "review_results", "review_verdicts", "acceptance_decisions", "acceptance_rows"]
+    .map(async (table) => [table, (await queryRecords("select count(*)::int as n from " + table + " where run_id = $1", [runId]))[0].n])));
+  assert.ok(Object.values(await owned()).every((n) => n > 0));
+  assert.equal(cli(["clean", runId]).status, 0);
+  assert.ok(Object.values(await owned()).every((n) => n === 0), JSON.stringify(await owned()));
+  assert.equal((await queryRecords("select count(*)::int as n from authorization_claims where run_id = $1", [runId]))[0].n, 1, "the card stays used");
 });
 
 // E10: a card never shown because the reviewer check did not pass is withdrawn in the records, so no

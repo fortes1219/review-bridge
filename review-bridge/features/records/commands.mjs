@@ -26,7 +26,9 @@ export async function runPrune(paths, { json = false, out = process.stdout, deli
   }
 }
 
-export async function removeRecord(paths, runId, { deliver }) {
+// `forget(runId)` removes the run from the person's database once its files are gone (passed in by
+// the router; a project without records passes nothing).
+export async function removeRecord(paths, runId, { deliver, forget = null }) {
   if (!runId) throw new Error("rm requires a run id.");
   // rm folds the run into the archive; a run without a result gets one first. If that fails the
   // human's removal still happens, but the day file marks it and the output says why.
@@ -35,6 +37,7 @@ export async function removeRecord(paths, runId, { deliver }) {
     .then((delivery) => { if (delivery?.skipped) deliveryError = delivery.reason; })
     .catch((error) => { deliveryError = String(error?.message || error); });
   const result = await removeRun(paths, runId);
+  if (result.exitCode === 0 && forget) await forget(runId);
   process.stdout.write(result.line + "\n");
   if (result.undelivered) {
     process.stdout.write("結果沒交付成功：" + (deliveryError || "原因不明") + "，已標記未交付後移除\n");

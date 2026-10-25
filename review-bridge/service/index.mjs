@@ -13,6 +13,7 @@ export * from "./records/fileStore.mjs";
 export * from "./records/ioEvents.mjs";
 export * from "./records/policySnapshots.mjs";
 export * from "./records/probeAudit.mjs";
+export * from "./records/runRecords.mjs";
 export * from "./records/runStore.mjs";
 
 // The installer and bridge.mjs read the runtime source through this entry too; these pure tools

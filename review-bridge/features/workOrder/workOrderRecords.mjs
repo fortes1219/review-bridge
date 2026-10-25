@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
+import { insertRun, runRecorder } from "../../service/index.mjs";
 import { canonical, digest } from "../../utils/digest.mjs";
 import { workOrderChange } from "./delivery.mjs";
 
@@ -95,7 +96,7 @@ export async function ensureProject(db, { projectId, root }) {
     [projectId, root, path.basename(root), now],
   );
   if (rows[0].cleared_at) {
-    throw new Error("This project's records were cleared (clean --project); its id is not used again. Run: review-bridge uninstall, then review-bridge init");
+    throw new Error("This project's records were cleared (clean --all); its id is not used again. Run: review-bridge uninstall, then review-bridge init");
   }
 }
 
@@ -143,9 +144,13 @@ export async function cardUsed(db, planSha256) {
 // The start, in one transaction with the file authorization `authorize` makes: the card is locked,
 // a used one is refused, then the work order (new, or the card's) and its version, the
 // authorization and its claim are written. Two --yes to one card queue on the lock; the second
-// finds the claim and is refused, and `authorize` never runs for it. Anything that fails rolls the
-// whole start back; `authorize`'s own run is closed by the caller.
+// finds the claim and is refused, and `authorize` never runs for it. The run's events made while
+// authorizing (its start, an earlier version closed as superseded) are held and written here, after
+// the run's row (step 3). Anything that fails rolls the whole start back; `authorize`'s own run is
+// closed by the caller.
 export async function recordStart(db, { planSha256, authorize }) {
+  const recorder = runRecorder();
+  if (!recorder) throw new Error("This process keeps no run records; a start is refused.");
   return await db.transaction(async (tx) => {
     const { rows } = await tx.query("select project_id, body, withdrawn_at from plans where plan_sha256 = $1 for update", [planSha256]);
     if (!rows.length) throw new Error("This plan is not in Bridge's records. Run: review-bridge start <file> again");
@@ -153,7 +158,14 @@ export async function recordStart(db, { planSha256, authorize }) {
     const used = await tx.query("select 1 from authorization_claims where claim_key = $1", ["plan-" + planSha256]);
     if (used.rows.length) throw new Error("This card was already said yes to; one card starts one run. Run: review-bridge start <file> again");
     const { project_id: projectId, body: plan } = rows[0];
-    const started = await authorize();
+    recorder.hold();
+    let started;
+    try {
+      started = await authorize();
+    } catch (error) {
+      recorder.drop();
+      throw error;
+    }
     const now = new Date().toISOString();
     const workOrder = plan.work_order || { decision: "new", title: titleOf(plan.task, plan.task_file) };
     let workOrderId = workOrder.work_order_id;
@@ -189,7 +201,16 @@ export async function recordStart(db, { planSha256, authorize }) {
       ["plan-" + planSha256, authorization.authorization_id, started.run.run_id, started.run.created_at],
     );
     await tx.query("update projects set last_activity_at = $2 where project_id = $1", [projectId, now]);
+    try {
+      await insertRun(tx, { run: started.run, projectId, workOrderId, contentSha256: plan.task_sha256, planSha256, repoRoot: plan.repo_root });
+      await recorder.flush(tx);
+    } finally {
+      recorder.drop();
+    }
     return { ...started, workOrderId, versionNo: version.rows[0].version_no };
+  }).catch((error) => {
+    recorder.drop();
+    throw error;
   });
 }
 
@@ -204,13 +225,15 @@ export async function recordContract(db, { workOrderId, contentSha256, contractS
   );
 }
 
-// clean --project: the project's records go in one transaction; its id is kept as cleared.
+// clean --all: the project's records go in one transaction; its id is kept as cleared.
 export async function clearProject(db, projectId) {
   return await db.transaction(async (tx) => {
     const plans = "select plan_sha256 from plans where project_id = $1";
     const orders = "select work_order_id from work_orders where project_id = $1";
     const counts = {};
     const remove = async (table, sql) => { counts[table] = (await tx.query(sql, [projectId])).rowCount; };
+    // A run's events and facts go with it (on delete cascade).
+    await remove("runs", "delete from runs where project_id = $1");
     await remove("authorization_claims", "delete from authorization_claims where authorization_id in (select authorization_id from authorizations where plan_sha256 in (" + plans + "))");
     await remove("authorizations", "delete from authorizations where plan_sha256 in (" + plans + ")");
     await remove("contracts", "delete from contracts where work_order_id in (" + orders + ")");

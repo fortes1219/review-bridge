@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `init` adds Claude Code's `/review-bridge` command (`.claude/commands/review-bridge.md`, only when there is none) and the same note in `AGENTS.md` (appended between markers). Rollback and `uninstall` remove both unless they were edited.
 - Every command has `--help`, generated from the command table with each option's type, default and help line. `--help --all` also lists the commands and options for agents and tests. README's Commands section is generated from the same table, and CI fails when it is out of date.
 - Work orders, their versions, plans, authorizations and contracts are recorded in your database (embedded PostgreSQL, one for all your projects; created on first use and migrated by dated migration files). `init` gives the project an id in `bridge.json`; `upgrade` adds one to an older project. The card says which work order the yes starts (a new one, a new version of one, or the same version with new settings); `--update <work_order_id>` and `--as-new` print a card that says otherwise. `--yes` finds its card in the database, and two `--yes` to one card start one run. The files under `.review-bridge/` are kept as the running copy.
-- `clean --project` clears this project's records from your database; the project id is not used again.
+- Runs are recorded in your database too: the run, its events in one sequence, Gate A's result, the reviewer's verdict per condition and findings, Bridge's acceptance decision per condition, and the delivery. A run's state changes in the same transaction as the event that changes it. `clean <run_id>` removes the run and everything it owns in one delete; its authorization stays, so its card never takes another yes.
+- `doctor` on Windows says when PowerShell does not write UTF-8 (Codex's Chinese output then arrives broken) and which line to add to `$PROFILE`; README's Platforms section explains it.
+- `clean --all` clears this project's records from your database; the project id is not used again. `--project <folder>` still names the project, so `clean --all --project <folder>` clears that one.
 
 ### Fixed
 

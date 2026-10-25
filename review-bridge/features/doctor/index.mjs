@@ -4,8 +4,13 @@ import { fileExists, listJson, listRuns, loadOrCreatePolicySnapshot, readJson } 
 import { validateClassificationProfile } from "../../policy/policyChecks.mjs";
 import { classificationProfileFromSnapshot, codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { inspectStateFilesystem } from "../../utils/filesystem.mjs";
+import { consoleEncodingHint, powershellCodePage } from "./consoleEncoding.mjs";
 
-export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = process.version }) {
+// `codePage` is the one PowerShell writes in (asked only on Windows); tests pass it in.
+export async function inspectDoctor({
+  paths, adapter, manifest, nodeVersion = process.version, platform = process.platform,
+  codePage = platform === "win32" ? powershellCodePage() : null,
+}) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
     throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
   }
@@ -22,6 +27,7 @@ export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = pr
     profileValid = false;
     profileError = error.message;
   }
+  const encodingHint = consoleEncodingHint({ platform, codePage });
   const runs = await listRuns(paths);
   const active = runs.filter((run) => ["running", "review_pending", "correction_pending", "interrupted"].includes(run.status));
   const queue = {};
@@ -45,6 +51,7 @@ export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = pr
       adapter: adapter.id,
       commands: manifest.commands,
       node: nodeVersion,
+      ...(platform === "win32" ? { powershell_code_page: codePage } : {}),
     },
     authorization: {
       schema_version: 4,
@@ -59,7 +66,10 @@ export async function inspectDoctor({ paths, adapter, manifest, nodeVersion = pr
       effective_policy_sha256: snapshot.effective_policy_sha256,
     },
     queue,
-    warnings: active.length ? [] : ["no active run; create and authorize a work package to begin"],
+    warnings: [
+      ...(encodingHint ? [encodingHint] : []),
+      ...(active.length ? [] : ["no active run; create and authorize a work package to begin"]),
+    ],
     bounded_resume_ready: active.length === 1 && queue.pending === 0 && queue.running === 0,
   };
 }

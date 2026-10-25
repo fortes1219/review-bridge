@@ -437,11 +437,11 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
   return await runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerCheck, plan, again });
 }
 
-// `clean --project` (Owner 2026-10-25): the project's work orders, versions, plans, authorizations
+// `clean --all` (Owner 2026-10-25): the project's work orders, versions, plans, authorizations
 // and contracts leave the person's database in one transaction; the project id is kept as cleared
 // and never used again. Refused while one of its runs is running, and with a run id.
 export async function clearProjectRecords({ paths, runId, options }) {
-  if (runId) throw new Error("clean --project clears the whole project; give no run id. Run: review-bridge clean --project");
+  if (runId) throw new Error("clean --all clears the whole project; give no run id. Run: review-bridge clean --all");
   const work = await workPackageStatus(paths);
   if (work.active_runs) throw new Error(work.active_runs + " run(s) of this project are running. Stop them first: review-bridge stop <run_id>");
   const { db, projectId } = await openRecords(paths);
@@ -451,7 +451,7 @@ export async function clearProjectRecords({ paths, runId, options }) {
     return 0;
   }
   write("Cleared this project's records: " + counts.work_orders + " work order(s), " + counts.work_order_versions + " version(s), "
-    + counts.plans + " plan(s), " + counts.authorizations + " authorization(s), " + counts.contracts + " contract(s).");
+    + counts.plans + " plan(s), " + counts.authorizations + " authorization(s), " + counts.contracts + " contract(s), " + counts.runs + " run(s).");
   write("This project's id is not used again. To use Bridge here again: review-bridge uninstall --target ., then review-bridge init");
   return 0;
 }

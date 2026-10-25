@@ -15,6 +15,7 @@ import {
 import { codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { loadOrCreatePolicySnapshot } from "./policySnapshots.mjs";
+import { runRecorder } from "./runRecords.mjs";
 
 // The one list of run statuses; retention and the CLI read it from here so a new terminal
 // status cannot be forgotten by the archive again.
@@ -260,6 +261,8 @@ async function appendProjectionEvent(paths, previous, next, type, details, clock
       projected.recovery_window_seconds,
     );
   }
+  // The database first (RC3-BLOCKER-01 step 3): the event and the state it sets, in one transaction.
+  await runRecorder()?.projection({ run: projected, type, details, occurredAt, substantive });
   await appendJsonLineDurable(eventFile(paths, projected.run_id), {
     schema_version: 4,
     run_id: projected.run_id,

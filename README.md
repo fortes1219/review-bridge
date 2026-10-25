@@ -183,7 +183,7 @@ Usage: review-bridge clean [<run_id>] [options]
 Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
 
 Options:
-  --project
+  --all
       Clear this project's work orders, versions, plans and contracts from your database (refused while a run is running) (boolean)
   --json
       Print the result as JSON (without a run id) (boolean)
@@ -541,6 +541,16 @@ npm uninstall -g review-bridge    # remove a project's setup first: review-bridg
 ## Platforms
 
 Windows x64 is native-verified. Apple Silicon macOS is a selectable candidate, not native-verified. Linux is experimental and fails closed for native work.
+
+### Windows
+
+Codex runs its commands in Windows PowerShell, which loads your `$PROFILE`. On a Windows set to Chinese (or any non-UTF-8 code page), PowerShell writes in that code page and Codex reads it as UTF-8, so its Chinese output arrives broken. Add this line to your profile (`notepad $PROFILE` in PowerShell; create the file if it does not exist):
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+```
+
+Or use PowerShell 7 (`pwsh`), which writes UTF-8. `review-bridge doctor` tells you when PowerShell does not write UTF-8; it never changes your profile.
 
 ## Development
 
