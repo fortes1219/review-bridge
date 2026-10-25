@@ -6,7 +6,8 @@ import path from "node:path";
 import readline from "node:readline/promises";
 
 import {
-  assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView, readJson, writeJson,
+  activeRuns, assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
+  projectRuns, readJson, recordsDatabase, runDetail, writeJson,
 } from "../../service/index.mjs";
 import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
 import { loadContract } from "./contract.mjs";
@@ -25,7 +26,7 @@ import {
   workPackageStatus,
 } from "./workPackage.mjs";
 import {
-  cardFor, cardUsed, clearProject, ensureProject, identifyWorkOrder, markCardShown, recordCard, recordContract, recordStart, withdrawCard,
+  canonicalTaskFile, cardFor, cardUsed, clearProject, ensureProject, identifyWorkOrder, markCardShown, recordCard, recordContract, recordStart, withdrawCard,
 } from "./workOrderRecords.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
 
@@ -80,14 +81,15 @@ const planPathFor = (paths, options) => {
 async function openRecords(paths) {
   const config = await readJson(paths.bridgeConfigPath);
   if (!config.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: review-bridge upgrade");
-  const { openDatabase } = await import("../../service/database/index.mjs");
-  const db = await openDatabase();
+  // The router's opener writes a run's kept events first; a direct call opens it plainly.
+  const database = recordsDatabase() || (async () => (await import("../../service/database/index.mjs")).openDatabase());
+  const db = await database();
   await ensureProject(db, { projectId: config.project_id, root: paths.repoRoot });
   return { db, projectId: config.project_id };
 }
 
-// The work order's path in the project, as the plan's task_file names it.
-const taskFileOf = (paths, file) => path.relative(paths.repoRoot, path.resolve(file)).split(path.sep).join("/");
+// The work order's path in the project, spelled as the file system spells it (the records' key).
+const taskFileOf = (paths, file) => canonicalTaskFile(paths.repoRoot, path.resolve(file));
 
 async function planFromOptions({ paths, options, command }) {
   const named = workPackageName(options);
@@ -442,9 +444,9 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
 // and never used again. Refused while one of its runs is running, and with a run id.
 export async function clearProjectRecords({ paths, runId, options }) {
   if (runId) throw new Error("clean --all clears the whole project; give no run id. Run: review-bridge clean --all");
-  const work = await workPackageStatus(paths);
-  if (work.active_runs) throw new Error(work.active_runs + " run(s) of this project are running. Stop them first: review-bridge stop <run_id>");
   const { db, projectId } = await openRecords(paths);
+  const active = await activeRuns(db, projectId);
+  if (active.length) throw new Error(active.length + " run(s) of this project are running. Stop them first: review-bridge stop " + active[0].run_id);
   const counts = await clearProject(db, projectId);
   if (options.json) {
     write(JSON.stringify({ project_id: projectId, cleared: counts }, null, 2));
@@ -456,8 +458,10 @@ export async function clearProjectRecords({ paths, runId, options }) {
   return 0;
 }
 
-// `status`: what Bridge is doing now: the page, the latest runs (newest first, at most ten) and
-// the review queue. --json gives the same three parts whole.
+// `status`: what Bridge is doing now, from the person's database (RC3-BLOCKER-01 step 4): the page,
+// this project's runs (Q12, newest first, ten at a time; --after <run_id> is the next page), how
+// many are running (Q6), the review queue, and how to look at the tables yourself. --json gives
+// the same parts whole.
 const STATUS_RUNS = 10;
 
 export async function statusOverview({ paths, options, page }) {
@@ -466,30 +470,43 @@ export async function statusOverview({ paths, options, page }) {
     return 0;
   }
   const service = await page();
-  const work = await workPackageStatus(paths);
+  const { db, projectId } = await openRecords(paths);
+  const { runs, more } = await projectRuns(db, projectId, { limit: STATUS_RUNS, after: options.after || null });
+  const active = await activeRuns(db, projectId);
   const queue = await queueStatus(paths);
   if (options.json) {
-    write(JSON.stringify({ page: { running: service.running, url: service.url, reason: service.reason }, work, review_queue: queue }, null, 2));
+    write(JSON.stringify({
+      page: { running: service.running, url: service.url, reason: service.reason },
+      project_id: projectId, active_runs: active.length, runs, more, review_queue: queue, database: db.connection,
+    }, null, 2));
     return 0;
   }
   write("Page: " + (service.running ? service.url : "not running; start it with review-bridge up"));
-  const runs = work.runs || [];
-  if (!runs.length) {
+  if (!runs.length && !options.after) {
     write("Work: none yet. Put a work order in .review-bridge/work-packages/ and run: review-bridge start <file>");
   } else {
-    write("Work: " + work.active_runs + " running, " + runs.length + " run(s) on record");
-    for (const run of runs.slice(0, STATUS_RUNS)) {
-      write("  " + run.run_id + "  " + run.status.padEnd(14) + "  " + (run.work_package || "-") + "  " + (run.updated_at || ""));
+    write("Work: " + active.length + " running");
+    for (const run of runs) {
+      write("  " + [run.run_id, run.status.padEnd(14), (run.closed_reason || "-").padEnd(20), run.source_file, run.created_at.toISOString()].join("  "));
     }
-    if (runs.length > STATUS_RUNS) write("  … " + (runs.length - STATUS_RUNS) + " older; all of them: review-bridge work-status");
+    if (more) write("  More: review-bridge status --after " + runs.at(-1).run_id);
   }
   write("Review queue: pending " + queue.pending + ", running " + queue.running + ", done " + queue.done + ", failed " + queue.failed);
   if (queue.latest_review) write("Latest review: " + queue.latest_review);
+  const { host, port, database, user, passwordFile } = db.connection;
+  write("Database: host " + host + "  port " + port + "  database " + database + "  user " + user);
+  write("          password file: " + passwordFile);
   return 0;
 }
 
-export async function workStatus({ paths }) {
-  process.stdout.write(JSON.stringify(await workPackageStatus(paths), null, 2) + "\n");
+// `work-status`: the same runs as JSON for agents and scripts, with the newest one in detail: its
+// work order version and contract, the yes, the plan's stop point, scope and budget, the last stop.
+export async function workStatus({ paths, options }) {
+  const { db, projectId } = await openRecords(paths);
+  const { runs, more } = await projectRuns(db, projectId, { limit: STATUS_RUNS, after: options.after || null });
+  const active = await activeRuns(db, projectId);
+  const latest = runs.length ? await runDetail(db, runs[0].run_id) : null;
+  write(JSON.stringify({ project_id: projectId, active_runs: active.length, latest_run: latest, runs, more }, null, 2));
   return 0;
 }
 

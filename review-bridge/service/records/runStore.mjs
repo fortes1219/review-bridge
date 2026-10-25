@@ -15,7 +15,7 @@ import {
 import { codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { loadOrCreatePolicySnapshot } from "./policySnapshots.mjs";
-import { runRecorder } from "./runRecords.mjs";
+import { DatabaseUnavailableError, runRecorder } from "./runRecords.mjs";
 
 // The one list of run statuses; retention and the CLI read it from here so a new terminal
 // status cannot be forgotten by the archive again.
@@ -262,7 +262,14 @@ async function appendProjectionEvent(paths, previous, next, type, details, clock
     );
   }
   // The database first (RC3-BLOCKER-01 step 3): the event and the state it sets, in one transaction.
-  await runRecorder()?.projection({ run: projected, type, details, occurredAt, substantive });
+  // When the database is gone the file is still written, then the run is told (it stops).
+  let gone = null;
+  try {
+    await runRecorder()?.projection({ paths, run: projected, type, details, occurredAt, substantive });
+  } catch (error) {
+    if (!(error instanceof DatabaseUnavailableError)) throw error;
+    gone = error;
+  }
   await appendJsonLineDurable(eventFile(paths, projected.run_id), {
     schema_version: 4,
     run_id: projected.run_id,
@@ -274,6 +281,7 @@ async function appendProjectionEvent(paths, previous, next, type, details, clock
     projection: projected,
   });
   await writeJsonAtomicDurable(runFile(paths, projected.run_id), projected);
+  if (gone) throw gone;
   return projected;
 }
 

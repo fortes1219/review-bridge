@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { fileExists, listJson, listRuns, loadOrCreatePolicySnapshot, readJson } from "../../service/index.mjs";
+import { activeRuns, fileExists, listJson, listRuns, loadOrCreatePolicySnapshot, readJson } from "../../service/index.mjs";
 import { validateClassificationProfile } from "../../policy/policyChecks.mjs";
 import { classificationProfileFromSnapshot, codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { inspectStateFilesystem } from "../../utils/filesystem.mjs";
@@ -28,8 +28,11 @@ export async function inspectDoctor({
     profileError = error.message;
   }
   const encodingHint = consoleEncodingHint({ platform, codePage });
-  const runs = await listRuns(paths);
-  const active = runs.filter((run) => ["running", "review_pending", "correction_pending", "interrupted"].includes(run.status));
+  // RC3-BLOCKER-01 step 4: a project with an id reads its running runs from the person's database
+  // (and stops with the reason when it cannot be opened); one set up before ids reads its files.
+  const active = bridgeConfig.project_id
+    ? await activeRuns(await (await import("../../service/database/index.mjs")).openDatabase(), bridgeConfig.project_id)
+    : (await listRuns(paths, { activeOnly: true }));
   const queue = {};
   for (const [state, directory] of Object.entries({
     pending: paths.pendingDir, running: paths.runningDir, done: paths.doneDir, failed: paths.failedDir,
@@ -43,7 +46,7 @@ export async function inspectDoctor({
       // and never reads the editable audit file or a stored Boolean as proof.
       reviewer_readonly_proven: "not_run",
       reviewer_readonly_authority: "watch_session_only",
-      reason: "Native work-start needs an interactive terminal confirmation and a reviewer read-only check passed in the running Bridge page; doctor cannot see that proof.",
+      reason: "Native work starts on the person's yes to the card (at a terminal, or through an agent with --yes) after the reviewer read-only check passed in the running Bridge page; doctor cannot see that proof.",
     } : null,
     state_filesystem: inspectStateFilesystem(paths.repoRoot),
     platform: {

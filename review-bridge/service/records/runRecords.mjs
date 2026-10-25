@@ -1,12 +1,28 @@
 // Every fact a run writes also goes into the person's database (RC3-BLOCKER-01 step 3): the run, its
 // one ordered timeline (state events and I/O events in one sequence), Gate A, the review's verdicts
 // and findings, Bridge's acceptance decision, the delivery. appendProjectionEvent and appendIoEvent
-// hand each event to the recorder a command installed; the files stay the running copy and are still
-// what is read until step 4.
+// hand each event to the recorder a command installed; the files stay the running copy. The reads a
+// person and an agent use (status, work-status, doctor) come from here too (step 4).
 //
 // One event is one transaction: the run's row is locked, the next sequence taken, the event and its
 // facts written, and the run's state columns set from the same event, so they never disagree. A run
 // the database does not know (started before Bridge kept its records there) is left to its files.
+import fsp from "node:fs/promises";
+import path from "node:path";
+
+import { appendJsonLineDurable } from "./fileStore.mjs";
+
+// The person's database could not be reached: not started, gone mid-run, or refused at the door. A
+// read says so and exits; a run stops with database_unavailable and calls no model after it.
+export class DatabaseUnavailableError extends Error {
+  constructor(cause, root = null) {
+    super("Bridge's database " + (root ? "at " + root + " " : "") + "is not available: " + String(cause?.message || cause).trim().replace(/\.$/, "")
+      + (root ? ". Run the command again; if it fails the same way, look at that folder (the server's log is in " + path.join(root, "data", "log") + ")" : ""));
+    this.name = "DatabaseUnavailableError";
+    this.cause = cause;
+    this.root = root;
+  }
+}
 
 // Fields each fact table holds; the rest of the event stays in run_events.payload, so every field
 // is in one place.
@@ -93,24 +109,47 @@ async function append(client, entry) {
   return true;
 }
 
+// Events the database could not take while it was gone, kept beside the run's files until the next
+// command that opens the database writes them there (replayUnrecorded), in the order they happened.
+const unrecordedDir = (paths) => path.join(paths.queueRoot, "unrecorded");
+const unrecordedFile = (paths, runId) => path.join(unrecordedDir(paths), runId + ".jsonl");
+
 // The recorder a command installs; `database` opens the person's database on the first event. While a
 // start is being recorded (hold), events are kept and written inside the start's own transaction
 // once the new run's row exists (flush): an earlier version's run is closed as superseded by it in
-// the same transaction.
+// the same transaction. When the database is gone, the event that found it gone is kept as
+// unrecorded and the error is thrown (the run stops); every event after it is kept the same way
+// without trying again, so the run's stop and delivery are not lost.
 export function createRunRecorder(database) {
   let held = null;
-  const write = async (entry) => {
+  let gone = false;
+  const keep = async (paths, entry) => {
+    await fsp.mkdir(unrecordedDir(paths), { recursive: true });
+    await appendJsonLineDurable(unrecordedFile(paths, entry.runId), entry);
+  };
+  const write = async (paths, entry) => {
     if (held) {
       held.push(entry);
       return;
     }
-    await (await database()).transaction((tx) => append(tx, entry));
+    if (gone) {
+      await keep(paths, entry);
+      return;
+    }
+    try {
+      await (await database()).transaction((tx) => append(tx, entry));
+    } catch (error) {
+      if (!(error instanceof DatabaseUnavailableError)) throw error;
+      gone = true;
+      await keep(paths, entry);
+      throw error;
+    }
   };
   return {
-    projection: ({ run, type, details, occurredAt, substantive }) => write({
+    projection: ({ paths, run, type, details, occurredAt, substantive }) => write(paths, {
       runId: run.run_id, type, occurredAt, state: run, body: { ...(details || {}), ...(substantive ? {} : { substantive: false }) },
     }),
-    io: (record) => write({ runId: record.run_id, type: record.event, occurredAt: record.occurred_at, state: null, body: without(record, ENVELOPE) }),
+    io: (paths, record) => write(paths, { runId: record.run_id, type: record.event, occurredAt: record.occurred_at, state: null, body: without(record, ENVELOPE) }),
     hold() { held = []; },
     async flush(tx) {
       const entries = held || [];
@@ -122,9 +161,86 @@ export function createRunRecorder(database) {
 }
 
 let installed = null;
-// The command's recorder; null in a process that keeps no records (a unit test of the files alone).
-export function installRunRecorder(recorder) { installed = recorder; }
+let installedDatabase = null;
+// The command's recorder and how it opens the database; null in a process that keeps no records (a
+// unit test of the files alone, or a project set up before it had an id), which reads its files.
+export function installRunRecorder(recorder, database = null) {
+  installed = recorder;
+  installedDatabase = database;
+}
 export function runRecorder() { return installed; }
+export function recordsDatabase() { return installedDatabase; }
+
+const ACTIVE = "('running', 'review_pending', 'correction_pending', 'interrupted')";
+
+// Q12: a project's runs, newest first, one page; `after` is the last run id of the page before.
+export async function projectRuns(db, projectId, { limit = 10, after = null } = {}) {
+  const { rows } = await db.query(
+    "select r.run_id, r.status, r.closed_reason, r.outcome, r.created_at, r.closed_at, p.source_file, a.authorized_via"
+    + " from runs r join plans p using (plan_sha256) left join authorizations a on a.plan_sha256 = r.plan_sha256 and a.kind = 'start'"
+    + " where r.project_id = $1 and ($3::uuid is null or (r.created_at, r.run_id) < (select created_at, run_id from runs where run_id = $3::uuid))"
+    + " order by r.created_at desc, r.run_id desc limit $2",
+    [projectId, limit + 1, after],
+  );
+  return { runs: rows.slice(0, limit), more: rows.length > limit };
+}
+
+// Q6: the project's running runs.
+export async function activeRuns(db, projectId) {
+  return (await db.query("select run_id, work_order_id, content_sha256, status from runs where project_id = $1 and status in " + ACTIVE + " order by created_at", [projectId])).rows;
+}
+
+// The running runs of one work order (a start replaces them; an unchanged one refuses the start).
+export async function activeRunsOfWorkOrder(db, workOrderId) {
+  return (await db.query("select run_id, content_sha256 from runs where work_order_id = $1 and status in " + ACTIVE, [workOrderId])).rows;
+}
+
+// A project's ended runs without a delivery, oldest first, at most `limit`.
+export async function undeliveredRuns(db, projectId, { limit = 50 } = {}) {
+  return (await db.query("select run_id from runs where project_id = $1 and outcome is null and closed_at is not null order by closed_at limit $2", [projectId, limit])).rows;
+}
+
+// One run as work-status shows it: its state, its work order version and contract, the yes, the
+// plan's stop point, scope and budget, and the last stop the controller recorded.
+export async function runDetail(db, runId) {
+  const { rows } = await db.query(
+    "select r.run_id, r.status, r.closed_reason, r.outcome, r.created_at, r.closed_at, r.updated_at, r.execution_mode, r.contract_sha256,"
+    + " r.work_order_id, v.version_no, v.title, p.source_file, p.body->'breakpoint' as breakpoint, p.body->'scope' as scope, p.body->'budget' as budget,"
+    + " a.authorized_by, a.authorized_via,"
+    + " (select payload from run_events e where e.run_id = r.run_id and e.type = 'stop' order by sequence desc limit 1) as last_stop"
+    + " from runs r join plans p using (plan_sha256) join work_order_versions v on v.work_order_id = r.work_order_id and v.content_sha256 = r.content_sha256"
+    + " left join authorizations a on a.plan_sha256 = r.plan_sha256 and a.kind = 'start' where r.run_id = $1",
+    [runId],
+  );
+  return rows[0] || null;
+}
+
+// The events a run kept while the database was gone, written now in their order. Each file is
+// moved aside before it is read, so a run still keeping events starts a new one that the next pass
+// writes. A run the database does not know is left to its files.
+export async function replayUnrecorded(db, paths) {
+  let names;
+  try {
+    names = (await fsp.readdir(unrecordedDir(paths))).filter((name) => name.endsWith(".jsonl"));
+  } catch (error) {
+    if (error.code === "ENOENT") return 0;
+    throw error;
+  }
+  let written = 0;
+  for (const name of names) {
+    const taken = path.join(unrecordedDir(paths), name + ".replaying-" + process.pid);
+    try {
+      await fsp.rename(path.join(unrecordedDir(paths), name), taken);
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    const entries = (await fsp.readFile(taken, "utf8")).split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
+    await db.transaction(async (tx) => { for (const entry of entries) if (await append(tx, entry)) written += 1; });
+    await fsp.rm(taken, { force: true });
+  }
+  return written;
+}
 
 // clean <run_id>: the run and every row it owns, in one delete; its authorization and claim stay.
 export async function deleteRunRecords(db, runId) {

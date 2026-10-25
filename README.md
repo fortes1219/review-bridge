@@ -69,7 +69,7 @@ Commands:
   stop <run_id>     Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
   resume <run_id>   Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start
   clean [<run_id>]  Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
-  status            Show what Bridge is doing now: the page, the work and its runs, and the review queue
+  status            Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
   up                Start the local page service in the background
   down              Stop the local page service
   ps                Show whether the local page service is running, and its address
@@ -196,9 +196,11 @@ Options:
 ```text
 Usage: review-bridge status [options]
 
-Show what Bridge is doing now: the page, the work and its runs, and the review queue
+Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
 
 Options:
+  --after <run_id>
+      Show the ten runs after this one (the next page) (string; default: the newest runs)
   --json
       Print the result as JSON (boolean)
   --project <folder>
@@ -396,9 +398,11 @@ Options:
 ```text
 Usage: review-bridge work-status [options]
 
-Show the current work: each run's state, as JSON
+Show the current work as JSON: this project's runs and the newest one in detail
 
 Options:
+  --after <run_id>
+      Show the ten runs after this one (the next page) (string; default: the newest runs)
   --project <folder>
       The project folder (string; default: the current folder)
 ```
@@ -522,6 +526,15 @@ Options:
 - In the project: `.review-bridge/`.
 - For you, shared by all your projects: your settings (`settings.json`, the default roles) and the database, in `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS and `~/.local/share/review-bridge` on Linux. `REVIEW_BRIDGE_DATA_HOME` moves it.
 - Backups made by `upgrade` and `uninstall`: `%LOCALAPPDATA%\CodexReviewBridge\backups` on Windows, or `--backup-root <folder>`. They can hold private work data; do not publish them.
+
+The database is the record; the files under `.review-bridge/` are the running copy. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. `review-bridge status` ends with how to reach it:
+
+```text
+Database: host 127.0.0.1  port 57065  database bridge  user bridge
+          password file: C:\Users\you\AppData\Local\ReviewBridge\postgres\secret
+```
+
+To look at every table in VS Code, install Microsoft's PostgreSQL extension (or SQLTools with its PostgreSQL driver), add a connection with that host, port, database and user, and paste the password from that file (only your user can read it). The server listens on 127.0.0.1 only and keeps running between commands; the port can change when it restarts, so take it from `status`.
 
 ## Upgrade and remove
 

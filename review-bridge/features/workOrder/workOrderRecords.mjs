@@ -2,6 +2,7 @@
 // file is (Q13), the card a plan is (Q14), the yes that starts it, and the contract it was turned
 // into. The plan file under .review-bridge/ is the running copy; the database is the record.
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
@@ -20,6 +21,20 @@ const sameLinesShare = (change, left, right) => {
   return longer ? (longer - Math.max(change.removed.length, change.added.length)) / longer : 0;
 };
 const changedLines = (change) => (change ? Math.max(change.removed.length, change.added.length) : 0);
+
+// The work order's file as the records name it: its path in the project, spelled the way the file
+// system spells it (where names ignore case, farm.md and FARM.md are one file, so one name).
+export function canonicalTaskFile(repoRoot, file) {
+  const real = (target) => { try { return realpathSync.native(target); } catch { return path.resolve(target); } };
+  return path.relative(real(repoRoot), real(path.resolve(repoRoot, file))).split(path.sep).join("/");
+}
+
+// The work order this file belongs to now in the project, or null.
+export async function workOrderOfFile(db, { projectId, fileName }) {
+  const { rows } = await db.query(
+    "select work_order_id from work_orders where project_id = $1 and last_file_name = $2 order by last_activity_at desc limit 1", [projectId, fileName]);
+  return rows[0]?.work_order_id || null;
+}
 
 // The work order's title: its first Markdown heading, else the file name.
 export function titleOf(text, fileName) {
@@ -48,9 +63,14 @@ function decided(kind, workOrderId, title, latest, text) {
 }
 
 // Q13, no model: the work order this file is, as the card will show it. `fileName` is the file's
-// path in the project (.review-bridge/work-packages/<name>.md, the plan's task_file); `update` (a
-// work order id) and `asNew` are how the person or an agent overrides it.
-export async function identifyWorkOrder(db, { projectId, fileName, text, repoRoot, update = null, asNew = false }) {
+// path in the project as canonicalTaskFile names it; `update` (a work order id) and `asNew` are how
+// the person or an agent overrides it. The decision names the file, and says when it was forced new.
+export async function identifyWorkOrder(db, options) {
+  const decision = await decide(db, options);
+  return { ...decision, file: options.fileName, ...(options.asNew ? { as_new: true } : {}) };
+}
+
+async function decide(db, { projectId, fileName, text, repoRoot, update = null, asNew = false }) {
   const title = titleOf(text, fileName);
   if (asNew) return decided("new", null, title, null, text);
   if (update) {
@@ -58,14 +78,8 @@ export async function identifyWorkOrder(db, { projectId, fileName, text, repoRoo
     if (!rows.length) throw new Error("There is no work order " + update + " in this project. Run: review-bridge status");
     return decided("update", update, title, await latestVersion(db, update), text);
   }
-  const named = await db.query(
-    "select work_order_id from work_orders where project_id = $1 and last_file_name = $2 order by last_activity_at desc limit 1",
-    [projectId, fileName],
-  );
-  if (named.rows.length) {
-    const id = named.rows[0].work_order_id;
-    return decided("update", id, title, await latestVersion(db, id), text);
-  }
+  const named = await workOrderOfFile(db, { projectId, fileName });
+  if (named) return decided("update", named, title, await latestVersion(db, named), text);
   // A renamed file: the work orders whose last file is gone, newest first; a copy keeps its original,
   // so the original is never a candidate and the copy is a new work order.
   const { rows } = await db.query(
@@ -111,7 +125,7 @@ export async function recordCard(db, { projectId, plan, snapshot, shown }) {
   await db.query(
     "insert into plans (plan_sha256, project_id, work_order_id, content_sha256, source_file, proposed_run_id, effective_policy_sha256,"
     + " repo_root, authorization_expires_at, body, created_at, shown_at) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-    [plan.plan_sha256, projectId, plan.work_order?.work_order_id || null, plan.task_sha256, plan.task_file, plan.proposed_run_id,
+    [plan.plan_sha256, projectId, plan.work_order?.work_order_id || null, plan.task_sha256, plan.work_order?.file ?? plan.task_file, plan.proposed_run_id,
       plan.effective_policy_sha256, plan.repo_root, plan.authorization_expires_at, body, plan.created_at, shown ? new Date().toISOString() : null],
   );
 }
@@ -158,6 +172,21 @@ export async function recordStart(db, { planSha256, authorize }) {
     const used = await tx.query("select 1 from authorization_claims where claim_key = $1", ["plan-" + planSha256]);
     if (used.rows.length) throw new Error("This card was already said yes to; one card starts one run. Run: review-bridge start <file> again");
     const { project_id: projectId, body: plan } = rows[0];
+    const file = plan.work_order?.file ?? plan.task_file;
+    // One start of a file, and of a work order, at a time (PostgreSQL's advisory lock, released when
+    // this transaction ends). A second start meanwhile is refused at once, as the start lock always
+    // refused it (design step 3: not queued); once the first ends, a new card sees what it made.
+    const keys = [projectId + ":file:" + file, ...(plan.work_order?.work_order_id ? [projectId + ":order:" + plan.work_order.work_order_id] : [])].sort();
+    for (const key of keys) {
+      const { rows: [{ locked }] } = await tx.query("select pg_try_advisory_xact_lock(hashtextextended($1, 0)) as locked", [key]);
+      if (!locked) throw new Error("Another start of " + file + " is in progress; nothing was created. Try again in a moment.");
+    }
+    // A card that said "new work order" is out of date once its file became a work order after it
+    // was shown (another card for the same file was said yes to first); --as-new is meant new.
+    if (plan.work_order?.decision === "new" && !plan.work_order.as_new) {
+      const owner = await workOrderOfFile(tx, { projectId, fileName: file });
+      if (owner) throw new Error("This card was made before " + file + " became work order " + owner + "; nothing was created. Run: review-bridge start " + file + " again to see the card as it is now");
+    }
     recorder.hold();
     let started;
     try {
@@ -173,12 +202,12 @@ export async function recordStart(db, { planSha256, authorize }) {
       workOrderId = randomUUID();
       await tx.query(
         "insert into work_orders (work_order_id, project_id, last_file_name, created_at, last_activity_at) values ($1, $2, $3, $4, $4)",
-        [workOrderId, projectId, plan.task_file, now],
+        [workOrderId, projectId, file, now],
       );
     } else {
       const updated = await tx.query(
         "update work_orders set last_file_name = $3, last_activity_at = $4 where work_order_id = $1 and project_id = $2",
-        [workOrderId, projectId, plan.task_file, now],
+        [workOrderId, projectId, file, now],
       );
       if (!updated.rowCount) throw new Error("The work order " + workOrderId + " this card updates is no longer in Bridge's records. Run: review-bridge start <file> again");
     }
@@ -187,7 +216,7 @@ export async function recordStart(db, { planSha256, authorize }) {
       + " select $1, $2, coalesce(max(version_no), 0) + 1, $3, $4, $5, $6 from work_order_versions where work_order_id = $1"
       + " on conflict (work_order_id, content_sha256) do update set content_sha256 = excluded.content_sha256"
       + " returning version_no",
-      [workOrderId, plan.task_sha256, workOrder.title, plan.task, plan.task_file, now],
+      [workOrderId, plan.task_sha256, workOrder.title, plan.task, file, now],
     );
     const authorization = started.authorization;
     await tx.query(

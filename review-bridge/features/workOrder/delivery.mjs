@@ -11,6 +11,8 @@ import {
   deliverRun,
   listJson,
   listRuns,
+  recordsDatabase,
+  undeliveredRuns,
   loadControlView,
   readIoEvents,
   readJson,
@@ -314,6 +316,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     // The new run is named from the run record, written with the stop; it is said to have replaced
     // this one only if it existed when this result was written.
     if (run.closed_reason === "superseded") why.push(t(successorExists ? "result.why.superseded" : "result.why.superseded.pending", { run_id: run.superseded_by || t("result.acceptance.none") }));
+    else if (run.closed_reason === "database_unavailable") why.push(t("result.why.database_unavailable"));
     else if (stop?.role) why.push(t("result.why.stopped", { call: state.call ?? calls, role: t.has("result.tokens.role." + stop.role) ? t("result.tokens.role." + stop.role) : stop.role }));
     else why.push(t("result.why.stopped.unknown"));
   } else if (outcome === "cancelled") {
@@ -411,7 +414,8 @@ function oneLine({ t, outcome, review, gate, workPackage, state, failure, stop, 
     case "needs_human": return t("line.needs_human");
     case "token_limit": return t("line.token_limit", { role: t("result.tokens.role." + (state.token_limit_role || stop?.role || "writer")) });
     case "quota": return t("line.quota", { role: t("result.tokens.role." + (failure?.role || "writer")), provider: failure?.provider || "" });
-    case "stopped": return run.closed_reason === "superseded" ? t("line.stopped.superseded") : t("line.stopped");
+    case "stopped": return run.closed_reason === "superseded" ? t("line.stopped.superseded")
+      : run.closed_reason === "database_unavailable" ? t("line.stopped.database") : t("line.stopped");
     case "cancelled": return t("line.cancelled");
     default: return t("line.error", { reason: run.closed_reason || run.status });
   }
@@ -644,9 +648,19 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
 }
 
 // V2.8 (c): runs that ended without a delivery (a crash, a held lock) get one before pruning.
+// With records (RC3-BLOCKER-01 step 4) the candidates come from the database, at most fifty a pass;
+// a process that keeps none reads its files.
+async function undeliveredCandidates(paths) {
+  const database = recordsDatabase();
+  const projectId = database ? (await readJson(paths.bridgeConfigPath).catch(() => null))?.project_id : null;
+  if (!projectId) return await listRuns(paths);
+  const ids = (await undeliveredRuns(await database(), projectId)).map((row) => row.run_id);
+  return (await Promise.all(ids.map((runId) => readRun(paths, runId).catch(() => null)))).filter(Boolean);
+}
+
 export async function deliverPendingRuns(paths, adapter = null) {
   const delivered = [];
-  for (const run of await listRuns(paths)) {
+  for (const run of await undeliveredCandidates(paths)) {
     if (!TERMINAL_RUN_STATUSES.includes(run.status) || run.outcome || run.archived_at) continue;
     try {
       const result = await deliverOutcome({ paths, runId: run.run_id, adapter, notify: false });

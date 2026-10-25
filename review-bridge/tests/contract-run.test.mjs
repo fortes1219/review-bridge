@@ -675,14 +675,22 @@ test("a second start of an unchanged work order that is already running is refus
   // The first run exists and its start has let go of the start lock.
   const old = await startSleeping(rt, first);
   t.after(() => { try { process.kill(old.record.pid); } catch {} });
-  const refused = start(rt, second);
+  // The second card was made before the file became the first's work order (step 4: the records
+  // know a work order by its id): it is out of date, and refused before anything is touched.
+  const stale = start(rt, second);
+  assert.notEqual(stale.status, 0);
+  assert.match(stale.stderr, /This card was made before \.review-bridge\/work-packages\/farm\.md became work order [0-9a-f-]{36}; nothing was created/);
+  await assert.rejects(runOf(rt, second));
+  // A card made now names that work order; its start is refused because the same text is running.
+  const current = await planWork(rt, "farm", SINGLE);
+  const refused = start(rt, current);
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, new RegExp("already running unchanged as run " + first.plan.proposed_run_id + "; nothing was created"));
-  await assert.rejects(runOf(rt, second));
+  await assert.rejects(runOf(rt, current));
   assert.equal((await runOf(rt, first)).status, "running");
   assert.equal(alive(old.record.pid), true);
   // The start card says the start will be refused, not that it will stop the run.
-  const card = spawnSync(process.execPath, [rt.bootstrap, "work-start", "--plan", second.planArg, "--fake-cli"], {
+  const card = spawnSync(process.execPath, [rt.bootstrap, "work-start", "--plan", current.planArg, "--fake-cli"], {
     cwd: rt.root, encoding: "utf8", windowsHide: true, input: "n\n",
   });
   assert.match(card.stdout, new RegExp("already running unchanged as run " + first.plan.proposed_run_id + "; this start will be refused"));

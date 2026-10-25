@@ -5,7 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { appendJsonLineDurable } from "./fileStore.mjs";
-import { runRecorder } from "./runRecords.mjs";
+import { DatabaseUnavailableError, runRecorder } from "./runRecords.mjs";
 
 export const IO_EVENT_SCHEMA_VERSION = 1;
 export const IO_EVENT_TYPES = Object.freeze([
@@ -40,9 +40,17 @@ export async function appendIoEvent(paths, runId, event, clock = Date.now) {
     occurred_at: new Date(clock()).toISOString(),
     ...event,
   };
-  // The database first (RC3-BLOCKER-01 step 3); the file line is the running copy.
-  await runRecorder()?.io(record);
+  // The database first (RC3-BLOCKER-01 step 3); the file line is the running copy. When the database
+  // is gone the line is still written, then the run is told (it stops).
+  let gone = null;
+  try {
+    await runRecorder()?.io(paths, record);
+  } catch (error) {
+    if (!(error instanceof DatabaseUnavailableError)) throw error;
+    gone = error;
+  }
   await appendJsonLineDurable(ioEventFile(paths, runId), record);
+  if (gone) throw gone;
   return record;
 }
 

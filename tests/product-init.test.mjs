@@ -674,6 +674,53 @@ test("a run's events, verdicts, Gate A and delivery are in the database; stop an
   assert.equal((await queryRecords("select count(*)::int as n from authorization_claims where run_id = $1", [runId]))[0].n, 1, "the card stays used");
 });
 
+// RC3-BLOCKER-01 step 4: the database is the one record. A run that loses it mid-way stops with
+// database_unavailable and calls no model after that; once the database is back, status shows the
+// run as it ended. A read that cannot open the database says why and where to look, and exits non-0.
+test("a run whose database goes away stops as database_unavailable; reads without a database say why", async (t) => {
+  const { order, cli, queue } = await fourActionsProject(t, "review-bridge-database-gone-");
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const { spawn } = await import("node:child_process");
+  const root = path.dirname(path.dirname(queue));
+  const child = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: root, env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "6000" }), windowsHide: true, stdio: "ignore" });
+  const exited = new Promise((resolve) => child.once("close", resolve));
+  let runId = null;
+  for (const until = Date.now() + 30_000; !runId && Date.now() < until;) {
+    for (const name of await fsp.readdir(path.join(queue, "run-locks")).catch(() => [])) {
+      if (!name.endsWith(".process.json")) continue;
+      const record = JSON.parse(await fsp.readFile(path.join(queue, "run-locks", name), "utf8").catch(() => "{}"));
+      if (record.role === "writer") runId = name.replace(".process.json", "");
+    }
+    if (!runId) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(runId, "the writer never started");
+  stopServerIn(dataHome);
+  assert.equal(await exited, 69, "the run stops: its database is gone");
+  const events = (await fsp.readFile(path.join(queue, "events", runId + ".io.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  const lost = events.findIndex((event) => event.event === "stop" && event.status === "database_unavailable");
+  assert.ok(lost > 0, "the stop is recorded");
+  assert.equal(events.slice(lost).some((event) => ["task.input", "review.input", "contract.translation", "contract.check"].includes(event.event)), false, "no model call after it");
+  const file = JSON.parse(await fsp.readFile(path.join(queue, "runs", runId + ".json"), "utf8"));
+  assert.deepEqual([file.status, file.closed_reason], ["stopped", "database_unavailable"]);
+  // status opens the database again (it starts the server) and writes what the run kept meanwhile.
+  const status = cli(["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, new RegExp("\\n  " + runId + "  stopped +  database_unavailable +\\.review-bridge/work-packages/hello\\.md  "));
+  const [row] = await queryRecords("select status, closed_reason, outcome from runs where run_id = $1", [runId]);
+  assert.deepEqual(row, { status: "stopped", closed_reason: "database_unavailable", outcome: "stopped" });
+
+  // A database that cannot be opened: each read says why and where, and exits non-0.
+  const broken = path.join(root, "..", path.basename(root) + "-broken-home");
+  await fsp.mkdir(path.join(broken, "postgres"), { recursive: true });
+  await fsp.writeFile(path.join(broken, "postgres", "notes.txt"), "not a cluster\n");
+  t.after(() => fsp.rm(broken, { recursive: true, force: true }));
+  for (const command of ["status", "work-status", "doctor"]) {
+    const read = cli([command], { REVIEW_BRIDGE_DATA_HOME: broken });
+    assert.equal(read.status, 2, command + ": " + read.stdout);
+    assert.match(read.stderr, /^Review bridge failed closed: Bridge's database at .*postgres is not available: The folder .* holds files but no PostgreSQL cluster; Bridge will not touch it\. Run the command again; if it fails the same way, look at that folder \(the server's log is in .*log\)\n$/, command);
+  }
+});
+
 // E10: a card never shown because the reviewer check did not pass is withdrawn in the records, so no
 // later --yes can start it (a card answered no at a terminal is withdrawn the same way; the pty run
 // shows it). The card's "Valid until" is the plan's, as recorded.
@@ -726,8 +773,11 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
 
   const status = cli(["status"]);
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running, 1 run\\(s\\) on record\\n  " + runId + "  stopped +  hello  ", "m"));
+  // From the database: the run, its status, why it stopped, its work order file and when it began.
+  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running\\n  " + runId + "  stopped +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\dT", "m"));
   assert.match(status.stdout, /\nReview queue: pending \d+, running \d+, done \d+, failed \d+\n/);
+  assert.match(status.stdout, /\nDatabase: host 127\.0\.0\.1  port \d+  database bridge  user bridge\n {10}password file: .*[\\/]postgres[\\/]secret\n$/);
+  assert.doesNotMatch(status.stdout, new RegExp((await fsp.readFile(path.join(dataHome, "postgres", "secret"), "utf8")).trim()), "the password itself is not printed");
 
   const card = cli(["resume", runId, "--fake-cli"]);
   assert.equal(card.status, 1);

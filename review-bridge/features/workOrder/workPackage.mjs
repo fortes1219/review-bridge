@@ -6,6 +6,7 @@ import path from "node:path";
 import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
 import {
   acquireLock,
+  activeRunsOfWorkOrder,
   claimStartAuthorization,
   consumeRun,
   createAuthorization,
@@ -18,6 +19,7 @@ import {
   readJson,
   readRun,
   recordRunState,
+  recordsDatabase,
   writeJson,
   writeText,
 } from "../../service/index.mjs";
@@ -287,6 +289,8 @@ export async function workOrderLocation(paths, taskFile, {
 export async function runningVersions(paths, plan) {
   if (!plan.task_file) return [];
   if (await readRun(paths, plan.proposed_run_id).then(() => true, () => false)) return [];
+  const database = recordsDatabase();
+  if (database && plan.work_order) return await runningVersionsOf(paths, plan, await database());
   const location = await workOrderLocation(paths, plan.task_file);
   if (!location) throw new Error("The work order " + plan.task_file + " is missing.");
   const found = [];
@@ -303,6 +307,26 @@ export async function runningVersions(paths, plan) {
     const theirs = control.run?.work_package?.task_file;
     if (!theirs || (await workOrderLocation(paths, theirs)) !== location) continue;
     found.push({ runId: run.run_id, unchanged: RUNNING_STATUSES.has(run.status) && control.run.work_package.task === plan.task });
+  }
+  return found;
+}
+
+// With records (RC3-BLOCKER-01 step 4) the same question is asked of the work order's id, not its
+// place: its running runs from the database, and a stopped one whose kill is not confirmed yet
+// (its process record is still there; there are only as many as processes alive). A new work order
+// has none.
+async function runningVersionsOf(paths, plan, db) {
+  const workOrderId = plan.work_order.work_order_id;
+  if (!workOrderId) return [];
+  const found = (await activeRunsOfWorkOrder(db, workOrderId))
+    .map((row) => ({ runId: row.run_id, unchanged: row.content_sha256 === plan.task_sha256 }));
+  const unconfirmed = (await fsp.readdir(paths.runLocksDir).catch(() => []))
+    .filter((name) => name.endsWith(".process.json")).map((name) => name.slice(0, -".process.json".length))
+    .filter((runId) => !found.some((run) => run.runId === runId));
+  if (unconfirmed.length) {
+    const { rows } = await db.query("select run_id from runs where run_id = any($1::uuid[]) and work_order_id = $2 and status = 'stopped'",
+      [unconfirmed.filter((runId) => /^[0-9a-f-]{36}$/.test(runId)), workOrderId]);
+    found.push(...rows.map((row) => ({ runId: row.run_id, unchanged: false })));
   }
   return found;
 }

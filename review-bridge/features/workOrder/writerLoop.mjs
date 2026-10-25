@@ -17,6 +17,7 @@ import {
   RunEndedError,
   runProcess,
   stopRunRecord,
+  DatabaseUnavailableError,
   tokenTotal,
   usageTotalForRun,
   writeFailureRecord,
@@ -172,6 +173,9 @@ async function checkedContract({ paths, runtimeState, control, contractSha256, s
 
 // A stop before the work exits with the code the writer's or reviewer's own stop of that kind uses;
 // one that needs the human (an unclear work order, an unconfirmed check) exits 0 like needs_human.
+// sysexits' EX_UNAVAILABLE: a service the run needs is gone.
+const DATABASE_UNAVAILABLE_EXIT = 69;
+
 const CONTRACT_EXIT_CODES = Object.freeze({
   needs_human: 0, contract_unconfirmed: 0, claude_failed: 1, reviewer_failed: 1, policy_failure: 1, rate_limited: 75, token_limit: 76, usage_unknown: 76,
   // The status could not be read when a stop check failed closed; the run is closed as stopped.
@@ -918,6 +922,13 @@ export async function runBoundedResume({
     await consumeAuthorization(paths, control, "call_budget_exhausted");
     return 76;
   } catch (error) {
+    // RC3-BLOCKER-01 step 4: the database is the one record; a run that cannot write to it stops here
+    // and calls no model after this. Its stop is kept beside its files until the database is back.
+    if (error instanceof DatabaseUnavailableError) {
+      await recordIo(paths, runtimeState.runId, { event: "stop", status: "database_unavailable", role: "controller", provider: null, detail_ref: "database" }).catch(() => {});
+      await stopRunRecord(paths, runtimeState.runId, { closedReason: "database_unavailable" }).catch(() => {});
+      return DATABASE_UNAVAILABLE_EXIT;
+    }
     if ((await readRunStatus(paths, runtimeState.runId)) === "stopped") return 130;
     const currentState = await runtimeState.getState().catch(() => null);
     const stateBelongsToThisInvocation = Boolean(validation) && currentState?.session_id === validation.session_id

@@ -6,7 +6,8 @@ import pg from "pg";
 
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
 import { applyMigrations } from "./migrate.mjs";
-import { connect, connectionSettings, ensureCluster, postgresBinaries, startServer } from "./postgresServer.mjs";
+import { DatabaseUnavailableError } from "../records/runRecords.mjs";
+import { clusterPaths, connect, connectionSettings, ensureCluster, postgresBinaries, startServer } from "./postgresServer.mjs";
 
 export const DATABASE_NAME = "bridge";
 const opened = new Map();
@@ -38,12 +39,16 @@ async function open(dataHome) {
   } finally {
     client.release();
   }
+  const settings = await connectionSettings(root, { database: DATABASE_NAME });
   return {
     root,
-    query: (sql, values) => pool.query(sql, values),
+    // What a person needs to look at the tables (VS Code's PostgreSQL extension, psql); the
+    // password stays in its owner-only file.
+    connection: { host: settings.host, port: settings.port, database: DATABASE_NAME, user: settings.user, passwordFile: clusterPaths(root).secret },
+    query: (sql, values) => pool.query(sql, values).catch((error) => { throw unavailable(error); }),
     // fn gets a client inside begin/commit; anything it throws rolls the whole transaction back.
     async transaction(fn) {
-      const tx = await pool.connect();
+      const tx = await pool.connect().catch((error) => { throw unavailable(error); });
       try {
         await tx.query("begin");
         const result = await fn(tx);
@@ -51,7 +56,7 @@ async function open(dataHome) {
         return result;
       } catch (error) {
         await tx.query("rollback").catch(() => {});
-        throw error;
+        throw unavailable(error);
       } finally {
         tx.release();
       }
@@ -60,12 +65,19 @@ async function open(dataHome) {
   };
 }
 
+// A server that is gone, stopping or not answering (as opposed to a refused statement).
+const GONE = new Set(["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT", "57P01", "57P02", "57P03"]);
+function unavailable(error) {
+  const gone = GONE.has(error?.code) || /^08/.test(String(error?.code || "")) || /Connection terminated|connection.*(ended|closed)/i.test(String(error?.message));
+  return gone && !(error instanceof DatabaseUnavailableError) ? new DatabaseUnavailableError(error) : error;
+}
+
 // Fails closed: without the database no work order is planned or started.
 export async function openDatabase({ dataHome = bridgeDataHome() } = {}) {
   if (!opened.has(dataHome)) {
     opened.set(dataHome, open(dataHome).catch((error) => {
       opened.delete(dataHome);
-      throw new Error("Bridge's database at " + databaseRoot(dataHome) + " is not available: " + error.message);
+      throw new DatabaseUnavailableError(error, databaseRoot(dataHome));
     }));
   }
   return await opened.get(dataHome);

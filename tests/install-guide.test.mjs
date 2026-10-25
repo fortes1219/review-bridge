@@ -284,7 +284,7 @@ test("--help lists the commands for people; --help --all adds the ones for agent
   const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "roles-check"];
   assert.deepEqual(listed(run("--help").stdout), human);
   assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());
-  assert.match(run("status", "--help").stdout, /Show what Bridge is doing now: the page, the work and its runs, and the review queue/);
+  assert.match(run("status", "--help").stdout, /Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database/);
   assert.match(run("prune", "--help").stdout, /Same as clean without a run id/);
   assert.match(run("rm", "--help").stdout, /Same as clean <run_id>/);
 });

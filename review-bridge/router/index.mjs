@@ -8,16 +8,14 @@ import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mj
 import * as records from "../features/records/index.mjs";
 import * as setupCheck from "../features/setupCheck/index.mjs";
 import * as workOrder from "../features/workOrder/index.mjs";
-import { createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson } from "../service/index.mjs";
+import { createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, recordsDatabase, replayUnrecorded } from "../service/index.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 
 // clean <run_id> also removes the run from the person's database: one delete, and every row it owns
 // goes with it; its authorization and claim stay, so its card never takes another yes.
-const forgetRunRecords = ({ paths }) => async (runId) => {
-  const config = await readJson(paths.bridgeConfigPath).catch(() => null);
-  if (!config?.project_id) return 0;
-  const { openDatabase } = await import("../service/database/index.mjs");
-  return await deleteRunRecords(await openDatabase(), runId);
+const forgetRunRecords = () => async (runId) => {
+  const database = recordsDatabase();
+  return database ? await deleteRunRecords(await database(), runId) : 0;
 };
 
 // A run is given its result before the records fold or remove it; the human is not notified.
@@ -35,6 +33,7 @@ const PROVIDER = "<claude|codex>";
 const FAKE_CLI = { key: "fakeCli", type: "boolean", internal: true, help: "Use the built-in fake CLI instead of a model (tests and self-checks)" };
 const FAKE_SCENARIO = { key: "fakeScenario", type: "string", value: "<name>", default: "PASS", internal: true, help: "Fake CLI outcome: PASS, FAIL_THEN_PASS, HARD_STOP or RATE_LIMIT" };
 const JSON_OUT = { key: "json", type: "boolean", help: "Print the result as JSON" };
+const AFTER = { key: "after", type: "string", value: "<run_id>", default: "the newest runs", help: "Show the ten runs after this one (the next page)" };
 // The person's yes to the card, relayed by an agent: without a terminal start and resume print the
 // card and stop, and the agent runs the same command again with --yes once the person said yes.
 const YES = { key: "yes", type: "boolean", help: "The person said yes to the card; an agent adds this after showing them the card" };
@@ -116,8 +115,8 @@ export const COMMANDS = {
   status: {
     audience: "human",
     configFree: true,
-    summary: "Show what Bridge is doing now: the page, the work and its runs, and the review queue",
-    options: { "--json": { ...JSON_OUT } },
+    summary: "Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database",
+    options: { "--after": AFTER, "--json": { ...JSON_OUT } },
     run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.checkService(context.paths) }),
   },
   up: {
@@ -217,8 +216,8 @@ export const COMMANDS = {
   },
   "work-status": {
     audience: "agent",
-    summary: "Show the current work: each run's state, as JSON",
-    options: {},
+    summary: "Show the current work as JSON: this project's runs and the newest one in detail",
+    options: { "--after": AFTER },
     run: (context) => workOrder.workStatus(context),
   },
   "work-cancel": {
@@ -323,7 +322,15 @@ export function parseCommandLine(command, args) {
 async function recordRunsOf(paths) {
   const config = await readJson(paths.bridgeConfigPath).catch(() => null);
   if (!config?.project_id) return;
-  installRunRecorder(createRunRecorder(async () => (await import("../service/database/index.mjs")).openDatabase()));
+  // Once the database opens, the events a run kept while it was gone are written first.
+  let ready = null;
+  const database = async () => {
+    const db = await (await import("../service/database/index.mjs")).openDatabase();
+    ready ??= replayUnrecorded(db, paths).catch((error) => { ready = null; throw error; });
+    await ready;
+    return db;
+  };
+  installRunRecorder(createRunRecorder(database), database);
 }
 
 // `loadAdapter` is how start and resume take the platform adapter when it was not given: only after
