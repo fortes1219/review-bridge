@@ -15,8 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `review-bridge start <file>`: one command from a work order to its result. It plans the work, runs the reviewer read-only check once per page session, shows what the answer authorizes, asks `Start this work? [y/N]` and prints one line per step. `work-plan` and `work-start` stay for agents and scripts.
 - `init` adds Claude Code's `/review-bridge` command (`.claude/commands/review-bridge.md`, only when there is none) and the same note in `AGENTS.md` (appended between markers). Rollback and `uninstall` remove both unless they were edited.
 - Every command has `--help`, generated from the command table with each option's type, default and help line. `--help --all` also lists the commands and options for agents and tests. README's Commands section is generated from the same table, and CI fails when it is out of date.
+- Work orders, their versions, plans, authorizations and contracts are recorded in your database (embedded PostgreSQL, one for all your projects; created on first use and migrated by dated migration files). `init` gives the project an id in `bridge.json`; `upgrade` adds one to an older project. The card says which work order the yes starts (a new one, a new version of one, or the same version with new settings); `--update <work_order_id>` and `--as-new` print a card that says otherwise. `--yes` finds its card in the database, and two `--yes` to one card start one run. The files under `.review-bridge/` are kept as the running copy.
+- `clean --project` clears this project's records from your database; the project id is not used again.
 
 ### Fixed
+
+- `init` in a Git project whose path is a Windows 8.3 short name (`C:\Users\RUNNER~1\…`, as on GitHub's Windows runners) no longer stops with "Git exclusion path is outside the selected Git directory".
 
 - The reviewer read-only check on a Chinese Windows: PowerShell's denial arrives broken (Codex reads its CP950 output as UTF-8), so it was never recognized. The check now also recognizes PowerShell's `UnauthorizedAccessException`, the English `Access to the path '…' is denied.` and the Chinese 「存取被拒」「拒絕存取」. The probe's output is decoded as one UTF-8 stream.
 - A project type chosen explicitly is set up even when the folder shows no sign of it; a mismatch stops code work at Gate A.

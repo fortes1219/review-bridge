@@ -28,6 +28,8 @@ function takeProject(argv) {
   const index = argv.indexOf("--project");
   if (index < 0) return { repoRoot: process.cwd(), args: argv };
   const value = argv[index + 1];
+  // `clean --project` with no folder is clean's own option: clear this project's records.
+  if ((!value || value.startsWith("--")) && argv[0] === "clean") return { repoRoot: process.cwd(), args: argv };
   if (!value || value.startsWith("--")) throw new Error("Missing value for --project");
   return { repoRoot: path.resolve(value), args: [...argv.slice(0, index), ...argv.slice(index + 2)] };
 }

@@ -158,6 +158,9 @@ export async function createWorkPackagePlan({
   maxCalls = 2,
   maxMinutes = 8,
   outPath,
+  // Which work order this file is (Q13), as the card shows it; sealed with the plan, so the yes
+  // approves it too.
+  workOrder = null,
 }) {
   if (Boolean(task) === Boolean(taskFile)) throw new Error("Provide exactly one of --task or --task-file.");
   let taskText = task;
@@ -194,6 +197,7 @@ export async function createWorkPackagePlan({
     task: taskText,
     task_sha256: digest(taskText),
     task_file: taskFileRelative,
+    ...(workOrder ? { work_order: workOrder } : {}),
     rules,
     ...(contract ? { contract_steps: contract } : {}),
     scope: {
@@ -231,6 +235,8 @@ export function optionAgainstCard(plan, options) {
   if (options.owner !== undefined && String(options.owner).trim() !== plan.owner) return "--owner";
   if (options.maxCalls !== undefined && Number(options.maxCalls) !== plan.budget?.max_claude_calls) return "--max-claude-calls";
   if (options.maxMinutes !== undefined && Number(options.maxMinutes) !== plan.budget?.max_claude_minutes_per_call) return "--max-claude-minutes";
+  if (options.asNew && plan.work_order?.decision !== "new") return "--as-new";
+  if (options.update !== undefined && plan.work_order?.work_order_id !== options.update) return "--update";
   return null;
 }
 
@@ -348,7 +354,7 @@ async function stopEarlierVersions(paths, plan) {
 }
 
 // A run created by a start that then failed is closed, never left running.
-async function closeFailedStart(paths, runId, error) {
+export async function closeFailedStart(paths, runId, error) {
   const message = String(error?.message || error);
   await recordRunState(paths, runId, { status: "controller_failure", error: message, updated_at: new Date().toISOString() }).catch(() => {});
   await consumeRun(paths, runId, "controller_failure", null).catch(() => {});

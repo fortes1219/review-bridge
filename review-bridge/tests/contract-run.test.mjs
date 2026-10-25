@@ -1,3 +1,5 @@
+// Keeps the person's database out of these tests (see the fixture).
+import { dataHome } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -19,8 +21,6 @@ import { getBridgePaths } from "../utils/paths.mjs";
 const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(runtimeSource, "..");
 // init saves the default roles in the data home; keep it out of the real user profile.
-const dataHome = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-data-home-"));
-process.on("exit", () => { try { fs.rmSync(dataHome, { recursive: true, force: true }); } catch {} });
 
 async function freePort() {
   const net = await import("node:net");

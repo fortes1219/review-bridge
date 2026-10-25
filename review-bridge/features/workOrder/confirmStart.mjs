@@ -11,6 +11,15 @@ export function contractStepsLine(steps) {
     + " and " + steps.max_attempts + " check(s) by the reviewer (" + steps.check.provider + "), " + steps.minutes_per_call + " minute(s) per call";
 }
 
+// Which work order the yes starts (spec 2026-10-24's three lines, in the card's language): y starts
+// it as the card says, n does not start; --update <work_order_id> or --as-new prints another card.
+export function decisionLine(workOrder) {
+  const title = "\"" + workOrder.title + "\"";
+  if (workOrder.decision === "new") return "New work order " + title;
+  if (workOrder.decision === "same") return "Updates " + title + ": still version " + workOrder.from_version + ", with new run settings";
+  return "Updates " + title + ": version " + (workOrder.from_version ?? 0) + " → " + workOrder.to_version + ", " + workOrder.changed_lines + " line(s) changed";
+}
+
 // start's card: what the answer authorizes, in the words a person checks it by. Every line comes
 // from the sealed plan. The numbered acceptance conditions are written only after the answer (the
 // translation is part of the authorized work), so the card shows the work order as it is sealed.
@@ -22,6 +31,7 @@ export async function startCard(paths, plan) {
     : "the whole project except protected files (" + plan.scope.forbidden_paths.length + " patterns)";
   return [
     "Work order:   " + plan.task_file,
+    ...(plan.work_order ? ["              " + decisionLine(plan.work_order)] : []),
     "Stops:        " + plan.breakpoint,
     "Changes:      " + plan.scope.change_types.join(", "),
     "Scope:        " + scope,
@@ -52,6 +62,7 @@ export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask
   const replaced = await runningVersions(paths, plan);
   process.stdout.write([
     "Work package: " + plan.work_package_id,
+    ...(plan.work_order ? ["Work order: " + decisionLine(plan.work_order)] : []),
     "Owner: " + plan.owner,
     "Breakpoint: " + plan.breakpoint,
     "Allowed change types: " + plan.scope.change_types.join(", "),

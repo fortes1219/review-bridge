@@ -1,3 +1,5 @@
+// Keeps the person's database out of these tests (see the fixture).
+import "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";

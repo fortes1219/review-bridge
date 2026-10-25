@@ -1,3 +1,5 @@
+// Keeps the person's database out of these tests (see the fixture).
+import "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -50,6 +52,30 @@ test("Git project gets local private exclusion without changing tracked ignore o
   });
   assert.equal(ignored.status, 0);
   assert.equal(await fsp.readFile(path.join(root, ".gitignore"), "utf8"), "dist/\n");
+  assert.equal((await verifyNeutralInstall(root)).valid, true);
+});
+
+// CI's Windows runner has an 8.3 TEMP (C:\Users\RUNNER~1\...), while Git names its folder in full.
+function shortName(folder) {
+  const result = spawnSync("cmd.exe", ["/d", "/s", "/c", "\"for %I in (\"" + folder + "\") do @echo %~sI\""], {
+    encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true,
+  });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+test("a Git project named by its Windows short path is set up and excluded like any other", { skip: process.platform !== "win32" && "8.3 short names are Windows only" }, async (t) => {
+  const parent = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-long-folder-name-"));
+  t.after(() => fsp.rm(parent, { recursive: true, force: true }));
+  const short = shortName(parent);
+  if (!short || !short.includes("~")) return t.skip("this volume makes no 8.3 short names");
+  const root = path.join(short, "my-app");
+  await fsp.mkdir(root);
+  assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: root, windowsHide: true }).status, 0);
+  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  assert.equal(plan.git.repository, true);
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/review-bridge-install.json"], { cwd: root, windowsHide: true });
+  assert.equal(ignored.status, 0);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
 });
 

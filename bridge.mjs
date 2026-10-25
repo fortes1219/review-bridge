@@ -2,6 +2,7 @@
 
 import "./review-bridge/utils/nodeVersion.mjs";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -121,7 +122,15 @@ async function runDisposableFakeScenarios(target, privateName = ".claude") {
     if (!(await fsp.stat(path.join(disposable, "README.md")).catch(() => null))) {
       await fsp.writeFile(path.join(disposable, "README.md"), "# Review Bridge self-test workspace\n", "utf8");
     }
-    return await runFakeScenarios(disposable, privateName);
+    // The copy is its own project in the person's database, never the real one, and its records go
+    // when the self-tests end.
+    const config = path.join(disposable, privateName, "review-bridge", "bridge.json");
+    await fsp.writeFile(config, JSON.stringify({ ...JSON.parse(await fsp.readFile(config, "utf8")), project_id: randomUUID() }, null, 2) + "\n", "utf8");
+    try {
+      return await runFakeScenarios(disposable, privateName);
+    } finally {
+      run(process.execPath, [bootstrapPath, "clean", "--project"], { cwd: disposable, expected: [0, 1, 2] });
+    }
   } finally {
     await fsp.rm(disposable, { recursive: true, force: true });
   }

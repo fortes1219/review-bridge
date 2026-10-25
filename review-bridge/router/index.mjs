@@ -38,6 +38,9 @@ const WORK_ORDER_OPTIONS = {
   "--work-package": { key: "workPackage", type: "string", value: "<id>", default: "the work order's file name", help: "Name of the work package" },
   "--max-claude-calls": { key: "maxCalls", type: "number", value: "<1-2>", default: "2", help: "Writer calls this work may use" },
   "--max-claude-minutes": { key: "maxMinutes", type: "number", value: "<1-15>", default: "8", help: "Minutes each writer call may run" },
+  // The card says which work order this file is; these print another card that says otherwise.
+  "--update": { key: "update", type: "string", value: "<work_order_id>", default: "what Bridge finds, shown on the card", help: "Make this a new version of that work order" },
+  "--as-new": { key: "asNew", type: "boolean", help: "Make this a new work order" },
 };
 
 export const COMMANDS = {
@@ -90,10 +93,15 @@ export const COMMANDS = {
     takesRunId: "optional",
     usage: "[<run_id>]",
     summary: "Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)",
-    options: { "--json": { ...JSON_OUT, help: "Print the result as JSON (without a run id)" } },
-    run: (context) => (context.runId
-      ? records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) })
-      : records.runPrune(context.paths, { json: Boolean(context.options.json), deliver: deliverQuietly(context) })),
+    options: {
+      "--project": { key: "project", type: "boolean", help: "Clear this project's work orders, versions, plans and contracts from your database (refused while a run is running)" },
+      "--json": { ...JSON_OUT, help: "Print the result as JSON (without a run id)" },
+    },
+    run: (context) => (context.options.project
+      ? workOrder.clearProjectRecords(context)
+      : context.runId
+        ? records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context) })
+        : records.runPrune(context.paths, { json: Boolean(context.options.json), deliver: deliverQuietly(context) })),
   },
   // status and wait only read; every other command needs the configuration.
   status: {

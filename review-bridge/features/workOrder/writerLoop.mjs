@@ -180,7 +180,7 @@ const CONTRACT_EXIT_CODES = Object.freeze({
 });
 
 // A work-order run gets its contract once, before the writer's first call; a resumed run keeps it.
-async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep }) {
+async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep, onContractSealed }) {
   const workPackage = control.run.work_package;
   if (!workPackage.task_file) return { sha256: null, exitCode: null };
   if (control.run.contract_sha256) return { sha256: control.run.contract_sha256, exitCode: null };
@@ -199,6 +199,7 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
   if ((await readRunStatus(paths, runId)) === "stopped") return { sha256: null, exitCode: 130 };
   if (translated.status === "sealed") {
     await runtimeState.recordContract(translated.sha256);
+    if (onContractSealed) await onContractSealed(translated.sha256);
     onStep("Contract sealed");
     return { sha256: translated.sha256, exitCode: null };
   }
@@ -353,6 +354,8 @@ export async function runBoundedResume({
   workLock = null,
   // One line per step for the person watching (start); the run's records do not depend on it.
   onStep = () => {},
+  // The sealed contract's SHA-256, as soon as it is sealed (start records it in the database).
+  onContractSealed = null,
 }) {
   control.runtime_state = runtimeState;
   const invocationStartedAt = Date.now();
@@ -378,7 +381,7 @@ export async function runBoundedResume({
     const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
     const unconfirmable = await unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId });
     if (unconfirmable !== null) return unconfirmable;
-    const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep });
+    const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep, onContractSealed });
     if (sealed.exitCode !== null) return sealed.exitCode;
     const contractSha256 = sealed.sha256;
     // The work-proof seal: the baseline hash as authorized, and every window this controller writes.

@@ -1,3 +1,5 @@
+// Keeps the person's database out of these tests (see the fixture).
+import { dataHome, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -29,6 +31,7 @@ function isolatedEnv(overrides = {}) {
     TMP: os.tmpdir(),
     CLAUDE_REVIEW_CLI: path.join(isolatedHome, "absent", "claude"),
     CODEX_REVIEW_CLI: path.join(isolatedHome, "absent", "codex"),
+    REVIEW_BRIDGE_DATA_HOME: dataHome,
     ...overrides,
   };
   if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
@@ -215,7 +218,7 @@ test("same provider for both roles remains blocked until separate sessions are p
 test("init without a terminal takes claude and codex when no role is given or saved, and sets up an empty folder as type none", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-"));
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-home-"));
-  t.after(() => Promise.all([removeWorkspace(root), fsp.rm(home, { recursive: true, force: true })]));
+  t.after(() => { stopServerIn(home); return Promise.all([removeWorkspace(root), fsp.rm(home, { recursive: true, force: true })]); });
   const env = isolatedEnv({ REVIEW_BRIDGE_DATA_HOME: home });
   const result = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root), {
     cwd: packageRoot, encoding: "utf8", env, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
@@ -538,20 +541,99 @@ test("--yes is refused when the work order changed after the card, when no card 
   assert.equal((await listed("runs")).length, 1, "one run from one card");
 });
 
-// E10: a card never shown because the reviewer check did not pass leaves no plan that a later
-// --yes could start (a card answered no at a terminal is dropped the same way; the pty run shows it).
+// RC3-BLOCKER-01 step 2: the card says which work order the yes starts (spec 2026-10-24), and the
+// start lands in the person's database: the work order, its versions, one plan per card, one claim
+// per yes, one contract per run.
+test("the card names the work order: new, then updated, renamed or copied; the records are in the database", async (t) => {
+  const { root, order, cli } = await fourActionsProject(t, "review-bridge-identity-");
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const decision = (args) => {
+    const card = cli(["start", ...args, "--fake-cli"]);
+    assert.equal(card.status, 1, card.stderr);
+    return card.stdout.split(/\r?\n/)[card.stdout.split(/\r?\n/).findIndex((line) => line.startsWith("Work order:   ")) + 1].trim();
+  };
+  const yes = (file) => assert.equal(cli(["start", file, "--fake-cli", "--yes"]).status, 0);
+  assert.equal(decision([order]), "New work order \"工單：新增 README\"");
+  yes(order);
+  await fsp.appendFile(path.join(root, order), "2. README 有專案名稱。\n");
+  assert.equal(decision([order]), "Updates \"工單：新增 README\": version 1 → 2, 1 line(s) changed");
+  yes(order);
+  assert.equal(decision([order]), "Updates \"工單：新增 README\": still version 2, with new run settings");
+  // A copy beside the original is a new work order, even with the same text; --update says otherwise.
+  const copy = ".review-bridge/work-packages/hello-copy.md";
+  await fsp.copyFile(path.join(root, order), path.join(root, copy));
+  assert.equal(decision([copy]), "New work order \"工單：新增 README\"");
+  const [{ work_order_id: original }] = await queryRecords("select work_order_id from work_orders where project_id = $1 and last_file_name = $2", [projectId, order]);
+  assert.equal(decision([copy, "--update", original]), "Updates \"工單：新增 README\": still version 2, with new run settings");
+  assert.equal(decision([order, "--as-new"]), "New work order \"工單：新增 README\"");
+  // A renamed file (the old one gone, the text close) updates the work order it was.
+  const renamed = ".review-bridge/work-packages/readme.md";
+  await fsp.rm(path.join(root, copy));
+  await fsp.rename(path.join(root, order), path.join(root, renamed));
+  await fsp.appendFile(path.join(root, renamed), "3. 一行說明。\n");
+  assert.equal(decision([renamed]), "Updates \"工單：新增 README\": version 2 → 3, 1 line(s) changed");
+  yes(renamed);
+
+  const rows = async (sql) => await queryRecords(sql, [projectId]);
+  assert.deepEqual((await rows("select last_file_name from work_orders where project_id = $1")).map((row) => row.last_file_name), [renamed], "one work order, renamed");
+  assert.deepEqual((await rows("select v.version_no from work_order_versions v join work_orders w using (work_order_id) where w.project_id = $1 order by 1"))
+    .map((row) => row.version_no), [1, 2, 3]);
+  assert.equal((await rows("select count(*)::int as n from plans where project_id = $1"))[0].n, 7, "one plan per card");
+  const claims = await rows("select c.run_id from authorization_claims c join authorizations a using (authorization_id) join plans p using (plan_sha256) where p.project_id = $1");
+  assert.equal(claims.length, 3, "one claim per yes");
+  const authorizations = await rows("select a.authorized_via, p.content_sha256 from authorizations a join plans p using (plan_sha256) where p.project_id = $1");
+  assert.ok(authorizations.every((row) => row.authorized_via === "agent" && /^[0-9a-f]{64}$/.test(row.content_sha256)));
+  const contracts = await rows("select c.contract_sha256 from contracts c join work_orders w using (work_order_id) where w.project_id = $1");
+  assert.equal(contracts.length, 3, "one contract per run");
+  for (const { run_id: runId } of claims) {
+    const run = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-queue", "runs", runId + ".json"), "utf8"));
+    assert.ok(contracts.some((row) => row.contract_sha256 === run.contract_sha256), "the run's contract is recorded");
+  }
+});
+
+test("two --yes to one card at once start one run; clean --project clears the project's records", async (t) => {
+  const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-two-yes-");
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const { spawn } = await import("node:child_process");
+  const yes = () => new Promise((resolve) => {
+    const child = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: root, env: isolatedEnv(), windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    child.once("close", (code) => resolve({ code, output }));
+  });
+  const results = await Promise.all([yes(), yes()]);
+  assert.deepEqual(results.map((result) => result.code === 0).sort(), [false, true], results.map((result) => result.output).join("\n----\n"));
+  assert.match(results.find((result) => result.code !== 0).output, /already said yes to|already being started|in progress|already consumed/);
+  assert.equal((await listed("runs")).length, 1);
+  assert.equal((await queryRecords("select count(*)::int as n from authorization_claims c join authorizations a using (authorization_id) join plans p using (plan_sha256) where p.project_id = $1", [projectId]))[0].n, 1);
+
+  const cleared = cli(["clean", "--project"]);
+  assert.equal(cleared.status, 0, cleared.stderr);
+  assert.match(cleared.stdout, /^Cleared this project's records: 1 work order\(s\), 1 version\(s\), 1 plan\(s\), 1 authorization\(s\), 1 contract\(s\)\.\n/);
+  assert.equal((await queryRecords("select count(*)::int as n from plans where project_id = $1", [projectId]))[0].n, 0);
+  assert.ok((await queryRecords("select cleared_at from projects where project_id = $1", [projectId]))[0].cleared_at);
+  const after = cli(["start", order, "--fake-cli"]);
+  assert.equal(after.status, 2);
+  assert.match(after.stderr, /records were cleared \(clean --project\)/);
+});
+
+// E10: a card never shown because the reviewer check did not pass is withdrawn in the records, so no
+// later --yes can start it (a card answered no at a terminal is withdrawn the same way; the pty run
+// shows it). The card's "Valid until" is the plan's, as recorded.
 test("a card not shown takes no later --yes; a card past its Valid until is refused", async (t) => {
-  const { order, cli, queue, listed } = await fourActionsProject(t, "review-bridge-card-once-");
-  const planFile = path.join(queue, "hello.plan.json");
+  const { order, cli, listed } = await fourActionsProject(t, "review-bridge-card-once-");
   const notShown = cli(["start", order]);
   assert.equal(notShown.status, 1);
   assert.match(notShown.stdout, /\nReviewer read-only check: not passed /);
-  assert.equal(await fsp.stat(planFile).catch(() => null), null, "the card was never shown");
+  const [withdrawn] = await queryRecords("select shown_at, withdrawn_at from plans order by created_at desc limit 1");
+  assert.equal(withdrawn.shown_at, null, "the card was never shown");
+  assert.ok(withdrawn.withdrawn_at, "and it is withdrawn");
   assert.match(cli(["start", order, "--fake-cli", "--yes"]).stdout, /^No card was shown /);
 
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-  const plan = JSON.parse(await fsp.readFile(planFile, "utf8"));
-  await fsp.writeFile(planFile, JSON.stringify({ ...plan, authorization_expires_at: new Date(Date.now() - 1000).toISOString() }));
+  await queryRecords("update plans set authorization_expires_at = now() - interval '1 second' where shown_at is not null and withdrawn_at is null");
   const old = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(old.status, 1, old.stderr);
   assert.match(old.stdout, /^The card was valid until .*\. Run: review-bridge start .* and show the person the new card\.\n$/);

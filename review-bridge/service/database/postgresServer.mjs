@@ -9,8 +9,8 @@
 // waits for it; the server is never killed. While a server runs, its own postmaster.pid is the truth
 // for where it listens.
 //
-// Not exported from service/index.mjs yet: an installed runtime has no node_modules until the
-// distribution of these packages is designed, and every command imports that index.
+// Not exported from service/index.mjs: every command imports that index, and only the commands that
+// keep records load pg and the server binaries (through database/index.mjs).
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fsp from "node:fs/promises";
@@ -89,11 +89,14 @@ function runTool(file, args, { timeoutMs }) {
 // `pg_ctl start` leaves the server running, and the server inherits pg_ctl's output handles. With
 // pipes, the call would wait until the server closed them (measured on Windows: 90 s instead of
 // 0.3 s). The output goes to a file instead, so the call ends with pg_ctl and its words are kept.
-async function runDetaching(file, args, { timeoutMs, outputFile }) {
+// The server it leaves running works in `cwd` (the cluster's folder), never in the folder the
+// command ran in: on Windows a running process holds its working folder, which then could not be
+// removed (init's self-test copy, a test's project).
+async function runDetaching(file, args, { timeoutMs, outputFile, cwd }) {
   const output = await fsp.open(outputFile, "w");
   try {
     const code = await new Promise((resolve) => {
-      const child = spawn(file, args, { windowsHide: true, env: TOOL_ENV, stdio: ["ignore", output.fd, output.fd] });
+      const child = spawn(file, args, { cwd, windowsHide: true, env: TOOL_ENV, stdio: ["ignore", output.fd, output.fd] });
       const timer = setTimeout(() => { try { child.kill(); } catch {} }, timeoutMs);
       child.once("error", () => { clearTimeout(timer); resolve(1); });
       child.once("exit", (exitCode) => { clearTimeout(timer); resolve(exitCode ?? 1); });
@@ -310,7 +313,7 @@ export async function startServer(root, { binaries, timeoutSeconds = 60 }) {
     const result = await runDetaching(binaries.pg_ctl, [
       "start", "-D", paths.data, "-w", "-t", String(timeoutSeconds),
       "-o", "-h " + LISTEN_HOST + " -p " + settings.port,
-    ], { timeoutMs: (timeoutSeconds + 30) * 1000, outputFile: paths.control });
+    ], { timeoutMs: (timeoutSeconds + 30) * 1000, outputFile: paths.control, cwd: paths.root });
     if (result.code !== 0 && !(await serverRunning(root, { binaries }))) {
       const latest = (await serverLogFiles(root)).at(-1);
       const log = latest ? await fsp.readFile(latest, "utf8").catch(() => "") : "";

@@ -1,3 +1,5 @@
+// Keeps the person's database out of these tests (see the fixture).
+import "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";

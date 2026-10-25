@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -40,8 +40,28 @@ function git(target, args) {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
+// The path as the file system names it: Windows 8.3 short names (C:\Users\RUNNER~1) expanded and
+// links resolved, for the part that exists; Git reports its paths that way, so both sides of a
+// comparison go through this first.
+function realNative(target) {
+  let current = path.resolve(target);
+  const rest = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync.native(current), ...rest);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(target);
+      rest.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 function under(child, parent) {
-  const relative = path.relative(parent, child);
+  const fold = (value) => (process.platform === "win32" ? realNative(value).toLowerCase() : realNative(value));
+  const relative = path.relative(fold(parent), fold(child));
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
@@ -62,15 +82,16 @@ async function runtimeFingerprint(root = path.join(packageRoot, "review-bridge")
   return sha256(JSON.stringify(files));
 }
 
-function gitBoundary(target) {
-  const gitRootText = git(target, ["rev-parse", "--show-toplevel"]);
+function gitBoundary(selected) {
+  const gitRootText = git(selected, ["rev-parse", "--show-toplevel"]);
   if (!gitRootText) return { repository: false, ignored: null, excludePath: null, pattern: null };
-  const gitRoot = path.resolve(gitRootText);
-  const gitDirText = git(target, ["rev-parse", "--absolute-git-dir"]);
-  const excludeText = git(target, ["rev-parse", "--git-path", "info/exclude"]);
+  const target = realNative(selected);
+  const gitRoot = realNative(gitRootText);
+  const gitDirText = git(selected, ["rev-parse", "--absolute-git-dir"]);
+  const excludeText = git(selected, ["rev-parse", "--git-path", "info/exclude"]);
   if (!gitDirText || !excludeText) throw new Error("Cannot locate local Git exclusion file.");
-  const gitDir = path.resolve(gitDirText);
-  const excludePath = path.resolve(target, excludeText);
+  const gitDir = realNative(gitDirText);
+  const excludePath = realNative(path.resolve(selected, excludeText));
   if (!under(excludePath, gitDir)) throw new Error("Git exclusion path is outside the selected Git directory.");
   const relativeTarget = path.relative(gitRoot, target).replaceAll("\\", "/");
   if (relativeTarget === ".." || relativeTarget.startsWith("../") || path.isAbsolute(relativeTarget)) {
@@ -161,9 +182,13 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
 }
 
 // The bridge.json this version writes; T0-10 upgrades merge an installed one against it.
-function neutralBridgeConfig({ profileId, roles, profile, watch = { port: DEFAULT_WATCH_PORT, strict_port: false }, retentionDays = DEFAULT_RETENTION_DAYS }) {
+// project_id is the project's identity in the person's database (one database for all their
+// projects); the folder's path is only where it was last seen. A copied folder carries the same id;
+// init in the copy gives it its own (Owner 2026-10-25).
+function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { port: DEFAULT_WATCH_PORT, strict_port: false }, retentionDays = DEFAULT_RETENTION_DAYS }) {
   return {
     schema_version: 4,
+    project_id: projectId,
     profile_id: profileId,
     roles: {
       writer: { provider_id: roles.writer },
@@ -319,7 +344,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
     // The project holds only its settings, template and state; the runtime stays in the Bridge folder.
     const profile = await resolveProfile(plan.target, plan.profile.id);
     await writeJson(path.join(privateRoot, "review-bridge", "bridge.json"), neutralBridgeConfig({
-      profileId: plan.profile.id, roles: plan.roles, profile,
+      projectId: randomUUID(), profileId: plan.profile.id, roles: plan.roles, profile,
       watch: { port: plan.watch.port, strict_port: plan.watch.strict_port },
       retentionDays: plan.retention?.days ?? DEFAULT_RETENTION_DAYS,
     }));
@@ -1285,6 +1310,8 @@ export async function applyNeutralUninstall(plan, approval, hooks = {}) {
 
 const OWNER_EDITABLE_KEYS = Object.freeze(["watch", "retention", "locale", "gate_a"]);
 const PROTECTED_KEYS = Object.freeze(["roles", "requires_human_authorization", "readiness"]);
+// The project's identity in the database: never replaced by an upgrade.
+const IDENTITY_KEYS = Object.freeze(["project_id"]);
 // Keys an earlier Bridge wrote and no longer uses; an upgrade removes them.
 const RETIRED_KEYS = Object.freeze(["state_contract"]);
 const CONFIG_RELATIVE = "review-bridge/bridge.json";
@@ -1325,7 +1352,7 @@ function mergeBridgeConfig(current, defaults) {
       throw new Error("The new version would change the protected bridge.json setting \"" + key + "\"; the upgrade keeps protected settings as they are and stops.");
     }
   }
-  const kept = (key) => OWNER_EDITABLE_KEYS.includes(key) || PROTECTED_KEYS.includes(key);
+  const kept = (key) => OWNER_EDITABLE_KEYS.includes(key) || PROTECTED_KEYS.includes(key) || IDENTITY_KEYS.includes(key);
   const merged = {};
   for (const key of Object.keys(defaults)) merged[key] = kept(key) && Object.hasOwn(current, key) ? current[key] : defaults[key];
   for (const key of Object.keys(current)) if (!Object.hasOwn(merged, key) && !RETIRED_KEYS.includes(key)) merged[key] = current[key];
@@ -1338,7 +1365,8 @@ function mergeBridgeConfig(current, defaults) {
 }
 
 async function defaultConfigFor(root, current, manifest) {
-  return neutralBridgeConfig({ profileId: current.profile_id, roles: manifest.roles, profile: await resolveProfile(root, current.profile_id) });
+  // A project set up before project ids gets one; an existing one is kept (IDENTITY_KEYS).
+  return neutralBridgeConfig({ projectId: current.project_id || randomUUID(), profileId: current.profile_id, roles: manifest.roles, profile: await resolveProfile(root, current.profile_id) });
 }
 
 // Where the new template goes when TEMPLATE.md was edited. TEMPLATE.new.md is reused only while it

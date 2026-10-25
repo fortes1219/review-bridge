@@ -135,6 +135,10 @@ Options:
       Writer calls this work may use (number; default: 2)
   --max-claude-minutes <1-15>
       Minutes each writer call may run (number; default: 8)
+  --update <work_order_id>
+      Make this a new version of that work order (string; default: what Bridge finds, shown on the card)
+  --as-new
+      Make this a new work order (boolean)
   --yes
       The person said yes to the card; an agent adds this after showing them the card (boolean)
   --project <folder>
@@ -179,6 +183,8 @@ Usage: review-bridge clean [<run_id>] [options]
 Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
 
 Options:
+  --project
+      Clear this project's work orders, versions, plans and contracts from your database (refused while a run is running) (boolean)
   --json
       Print the result as JSON (without a run id) (boolean)
   --project <folder>
@@ -343,6 +349,10 @@ Options:
       Writer calls this work may use (number; default: 2)
   --max-claude-minutes <1-15>
       Minutes each writer call may run (number; default: 8)
+  --update <work_order_id>
+      Make this a new version of that work order (string; default: what Bridge finds, shown on the card)
+  --as-new
+      Make this a new work order (boolean)
   --task-file <file>
       The work order, instead of giving it first (string)
   --task <text>

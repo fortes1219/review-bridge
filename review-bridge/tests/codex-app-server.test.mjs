@@ -1,3 +1,5 @@
+// Keeps the person's database out of these tests (see the fixture).
+import "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import fsp from "node:fs/promises";

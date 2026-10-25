@@ -1,3 +1,5 @@
+// Keeps the person's database out of these tests (see the fixture).
+import "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -443,7 +445,8 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
 
     const second = spawnSync(process.execPath, startArgs, { cwd: target, encoding: "utf8" });
     assert.equal(second.status, 2);
-    assert.match(second.stderr, /plan already consumed, generate a new plan/i);
+    // The records refuse it first (one card, one yes), before the file claim is looked at.
+    assert.match(second.stderr, /This card was already said yes to; one card starts one run\./);
     assert.equal(sha256(await fsp.readFile(eventsPath)), beforeSha);
     assert.deepEqual((await fsp.readdir(path.join(target, ".review-bridge", "review-queue", "runs"))).length, 1);
   });
