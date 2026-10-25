@@ -708,6 +708,11 @@ test("a run whose database goes away stops as database_unavailable; reads withou
   assert.match(status.stdout, new RegExp("\\n  " + runId + "  stopped +  database_unavailable +\\.review-bridge/work-packages/hello\\.md  "));
   const [row] = await queryRecords("select status, closed_reason, outcome from runs where run_id = $1", [runId]);
   assert.deepEqual(row, { status: "stopped", closed_reason: "database_unavailable", outcome: "stopped" });
+  // What was written after the fact says so; what was written as it happened does not.
+  const timeline = await queryRecords("select type, recorded_late from run_events where run_id = $1 order by sequence", [runId]);
+  assert.equal(timeline.find((event) => event.type === "run_started").recorded_late, false);
+  assert.equal(timeline.find((event) => event.type === "run_terminal").recorded_late, true);
+  assert.deepEqual(timeline.slice(timeline.findIndex((event) => event.recorded_late)).filter((event) => !event.recorded_late), [], "the late ones are the tail");
 
   // A database that cannot be opened: each read says why and where, and exits non-0.
   const broken = path.join(root, "..", path.basename(root) + "-broken-home");

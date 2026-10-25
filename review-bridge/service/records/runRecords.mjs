@@ -90,7 +90,8 @@ const FACTS = { gate_a_result: gateAFacts, "review.result": reviewFacts, accepta
 const STATE = (run) => [run.status, orNull(run.closed_reason), orNull(run.closed_at), orNull(run.superseded_by), orNull(run.outcome),
   orNull(run.run_deadline_at), orNull(run.contract_sha256)];
 
-async function append(client, entry) {
+// `late`: written after the fact (replayUnrecorded), marked so on the event.
+async function append(client, entry, { late = false } = {}) {
   const sets = entry.state
     ? ", status = $3, closed_reason = $4, closed_at = $5, superseded_by = $6, outcome = $7, run_deadline_at = $8, contract_sha256 = $9"
     : "";
@@ -100,8 +101,8 @@ async function append(client, entry) {
   );
   if (!rows.length) return false;
   const sequence = rows[0].last_event_sequence;
-  await client.query("insert into run_events (run_id, sequence, type, occurred_at, payload) values ($1, $2, $3, $4, null)",
-    [entry.runId, sequence, entry.type, entry.occurredAt]);
+  await client.query("insert into run_events (run_id, sequence, type, occurred_at, payload, recorded_late) values ($1, $2, $3, $4, null, $5)",
+    [entry.runId, sequence, entry.type, entry.occurredAt, late]);
   const facts = FACTS[entry.type];
   const payload = facts ? await facts(client, entry.runId, sequence, entry.body) : entry.body;
   await client.query("update run_events set payload = $3 where run_id = $1 and sequence = $2",
@@ -236,7 +237,7 @@ export async function replayUnrecorded(db, paths) {
       throw error;
     }
     const entries = (await fsp.readFile(taken, "utf8")).split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
-    await db.transaction(async (tx) => { for (const entry of entries) if (await append(tx, entry)) written += 1; });
+    await db.transaction(async (tx) => { for (const entry of entries) if (await append(tx, entry, { late: true })) written += 1; });
     await fsp.rm(taken, { force: true });
   }
   return written;

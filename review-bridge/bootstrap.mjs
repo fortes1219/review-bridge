@@ -79,6 +79,12 @@ async function main() {
   // Native start and resume take this machine's adapter only after the reviewer check and the yes,
   // so without the proof they are refused the same way on every platform, adapter or not.
   const checksFirst = !fakeRequested && ["start", "resume"].includes(command);
+  // doctor reports the database before the adapter (as start checks the reviewer before it, E7b): a
+  // database that cannot be opened is said the same way on every platform, adapter or not.
+  if (command === "doctor") {
+    const config = await readJson(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }).bridgeConfigPath).catch(() => null);
+    if (config?.project_id) await (await import("./service/database/index.mjs")).openDatabase();
+  }
   let adapterDefinition = null;
   let implementation = {};
   let adapterSource = null;
