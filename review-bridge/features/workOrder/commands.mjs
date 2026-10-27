@@ -577,11 +577,11 @@ export async function resumeWork({ paths, options, adapter }) {
 }
 
 export async function waitForReview({ paths, options }) {
-  const timeoutMinutes = options.timeoutMinutes ?? 120;
-  if (timeoutMinutes < 1 || timeoutMinutes > 1440) {
-    throw new Error("wait timeout must be 1 through 1440 minutes.");
+  const timeout = options.timeout ?? 7_200_000;
+  if (timeout < 60_000 || timeout > 86_400_000) {
+    throw new Error("wait timeout must be 60000 through 86400000 ms.");
   }
-  const file = await waitForPending(paths, timeoutMinutes);
+  const file = await waitForPending(paths, timeout);
   process.stdout.write(file + "\n");
   return 0;
 }

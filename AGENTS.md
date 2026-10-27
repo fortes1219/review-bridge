@@ -1,4 +1,4 @@
-# Codex Review Bridge Guardrails
+# Review Bridge Guardrails
 
 ## Repository Purpose
 

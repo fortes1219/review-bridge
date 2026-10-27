@@ -469,8 +469,8 @@ Usage: review-bridge wait [options]
 Wait for the next queued review report and print its path
 
 Options:
-  --timeout-minutes <1-1440>
-      How long to wait (number; default: 120)
+  --timeout <ms>
+      How long to wait, in milliseconds (number; default: 7200000)
   --project <folder>
       The project folder (string; default: the current folder)
 ```

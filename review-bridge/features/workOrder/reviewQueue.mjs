@@ -152,13 +152,13 @@ export async function hasPendingMessageHash(paths, messageHash) {
   return jobs.some((file) => path.basename(file).endsWith(suffix));
 }
 
-export async function waitForPending(paths, timeoutMinutes = 120) {
-  const deadline = Date.now() + timeoutMinutes * 60_000;
+export async function waitForPending(paths, timeout = 7_200_000) {
+  const deadline = Date.now() + timeout;
   await ensureDir(paths.pendingDir);
   while (Date.now() < deadline) {
     const jobs = await listJson(paths.pendingDir);
     if (jobs.length) return jobs[0];
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  throw new Error("No writer review submission arrived within " + timeoutMinutes + " minutes.");
+  throw new Error("No writer review submission arrived within " + timeout + " ms.");
 }

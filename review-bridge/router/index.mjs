@@ -254,7 +254,7 @@ export const COMMANDS = {
     audience: "agent",
     configFree: true,
     summary: "Wait for the next queued review report and print its path",
-    options: { "--timeout-minutes": { key: "timeoutMinutes", type: "number", value: "<1-1440>", default: "120", help: "How long to wait" } },
+    options: { "--timeout": { key: "timeout", type: "number", value: "<ms>", default: "7200000", help: "How long to wait, in milliseconds" } },
     run: (context) => workOrder.waitForReview(context),
   },
   prune: {
