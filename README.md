@@ -102,7 +102,7 @@ Options:
   --reviewer <claude|codex>
       Reviewer role (string; default: your saved default, else codex)
   --profile <type|none>
-      Project type; its test command becomes Gate A (string; default: what detection finds, else none)
+      Project type; its test command becomes the tests a run executes (string; default: what detection finds, else none)
   --port <n>
       Port of the local page (number; default: 8080, or the next free port)
   --yes
@@ -131,10 +131,10 @@ Options:
       Who owns the work (string; default: your OS user name)
   --work-package <id>
       Name of the work package (string; default: the work order's file name)
-  --max-claude-calls <1-2>
-      Writer calls this work may use (number; default: 2)
-  --max-claude-minutes <1-15>
-      Minutes each writer call may run (number; default: 8)
+  --rounds <n>
+      Writer rounds this work may use (number; default: 2)
+  --call-timeout <ms>
+      Milliseconds each writer call may run (number; default: 480000)
   --update <work_order_id>
       Make this a new version of that work order (string; default: what Bridge finds, shown on the card)
   --as-new
@@ -347,10 +347,10 @@ Options:
       Who owns the work (string; default: your OS user name)
   --work-package <id>
       Name of the work package (string; default: the work order's file name)
-  --max-claude-calls <1-2>
-      Writer calls this work may use (number; default: 2)
-  --max-claude-minutes <1-15>
-      Minutes each writer call may run (number; default: 8)
+  --rounds <n>
+      Writer rounds this work may use (number; default: 2)
+  --call-timeout <ms>
+      Milliseconds each writer call may run (number; default: 480000)
   --update <work_order_id>
       Make this a new version of that work order (string; default: what Bridge finds, shown on the card)
   --as-new
@@ -451,10 +451,10 @@ Internal: resume the writer session of the one active run (refused with real mod
 Options:
   --prompt <file>
       The prompt file (string; required)
-  --max-claude-calls <1-2>
-      Writer calls (number; default: 2)
-  --max-claude-minutes <1-15>
-      Minutes per writer call (number; default: 8)
+  --rounds <n>
+      Writer rounds (number; default: 2)
+  --call-timeout <ms>
+      Milliseconds per writer call (number; default: 480000)
   --validate-only
       Only check that the resume could run (boolean)
   --project <folder>
@@ -525,7 +525,7 @@ Options:
 
 - In the project: `.review-bridge/`.
 - For you, shared by all your projects: your settings (`settings.json`, the default roles) and the database, in `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS and `~/.local/share/review-bridge` on Linux. `REVIEW_BRIDGE_DATA_HOME` moves it.
-- Backups made by `upgrade` and `uninstall`: `%LOCALAPPDATA%\CodexReviewBridge\backups` on Windows, or `--backup-root <folder>`. They can hold private work data; do not publish them.
+- Backups made by `upgrade` and `uninstall`: `%LOCALAPPDATA%\ReviewBridge\backups` on Windows, or `--backup-root <folder>`. They can hold private work data; do not publish them.
 
 The database is the record; the files under `.review-bridge/` are the running copy. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. `review-bridge status` ends with how to reach it:
 

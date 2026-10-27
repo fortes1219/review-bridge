@@ -3,12 +3,12 @@ import readline from "node:readline/promises";
 
 import { readJson } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
-import { runningVersions } from "./workPackage.mjs";
+import { assertCurrentPlan, runningVersions } from "./workPackage.mjs";
 
 // The model calls before the work, as the plan seals them; the human approves them with the plan.
 export function contractStepsLine(steps) {
   return "Before the work: up to " + steps.max_attempts + " work-order translation(s) by the writer (" + steps.translate.provider + ")"
-    + " and " + steps.max_attempts + " check(s) by the reviewer (" + steps.check.provider + "), " + steps.minutes_per_call + " minute(s) per call";
+    + " and " + steps.max_attempts + " check(s) by the reviewer (" + steps.check.provider + "), " + steps.call_timeout / 60_000 + " minute(s) per call";
 }
 
 // Which work order the yes starts (spec 2026-10-24's three lines, in the card's language): y starts
@@ -25,7 +25,7 @@ export function decisionLine(workOrder) {
 // translation is part of the authorized work), so the card shows the work order as it is sealed.
 export async function startCard(paths, plan) {
   const replaced = await runningVersions(paths, plan);
-  const gate = plan.gate_a?.kind === "command" ? "runs " + plan.gate_a.command + " after each writer call" : "not needed for docs-only work";
+  const gate = plan.test?.kind === "command" ? "runs " + plan.test.command + " after each writer call" : "not needed for docs-only work";
   const scope = plan.scope.source === "explicit"
     ? plan.scope.allowed_paths.join(", ")
     : "the whole project except protected files (" + plan.scope.forbidden_paths.length + " patterns)";
@@ -35,8 +35,8 @@ export async function startCard(paths, plan) {
     "Stops:        " + plan.breakpoint,
     "Changes:      " + plan.scope.change_types.join(", "),
     "Scope:        " + scope,
-    "Gate A:       " + gate,
-    "Budget:       " + plan.budget.max_claude_calls + " writer call(s), up to " + plan.budget.max_claude_minutes_per_call + " minute(s) each",
+    "Tests:        " + gate,
+    "Budget:       " + plan.budget.rounds + " writer call(s), up to " + plan.budget.call_timeout / 60_000 + " minute(s) each",
     ...(plan.contract_steps ? ["Contract:     " + contractStepsLine(plan.contract_steps).replace(/^Before the work: /, "")] : []),
     "Valid until:  " + plan.authorization_expires_at,
     ...replaced.map(({ runId, unchanged }) => (unchanged
@@ -55,9 +55,7 @@ export async function startCard(paths, plan) {
 export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask = true, again = null } = {}) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
   const plan = await readJson(resolvedPlan);
-  if (plan.schema_version !== 4 || plan.operation !== "start_work_package") {
-    throw new Error("Unsupported work plan.");
-  }
+  assertCurrentPlan(plan);
   if (assumeYes) return plan.plan_sha256;
   const replaced = await runningVersions(paths, plan);
   process.stdout.write([
@@ -67,8 +65,8 @@ export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask
     "Breakpoint: " + plan.breakpoint,
     "Allowed change types: " + plan.scope.change_types.join(", "),
     "Allowed paths: " + plan.scope.allowed_paths.join(", "),
-    "Claude budget: " + plan.budget.max_claude_calls + " call(s), "
-      + plan.budget.max_claude_minutes_per_call + " minute(s) per call",
+    "Writer budget: " + plan.budget.rounds + " call(s), "
+      + plan.budget.call_timeout / 60_000 + " minute(s) per call",
     ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
     "Authorization expires at: " + plan.authorization_expires_at,
     ...replaced.map(({ runId, unchanged }) => (unchanged

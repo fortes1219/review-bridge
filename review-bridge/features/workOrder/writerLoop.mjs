@@ -6,7 +6,9 @@ import {
   appendIoEvent,
   classifyProviderFailure,
   fileExists,
+  isActiveRun,
   isPidAlive,
+  isStoppedRun,
   killProcessTree,
   listJson,
   parseJson,
@@ -16,6 +18,7 @@ import {
   readRun,
   RunEndedError,
   runProcess,
+  STOP_REASONS,
   stopRunRecord,
   DatabaseUnavailableError,
   tokenTotal,
@@ -49,15 +52,15 @@ import {
   WRITER_RESULT_SCHEMA,
   writerResultFromClaudeResult,
 } from "./typedResults.mjs";
-import { runGateA, sameDelta } from "./gateA.mjs";
+import { runTest, sameDelta } from "./test.mjs";
 import { createWorkspaceDelta, EvidenceChangedError, recordWindow, sealEvidence, snapshotWorkspace, startPointStatus, verifySealedEvidence } from "./workspaceEvidence.mjs";
 import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
-import { classificationProfileFromSnapshot } from "../../policy/policyRules.mjs";
+import { priorityChoice } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
 import { acceptanceRows, decideAcceptance, sameVersion, workVersion } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
 import { establishContract } from "./translation.mjs";
-import { callStamp, clearProcess, killConfirmed, processFile, readRunStatus, recordProcess, recordProcessOrKill, runMustStop, workLockFile } from "./processRecords.mjs";
+import { callStamp, clearProcess, killConfirmed, processFile, recordProcess, recordProcessOrKill, runMustStop, runStopped, workLockFile } from "./processRecords.mjs";
 
 export { recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 
@@ -79,7 +82,7 @@ async function enqueuedJobId(paths, enqueued) {
 
 function sameAuthorization(current, expected) {
   return current.authorization_status === "active"
-    && current.active_claude_session === expected.active_claude_session
+    && current.active_writer_session === expected.active_writer_session
     && String(current.authorization_plan_sha256 || "")
       === String(expected.authorization_plan_sha256 || "");
 }
@@ -94,16 +97,18 @@ async function loadLiveControl(paths, runtimeState) {
 
 export const DEFAULT_WRITER_MODEL = "opus";
 
-// The policy snapshot pins the model; a snapshot without one uses the package default.
+// The policy snapshot pins the model through its priority table; a snapshot without one uses the
+// package default.
 export function writerModelFor(control) {
-  return control?.run?.policy_snapshot?.effective_policy?.writer?.model || DEFAULT_WRITER_MODEL;
+  const policy = control?.run?.policy_snapshot?.effective_policy;
+  return policy?.priority ? priorityChoice(policy).writer.model : DEFAULT_WRITER_MODEL;
 }
 
 async function writeBoundedState(paths, runtimeState, state) {
   return await runtimeState.recordState(state);
 }
 
-// A writer or Gate A call runs between two snapshots of the work, so its changes can be tied to it
+// A writer or test call runs between two snapshots of the work, so its changes can be tied to it
 // (workspaceEvidence.mjs); each window's hash joins the controller's in-memory seal. Without Git,
 // or without a baseline, the call just runs.
 async function inWindow(paths, baselinePath, sealed, meta, work) {
@@ -131,7 +136,7 @@ async function unconfirmableEvidenceStop({ paths, runtimeState, control, writerM
   return 0;
 }
 
-// After every untrusted call (writer, Gate A, reviewer): the work-proof records must still be the
+// After every untrusted call (writer, tests, reviewer): the work-proof records must still be the
 // ones this controller sealed, and the Git start must still exist. Either failing stops the run
 // for the human. Without Git there is nothing to check.
 async function proofStop({ paths, runtimeState, control, baselinePath, sealed, state, after }) {
@@ -177,10 +182,10 @@ async function checkedContract({ paths, runtimeState, control, contractSha256, s
 const DATABASE_UNAVAILABLE_EXIT = 69;
 
 const CONTRACT_EXIT_CODES = Object.freeze({
-  needs_human: 0, contract_unconfirmed: 0, claude_failed: 1, reviewer_failed: 1, policy_failure: 1, rate_limited: 75, token_limit: 76, usage_unknown: 76,
+  needs_human: 0, contract_unconfirmed: 0, writer_failed: 1, reviewer_failed: 1, policy_failure: 1, rate_limited: 75, token_limit: 76, usage_unknown: 76,
   // The status could not be read when a stop check failed closed; the run is closed as stopped.
   stopped: 130,
-  claude_timeout: 77, contract_rejected: MALFORMED_EXIT_CODE,
+  writer_timeout: 77, contract_rejected: MALFORMED_EXIT_CODE,
 });
 
 // A work-order run gets its contract once, before the writer's first call; a resumed run keeps it.
@@ -192,15 +197,16 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
   const runId = runtimeState.runId;
   onStep("Writer (" + workPackage.contract_steps.translate.provider + ") turns the work order into a contract; reviewer ("
     + workPackage.contract_steps.check.provider + ") checks it");
-  const policy = control.codex_policy || {};
   const translated = await establishContract({
     paths, runId, workPackage, adapter, limits: effectiveLimits(control), executionMode: control.execution_mode,
     isStopped: () => runMustStop(paths, runId),
-    effort: policy.effort_by_level?.[policy.default_review_level] || "medium",
+    effort: control.reviewer_policy?.effort || "medium",
+    model: control.reviewer_policy?.model ?? null,
+    translateEffort: control.token_policy.writer_effort,
     onSpawn: (pid, role, provider) => recordProcess(paths, runId, { pid, role, provider, call: 0 }),
   });
   await clearProcess(paths, runId);
-  if ((await readRunStatus(paths, runId)) === "stopped") return { sha256: null, exitCode: 130 };
+  if (await runStopped(paths, runId)) return { sha256: null, exitCode: 130 };
   if (translated.status === "sealed") {
     await runtimeState.recordContract(translated.sha256);
     if (onContractSealed) await onContractSealed(translated.sha256);
@@ -218,16 +224,16 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
 }
 
 // T0-04 D4.1: ceilings come from the policy snapshot; missing ones use the package defaults.
-// gate_a_minutes was missing here until RC3-BLOCKER-00, which left Gate A with no time limit.
-export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, max_tokens_per_call: 1_500_000, max_tokens_per_run: 4_000_000, max_output_chars: 4_000, gate_a_minutes: 10 });
+// test_timeout was missing here until RC3-BLOCKER-00, which left the tests with no time limit.
+export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, tokens_per_call: 1_500_000, tokens: 4_000_000, max_output_chars: 4_000, test_timeout: 600_000 });
 export function effectiveLimits(control) {
   const limits = control?.run?.policy_snapshot?.effective_policy?.limits || {};
   return {
     max_turns: limits.max_turns ?? DEFAULT_LIMITS.max_turns,
-    max_tokens_per_call: limits.max_tokens_per_call ?? DEFAULT_LIMITS.max_tokens_per_call,
-    max_tokens_per_run: limits.max_tokens_per_run ?? DEFAULT_LIMITS.max_tokens_per_run,
+    tokens_per_call: limits.tokens_per_call ?? DEFAULT_LIMITS.tokens_per_call,
+    tokens: limits.tokens ?? DEFAULT_LIMITS.tokens,
     max_output_chars: DEFAULT_LIMITS.max_output_chars,
-    gate_a_minutes: limits.gate_a_minutes ?? DEFAULT_LIMITS.gate_a_minutes,
+    test_timeout: limits.test_timeout ?? DEFAULT_LIMITS.test_timeout,
   };
 }
 
@@ -243,8 +249,6 @@ async function changedFilesForJob(paths, jobId) {
   const delta = await readJson(deltaPath).catch(() => null);
   return (delta?.changed_files || []).map((entry) => ({ path: entry.path, change: entry.change }));
 }
-
-const ACTIVE_RUN_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
 
 // A killed process tree can take a moment to go; give it up to three seconds before calling it alive.
 async function stillAlive(pid) {
@@ -266,9 +270,9 @@ export async function stopRun(paths, runId, { kill = killProcessTree, superseded
   if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
   // A stopped run that still has a pid record is a stop whose kill was not confirmed: retry the
   // kill without writing the stop again.
-  const retry = run.status === "stopped" && await unresolvedProcess(paths, runId);
+  const retry = isStoppedRun(run) && await unresolvedProcess(paths, runId);
   if (!retry) {
-    if (!ACTIVE_RUN_STATUSES.has(run.status)) return { exitCode: 1, line: "已經結束：" + run.status, reason: "terminal" };
+    if (!isActiveRun(run)) return { exitCode: 1, line: "已經結束：" + run.closed_reason, reason: "terminal" };
     // The early read above cannot see a PASS written just after it; the locked write decides.
     let lastError = null;
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -278,8 +282,8 @@ export async function stopRun(paths, runId, { kill = killProcessTree, superseded
         break;
       } catch (error) {
         if (error instanceof RunEndedError) {
-          if (error.status === "stopped" && await unresolvedProcess(paths, runId)) { lastError = null; break; }
-          return { exitCode: 1, line: "已經結束：" + error.status, reason: "terminal" };
+          if (STOP_REASONS.includes(error.reason) && await unresolvedProcess(paths, runId)) { lastError = null; break; }
+          return { exitCode: 1, line: "已經結束：" + error.reason, reason: "terminal" };
         }
         lastError = error;
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -312,10 +316,10 @@ export async function validateBoundedResume({
   control,
   adapter,
   promptPath,
-  maxCalls,
-  maxMinutes,
+  rounds,
+  callTimeout,
 }) {
-  validateWriterPolicy(control, maxCalls, maxMinutes);
+  validateWriterPolicy(control, rounds, callTimeout);
   const resolvedPrompt = assertUnder(path.resolve(promptPath), paths.privateRoot, "Bounded prompt");
   if (!(await fileExists(resolvedPrompt))) throw new Error("Prompt file is missing.");
   // Only this run's own review jobs hold it back; other runs' reviews go on beside it. A job that
@@ -334,14 +338,14 @@ export async function validateBoundedResume({
   await adapter.resolveExecutable("claude");
   return {
     valid: true,
-    session_id: String(control.active_claude_session),
+    session_id: String(control.active_writer_session),
     transport: control.dispatch_transport,
-    disallowed_tools: [...(control.token_policy?.claude_disallowed_tools || [])],
+    disallowed_tools: [...(control.token_policy?.writer_disallowed_tools || [])],
     mode: "writer_only",
     model: writerModelFor(control),
-    effort: "low",
-    max_claude_calls: maxCalls,
-    max_claude_minutes_per_call: maxMinutes,
+    effort: control.token_policy.writer_effort,
+    rounds,
+    call_timeout: callTimeout,
     prompt_path: resolvedPrompt,
   };
 }
@@ -351,8 +355,8 @@ export async function runBoundedResume({
   control,
   adapter,
   promptPath,
-  maxCalls,
-  maxMinutes,
+  rounds,
+  callTimeout,
   startNewSession = false,
   runtimeState,
   workLock = null,
@@ -370,7 +374,7 @@ export async function runBoundedResume({
   try {
     // Inside the try: a run that fails its checks is closed, never left running.
     validation = await validateBoundedResume({
-      paths, control, adapter, promptPath, maxCalls, maxMinutes,
+      paths, control, adapter, promptPath, rounds, callTimeout,
     });
     const claude = await adapter.resolveExecutable("claude");
     let sessionId = validation.session_id;
@@ -379,8 +383,8 @@ export async function runBoundedResume({
     let lastFindings = [];
     let lastGate = null;
     let lastChangedFiles = [];
-    let lastGateAResult = null;
-    let lastGateADelta = null;
+    let lastTestResult = null;
+    let lastTestDelta = null;
     let handoffReason = "correction";
     const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
     const unconfirmable = await unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId });
@@ -391,16 +395,16 @@ export async function runBoundedResume({
     // The work-proof seal: the baseline hash as authorized, and every window this controller writes.
     const evidenceSeal = sealEvidence(control.workspace_evidence?.baseline_sha256);
 
-    for (let call = 1; call <= maxCalls; call += 1) {
+    for (let call = 1; call <= rounds; call += 1) {
       currentControl = await loadLiveControl(paths, runtimeState);
       currentControl.runtime_state = runtimeState;
       if (!sameAuthorization(currentControl, control)) {
         throw new Error("Work package authorization is no longer active.");
       }
       const stamp = callStamp(runtimeState.runId);
-      const stdoutPath = path.join(paths.queueRoot, stamp + "-claude.stdout.json");
-      const streamPath = path.join(paths.queueRoot, stamp + "-claude.stream.jsonl");
-      const stderrPath = path.join(paths.queueRoot, stamp + "-claude.stderr.log");
+      const stdoutPath = path.join(paths.queueRoot, stamp + "-writer.stdout.json");
+      const streamPath = path.join(paths.queueRoot, stamp + "-writer.stream.jsonl");
+      const stderrPath = path.join(paths.queueRoot, stamp + "-writer.stderr.log");
       const payloadPath = path.join(paths.queueRoot, stamp + "-stop-payload.json");
       const effectivePromptPath = path.join(paths.queueRoot, stamp + "-writer-only-prompt.txt");
       const workPackage = currentControl.run.work_package;
@@ -410,7 +414,7 @@ export async function runBoundedResume({
       if (call > 1) {
         sessionId = randomUUID();
         await runtimeState.rotateSession(sessionId);
-        control.active_claude_session = sessionId;
+        control.active_writer_session = sessionId;
         currentControl = await loadLiveControl(paths, runtimeState);
         currentControl.runtime_state = runtimeState;
       }
@@ -436,7 +440,7 @@ export async function runBoundedResume({
       const handoff = call > 1 ? buildHandoff({
         workPackage, call, reason: handoffReason, ioEvents: await readIoEvents(paths, runId),
         openFindings: lastFindings, lastGate, changedFiles: lastChangedFiles, readList,
-        gateAResult: handoffReason === "gate_a_failed" ? lastGateAResult : null, contract,
+        testResult: handoffReason === "test_failed" ? lastTestResult : null, contract,
       }) : null;
       if (handoff) await recordIo(paths, runId, handoff);
       const effectivePrompt = composeWriterPrompt({
@@ -455,8 +459,9 @@ export async function runBoundedResume({
         "--permission-mode", "auto",
         // Sub-agents are allowed for implementation; a project override can still disallow tools.
         ...(validation.disallowed_tools.length ? ["--disallowedTools", validation.disallowed_tools.join(",")] : []),
-        "--model", writerModel,
-        "--effort", "low",
+        // A model of null leaves the choice to the CLI.
+        ...(writerModel ? ["--model", writerModel] : []),
+        "--effort", validation.effort,
         "--max-turns", String(limits.max_turns),
         "--output-format", "stream-json",
         "--verbose",
@@ -464,7 +469,7 @@ export async function runBoundedResume({
         "--json-schema", writerSchemaArg,
       ];
       const invocation = adapter.buildInvocation("claude", claude, claudeArgs);
-      onStep("Writer working (call " + call + " of " + maxCalls + ")");
+      onStep("Writer working (call " + call + " of " + rounds + ")");
       const callStartedAt = Date.now();
       const baselinePath = currentControl.workspace_evidence?.baseline_path || null;
       const processResult = await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "writer" }, () => runProcess({
@@ -473,14 +478,14 @@ export async function runBoundedResume({
         input: effectivePrompt,
         stdoutPath: streamPath,
         stderrPath,
-        timeoutMs: maxMinutes * 60_000,
+        timeoutMs: callTimeout,
         onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "writer", provider: "claude", call }),
       }));
       await clearProcess(paths, runId);
       // Checked at the call's common exit, before any success or failure path returns: a call that
       // rewrites a record and then fails is still caught. A rebase, amend, reset or branch switch
       // since the start leaves nothing sound to compare against; the human decides.
-      const proofState = { writer_model: writerModel, session_id: sessionId, call, claude_stdout_path: stdoutPath };
+      const proofState = { writer_model: writerModel, session_id: sessionId, call, writer_stdout_path: stdoutPath };
       const afterWriterProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "writer" });
       if (afterWriterProof !== null) return afterWriterProof;
       // D3.3: the final result object keeps the legacy single-JSON file for everything downstream.
@@ -490,7 +495,7 @@ export async function runBoundedResume({
         await recordIo(paths, runId, partialUsageFromStream(stream.streamUsage, { call, durationMs: Date.now() - callStartedAt }));
       }
       // D5.3: stopped from outside; nothing more is classified (the spent tokens above are accounting).
-      if ((await readRunStatus(paths, runId)) === "stopped") return 130;
+      if (await runStopped(paths, runId)) return 130;
       if (stream.result) await writeJson(stdoutPath, stream.result);
       for (const read of stream.reads) {
         await recordIo(paths, runId, {
@@ -505,11 +510,11 @@ export async function runBoundedResume({
         await recordIo(paths, runId, usage);
         const callTotal = tokenTotal(usage.tokens);
         const runTotal = await usageTotalForRun(paths, runId);
-        if (callTotal > limits.max_tokens_per_call || runTotal > limits.max_tokens_per_run) {
-          const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
+        if (callTotal > limits.tokens_per_call || runTotal > limits.tokens) {
+          const which = callTotal > limits.tokens_per_call ? "per_call" : "per_run";
           await writeBoundedState(paths, runtimeState, {
             writer_model: writerModel, status: "token_limit", session_id: sessionId, call, updated_at: new Date().toISOString(),
-            token_limit: which, tokens_this_call: callTotal, tokens_this_run: runTotal, claude_stdout_path: stdoutPath,
+            token_limit: which, tokens_this_call: callTotal, tokens_this_run: runTotal, writer_stdout_path: stdoutPath,
           });
           await recordIo(paths, runId, {
             event: "stop", status: "token_limit", role: "writer", provider: "claude",
@@ -523,21 +528,21 @@ export async function runBoundedResume({
         }
       }
       if (processResult.timedOut) {
-        const timeout = await writeFailureRecord(paths, paths.queueRoot, stamp + "-claude", classifyProviderFailure({
+        const timeout = await writeFailureRecord(paths, paths.queueRoot, stamp + "-writer", classifyProviderFailure({
           role: "writer", provider: "claude", phase: "write", exitCode: processResult.exitCode, timedOut: true,
         }), { stdout_path: stdoutPath, stderr_path: stderrPath });
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel,
-          status: "claude_timeout",
+          status: "writer_timeout",
           failure: failureSummary(timeout.record, timeout.record_path),
           session_id: sessionId,
           call,
           updated_at: new Date().toISOString(),
-          max_minutes: maxMinutes,
+          call_timeout: callTimeout,
           stdout_path: stdoutPath,
           stderr_path: stderrPath,
         });
-        await consumeAuthorization(paths, control, "claude_timeout");
+        await consumeAuthorization(paths, control, "writer_timeout");
         return 77;
       }
       let claudeResult = null;
@@ -549,7 +554,7 @@ export async function runBoundedResume({
         }
       }
       if (claudeResult && String(claudeResult.session_id) !== sessionId) {
-        throw new Error("Claude session drift detected.");
+        throw new Error("Writer session drift detected.");
       }
       const resultText = String(claudeResult?.result || "");
       if (!claudeResult || claudeResult.is_error === true || processResult.exitCode !== 0) {
@@ -564,31 +569,31 @@ export async function runBoundedResume({
             claudeResult ? "" : await readEvidenceTail(stdoutPath),
           ],
         });
-        const written = await writeFailureRecord(paths, paths.queueRoot, stamp + "-claude", classified, {
+        const written = await writeFailureRecord(paths, paths.queueRoot, stamp + "-writer", classified, {
           stdout_path: stdoutPath,
           stderr_path: stderrPath,
         });
         const limited = classified.reason === "provider_usage_limit";
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel,
-          status: limited ? "rate_limited" : "claude_failed",
+          status: limited ? "rate_limited" : "writer_failed",
           session_id: sessionId,
           call,
           updated_at: new Date().toISOString(),
-          claude_exit_code: processResult.exitCode,
-          claude_json_valid: Boolean(claudeResult),
+          writer_exit_code: processResult.exitCode,
+          writer_json_valid: Boolean(claudeResult),
           failure: failureSummary(classified, written.record_path),
           stdout_path: stdoutPath,
           stderr_path: stderrPath,
         });
-        await consumeAuthorization(paths, control, limited ? "rate_limited" : "claude_failed");
+        await consumeAuthorization(paths, control, limited ? "rate_limited" : "writer_failed");
         return limited ? 75 : 1;
       }
       // Usage Bridge cannot read cannot be shown to stay under the ceilings; no further call starts.
       if (!writerUsage || writerUsage.parse_error) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "usage_unknown", session_id: sessionId, call, updated_at: new Date().toISOString(),
-          token_limit_role: "writer", missing: writerUsage?.missing || [], claude_stdout_path: stdoutPath,
+          token_limit_role: "writer", missing: writerUsage?.missing || [], writer_stdout_path: stdoutPath,
         });
         await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "writer", provider: "claude", detail_ref: "usage" });
         await consumeAuthorization(paths, control, "usage_unknown");
@@ -603,7 +608,7 @@ export async function runBoundedResume({
       if (!writerCheck.ok) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "malformed_writer_result", session_id: sessionId, call,
-          updated_at: new Date().toISOString(), errors: writerCheck.errors.slice(0, 20), claude_stdout_path: stdoutPath,
+          updated_at: new Date().toISOString(), errors: writerCheck.errors.slice(0, 20), writer_stdout_path: stdoutPath,
         });
         await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "writer", provider: "claude", detail_ref: writerCheck.errors[0] || "writer.result" });
         await consumeAuthorization(paths, control, "malformed_writer_result");
@@ -614,69 +619,69 @@ export async function runBoundedResume({
         // D1.4: the writer asked for a decision or declared itself blocked; no review, back to the owner.
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "needs_human", session_id: sessionId, call, updated_at: new Date().toISOString(),
-          writer_status: writerResult.status, needs_human: writerResult.needs_human, claude_stdout_path: stdoutPath,
+          writer_status: writerResult.status, needs_human: writerResult.needs_human, writer_stdout_path: stdoutPath,
         });
         await recordIo(paths, runId, { event: "stop", status: "needs_human", role: "writer", provider: "claude", detail_ref: writerResult.status });
         await consumeAuthorization(paths, control, "needs_human");
         return 0;
       }
       // T0-06 G3: the sealed verification runs after the writer and before any review.
-      let gateAResult = null;
-      if (workPackage.gate_a) {
-        // The version Gate A tests is recorded with its result, so a condition proven by Gate A can
+      let testResult = null;
+      if (workPackage.test) {
+        // The version the tests run on is recorded with their result, so a condition proven by them can
         // be tied to the version the reviewer later reads.
         const testedVersion = await workVersion(paths.repoRoot);
-        onStep(workPackage.gate_a.kind === "command" ? "Gate A: running " + workPackage.gate_a.command : "Gate A: not needed for docs-only work");
-        gateAResult ={ ...(await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "gate_a" }, () => runGateA({
-          paths, gateA: workPackage.gate_a,
-          stdoutPath: path.join(paths.queueRoot, stamp + "-gate-a.stdout.log"),
-          stderrPath: path.join(paths.queueRoot, stamp + "-gate-a.stderr.log"),
-          timeoutMs: limits.gate_a_minutes * 60_000,
-          onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "controller", provider: "gate_a", call }),
+        onStep(workPackage.test.kind === "command" ? "Tests: running " + workPackage.test.command : "Tests: not needed for docs-only work");
+        testResult ={ ...(await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "test" }, () => runTest({
+          paths, test: workPackage.test,
+          stdoutPath: path.join(paths.queueRoot, stamp + "-test.stdout.log"),
+          stderrPath: path.join(paths.queueRoot, stamp + "-test.stderr.log"),
+          timeoutMs: limits.test_timeout,
+          onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "controller", provider: "test", call }),
         }))), work_version: testedVersion };
         await clearProcess(paths, runId);
-        if ((await readRunStatus(paths, runId)) === "stopped") return 130;
-        await recordIo(paths, runId, { ...gateAResult, call });
-        if (gateAResult.kind === "command") onStep("Gate A " + (gateAResult.passed ? "passed" : "failed"));
-        const afterGateProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "gate_a" });
+        if (await runStopped(paths, runId)) return 130;
+        await recordIo(paths, runId, { ...testResult, call });
+        if (testResult.kind === "command") onStep("Tests " + (testResult.passed ? "passed" : "failed"));
+        const afterGateProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "test" });
         if (afterGateProof !== null) return afterGateProof;
-        if (gateAResult.kind === "command" && !gateAResult.passed) {
+        if (testResult.kind === "command" && !testResult.passed) {
           // G3.5: the controller's result goes back to the writer as fix.input; no reviewer call.
           const delta = currentControl.workspace_evidence?.baseline_path
-            ? await createWorkspaceDelta({ paths, baselinePath: currentControl.workspace_evidence.baseline_path, deltaId: "gate-a-" + stamp, sealed: evidenceSeal })
+            ? await createWorkspaceDelta({ paths, baselinePath: currentControl.workspace_evidence.baseline_path, deltaId: "test-" + stamp, sealed: evidenceSeal })
             : null;
           const changed = delta ? (await readJson(delta.delta_path)).changed_files : [];
           // Without Git there is no list of changes, so "nothing changed between two failures" cannot be shown.
           const comparable = delta?.mode === "git";
           lastChangedFiles = changed.map((entry) => ({ path: entry.path, change: entry.change, after_sha256: entry.after_sha256 }));
           const gateState = {
-            writer_model: writerModel, status: "gate_a_failed", session_id: sessionId, call, updated_at: new Date().toISOString(),
-            gate_a_passed: false, gate_a_command: gateAResult.command, gate_a_exit_code: gateAResult.exit_code, gate_a_timed_out: gateAResult.timed_out,
-            claude_stdout_path: stdoutPath,
+            writer_model: writerModel, status: "test_failed", session_id: sessionId, call, updated_at: new Date().toISOString(),
+            test_passed: false, test_command: testResult.command, test_exit_code: testResult.exit_code, test_timed_out: testResult.timed_out,
+            writer_stdout_path: stdoutPath,
           };
           // G3.6: the same command failing twice on an unchanged delta means nothing was fixed.
-          if (comparable && lastGateAResult && lastGateADelta && sameDelta(lastGateADelta, lastChangedFiles)) {
+          if (comparable && lastTestResult && lastTestDelta && sameDelta(lastTestDelta, lastChangedFiles)) {
             const stopGate = { review_gate: "FAIL", hard_stop_required: true, hard_stop_reason: "needs_human_decision" };
             await writeBoundedState(paths, runtimeState, { ...gateState, status: "hard_stop", ...stopGate });
-            await recordIo(paths, runId, { event: "stop", status: "hard_stop", role: "controller", provider: null, detail_ref: "gate_a_loop" });
+            await recordIo(paths, runId, { event: "stop", status: "hard_stop", role: "controller", provider: null, detail_ref: "test_loop" });
             await consumeAuthorization(paths, control, "review_hard_stop", stopGate);
             return 0;
           }
-          lastGateAResult = gateAResult;
-          lastGateADelta = comparable ? lastChangedFiles : null;
-          handoffReason = "gate_a_failed";
+          lastTestResult = testResult;
+          lastTestDelta = comparable ? lastChangedFiles : null;
+          handoffReason = "test_failed";
           lastFindings = [];
           await writeBoundedState(paths, runtimeState, gateState);
-          if (call >= maxCalls) {
+          if (call >= rounds) {
             await writeBoundedState(paths, runtimeState, {
-              ...gateState, status: "call_budget_exhausted", failure: failureSummary(budgetStop({ phase: "correction", maxCalls })),
+              ...gateState, status: "rounds_exhausted", failure: failureSummary(budgetStop({ phase: "correction", maxCalls: rounds })),
             });
-            await consumeAuthorization(paths, control, "call_budget_exhausted");
+            await consumeAuthorization(paths, control, "rounds_exhausted");
             return 76;
           }
           await recordIo(paths, runId, {
-            event: "fix.input", work_order: workPackage.work_package_id, call: call + 1, reason: "gate_a_failed",
-            gate_a_result: { command: gateAResult.command, exit_code: gateAResult.exit_code, timed_out: gateAResult.timed_out, stdout_tail: gateAResult.stdout_tail, stderr_tail: gateAResult.stderr_tail },
+            event: "fix.input", work_order: workPackage.work_package_id, call: call + 1, reason: "test_failed",
+            test_result: { command: testResult.command, exit_code: testResult.exit_code, timed_out: testResult.timed_out, stdout_tail: testResult.stdout_tail, stderr_tail: testResult.stderr_tail },
             read_list: buildReadList({ deltaPaths: lastChangedFiles.map((entry) => entry.path) }),
             limits: { max_turns: limits.max_turns, max_output_chars: limits.max_output_chars },
           });
@@ -698,14 +703,14 @@ export async function runBoundedResume({
         last_assistant_message: JSON.stringify(writerResult),
       };
       await writeJson(payloadPath, payload);
-      // The version the reviewer will read; a Gate A result for another version proves nothing here.
+      // The version the reviewer will read; a test result for another version proves nothing here.
       const reviewVersion = await workVersion(paths.repoRoot);
-      // Decision 2026-10-19: what Gate A tested must be what the reviewer reads. A project that changed
-      // since Gate A, whoever changed it (another run in this folder, or a person), stops here, before
+      // Decision 2026-10-19: what the tests ran on must be what the reviewer reads. A project that changed
+      // since the tests, whoever changed it (another run in this folder, or a person), stops here, before
       // a review is paid for.
-      if (gateAResult?.kind === "command" && gateAResult.work_version?.kind === "git" && !sameVersion(gateAResult.work_version, reviewVersion)) {
-        await writeBoundedState(paths, runtimeState, { ...proofState, status: "version_changed", changed_after: "gate_a", updated_at: new Date().toISOString(), tested_version: gateAResult.work_version, review_version: reviewVersion });
-        await recordIo(paths, runId, { event: "stop", status: "version_changed", role: "controller", provider: null, detail_ref: "gate_a" });
+      if (testResult?.kind === "command" && testResult.work_version?.kind === "git" && !sameVersion(testResult.work_version, reviewVersion)) {
+        await writeBoundedState(paths, runtimeState, { ...proofState, status: "version_changed", changed_after: "test", updated_at: new Date().toISOString(), tested_version: testResult.work_version, review_version: reviewVersion });
+        await recordIo(paths, runId, { event: "stop", status: "version_changed", role: "controller", provider: null, detail_ref: "test" });
         await consumeAuthorization(paths, control, "version_changed");
         return 0;
       }
@@ -713,11 +718,10 @@ export async function runBoundedResume({
         payload,
         paths,
         control: currentControl,
-        classificationProfile: classificationProfileFromSnapshot(currentControl.run.policy_snapshot),
         writerResult,
         call,
         openFindings: lastFindings,
-        gateAResult,
+        testResult,
         workVersion: reviewVersion,
         sealedEvidence: evidenceSeal,
       });
@@ -739,7 +743,7 @@ export async function runBoundedResume({
       }
       const [ownOutcome] = ownOutcomes;
       // Stopped during the review: the killed review's output is not taken, and nothing is recorded.
-      if (ownOutcome.status === "stopped" || (await readRunStatus(paths, runId)) === "stopped") return 130;
+      if (ownOutcome.status === "stopped" || await runStopped(paths, runId)) return 130;
       const afterReviewProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "review" });
       if (afterReviewProof !== null) return afterReviewProof;
       if (ownOutcome.status === "failed") {
@@ -756,8 +760,8 @@ export async function runBoundedResume({
           failed_review_job_id: failedReview.job_id,
           failed_review_job_path: failedReview.job_path,
           review_error_path: failedReview.error_path,
-          claude_stdout_path: stdoutPath,
-          claude_stderr_path: stderrPath,
+          writer_stdout_path: stdoutPath,
+          writer_stderr_path: stderrPath,
           resume_limitation: REVIEW_RESUME_LIMITATION,
         });
         await consumeAuthorization(paths, control, status);
@@ -768,7 +772,7 @@ export async function runBoundedResume({
       }
       const latestReviewPath = ownOutcome.result_path;
       assertUnder(latestReviewPath, paths.reviewsRoot, "Latest review");
-      if (!(await fileExists(latestReviewPath))) throw new Error("Codex review result is missing.");
+      if (!(await fileExists(latestReviewPath))) throw new Error("Reviewer result is missing.");
       const afterReview = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
       if (afterReview.exitCode !== null) return afterReview.exitCode;
       // The reviewer judged the version recorded before the review; if the work changed meanwhile,
@@ -794,7 +798,7 @@ export async function runBoundedResume({
       if (!check.ok) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "malformed_review_result", session_id: sessionId, call,
-          updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+          updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), review_path: latestReviewPath, writer_stdout_path: stdoutPath,
         });
         await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "reviewer", provider: "codex", detail_ref: check.errors[0] || "review.result" });
         await consumeAuthorization(paths, control, "malformed_review_result");
@@ -805,7 +809,7 @@ export async function runBoundedResume({
       if (!ownOutcome.controller_decided && (!ownOutcome.usage || ownOutcome.usage.parse_error)) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "usage_unknown", session_id: sessionId, call, updated_at: new Date().toISOString(),
-          token_limit_role: "reviewer", missing: ownOutcome.usage?.missing || [], review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+          token_limit_role: "reviewer", missing: ownOutcome.usage?.missing || [], review_path: latestReviewPath, writer_stdout_path: stdoutPath,
         });
         await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "reviewer", provider: "codex", detail_ref: "usage" });
         await consumeAuthorization(paths, control, "usage_unknown");
@@ -815,12 +819,12 @@ export async function runBoundedResume({
       if (ownOutcome.usage && !ownOutcome.controller_decided) {
         const callTotal = tokenTotal(ownOutcome.usage.tokens);
         const runTotal = await usageTotalForRun(paths, runId);
-        if (callTotal > limits.max_tokens_per_call || runTotal > limits.max_tokens_per_run) {
-          const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
+        if (callTotal > limits.tokens_per_call || runTotal > limits.tokens) {
+          const which = callTotal > limits.tokens_per_call ? "per_call" : "per_run";
           await writeBoundedState(paths, runtimeState, {
             writer_model: writerModel, status: "token_limit", session_id: sessionId, call, updated_at: new Date().toISOString(),
             token_limit: which, token_limit_role: "reviewer", tokens_this_call: callTotal, tokens_this_run: runTotal,
-            review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+            review_path: latestReviewPath, writer_stdout_path: stdoutPath,
           });
           await recordIo(paths, runId, {
             event: "stop", status: "token_limit", role: "reviewer", provider: "codex",
@@ -835,15 +839,15 @@ export async function runBoundedResume({
       // deliver. A condition that is not proven stops the run for the human instead of passing.
       const sealedContract = afterReview.contract?.contract || null;
       const rows = sealedContract && !ownOutcome.controller_decided
-        ? acceptanceRows({ contract: sealedContract, writer: writerResult, review: reviewResult, gateA: gateAResult, reviewVersion })
+        ? acceptanceRows({ contract: sealedContract, writer: writerResult, review: reviewResult, test: testResult, reviewVersion })
         : [];
       const accepted = rows.length ? decideAcceptance(rows) : null;
       if (rows.length) await recordIo(paths, runId, { event: "acceptance", call, decision: accepted, review_version: reviewVersion, rows });
       if (reviewResult.gate === "PASS" && accepted && accepted !== "proven") {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "acceptance_unverified", session_id: sessionId, call, updated_at: new Date().toISOString(),
-          ...(gateAResult ? { gate_a_passed: gateAResult.kind === "command" ? gateAResult.passed : null } : {}),
-          review_gate: reviewResult.gate, review_path: latestReviewPath, claude_stdout_path: stdoutPath,
+          ...(testResult ? { test_passed: testResult.kind === "command" ? testResult.passed : null } : {}),
+          review_gate: reviewResult.gate, review_path: latestReviewPath, writer_stdout_path: stdoutPath,
         });
         await recordIo(paths, runId, { event: "stop", status: "acceptance_unverified", role: "controller", provider: null, detail_ref: "acceptance" });
         await consumeAuthorization(paths, control, "acceptance_unverified");
@@ -881,10 +885,10 @@ export async function runBoundedResume({
         call,
         updated_at: new Date().toISOString(),
         // G3.7: PASS is both halves; the gate half is recorded beside the reviewer's.
-        ...(gateAResult ? { gate_a_passed: gateAResult.kind === "command" ? gateAResult.passed : null } : {}),
+        ...(testResult ? { test_passed: testResult.kind === "command" ? testResult.passed : null } : {}),
         ...gate,
         review_path: latestReviewPath,
-        claude_stdout_path: stdoutPath,
+        writer_stdout_path: stdoutPath,
       });
       if (gate.review_gate === "PASS" || gate.hard_stop_required) {
         await consumeAuthorization(
@@ -895,20 +899,20 @@ export async function runBoundedResume({
         );
         return 0;
       }
-      if (call >= maxCalls) {
+      if (call >= rounds) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel,
-          status: "call_budget_exhausted",
+          status: "rounds_exhausted",
           session_id: sessionId,
           call,
           updated_at: new Date().toISOString(),
-          ...(gateAResult ? { gate_a_passed: gateAResult.kind === "command" ? gateAResult.passed : null } : {}),
+          ...(testResult ? { test_passed: testResult.kind === "command" ? testResult.passed : null } : {}),
           ...gate,
           review_path: latestReviewPath,
-          claude_stdout_path: stdoutPath,
-          failure: failureSummary(budgetStop({ phase: "correction", maxCalls })),
+          writer_stdout_path: stdoutPath,
+          failure: failureSummary(budgetStop({ phase: "correction", maxCalls: rounds })),
         });
-        await consumeAuthorization(paths, control, "call_budget_exhausted", gate);
+        await consumeAuthorization(paths, control, "rounds_exhausted", gate);
         return 76;
       }
 
@@ -919,7 +923,7 @@ export async function runBoundedResume({
       }
       await runtimeState.incrementIteration();
     }
-    await consumeAuthorization(paths, control, "call_budget_exhausted");
+    await consumeAuthorization(paths, control, "rounds_exhausted");
     return 76;
   } catch (error) {
     // RC3-BLOCKER-01 step 4: the database is the one record; a run that cannot write to it stops here
@@ -929,7 +933,7 @@ export async function runBoundedResume({
       await stopRunRecord(paths, runtimeState.runId, { closedReason: "database_unavailable" }).catch(() => {});
       return DATABASE_UNAVAILABLE_EXIT;
     }
-    if ((await readRunStatus(paths, runtimeState.runId)) === "stopped") return 130;
+    if (await runStopped(paths, runtimeState.runId)) return 130;
     const currentState = await runtimeState.getState().catch(() => null);
     const stateBelongsToThisInvocation = Boolean(validation) && currentState?.session_id === validation.session_id
       && Number.isFinite(Date.parse(currentState?.updated_at))
@@ -940,7 +944,7 @@ export async function runBoundedResume({
       await writeBoundedState(paths, runtimeState, {
         status: "controller_failure",
         writer_model: validation?.model ?? writerModelFor(control),
-        session_id: validation?.session_id ?? String(control.active_claude_session),
+        session_id: validation?.session_id ?? String(control.active_writer_session),
         updated_at: new Date().toISOString(),
         error: error.message,
         failure: failureSummary(controllerError({ phase: "controller" })),

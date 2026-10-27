@@ -6,7 +6,7 @@
 // Who writes the evidence, and what it is checked against:
 // - baseline.json: written once by the run's controller when the work is authorized. Its hash is
 //   kept on the run record and, for the life of the controller, in memory (`sealed`).
-// - windows/*.json: written by a run's own controller after each writer or Gate A call, never by
+// - windows/*.json: written by a run's own controller after each writer or test call, never by
 //   anyone else. The controller keeps each file's hash in memory; before a delta is used, its own
 //   window files on disk must be exactly the sealed ones, unchanged.
 // - Another run's windows are written by that run's controller; this controller cannot seal them,
@@ -198,7 +198,7 @@ export async function startPointStatus(paths, baselinePath) {
   return "ok";
 }
 
-// Taken before and after each writer or Gate A call, so a change can be tied to the call it
+// Taken before and after each writer or test call, so a change can be tied to the call it
 // happened in. Without Git there is nothing to take.
 export async function snapshotWorkspace(paths, baselinePath) {
   const { baseline } = await readBaseline(paths, baselinePath);

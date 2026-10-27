@@ -1,7 +1,7 @@
 // The acceptance chain (RC3-BLOCKER-00). Every condition sealed in the contract is reported by the
 // writer, judged by the reviewer, and decided here by code: the writer's and reviewer's answers
 // must name exactly the sealed ids, and a condition the reviewer passes counts as proven only
-// when its evidence holds: a condition that leans on Gate A needs Gate A to have passed on the
+// when its evidence holds: a condition that leans on the tests needs them to have passed on the
 // same version of the work the reviewer saw. Anything else is failed or unknown, never a pass.
 import { fileSha256, headCommit, isGitWorkTree, runGit as git, sha256 } from "./gitWorkspace.mjs";
 
@@ -68,10 +68,10 @@ export function verdictProblems(reviewResult, contract) {
   return problems;
 }
 
-const leansOnGateA = (condition) => condition.verify.some((check) => check.kind === "gate_a");
+const leansOnTest = (condition) => condition.verify.some((check) => check.kind === "test");
 
 // One row per sealed condition, decided from records only.
-export function acceptanceRows({ contract, writer = null, review = null, gateA = null, reviewVersion = null }) {
+export function acceptanceRows({ contract, writer = null, review = null, test = null, reviewVersion = null }) {
   return (contract?.acceptance || []).map((condition) => {
     const reported = writer?.criteria?.find((item) => item.id === condition.id) || null;
     const judged = review?.verdicts?.find((item) => item.id === condition.id) || null;
@@ -81,20 +81,20 @@ export function acceptanceRows({ contract, writer = null, review = null, gateA =
       writer: reported?.status || null,
       verdict: judged?.verdict || null,
       evidence: judged?.evidence || null,
-      gate_a: leansOnGateA(condition) ? (gateA?.kind === "command" ? (gateA.passed ? "passed" : "failed") : "not_run") : "not_used",
+      test: leansOnTest(condition) ? (test?.kind === "command" ? (test.passed ? "passed" : "failed") : "not_run") : "not_used",
     };
-    return { ...row, result: rowResult(row, { gateA, reviewVersion }) };
+    return { ...row, result: rowResult(row, { test, reviewVersion }) };
   });
 }
 
-function rowResult(row, { gateA, reviewVersion }) {
-  if (row.verdict === "fail" || row.gate_a === "failed") return "failed";
+function rowResult(row, { test, reviewVersion }) {
+  if (row.verdict === "fail" || row.test === "failed") return "failed";
   if (row.verdict !== "pass") return "unknown";
-  if (row.gate_a === "not_used") return "proven";
-  if (row.gate_a !== "passed") return "unknown";
+  if (row.test === "not_used") return "proven";
+  if (row.test !== "passed") return "unknown";
   // Without Git neither version is known; the work proof is unknown, not the test result.
-  if (gateA.work_version?.kind === "unknown" && reviewVersion?.kind === "unknown") return "proven";
-  return sameVersion(gateA.work_version, reviewVersion) ? "proven" : "unknown";
+  if (test.work_version?.kind === "unknown" && reviewVersion?.kind === "unknown") return "proven";
+  return sameVersion(test.work_version, reviewVersion) ? "proven" : "unknown";
 }
 
 // Bridge's decision once the reviewer's answer is valid: every condition proven delivers; any

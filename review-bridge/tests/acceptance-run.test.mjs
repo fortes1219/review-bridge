@@ -61,7 +61,7 @@ async function run(rt, name, { env = {}, changeTypes = "code", allowPaths = null
   await fsp.writeFile(path.join(rt.root, order), ORDER);
   const planArg = ".review-bridge/review-queue/" + name + ".plan.json";
   const planned = rt.bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
-    "--change-types", changeTypes, ...(allowPaths ? ["--allow-paths", allowPaths] : []), "--max-claude-calls", String(maxCalls), "--max-claude-minutes", "2", "--out", planArg]);
+    "--change-types", changeTypes, ...(allowPaths ? ["--allow-paths", allowPaths] : []), "--rounds", String(maxCalls), "--call-timeout", "120000", "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(rt.root, planArg));
   const started = rt.bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli", "--fake-scenario", scenario, "--json"], env);
@@ -75,26 +75,26 @@ test("every sealed condition is reported, judged and proven before the work is d
   const rt = await install(t);
   const { exit, record, events, result } = await run(rt, "proven");
   assert.equal(exit, 0);
-  assert.equal(record.status, "pass");
+  assert.equal(record.conclusion, "success");
   const writer = events.find((event) => event.event === "writer.result");
   assert.deepEqual(writer.criteria.map((item) => [item.id, item.status]), [["AC1", "done"], ["AC2", "done"]]);
   const review = events.find((event) => event.event === "review.result");
   assert.deepEqual(review.verdicts.map((item) => [item.id, item.verdict]), [["AC1", "pass"], ["AC2", "pass"]]);
   const decided = events.find((event) => event.event === "acceptance");
   assert.equal(decided.decision, "proven");
-  assert.deepEqual(decided.rows.map((row) => [row.id, row.gate_a, row.result]), [["AC1", "passed", "proven"], ["AC2", "passed", "proven"]]);
+  assert.deepEqual(decided.rows.map((row) => [row.id, row.test, row.result]), [["AC1", "passed", "proven"], ["AC2", "passed", "proven"]]);
   // No Git in this project: the work proof is unknown, and the result says so.
-  assert.equal(events.find((event) => event.event === "gate_a_result").work_version.kind, "unknown");
-  assert.match(result, /## Acceptance\n- AC1 proven: The greeting is printed\. \(reviewer: pass; Gate A: passed; evidence: fake: /);
+  assert.equal(events.find((event) => event.event === "test_result").work_version.kind, "unknown");
+  assert.match(result, /## Acceptance\n- AC1 proven: The greeting is printed\. \(reviewer: pass; tests: passed; evidence: fake: /);
   assert.match(result, /Version checked: unknown \(no Git\)/);
 });
 
-test("in a Git project the Gate A result and the review are tied to the same commit and changes", async (t) => {
+test("in a Git project the test result and the review are tied to the same commit and changes", async (t) => {
   const rt = await install(t, { withGit: true });
   const { exit, record, events, result } = await run(rt, "versioned");
   assert.equal(exit, 0, JSON.stringify(record.last_state));
-  assert.equal(record.status, "pass");
-  const tested = events.find((event) => event.event === "gate_a_result").work_version;
+  assert.equal(record.conclusion, "success");
+  const tested = events.find((event) => event.event === "test_result").work_version;
   const decided = events.find((event) => event.event === "acceptance");
   assert.equal(tested.kind, "git");
   assert.equal(decided.review_version.fingerprint, tested.fingerprint);
@@ -108,7 +108,7 @@ test("a condition the reviewer cannot verify is not delivered as passed; the hum
   const rt = await install(t);
   const { exit, record, events, result } = await run(rt, "unverified", { env: { FAKE_CODEX_VERDICT: "cannot_verify" } });
   assert.equal(exit, 0);
-  assert.equal(record.status, "acceptance_unverified");
+  assert.equal(record.closed_reason, "acceptance_unverified");
   assert.equal(events.find((event) => event.event === "review.result").gate, "PASS");
   assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => row.result), ["unknown", "proven"]);
   assert.match(result, /^# Your decision needed/m);
@@ -129,7 +129,7 @@ test("answers that skip, repeat or contradict a condition are refused, from the 
   for (const [name, env, status, error] of cases) {
     const { exit, record } = await run(rt, name, { env });
     assert.equal(exit, 79, name);
-    assert.equal(record.status, status, name);
+    assert.equal(record.closed_reason, status, name);
     assert.ok(record.last_state.errors.includes(error), name + ": " + JSON.stringify(record.last_state.errors));
   }
 });
@@ -138,33 +138,33 @@ test("usage Bridge cannot read stops the run at the writer and at the reviewer, 
   const rt = await install(t);
   const writer = await run(rt, "writer-usage", { env: { FAKE_CLAUDE_USAGE: "none" } });
   assert.equal(writer.exit, 76);
-  assert.equal(writer.record.status, "usage_unknown");
-  assert.equal(writer.events.some((event) => event.event === "gate_a_result" || event.event === "review.input"), false);
+  assert.equal(writer.record.closed_reason, "usage_unknown");
+  assert.equal(writer.events.some((event) => event.event === "test_result" || event.event === "review.input"), false);
   assert.match(writer.result, /could not read how many tokens the writer call used/);
   const reviewer = await run(rt, "reviewer-usage", { env: { FAKE_CODEX_USAGE: "none" } });
   assert.equal(reviewer.exit, 76);
-  assert.equal(reviewer.record.status, "usage_unknown");
+  assert.equal(reviewer.record.closed_reason, "usage_unknown");
   assert.equal(reviewer.record.last_state.token_limit_role, "reviewer");
   assert.equal(reviewer.events.some((event) => event.event === "acceptance"), false);
 });
 
-test("docs-only work runs no tests: Gate A is not applicable and each condition rests on the reviewer", async (t) => {
+test("docs-only work runs no tests: the tests are not applicable and each condition rests on the reviewer", async (t) => {
   const rt = await install(t);
   const { exit, record, events, result } = await run(rt, "docs", { changeTypes: "docs" });
   assert.equal(exit, 0, JSON.stringify(record.last_state));
-  assert.equal(record.status, "pass");
-  assert.equal(events.find((event) => event.event === "gate_a_result").kind, "not_applicable");
-  assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => [row.gate_a, row.result]), [["not_used", "proven"], ["not_used", "proven"]]);
+  assert.equal(record.conclusion, "success");
+  assert.equal(events.find((event) => event.event === "test_result").kind, "not_applicable");
+  assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => [row.test, row.result]), [["not_used", "proven"], ["not_used", "proven"]]);
   assert.match(result, /No tests run \(docs only\)/);
-  assert.match(result, /Gate A: not used/);
+  assert.match(result, /tests: not used/);
 });
 
-test("a writer that rewrites the Git history stops the run before Gate A or review; the human decides", async (t) => {
+test("a writer that rewrites the Git history stops the run before the tests or review; the human decides", async (t) => {
   const rt = await install(t, { withGit: true });
   const { exit, record, events, result } = await run(rt, "rewritten", { env: { FAKE_CLAUDE_GIT_AMEND: "1" } });
   assert.equal(exit, 0);
-  assert.equal(record.status, "start_point_lost");
-  assert.equal(events.some((event) => event.event === "gate_a_result" || event.event === "review.input"), false);
+  assert.equal(record.closed_reason, "start_point_lost");
+  assert.equal(events.some((event) => event.event === "test_result" || event.event === "review.input"), false);
   assert.match(result, /^# Your decision needed/m);
   assert.match(result, /history was rewritten or the branch switched/);
 });
@@ -182,15 +182,15 @@ test("a writer that rewrites the run's starting record is caught after its call 
   const rt = await install(t, { withGit: true });
   const { exit, record, events, result } = await run(rt, "tampered", { env: { FAKE_CLAUDE_EVIDENCE_TAMPER: "1" } });
   assert.equal(exit, 0);
-  assert.equal(record.status, "evidence_changed");
+  assert.equal(record.closed_reason, "evidence_changed");
   assert.match(record.last_state.error, /^writer:.*starting record/);
-  assert.equal(events.some((event) => event.event === "gate_a_result" || event.event === "review.input"), false);
+  assert.equal(events.some((event) => event.event === "test_result" || event.event === "review.input"), false);
   assert.match(result, /work-proof record Bridge had sealed was changed/);
   // A later delivery in another process can only compare with the run record; it says so.
   assert.match(result, /work-proof records changed or no longer match what Bridge kept/);
 });
 
-test("Gate A that switches the branch stops the run before the review", async (t) => {
+test("tests that switch the branch stops the run before the review", async (t) => {
   const rt = await install(t, { withGit: true });
   await fsp.writeFile(path.join(rt.root, "gate.js"), "require('node:child_process').spawnSync('git', ['checkout', '-q', '-b', 'moved'], { stdio: 'ignore' });\n");
   const manifest = JSON.parse(await fsp.readFile(path.join(rt.root, "package.json"), "utf8"));
@@ -199,14 +199,14 @@ test("Gate A that switches the branch stops the run before the review", async (t
   rt.git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "gate that switches");
   const { exit, record, events } = await run(rt, "gate-switch");
   assert.equal(exit, 0, JSON.stringify(record.last_state));
-  assert.equal(record.status, "start_point_lost");
-  assert.match(record.last_state.error, /^git_start:gate_a/);
+  assert.equal(record.closed_reason, "start_point_lost");
+  assert.match(record.last_state.error, /^git_start:test/);
   assert.equal(events.some((event) => event.event === "review.input"), false);
 });
 
-// Decision 2026-10-19: what Gate A tested must be what the reviewer reads. Here Gate A itself leaves
+// Decision 2026-10-19: what the tests ran on must be what the reviewer reads. Here the tests themselves leaves
 // a change behind, the way another run working in the same folder would between the two.
-test("a project that changes after Gate A tested it stops the run before any review, and the result says why", async (t) => {
+test("a project that changes after the tests ran on it stops the run before any review, and the result says why", async (t) => {
   const rt = await install(t, { withGit: true });
   await fsp.writeFile(path.join(rt.root, "gate.js"), "require('node:fs').appendFileSync('README.md', 'changed beside the run\\n');\n");
   const manifest = JSON.parse(await fsp.readFile(path.join(rt.root, "package.json"), "utf8"));
@@ -215,13 +215,13 @@ test("a project that changes after Gate A tested it stops the run before any rev
   rt.git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "gate that leaves a change");
   const { exit, record, events, result } = await run(rt, "after-gate");
   assert.equal(exit, 0, JSON.stringify(record.last_state));
-  assert.equal(record.status, "version_changed");
-  assert.equal(record.last_state.changed_after, "gate_a");
+  assert.equal(record.closed_reason, "version_changed");
+  assert.equal(record.last_state.changed_after, "test");
   assert.notEqual(record.last_state.tested_version.fingerprint, record.last_state.review_version.fingerprint);
   // No review is paid for, and no condition is passed.
   assert.equal(events.some((event) => event.event === "review.input"), false);
   assert.equal(events.some((event) => event.event === "acceptance"), false);
-  assert.match(result, /changed after Gate A tested it and before the reviewer read it/);
+  assert.match(result, /changed after the tests ran on it and before the reviewer read it/);
   assert.match(result, /Another run working in this folder, or a person, may have changed files/);
 });
 
@@ -234,7 +234,7 @@ test("two work orders started at the same time both run, side by side, and neith
     await fsp.writeFile(path.join(rt.root, order), ORDER);
     const planArg = ".review-bridge/review-queue/" + name + ".plan.json";
     const planned = rt.bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
-      "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2", "--out", planArg]);
+      "--change-types", "code", "--rounds", "1", "--call-timeout", "120000", "--out", planArg]);
     assert.equal(planned.status, 0, planned.stderr);
     plans.push({ name, planArg, plan: await readJson(path.join(rt.root, planArg)) });
   }
@@ -250,7 +250,7 @@ test("two work orders started at the same time both run, side by side, and neith
   for (const [index, { code, stderr }] of exits.entries()) assert.equal(code, 0, plans[index].name + ": " + stderr);
   const records = await Promise.all(plans.map(({ plan }) => readJson(path.join(rt.paths.runsDir, plan.proposed_run_id + ".json"))));
   for (const record of records) {
-    assert.equal(record.status, "pass", JSON.stringify(record.last_state));
+    assert.equal(record.conclusion, "success", JSON.stringify(record.last_state));
     assert.equal(record.closed_reason === "superseded", false);
   }
   // Each writer started before the other one finished: they worked at the same time, not in turn.
@@ -270,13 +270,13 @@ test("work that changes while the reviewer reads it stops the run; the verdicts 
   const rt = await install(t, { withGit: true });
   const { exit, record, events, result } = await run(rt, "moving", { env: { FAKE_CODEX_TOUCH: "1" } });
   assert.equal(exit, 0, JSON.stringify(record.last_state));
-  assert.equal(record.status, "version_changed");
+  assert.equal(record.closed_reason, "version_changed");
   assert.notEqual(record.last_state.review_version.fingerprint, record.last_state.version_after_review.fingerprint);
   assert.equal(events.some((event) => event.event === "acceptance"), false);
-  // The result says the change came during the review, not after Gate A, and who may have made it.
+  // The result says the change came during the review, not after the tests, and who may have made it.
   assert.equal(record.last_state.changed_after, "review_start");
   assert.match(result, /changed while the reviewer was reading it/);
-  assert.doesNotMatch(result, /changed after Gate A tested it/);
+  assert.doesNotMatch(result, /changed after the tests ran on it/);
   assert.match(result, /Another run working in this folder, or a person, may have changed files/);
 });
 
@@ -285,8 +285,8 @@ test("work that changes while the reviewer reads it stops the run; the verdicts 
 test("an out-of-scope change hidden behind a forged overlapping record of an existing run is never delivered as passed", async (t) => {
   const rt = await install(t, { withGit: true });
   const { exit, record, events } = await run(rt, "forged", { allowPaths: "src", env: { FAKE_CLAUDE_WRITE: "README.md", FAKE_CLAUDE_FORGE_WINDOW: "1" } });
-  assert.notEqual(record.status, "pass", JSON.stringify(record.last_state));
-  assert.equal(record.status, "scope_unverified");
+  assert.notEqual(record.conclusion, "success", JSON.stringify(record.last_state));
+  assert.equal(record.closed_reason, "scope_unverified");
   assert.equal(exit, 0);
   const proof = events.find((event) => event.event === "review.input").work_proof;
   assert.deepEqual(proof.scope_unverified, ["README.md"]);
@@ -295,7 +295,7 @@ test("an out-of-scope change hidden behind a forged overlapping record of an exi
 test("a failing writer call that rewrote an earlier call record ends as evidence_changed, and the result uses no unchecked record", async (t) => {
   const rt = await install(t, { withGit: true });
   const { record, result } = await run(rt, "rewrites-records", { scenario: "FAIL_THEN_PASS", maxCalls: 2, env: { FAKE_CLAUDE_WRITE: "src/app.js", FAKE_CLAUDE_WINDOW_TAMPER_CALL: "2" } });
-  assert.equal(record.status, "evidence_changed", JSON.stringify(record.last_state));
+  assert.equal(record.closed_reason, "evidence_changed", JSON.stringify(record.last_state));
   assert.match(record.last_state.error, /^writer:.*call record/);
   assert.match(result, /No work proof: the run's work-proof records changed/);
   // No changed-file line comes from the unchecked records (a reviewer finding may still name the file).
@@ -305,6 +305,6 @@ test("a failing writer call that rewrote an earlier call record ends as evidence
 test("a failing review that rewrote a call record ends as evidence_changed, not as a reviewer failure", async (t) => {
   const rt = await install(t, { withGit: true });
   const { record } = await run(rt, "review-rewrites", { env: { FAKE_CLAUDE_WRITE: "src/app.js", FAKE_CODEX_WINDOW_TAMPER: "1" } });
-  assert.equal(record.status, "evidence_changed", JSON.stringify(record.last_state));
+  assert.equal(record.closed_reason, "evidence_changed", JSON.stringify(record.last_state));
   assert.match(record.last_state.error, /^review:.*call record/);
 });

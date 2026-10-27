@@ -56,7 +56,7 @@ async function makeRuntime(prefix = "ac-state-", baseRoot = os.tmpdir()) {
     schema_version: 4,
     active_runs: "derive_from_run_projections",
   });
-  await writeJson(paths.policyOverridePath, { schema_version: 4 });
+  await writeJson(paths.policyOverridePath, { schema_version: 5 });
   return { repoRoot, bridgeRoot, paths };
 }
 
@@ -76,7 +76,7 @@ async function startFixture(runtime, {
     task: "Change one disposable fixture.",
     acceptance_criteria: ["fixture passes"],
     scope: { change_types: ["tests"], allowed_paths: ["fixture.txt"] },
-    budget: { max_claude_calls: calls, max_claude_minutes_per_call: 1 },
+    budget: { rounds: calls, call_timeout: 1 },
     breakpoint: "return to human owner",
   }, clock);
   const authorization = await createAuthorization(runtime.paths, {
@@ -84,7 +84,7 @@ async function startFixture(runtime, {
     authorizedBy: "Human Owner",
     workPackageSha256: workPackage.record.content_sha256,
     policySha256: snapshot.effective_policy_sha256,
-    ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,
+    ttl: snapshot.effective_policy.limits.authorization_ttl,
     sourceRunId,
     sourceEvidence,
   }, clock);
@@ -98,21 +98,21 @@ async function startFixture(runtime, {
   return { snapshot, workPackage, authorization, ...started };
 }
 
-async function createUnclaimed(runtime, { calls = 1, clock = Date.now, ttlSeconds = null } = {}) {
+async function createUnclaimed(runtime, { calls = 1, clock = Date.now, ttl = null } = {}) {
   const { snapshot } = await loadOrCreatePolicySnapshot(runtime.paths);
   const workPackage = await createImmutableWorkPackage(runtime.paths, {
     work_package_id: "wp-" + randomUUID(),
     task: "Unclaimed fixture.",
     acceptance_criteria: [],
     scope: { change_types: ["tests"], allowed_paths: ["fixture.txt"] },
-    budget: { max_claude_calls: calls, max_claude_minutes_per_call: 1 },
+    budget: { rounds: calls, call_timeout: 1 },
     breakpoint: "return to owner",
   }, clock);
   const authorization = await createAuthorization(runtime.paths, {
     authorizedBy: "Human Owner",
     workPackageSha256: workPackage.record.content_sha256,
     policySha256: snapshot.effective_policy_sha256,
-    ttlSeconds: ttlSeconds ?? snapshot.effective_policy.limits.authorization_ttl_seconds,
+    ttl: ttl ?? snapshot.effective_policy.limits.authorization_ttl,
   }, clock);
   return { snapshot, workPackage, authorization };
 }
@@ -157,7 +157,7 @@ describe("AC-03 abnormal interruption resumes the same claim, run, and session",
       runId: "crash-run", sessionId: "crash-session",
     });
     assert.equal(resumed.run.run_id, first.claim.run_id);
-    assert.equal(resumed.run.claude_session_id, "crash-session");
+    assert.equal(resumed.run.writer_session_id, "crash-session");
     assert.equal((await listRuns(runtime.paths)).length, 1);
   });
 });
@@ -177,7 +177,7 @@ describe("AC-05 expired unclaimed authorization is rejected", () => {
   it("requires an unexpired authorization at first claim", async () => {
     const runtime = await makeRuntime();
     const old = Date.now() - 10_000;
-    const { authorization } = await createUnclaimed(runtime, { clock: () => old, ttlSeconds: 1 });
+    const { authorization } = await createUnclaimed(runtime, { clock: () => old, ttl: 1000 });
     await assert.rejects(
       claimStartAuthorization(runtime.paths, authorization.authorization_id),
       /expired/,
@@ -203,19 +203,19 @@ describe("AC-07 budget extension preserves run scope and policy ceiling", () => 
       authorizedBy: "Human Owner",
       workPackageSha256: started.run.work_package_sha256,
       policySha256: started.run.effective_policy_sha256,
-      ttlSeconds: 3600,
+      ttl: 3_600_000,
       runId: started.run.run_id,
-      additionalBudget: { max_claude_calls: 1 },
+      additionalBudget: { rounds: 1 },
     });
     const updated = await applyBudgetExtension(runtime.paths, extension.authorization_id);
     assert.equal(updated.run_id, started.run.run_id);
     assert.equal(updated.work_package_sha256, started.run.work_package_sha256);
-    assert.equal(updated.budget.max_claude_calls, 2);
+    assert.equal(updated.budget.rounds, 2);
     const excess = await createAuthorization(runtime.paths, {
       kind: "budget_extension", authorizedBy: "Human Owner",
       workPackageSha256: started.run.work_package_sha256,
-      policySha256: started.run.effective_policy_sha256, ttlSeconds: 3600,
-      runId: started.run.run_id, additionalBudget: { max_claude_calls: 1 },
+      policySha256: started.run.effective_policy_sha256, ttl: 3_600_000,
+      runId: started.run.run_id, additionalBudget: { rounds: 1 },
     });
     await assert.rejects(applyBudgetExtension(runtime.paths, excess.authorization_id), /ceiling/);
   });
@@ -228,9 +228,9 @@ describe("AC-07 budget extension preserves run scope and policy ceiling", () => 
       authorizedBy: "Human Owner",
       workPackageSha256: started.run.work_package_sha256,
       policySha256: started.run.effective_policy_sha256,
-      ttlSeconds: 3600,
+      ttl: 3_600_000,
       runId: started.run.run_id,
-      additionalBudget: { max_claude_calls: 1 },
+      additionalBudget: { rounds: 1 },
     });
     await writeJson(path.join(runtime.paths.authorizationClaimsDir, extension.authorization_id + ".json"), {
       schema_version: 4,
@@ -241,31 +241,22 @@ describe("AC-07 budget extension preserves run scope and policy ceiling", () => 
       claim_kind: "budget_extension",
     });
     const recovered = await applyBudgetExtension(runtime.paths, extension.authorization_id);
-    assert.equal(recovered.budget.max_claude_calls, 2);
+    assert.equal(recovered.budget.rounds, 2);
     assert.equal(recovered.authorization_ids.filter((id) => id === extension.authorization_id).length, 1);
     const replayed = await applyBudgetExtension(runtime.paths, extension.authorization_id);
-    assert.equal(replayed.budget.max_claude_calls, 2);
+    assert.equal(replayed.budget.rounds, 2);
   });
 });
 
 describe("AC-08 tighten-only policy merge rejects protected weakening", () => {
-  it("accepts stricter limits and rejects protected removals, exclusions, effort, and release weakening", async () => {
+  it("accepts stricter limits and rejects looser limits, lower effort, and release weakening", async () => {
     const defaults = JSON.parse(await fsp.readFile(path.join(sourceBridgeRoot, "config", "default-policy.json"), "utf8"));
-    assert.equal(mergePolicy(defaults, { schema_version: 4, limits: { max_claude_calls: 1 } }).limits.max_claude_calls, 1);
-    assert.throws(() => mergePolicy(defaults, { schema_version: 4, limits: { max_claude_calls: 3 } }), /tighten/);
-    assert.throws(() => mergePolicy(defaults, { schema_version: 4, release_actions_require_human: false }), /release/);
+    assert.equal(mergePolicy(defaults, { schema_version: 5, limits: { rounds: 1 } }).limits.rounds, 1);
+    assert.throws(() => mergePolicy(defaults, { schema_version: 5, limits: { rounds: 3 } }), /tighten/);
+    assert.throws(() => mergePolicy(defaults, { schema_version: 5, release_actions_require_human: false }), /release/);
     assert.throws(() => mergePolicy(defaults, {
-      schema_version: 4, classification: { effort_by_level: { SECURITY: "low" } },
-    }), /lower review effort/);
-    const security = defaults.classification.rules.find((rule) => rule.id === "package-security");
-    assert.throws(() => mergePolicy(defaults, {
-      schema_version: 4,
-      classification: { rules: [{ ...security, any: security.any.slice(1) }] },
-    }), /removed or narrowed/);
-    assert.throws(() => mergePolicy(defaults, {
-      schema_version: 4,
-      classification: { rules: [{ ...security, none: ["skip-auth"] }] },
-    }), /bypass exclusion/);
+      schema_version: 5, priority: { reviewer: { urgent: { effort: "low" } } },
+    }), /cannot lower reviewer effort for urgent/);
   });
 });
 
@@ -280,7 +271,7 @@ describe("AC-10 historical evidence uses its snapshot but old active run cannot 
     await writeJson(runtime.paths.defaultPolicyPath, defaults);
     await assert.rejects(assertRunResumable(runtime.paths, started.run.run_id), /human hard stop/);
     const stopped = await readRun(runtime.paths, started.run.run_id);
-    assert.equal(stopped.status, "hard_stop");
+    assert.equal(stopped.conclusion, "action_required");
     assert.equal(await fileExists(path.join(runtime.paths.eventsDir, stopped.run_id + ".jsonl")), true);
   });
 });
@@ -303,7 +294,7 @@ describe("AC-13 run rollback requires a compensating package and authorization",
     const sourceEvents = await fsp.readFile(path.join(runtime.paths.eventsDir, source.run.run_id + ".jsonl"));
     await assert.rejects(createAuthorization(runtime.paths, {
       kind: "rollback", authorizedBy: "Human Owner", workPackageSha256: source.run.work_package_sha256,
-      policySha256: source.run.effective_policy_sha256, ttlSeconds: 3600,
+      policySha256: source.run.effective_policy_sha256, ttl: 3_600_000,
       sourceRunId: source.run.run_id, sourceEvidence: null,
     }), /source evidence/);
     const rollback = await startFixture(runtime, {
@@ -358,7 +349,7 @@ describe("AC-16 real NTFS claim, stale lock, stale guard, and resume", () => {
     await lease.release();
     const resumed = await assertRunResumable(runtime.paths, started.run.run_id);
     assert.equal(resumed.run_id, started.run.run_id);
-    assert.equal(resumed.claude_session_id, started.run.claude_session_id);
+    assert.equal(resumed.writer_session_id, started.run.writer_session_id);
   });
 });
 
@@ -369,35 +360,30 @@ describe("AC-17 concurrent budget extensions serialize and remain single-use", (
     const grants = await Promise.all([1, 2].map(() => createAuthorization(runtime.paths, {
       kind: "budget_extension", authorizedBy: "Human Owner",
       workPackageSha256: started.run.work_package_sha256,
-      policySha256: started.run.effective_policy_sha256, ttlSeconds: 3600,
-      runId: started.run.run_id, additionalBudget: { max_claude_calls: 1 },
+      policySha256: started.run.effective_policy_sha256, ttl: 3_600_000,
+      runId: started.run.run_id, additionalBudget: { rounds: 1 },
     })));
     const results = await Promise.allSettled(grants.map((grant) => applyBudgetExtension(runtime.paths, grant.authorization_id)));
     assert.equal(results.filter((entry) => entry.status === "fulfilled").length, 1);
-    assert.equal((await readRun(runtime.paths, started.run.run_id)).budget.max_claude_calls, 2);
+    assert.equal((await readRun(runtime.paths, started.run.run_id)).budget.rounds, 2);
     const appliedGrant = grants.find((grant) => results[grants.indexOf(grant)].status === "fulfilled");
     const replayed = await applyBudgetExtension(runtime.paths, appliedGrant.authorization_id);
-    assert.equal(replayed.budget.max_claude_calls, 2);
+    assert.equal(replayed.budget.rounds, 2);
     assert.equal(replayed.authorization_ids.filter((id) => id === appliedGrant.authorization_id).length, 1);
   });
 });
 
-describe("AC-18 protected SECURITY paths cannot be removed, bypassed, or shadowed", () => {
-  it("rejects all protected classification weakening forms", async () => {
+describe("AC-18 a project override cannot lower the effort of any priority", () => {
+  it("rejects a lower writer or reviewer effort at every priority, and accepts a higher one", async () => {
     const defaults = JSON.parse(await fsp.readFile(path.join(sourceBridgeRoot, "config", "default-policy.json"), "utf8"));
-    const security = defaults.classification.rules.find((rule) => rule.id === "package-security");
-    assert.throws(() => mergePolicy(defaults, {
-      schema_version: 4, classification: { rules: [{ ...security, any: [security.any[0]] }] },
-    }), /removed or narrowed/);
-    assert.throws(() => mergePolicy(defaults, {
-      schema_version: 4, classification: { rules: [{ ...security, none: ["src/auth/"] }] },
-    }), /bypass exclusion/);
-    assert.throws(() => mergePolicy(defaults, {
-      schema_version: 4, classification: { rules: [{
-        id: "project-light-auth", level: "LIGHT", priority: 999,
-        reason: "bad shadow", any: [security.any[0]], none: [],
-      }] },
-    }), /shadow/);
+    for (const role of ["writer", "reviewer"]) {
+      for (const level of ["medium", "high", "urgent"]) {
+        assert.throws(() => mergePolicy(defaults, {
+          schema_version: 5, priority: { [role]: { [level]: { effort: "low" } } },
+        }), new RegExp("cannot lower " + role + " effort for " + level));
+      }
+      assert.equal(mergePolicy(defaults, { schema_version: 5, priority: { [role]: { low: { effort: "high" } } } }).priority[role].low.effort, "high");
+    }
   });
 });
 
@@ -424,8 +410,8 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
       "--breakpoint", "return after fake review",
       "--change-types", "docs",
       "--allow-paths", "README.md",
-      "--max-claude-calls", "1",
-      "--max-claude-minutes", "1",
+      "--rounds", "1",
+      "--call-timeout", "60000",
       "--out", planPath,
       "--json",
     ], { cwd: target, encoding: "utf8" });

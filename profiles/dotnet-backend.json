@@ -43,21 +43,5 @@
         "Microsoft\\.EntityFrameworkCore"
       ]
     }
-  ],
-  "review_terms": {
-    "security": [
-      "authentication",
-      "authorization",
-      "policy",
-      "credential",
-      "antiforgery"
-    ],
-    "full": [
-      "API contract",
-      "entity model",
-      "migration",
-      "transaction boundary",
-      "hosted service lifecycle"
-    ]
-  }
+  ]
 }

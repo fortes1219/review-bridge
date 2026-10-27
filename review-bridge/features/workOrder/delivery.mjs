@@ -8,6 +8,7 @@ import path from "node:path";
 
 import {
   appendIoEvent,
+  assertCurrentPolicy,
   deliverRun,
   listJson,
   listRuns,
@@ -17,7 +18,6 @@ import {
   readIoEvents,
   readJson,
   readRun,
-  TERMINAL_RUN_STATUSES,
   tokenTotal,
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
@@ -32,7 +32,6 @@ export const RESULT_MAX_CHANGED = 200;
 export const LOCK_RETRY_ATTEMPTS = 40;
 export const LOCK_RETRY_DELAY_MS = 250;
 export const LATE_DELIVERY_MS = 60_000;
-export const OUTCOMES = Object.freeze(["delivered", "needs_fix", "needs_human", "token_limit", "quota", "stopped", "cancelled", "error"]);
 
 export const ORDER_CHANGE_MAX_LINES = 20;
 
@@ -82,26 +81,25 @@ function orderChangeLines(t, change) {
   return [t("result.order_changed.note"), ...(diff.length ? ["", change.fence + "diff", ...diff, change.fence] : [])];
 }
 
-// V1: the eight outcome codes, decided from the run record alone.
-export function classifyOutcome(run) {
-  switch (run?.status) {
-    case "pass": return "delivered";
-    case "call_budget_exhausted": return "needs_fix";
-    case "hard_stop":
-    case "needs_human":
-    case "contract_unconfirmed":
-    case "acceptance_unverified":
-    case "start_point_lost":
-    case "evidence_changed":
-    case "version_changed":
-    case "evidence_unconfirmable":
-    case "scope_unverified": return "needs_human";
-    case "token_limit":
-    case "usage_unknown": return "token_limit";
-    case "rate_limited": return "quota";
-    case "stopped": return "stopped";
-    case "cancelled": return "cancelled";
-    default: return "error";
+// V1: the title and the next step are keyed by the run's conclusion and, where the reason it closed
+// changes what to say, by its closed_reason too ("outcome.failure.rate_limited").
+export function resultKey(t, prefix, run) {
+  const specific = prefix + "." + run.conclusion + "." + run.closed_reason;
+  return t.has(specific) ? specific : prefix + "." + run.conclusion;
+}
+
+// Which part of the result a run's conclusion and closed reason call for.
+function resultCase(run) {
+  const reason = run.closed_reason;
+  switch (run.conclusion) {
+    case "success": return "success";
+    case "action_required": return reason === "rounds_exhausted" ? "rounds_exhausted" : "action_required";
+    case "cancelled": return reason === "cancelled" ? "cancelled" : "stopped";
+    case "failure":
+      if (reason === "token_limit" || reason === "usage_unknown") return "token_limit";
+      if (reason === "rate_limited") return "rate_limited";
+      return "failure";
+    default: return "failure";
   }
 }
 
@@ -152,8 +150,8 @@ export async function rebuildCommands({ paths, plan, workPackage }) {
     // Codex 2026-10-14: a scope the human named explicitly must survive the rebuild; without it the
     // new plan would fall back to the references or the whole project.
     ...(workPackage.scope?.source === "explicit" ? ["--allow-paths", (workPackage.scope.allowed_paths || []).join(",")] : []),
-    "--max-claude-calls", String(budget.max_claude_calls ?? ""),
-    "--max-claude-minutes", String(budget.max_claude_minutes_per_call ?? ""),
+    "--rounds", String(budget.rounds ?? ""),
+    "--call-timeout", String(budget.call_timeout ?? ""),
     "--out", outPath,
     "--plain",
   ];
@@ -226,37 +224,38 @@ function writerCalls(run, events) {
 }
 
 // V2.2–V2.6: the sections, as arrays of lines, from typed records only.
-export function composeSections({ t, run, outcome, workPackage, plan, events, delta, contract = null, orderChange = null, successorExists = false, limits = {}, deliveredAt = Date.now() }) {
+export function composeSections({ t, run, workPackage, plan, events, delta, contract = null, orderChange = null, successorExists = false, limits = {}, deliveredAt = Date.now() }) {
   const name = workPackage?.task_file || workPackage?.work_package_id || run.work_package_id || run.run_id;
   const state = run.last_state || {};
   const calls = writerCalls(run, events);
-  const gate = last(events, "gate_a_result");
+  const gate = last(events, "test_result");
   const review = last(events, "review.result");
   const writer = last(events, "writer.result");
   const stop = last(events, "stop");
   const failure = state.failure || null;
   const acceptance = acceptanceSection({ t, contract, events, writer, review, gate });
+  const kind = resultCase(run);
 
   const head = [];
   const subtitle = [];
-  if (outcome === "needs_fix" && calls >= 2) subtitle.push(t("outcome.needs_fix.auto", { count: calls - 1 }));
-  head.push("# " + t("outcome." + outcome) + (subtitle.length ? "（" + subtitle.join("；") + "）" : ""));
+  if (kind === "rounds_exhausted" && calls >= 2) subtitle.push(t("outcome.action_required.rounds_exhausted.auto", { count: calls - 1 }));
+  head.push("# " + t(resultKey(t, "outcome", run)) + (subtitle.length ? "（" + subtitle.join("；") + "）" : ""));
   head.push("");
   head.push(t("result.header", { name, run_id: run.run_id, ended_at: run.closed_at || run.updated_at || "", calls }));
-  if (outcome === "delivered") {
-    if (gate?.kind === "command") head.push(t("result.gate_a.passed", { command: gate.command }));
-    else if (workPackage?.gate_a?.kind === "not_applicable" || gate?.kind === "not_applicable") head.push(t("result.gate_a.not_applicable"));
+  if (kind === "success") {
+    if (gate?.kind === "command") head.push(t("result.test.passed", { command: gate.command }));
+    else if (workPackage?.test?.kind === "not_applicable" || gate?.kind === "not_applicable") head.push(t("result.test.not_applicable"));
   }
 
   const why = [];
   let stderrTail = [];
-  if (outcome === "delivered") {
+  if (kind === "success") {
     if (review?.verified?.length) { why.push(t("result.why.delivered.verified")); for (const item of review.verified) why.push("- " + item); }
     if (review?.not_run?.length) { why.push(t("result.why.delivered.not_run")); for (const item of review.not_run) why.push("- " + item); }
     if (!why.length) why.push(t("result.why.delivered.none"));
-  } else if (outcome === "needs_fix") {
+  } else if (kind === "rounds_exhausted") {
     if (gate?.kind === "command" && gate.passed === false && (!review || gate.sequence > review.sequence)) {
-      why.push(t("result.why.gate_a_failed", { command: gate.command, exit_code: gate.exit_code, timed_out: gate.timed_out ? t("result.why.gate_a_failed.timed_out") : "" }));
+      why.push(t("result.why.test_failed", { command: gate.command, exit_code: gate.exit_code, timed_out: gate.timed_out ? t("result.why.test_failed.timed_out") : "" }));
       stderrTail = lastLines(gate.stderr_tail, 10);
       if (stderrTail.length) { why.push(t("result.why.stderr_tail")); why.push("```"); why.push(...stderrTail); why.push("```"); }
     } else if (review?.findings?.length) {
@@ -265,19 +264,19 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
         why.push("- " + t("result.why.finding", { id: finding.id, severity: finding.severity, path: finding.path, line: finding.line, claim: finding.claim, fix: finding.fix }));
       }
     }
-    why.push(t("result.why.budget", { max: workPackage?.budget?.max_claude_calls ?? run.budget?.max_claude_calls ?? "" }));
-  } else if (outcome === "needs_human") {
-    if (run.status === "acceptance_unverified") why.push(t("result.why.acceptance_unverified"));
-    if (run.status === "start_point_lost") why.push(t("result.why.start_point_lost"));
-    if (run.status === "evidence_changed") why.push(t("result.why.evidence_changed"));
-    if (run.status === "version_changed") why.push(t(state.changed_after === "gate_a" ? "result.why.version_changed.gate_a" : "result.why.version_changed"));
-    if (run.status === "evidence_unconfirmable") why.push(t("result.why.evidence_unconfirmable"));
-    if (run.status === "scope_unverified") why.push(t("result.why.scope_unverified"));
+    why.push(t("result.why.budget", { max: workPackage?.budget?.rounds ?? run.budget?.rounds ?? "" }));
+  } else if (kind === "action_required") {
+    if (run.closed_reason === "acceptance_unverified") why.push(t("result.why.acceptance_unverified"));
+    if (run.closed_reason === "start_point_lost") why.push(t("result.why.start_point_lost"));
+    if (run.closed_reason === "evidence_changed") why.push(t("result.why.evidence_changed"));
+    if (run.closed_reason === "version_changed") why.push(t(state.changed_after === "test" ? "result.why.version_changed.test" : "result.why.version_changed"));
+    if (run.closed_reason === "evidence_unconfirmable") why.push(t("result.why.evidence_unconfirmable"));
+    if (run.closed_reason === "scope_unverified") why.push(t("result.why.scope_unverified"));
     if (state.contract_questions?.length) {
       why.push(t("result.why.contract.questions"));
       for (const question of state.contract_questions) why.push("- " + question);
     }
-    if (run.status === "contract_unconfirmed") {
+    if (run.closed_reason === "contract_unconfirmed") {
       why.push(t("result.why.contract.unconfirmed"));
       for (const line of (state.contract_problems || []).slice(0, 10)) why.push("- " + line);
     }
@@ -287,7 +286,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     }
     if (writer && writer.status && writer.status !== "done") why.push(t("result.why.needs_human.writer_status", { status: writer.status }));
     if (stop?.detail_ref?.startsWith("loop:")) why.push(t("result.why.needs_human.loop", { id: stop.detail_ref.slice(5) }));
-    else if (stop?.detail_ref === "gate_a_loop") why.push(t("result.why.needs_human.gate_loop"));
+    else if (stop?.detail_ref === "test_loop") why.push(t("result.why.needs_human.gate_loop"));
     else if (state.hard_stop_reason || review?.hard_stop_reason) {
       const reason = state.hard_stop_reason || review.hard_stop_reason;
       why.push(t("result.why.needs_human.reviewer", { reason: t("result.why.hard_stop_reason." + reason) }));
@@ -298,32 +297,32 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
         why.push("- " + t("result.why.finding", { id: finding.id, severity: finding.severity, path: finding.path, line: finding.line, claim: finding.claim, fix: finding.fix }));
       }
     }
-  } else if (outcome === "token_limit" && run.status === "usage_unknown") {
+  } else if (kind === "token_limit" && run.closed_reason === "usage_unknown") {
     why.push(t("result.why.usage_unknown", { role: t("result.tokens.role." + (state.token_limit_role || "writer")) }));
-  } else if (outcome === "token_limit") {
+  } else if (kind === "token_limit") {
     const role = state.token_limit_role || stop?.role || "writer";
     const which = state.token_limit === "per_run" ? "per_run" : "per_call";
     why.push(t("result.why.token_limit", {
       role: t("result.tokens.role." + role), which: t("result.why.token_limit." + which),
-      limit: limits["max_tokens_" + which] ?? "", actual: which === "per_run" ? state.tokens_this_run : state.tokens_this_call,
+      limit: (which === "per_run" ? limits.tokens : limits.tokens_per_call) ?? "", actual: which === "per_run" ? state.tokens_this_run : state.tokens_this_call,
     }));
-  } else if (outcome === "quota") {
+  } else if (kind === "rate_limited") {
     const role = failure?.role || stop?.role || "writer";
     const provider = failure?.provider || stop?.provider || "";
     why.push(t("result.why.quota", { role: t("result.tokens.role." + role), provider }));
     if (failure?.reset_hint) why.push(t("result.why.quota.reset", { hint: failure.reset_hint }));
-  } else if (outcome === "stopped") {
+  } else if (kind === "stopped") {
     // The new run is named from the run record, written with the stop; it is said to have replaced
     // this one only if it existed when this result was written.
     if (run.closed_reason === "superseded") why.push(t(successorExists ? "result.why.superseded" : "result.why.superseded.pending", { run_id: run.superseded_by || t("result.acceptance.none") }));
     else if (run.closed_reason === "database_unavailable") why.push(t("result.why.database_unavailable"));
     else if (stop?.role) why.push(t("result.why.stopped", { call: state.call ?? calls, role: t.has("result.tokens.role." + stop.role) ? t("result.tokens.role." + stop.role) : stop.role }));
     else why.push(t("result.why.stopped.unknown"));
-  } else if (outcome === "cancelled") {
+  } else if (kind === "cancelled") {
     why.push(t("result.why.cancelled"));
   } else {
-    why.push(t("result.why.error", { reason: run.closed_reason || run.status }));
-    for (const file of [state.stderr_path, state.claude_stderr_path, state.review_error_path, failure?.record_path].filter(Boolean)) why.push(t("result.why.error.log", { path: file }));
+    why.push(t("result.why.error", { reason: run.closed_reason || run.conclusion }));
+    for (const file of [state.stderr_path, state.writer_stderr_path, state.review_error_path, failure?.record_path].filter(Boolean)) why.push(t("result.why.error.log", { path: file }));
     if (state.error) why.push(String(state.error));
     if (Array.isArray(state.errors)) for (const line of state.errors.slice(0, 10)) why.push("- " + line);
     if (state.contract_problems?.length) {
@@ -333,13 +332,13 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
   }
 
   const next = [];
-  if (outcome === "delivered") next.push(t("result.next.delivered"));
-  else if (outcome === "quota") next.push(t("result.next.quota", { provider: failure?.provider || "", hint: failure?.reset_hint ? t("result.next.quota.hint", { hint: failure.reset_hint }) : "" }));
-  else if (outcome === "error") {
-    const log = state.stderr_path || state.claude_stderr_path || failure?.record_path || null;
-    next.push(log ? t("result.next.error", { path: log }) : t("result.next.error.nolog"));
-  } else next.push(t("result.next." + outcome));
-  if (outcome !== "delivered") next.push(t("result.next.plan_used"));
+  const nextKey = resultKey(t, "result.next", run);
+  if (kind === "rate_limited") next.push(t(nextKey, { provider: failure?.provider || "", hint: failure?.reset_hint ? t(nextKey + ".hint", { hint: failure.reset_hint }) : "" }));
+  else if (kind === "failure") {
+    const log = state.stderr_path || state.writer_stderr_path || failure?.record_path || null;
+    next.push(log ? t(nextKey, { path: log }) : t(nextKey + ".nolog"));
+  } else next.push(t(nextKey));
+  if (kind !== "success") next.push(t("result.next.plan_used"));
 
   // The changed list is computed at delivery time. A late delivery (prune after a crash, days on)
   // would otherwise present the owner's later edits as the run's work; it says so instead.
@@ -382,7 +381,7 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
     tokens.push("| " + [label, row.calls, row.input, row.cache_read, row.cache_write, row.output, row.total, row.cost_usd === null ? "" : row.cost_usd.toFixed(4) + " " + t("result.tokens.cost_unit")].join(" | ") + " |");
   }
 
-  const line = oneLine({ t, outcome, review, gate, workPackage, state, failure, stop, run });
+  const line = oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run });
   return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, tokens, line, calls };
 }
 
@@ -391,12 +390,12 @@ export function composeSections({ t, run, outcome, workPackage, plan, events, de
 function acceptanceSection({ t, contract, events, writer, review, gate }) {
   const decided = last(events, "acceptance");
   const reviewInput = last(events, "review.input");
-  const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review, gateA: gate, reviewVersion: reviewInput?.work_version || null }) : []);
+  const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review, test: gate, reviewVersion: reviewInput?.work_version || null }) : []);
   if (!rows.length) return [];
   const version = decided?.review_version || reviewInput?.work_version || gate?.work_version || null;
   const lines = rows.map((row) => "- " + t("result.acceptance.row", {
     id: row.id, result: t("result.acceptance." + row.result), statement: row.statement,
-    verdict: row.verdict || t("result.acceptance.none"), gate: t("result.acceptance.gate." + row.gate_a), evidence: row.evidence || t("result.acceptance.none"),
+    verdict: row.verdict || t("result.acceptance.none"), gate: t("result.acceptance.gate." + row.test), evidence: row.evidence || t("result.acceptance.none"),
   }));
   if (version?.kind === "git") lines.push(t(version.dirty ? "result.acceptance.version.dirty" : "result.acceptance.version.git", { head: String(version.head || "none").slice(0, 12) }));
   else if (version) lines.push(t("result.acceptance.version.unknown"));
@@ -404,20 +403,20 @@ function acceptanceSection({ t, contract, events, writer, review, gate }) {
 }
 
 // V3.1: the one sentence after the title.
-function oneLine({ t, outcome, review, gate, workPackage, state, failure, stop, run }) {
-  switch (outcome) {
-    case "delivered": return gate?.kind === "command" ? t("line.delivered") : t("line.delivered.docs");
-    case "needs_fix":
+function oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run }) {
+  switch (kind) {
+    case "success": return gate?.kind === "command" ? t("line.delivered") : t("line.delivered.docs");
+    case "rounds_exhausted":
       return gate?.kind === "command" && gate.passed === false && (!review || gate.sequence > review.sequence)
         ? t("line.needs_fix.gate")
         : t("line.needs_fix.findings", { count: review?.findings?.length ?? 0 });
-    case "needs_human": return t("line.needs_human");
+    case "action_required": return t("line.needs_human");
     case "token_limit": return t("line.token_limit", { role: t("result.tokens.role." + (state.token_limit_role || stop?.role || "writer")) });
-    case "quota": return t("line.quota", { role: t("result.tokens.role." + (failure?.role || "writer")), provider: failure?.provider || "" });
+    case "rate_limited": return t("line.quota", { role: t("result.tokens.role." + (failure?.role || "writer")), provider: failure?.provider || "" });
     case "stopped": return run.closed_reason === "superseded" ? t("line.stopped.superseded")
       : run.closed_reason === "database_unavailable" ? t("line.stopped.database") : t("line.stopped");
     case "cancelled": return t("line.cancelled");
-    default: return t("line.error", { reason: run.closed_reason || run.status });
+    default: return t("line.error", { reason: run.closed_reason || run.conclusion });
   }
 }
 
@@ -569,10 +568,11 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   const locale = await resolveLocale(paths);
   const t = await createTranslator(locale);
   const run = await readRun(paths, runId);
-  if (run.outcome) return { already: true, outcome: run.outcome, result_path: run.result_path, latest_path: run.latest_result_path, latest_written: run.latest_result_written !== false, t };
-  if (!TERMINAL_RUN_STATUSES.includes(run.status)) throw new Error("Run is still active: " + runId);
+  if (run.result_sha256) return { already: true, conclusion: run.conclusion, closed_reason: run.closed_reason, result_path: run.result_path, latest_path: run.latest_result_path, latest_written: run.latest_result_written !== false, t };
+  if (run.status !== "completed") throw new Error("Run is still active: " + runId);
   // Everything is gathered before the lock; the build step only writes.
   const control = await loadControlView(paths, runId);
+  assertCurrentPolicy(control.run.policy_snapshot?.policy_schema_version, runId);
   const workPackage = control.run.work_package;
   const plan = await planForRun(paths, runId);
   const events = await readIoEvents(paths, runId);
@@ -581,10 +581,10 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
     // A delivery may run in another process, where the controller's in-memory seal is gone; the
     // baseline is then checked against the hash on the run record, and the result says so.
     const baseline = await readJson(control.workspace_evidence.baseline_path).catch(() => null);
-    if (!baseline || !control.workspace_evidence.baseline_sha256 || digest(baseline) !== control.workspace_evidence.baseline_sha256 || run.status === "evidence_changed") {
+    if (!baseline || !control.workspace_evidence.baseline_sha256 || digest(baseline) !== control.workspace_evidence.baseline_sha256 || run.closed_reason === "evidence_changed") {
       // A run stopped because its records changed: none of them is used to list or attribute changes.
       delta = { mode: "changed", changed_files: [], scope_violations: [], scope_unverified: [] };
-    } else if (run.status === "evidence_unconfirmable") {
+    } else if (run.closed_reason === "evidence_unconfirmable") {
       delta = { mode: "unconfirmed", changed_files: [], scope_violations: [], scope_unverified: [] };
     } else {
       // One delta per attempt: concurrent deliverers must not race on the same file name.
@@ -592,15 +592,14 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
       if (evidence) delta = await readJson(evidence.delta_path).catch(() => null);
     }
   }
-  const outcome = classifyOutcome(run);
   // A contract that no longer loads is reported as such; its conditions then stay unknown.
   const contract = control.run.contract_sha256 ? await loadContract(paths, control.run.contract_sha256).catch(() => null) : null;
   // The work is judged on the sealed work order; an edit made since is shown, never used.
   const current = workPackage?.task_file ? await currentWorkOrder(paths, workPackage.task_file) : undefined;
   const orderChange = current === undefined ? null : current?.unreadable ? current : workOrderChange(workPackage.task, current);
   const successorExists = run.superseded_by ? await readRun(paths, run.superseded_by).then(() => true, () => false) : false;
-  const sections = composeSections({ t, run, outcome, workPackage, plan, events, delta, contract, orderChange, successorExists, limits: control.run.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
-  const commands = outcome === "delivered" ? null : await rebuildCommands({ paths, plan, workPackage });
+  const sections = composeSections({ t, run, workPackage, plan, events, delta, contract, orderChange, successorExists, limits: control.run.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
+  const commands = run.conclusion === "success" ? null : await rebuildCommands({ paths, plan, workPackage });
   const runPath = path.join(paths.queueRoot, runId + ".result.md");
   const latestPath = latestPathFor(paths, workPackage, plan);
   const closedAt = run.closed_at || run.updated_at || "";
@@ -614,7 +613,7 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
       delivered = await deliverRun(paths, runId, async () => {
         await writeAtomic(runPath, body);
         const latestWritten = await writeLatestIfNewer(latestPath, latestBody, { runId, closedAt });
-        return { outcome, result_path: runPath, latest_path: latestPath, latest_written: latestWritten, sha256 };
+        return { result_path: runPath, latest_path: latestPath, latest_written: latestWritten, sha256 };
       });
       break;
     } catch (error) {
@@ -624,17 +623,17 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   }
   if (!delivered) {
     await appendIoEvent(paths, runId, { event: "delivery_skipped", reason: "lock_held" }).catch(() => {});
-    return { skipped: true, reason: "lock_held", outcome, t };
+    return { skipped: true, reason: "lock_held", conclusion: run.conclusion, closed_reason: run.closed_reason, t };
   }
   const result = {
-    already: delivered.already, outcome: delivered.run.outcome, result_path: delivered.run.result_path, latest_path: delivered.run.latest_result_path,
+    already: delivered.already, conclusion: delivered.run.conclusion, closed_reason: delivered.run.closed_reason, result_path: delivered.run.result_path, latest_path: delivered.run.latest_result_path,
     latest_written: delivered.run.latest_result_written !== false,
-    title: t("outcome." + outcome), line: sections.line, name: sections.name, tokens: tokenRows(events), t,
+    title: t(resultKey(t, "outcome", run)), line: sections.line, name: sections.name, tokens: tokenRows(events), t,
   };
   // V3.1: a fake-cli run never raises a real desktop notification; the fake adapter may capture it.
   const allowNotify = notify && adapter?.notify && !(run.execution_mode === "fake_cli" && adapter.id !== "portable-fake-cli");
   if (!delivered.already && allowNotify) {
-    const title = t("outcome." + outcome);
+    const title = t(resultKey(t, "outcome", run));
     try {
       const sent = await adapter.notify(title, t("notify.body", { name: sections.name, line: sections.line }));
       // An adapter may report that it sent nothing (the fake one does); that is not a failure.
@@ -661,10 +660,10 @@ async function undeliveredCandidates(paths) {
 export async function deliverPendingRuns(paths, adapter = null) {
   const delivered = [];
   for (const run of await undeliveredCandidates(paths)) {
-    if (!TERMINAL_RUN_STATUSES.includes(run.status) || run.outcome || run.archived_at) continue;
+    if (run.status !== "completed" || run.result_sha256 || run.archived_at) continue;
     try {
       const result = await deliverOutcome({ paths, runId: run.run_id, adapter, notify: false });
-      if (!result.skipped) delivered.push({ run_id: run.run_id, outcome: result.outcome });
+      if (!result.skipped) delivered.push({ run_id: run.run_id, conclusion: result.conclusion, closed_reason: result.closed_reason });
     } catch {
       // A run that cannot be delivered is left for the next pass; pruning still proceeds.
     }

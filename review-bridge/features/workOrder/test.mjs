@@ -1,4 +1,4 @@
-// Gate A (T0-06): the one verification command a run will execute. It is chosen at
+// The tests (T0-06): the one verification command a run will execute. It is chosen at
 // compile time from the profile-approved rules the installer copied into bridge.json,
 // sealed into the plan for the human to approve, re-checked at authorization, and run
 // exactly as sealed after the writer finishes. No model takes part in any of it.
@@ -8,18 +8,18 @@ import path from "node:path";
 import { runProcess } from "../../service/index.mjs";
 
 export const NOT_APPLICABLE_LABEL = "不跑測試（純文件）";
-export const GATE_A_TAIL_BYTES = 4 * 1024;
+export const TEST_TAIL_BYTES = 4 * 1024;
 export const NPM_PLACEHOLDER = /no test specified/i;
 
-export function gateALabel(command) {
+export function testLabel(command) {
   return "跑現有測試：" + command;
 }
 
-export class GateAError extends Error {
+export class TestError extends Error {
   constructor(checked) {
     super("這張卡沒有機械驗收：專案裡沒找到 profile 核准的測試入口");
-    this.name = "GateAError";
-    this.reason = "no_gate_a";
+    this.name = "TestError";
+    this.reason = "no_test";
     this.checked = checked;
   }
   plain() {
@@ -80,11 +80,11 @@ export function isDocsOnly(changeTypes) {
   return Array.isArray(changeTypes) && changeTypes.length > 0 && changeTypes.every((type) => type === "docs");
 }
 
-// G2.1–G2.3: the first rule whose conditions hold is Gate A; docs-only work runs nothing;
+// G2.1–G2.3: the first rule whose conditions hold is the test command; docs-only work runs nothing;
 // anything else without a match is refused with the list of what was checked.
-export async function selectGateA({ repoRoot, bridgeConfig, changeTypes, platform = process.platform }) {
+export async function selectTest({ repoRoot, bridgeConfig, changeTypes, platform = process.platform }) {
   if (isDocsOnly(changeTypes)) return { kind: "not_applicable", command: null, label: NOT_APPLICABLE_LABEL };
-  const rules = Array.isArray(bridgeConfig?.gate_a?.rules) ? bridgeConfig.gate_a.rules : [];
+  const rules = Array.isArray(bridgeConfig?.test?.rules) ? bridgeConfig.test.rules : [];
   const checked = [];
   for (const rule of rules) {
     if (typeof rule?.command !== "string" || !rule.command.trim()) continue;
@@ -93,21 +93,21 @@ export async function selectGateA({ repoRoot, bridgeConfig, changeTypes, platfor
       return {
         kind: "command",
         command: rule.command,
-        label: gateALabel(rule.command),
-        source: "profile:" + (bridgeConfig.gate_a.profile_id || "unknown"),
+        label: testLabel(rule.command),
+        source: "profile:" + (bridgeConfig.test.profile_id || "unknown"),
         rule,
         evidence: result.evidence,
       };
     }
     checked.push({ command: rule.command, reasons: result.reasons });
   }
-  throw new GateAError(checked);
+  throw new TestError(checked);
 }
 
 // G2.5: the sealed rule must still hold when the human approves.
-export async function recheckGateA(repoRoot, gateA, platform = process.platform) {
-  if (!gateA || gateA.kind !== "command") return { ok: true, reasons: [] };
-  const result = await evaluateRule(repoRoot, gateA.rule, platform);
+export async function recheckTest(repoRoot, test, platform = process.platform) {
+  if (!test || test.kind !== "command") return { ok: true, reasons: [] };
+  const result = await evaluateRule(repoRoot, test.rule, platform);
   return { ok: result.ok, reasons: result.reasons };
 }
 
@@ -123,7 +123,7 @@ async function tail(file) {
   try {
     handle = await fsp.open(file, "r");
     const { size } = await handle.stat();
-    const length = Math.min(size, GATE_A_TAIL_BYTES);
+    const length = Math.min(size, TEST_TAIL_BYTES);
     const buffer = Buffer.alloc(length);
     if (length > 0) await handle.read(buffer, 0, length, size - length);
     return buffer.toString("utf8");
@@ -136,16 +136,16 @@ async function tail(file) {
 
 // G3.2–G3.3: run the sealed command string through the platform shell, in the repo root,
 // with the sealed timeout; the result is an event, never a finding.
-export async function runGateA({ paths, gateA, stdoutPath, stderrPath, timeoutMs, onSpawn = null }) {
-  if (!gateA || gateA.kind !== "command") {
-    return { event: "gate_a_result", kind: "not_applicable", command: null, label: NOT_APPLICABLE_LABEL, passed: null };
+export async function runTest({ paths, test, stdoutPath, stderrPath, timeoutMs, onSpawn = null }) {
+  if (!test || test.kind !== "command") {
+    return { event: "test_result", kind: "not_applicable", command: null, label: NOT_APPLICABLE_LABEL, passed: null };
   }
   // A missing or broken limit must not mean "no limit".
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Gate A has no valid time limit: " + timeoutMs);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("The tests have no valid time limit: " + timeoutMs);
   const startedAt = Date.now();
   // On timeout runProcess terminates the whole tree while the shell is alive (process.mjs).
   const result = await runProcess({
-    invocation: shellInvocation(gateA.command),
+    invocation: shellInvocation(test.command),
     cwd: paths.repoRoot,
     stdoutPath,
     stderrPath,
@@ -154,10 +154,10 @@ export async function runGateA({ paths, gateA, stdoutPath, stderrPath, timeoutMs
   });
   const passed = !result.timedOut && result.exitCode === 0;
   return {
-    event: "gate_a_result",
+    event: "test_result",
     kind: "command",
-    command: gateA.command,
-    label: gateA.label,
+    command: test.command,
+    label: test.label,
     exit_code: result.exitCode,
     timed_out: Boolean(result.timedOut),
     ...(result.tree_kill ? { tree_kill: result.tree_kill } : {}),

@@ -8,13 +8,13 @@ import path from "node:path";
 import test from "node:test";
 
 import { acceptanceRows, criteriaProblems, decideAcceptance, sameVersion, verdictProblems, workVersion } from "../features/workOrder/acceptance.mjs";
-import { runGateA } from "../features/workOrder/gateA.mjs";
+import { runTest } from "../features/workOrder/test.mjs";
 import { effectiveLimits } from "../features/workOrder/writerLoop.mjs";
 
 const condition = (id, verify) => ({ id, statement: "condition " + id, quote: "q", source_refs: [{ start: 1, end: 1 }], verify, run_refs: [] });
 const contract = {
   acceptance: [
-    condition("AC1", [{ kind: "gate_a", check: null }]),
+    condition("AC1", [{ kind: "test", check: null }]),
     condition("AC2", [{ kind: "reviewer", check: "reads the page" }]),
   ],
 };
@@ -48,10 +48,10 @@ test("the reviewer judges every sealed condition once, backs a pass with evidenc
 
 test("Bridge decides each condition from the records: a reviewer pass is proven only when its evidence holds", () => {
   const gatePassed = (version) => ({ kind: "command", passed: true, work_version: version });
-  const rows = (verdicts, gateA, reviewVersion) => acceptanceRows({ contract, writer: writer([done("AC1"), done("AC2")]), review: review(verdicts), gateA, reviewVersion });
+  const rows = (verdicts, testResult, reviewVersion) => acceptanceRows({ contract, writer: writer([done("AC1"), done("AC2")]), review: review(verdicts), test: testResult, reviewVersion });
   const results = (list) => list.map((row) => row.result);
   assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], gatePassed(git("v1")), git("v1"))), ["proven", "proven"]);
-  // Gate A tested one version, the reviewer read another: the Gate A condition is not proven.
+  // The tests ran on one version, the reviewer read another: the condition proven by the tests is not proven.
   assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], gatePassed(git("v1")), git("v2"))), ["unknown", "proven"]);
   // Without Git neither version is known: the test result stands, the work proof is unknown.
   assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], gatePassed({ kind: "unknown", reason: "no_git" }), { kind: "unknown", reason: "no_git" })), ["proven", "proven"]);
@@ -89,10 +89,10 @@ test("the work version comes from Git without touching it; without Git it is unk
   assert.notEqual((await workVersion(root)).fingerprint, first.fingerprint);
 });
 
-test("Gate A always has a time limit; a missing one refuses to run instead of running without one", async () => {
-  assert.equal(effectiveLimits({ run: { policy_snapshot: { effective_policy: { limits: { gate_a_minutes: 3 } } } } }).gate_a_minutes, 3);
-  assert.equal(effectiveLimits({}).gate_a_minutes, 10);
-  await assert.rejects(runGateA({ paths: { repoRoot: os.tmpdir() }, gateA: { kind: "command", command: "node -e 0" }, stdoutPath: "x", stderrPath: "y", timeoutMs: Number.NaN }), /no valid time limit/);
+test("the tests always have a time limit; a missing one refuses to run instead of running without one", async () => {
+  assert.equal(effectiveLimits({ run: { policy_snapshot: { effective_policy: { limits: { test_timeout: 180_000 } } } } }).test_timeout, 180_000);
+  assert.equal(effectiveLimits({}).test_timeout, 600_000);
+  await assert.rejects(runTest({ paths: { repoRoot: os.tmpdir() }, test: { kind: "command", command: "node -e 0" }, stdoutPath: "x", stderrPath: "y", timeoutMs: Number.NaN }), /no valid time limit/);
 });
 
 // Codex review round 3: once a project has Git, a failing Git query stops the version, never "no Git".

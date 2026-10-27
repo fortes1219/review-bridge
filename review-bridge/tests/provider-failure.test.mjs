@@ -152,19 +152,14 @@ test("review worker preserves the failed job and links a private typed failure r
       "process.exit(1);",
     ].join("\n"), "utf8");
     const control = {
-      active_claude_session: "session-1",
+      active_writer_session: "session-1",
       authorization_plan_sha256: "a".repeat(64),
-      codex_policy: {
-        classification_profile: "p1",
-        allowed_review_levels: ["STANDARD"],
-        effort_by_level: { STANDARD: "medium" },
-      },
+      reviewer_policy: { priority: "medium", model: null, effort: "medium" },
     };
     await fsp.mkdir(paths.pendingDir, { recursive: true });
     await writeJson(path.join(paths.pendingDir, "job-1.json"), {
-      review_level: "STANDARD",
+      priority: "medium",
       reasoning_effort: "medium",
-      classification_profile: "p1",
       session_id: "session-1",
       authorization: { plan_sha256: "a".repeat(64) },
       last_assistant_message: "Claude report\nCODEX_REVIEW_REQUIRED: true",
@@ -184,7 +179,7 @@ test("review worker preserves the failed job and links a private typed failure r
     assert.equal(outcomes[0].job_path, path.join(paths.failedDir, "job-1.json"));
     const record = await readJson(outcomes[0].provider_failure.record_path);
     assert.equal(record.reason, "provider_usage_limit");
-    assert.equal(record.evidence.stderr_path, path.join(paths.reviewsRoot, "job-1-codex.stderr.log"));
+    assert.equal(record.evidence.stderr_path, path.join(paths.reviewsRoot, "job-1-reviewer.stderr.log"));
     assert.match(await fsp.readFile(record.evidence.stderr_path, "utf8"), /hit your usage limit/);
     assert.equal(JSON.stringify(record).includes("chatgpt.com"), false);
   } finally {

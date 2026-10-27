@@ -14,7 +14,7 @@ import { RetentionConfigError, retentionDays } from "../service/records/dayFiles
 import { parseReviewerUsage, parseWriterUsage } from "../service/agentCli/usage.mjs";
 import { probeAuditDir } from "../service/records/probeAudit.mjs";
 import { localDateKey } from "../utils/dates.mjs";
-import { TERMINAL_RUN_STATUSES } from "../service/records/runStore.mjs";
+import { CLOSED_REASONS } from "../service/records/runStore.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DAY_MS = 86_400_000;
@@ -37,16 +37,17 @@ function iso(offsetMs = 0) {
 
 // One terminal run laid out the way rc.2 wrote it: flat per-call files, a review job,
 // review files, evidence with a before snapshot and a delta.
-async function terminalRunFixture(paths, { runId = "run-" + Math.random().toString(16).slice(2, 10), closedAt = iso(), status = "pass", outcome = "delivered" } = {}) {
+async function terminalRunFixture(paths, { runId = "run-" + Math.random().toString(16).slice(2, 10), closedAt = iso(), status = "completed", closedReason = "review_pass", delivered = true } = {}) {
   fixtureCount += 1;
   const serial = String(fixtureCount).padStart(3, "0");
   const PLAN_SHA = serial.repeat(2) + BASE_SHA.slice(6);
   const stamp = "20261012T155054" + serial + "Z";
   const jobId = "20261012T155930" + serial + "Z-60141da11c31e5e9";
-  const stdoutPath = path.join(paths.queueRoot, stamp + "-claude.stdout.json");
-  const lastState = { status: "pass", call: 1, claude_stdout_path: stdoutPath, stderr_path: path.join(paths.queueRoot, stamp + "-claude.stderr.log") };
+  const stdoutPath = path.join(paths.queueRoot, stamp + "-writer.stdout.json");
+  const lastState = { status: "pass", call: 1, writer_stdout_path: stdoutPath, stderr_path: path.join(paths.queueRoot, stamp + "-writer.stderr.log") };
   const run = {
-    run_id: runId, status, closed_at: closedAt, updated_at: closedAt, created_at: closedAt, ...(outcome ? { outcome } : {}),
+    run_id: runId, status, ...(status === "completed" ? { conclusion: "success", closed_reason: closedReason } : {}),
+    closed_at: closedAt, updated_at: closedAt, created_at: closedAt, ...(delivered ? { result_sha256: "f".repeat(64) } : {}),
     authorization_ids: ["plan-" + PLAN_SHA], work_package: "demo", last_event_sequence: 2, last_state: lastState,
   };
   await writeJson(path.join(paths.runsDir, runId + ".json"), run);
@@ -77,8 +78,8 @@ async function terminalRunFixture(paths, { runId = "run-" + Math.random().toStri
     workspace_evidence: { delta_path: deltaPath, evidence_dir: evidenceDir, baseline_path: path.join(evidenceDir, "baseline.json") },
   });
   await fsp.mkdir(paths.reviewsRoot, { recursive: true });
-  await fsp.writeFile(path.join(paths.reviewsRoot, jobId + "-codex-review.md"), "REVIEW_GATE: PASS\nHARD_STOP_REQUIRED: false\n");
-  await fsp.writeFile(path.join(paths.reviewsRoot, jobId + "-codex.stderr.log"), "noise\ntokens used\n59,990\n");
+  await fsp.writeFile(path.join(paths.reviewsRoot, jobId + "-reviewer-review.md"), "REVIEW_GATE: PASS\nHARD_STOP_REQUIRED: false\n");
+  await fsp.writeFile(path.join(paths.reviewsRoot, jobId + "-reviewer.stderr.log"), "noise\ntokens used\n59,990\n");
   await fsp.writeFile(path.join(paths.reviewsRoot, "LATEST.txt"), "x");
   return { run, stamp, jobId, stdoutPath, evidenceDir, deltaPath };
 }
@@ -113,7 +114,7 @@ test("T1 merge folds a terminal run into its day file and deletes what it folded
   assert.equal(JSON.stringify(lines).includes("before copy"), false);
 
   for (const file of [fixture.stdoutPath, path.join(paths.eventsDir, fixture.run.run_id + ".jsonl"), fixture.deltaPath,
-    path.join(paths.queueRoot, "demo-001.plan.json"), path.join(paths.reviewsRoot, fixture.jobId + "-codex-review.md")]) {
+    path.join(paths.queueRoot, "demo-001.plan.json"), path.join(paths.reviewsRoot, fixture.jobId + "-reviewer-review.md")]) {
     assert.equal(await fileExists(file), false, file);
   }
   assert.equal(await fileExists(fixture.evidenceDir), false);
@@ -148,7 +149,7 @@ test("T3 prune merges, drops day files and run records past the window, and keep
   for (const key of [old, recent, today]) await fsp.writeFile(path.join(paths.archiveDir, key + ".jsonl"), "{}\n");
   const expired = await terminalRunFixture(paths, { runId: "run-expired-0001", closedAt: iso(-20 * DAY_MS) });
   const fresh = await terminalRunFixture(paths, { runId: "run-fresh-00001", closedAt: iso(-1 * DAY_MS) });
-  const active = { run_id: "run-active-0001", status: "running", updated_at: iso(), authorization_ids: ["plan-active"], last_state: null };
+  const active = { run_id: "run-active-0001", status: "in_progress", updated_at: iso(), authorization_ids: ["plan-active"], last_state: null };
   await writeJson(path.join(paths.runsDir, active.run_id + ".json"), active);
   await fsp.mkdir(paths.authorizationClaimsDir, { recursive: true });
   await writeJson(path.join(paths.authorizationClaimsDir, "plan-expired.json"), { run_id: expired.run.run_id, claimed_at: iso(-20 * DAY_MS) });
@@ -188,7 +189,7 @@ test("T4 an invalid retention setting refuses to prune and deletes nothing", asy
 
 test("T5 rm refuses an active run, folds and removes a finished one, and names an unknown id", async (t) => {
   const { paths } = await runtime(t);
-  const active = { run_id: "run-active-0002", status: "running", updated_at: iso(), authorization_ids: [], last_state: null };
+  const active = { run_id: "run-active-0002", status: "in_progress", updated_at: iso(), authorization_ids: [], last_state: null };
   await writeJson(path.join(paths.runsDir, active.run_id + ".json"), active);
   assert.deepEqual((await removeRun(paths, active.run_id)).exitCode, 1);
   assert.equal(await fileExists(path.join(paths.runsDir, active.run_id + ".json")), true);
@@ -212,10 +213,10 @@ test("T7 a stray file maps to no run: archived as an orphan by its own date and 
   const strayDate = new Date(now - 3 * DAY_MS);
   await fsp.utimes(stray, strayDate, strayDate);
   const activeStamp = "20261013T010000000Z";
-  const activeFile = path.join(paths.queueRoot, activeStamp + "-claude.stdout.json");
+  const activeFile = path.join(paths.queueRoot, activeStamp + "-writer.stdout.json");
   await fsp.writeFile(activeFile, "{}");
   await writeJson(path.join(paths.runsDir, "run-active-0003.json"), {
-    run_id: "run-active-0003", status: "running", updated_at: iso(), authorization_ids: [], last_state: { claude_stdout_path: activeFile },
+    run_id: "run-active-0003", status: "in_progress", updated_at: iso(), authorization_ids: [], last_state: { writer_stdout_path: activeFile },
   });
   const summary = await prune(paths, { config: {}, clock: () => now });
   assert.equal(summary.orphans_archived, 1);
@@ -262,26 +263,26 @@ test("P8 merge folds the run's I/O event file into the day file and deletes it",
   assert.equal(await fileExists(path.join(paths.runLocksDir, fixture.run.run_id + ".process.json")), false);
 });
 
-test("P9 every terminal status the state machine knows is archivable; the list is shared, not copied", async (t) => {
+test("P9 every closed reason the state machine knows is archivable; the list is shared, not copied", async (t) => {
   const { paths } = await runtime(t);
-  assert.ok(TERMINAL_RUN_STATUSES.includes("stopped") && TERMINAL_RUN_STATUSES.includes("token_limit") && TERMINAL_RUN_STATUSES.includes("needs_human"));
-  for (const status of TERMINAL_RUN_STATUSES) {
-    const fixture = await terminalRunFixture(paths, { status });
+  assert.ok(CLOSED_REASONS.includes("stopped") && CLOSED_REASONS.includes("token_limit") && CLOSED_REASONS.includes("needs_human"));
+  for (const reason of CLOSED_REASONS) {
+    const fixture = await terminalRunFixture(paths, { closedReason: reason });
     const result = await mergeRun(paths, fixture.run.run_id);
-    assert.equal(result.already_archived, false, status);
+    assert.equal(result.already_archived, false, reason);
     const lines = await readArchive(result.archive_file);
-    assert.ok(lines.some((line) => line.type === "run" && line.run_id === fixture.run.run_id && line.run.status === status), status);
+    assert.ok(lines.some((line) => line.type === "run" && line.run_id === fixture.run.run_id && line.run.closed_reason === reason), reason);
   }
-  const active = await terminalRunFixture(paths, { status: "review_pending" });
+  const active = await terminalRunFixture(paths, { status: "in_progress" });
   await assert.rejects(mergeRun(paths, active.run.run_id), /still active/);
 });
 
 test("P10 prune never folds an undelivered run inside the window; it delivers first when it can, and marks the ones it folds anyway", async (t) => {
   const { paths } = await runtime(t);
-  const recent = await terminalRunFixture(paths, { outcome: null });
-  const stale = await terminalRunFixture(paths, { outcome: null, closedAt: iso(-20 * 86_400_000) });
-  const deliverable = await terminalRunFixture(paths, { outcome: null });
-  const broken = await terminalRunFixture(paths, { outcome: null });
+  const recent = await terminalRunFixture(paths, { delivered: false });
+  const stale = await terminalRunFixture(paths, { delivered: false, closedAt: iso(-20 * 86_400_000) });
+  const deliverable = await terminalRunFixture(paths, { delivered: false });
+  const broken = await terminalRunFixture(paths, { delivered: false });
   const calls = [];
   const summary = await prune(paths, {
     config: { retention: { days: 15 } },
@@ -290,7 +291,7 @@ test("P10 prune never folds an undelivered run inside the window; it delivers fi
       if (runId === broken.run.run_id) throw new Error("cannot build the result");
       if (runId === deliverable.run.run_id) {
         const file = path.join(paths.runsDir, runId + ".json");
-        await writeJson(file, { ...JSON.parse(await fsp.readFile(file, "utf8")), outcome: "delivered" });
+        await writeJson(file, { ...JSON.parse(await fsp.readFile(file, "utf8")), result_sha256: "f".repeat(64) });
       }
     },
   });
@@ -304,7 +305,7 @@ test("P10 prune never folds an undelivered run inside the window; it delivers fi
   // Past the window it was folded (and, being expired, its record and day file are gone in the same pass).
   assert.equal(await read(stale.run.run_id), null);
   // The mark itself: a run folded without a result says so in its day-file line.
-  const marked = await terminalRunFixture(paths, { outcome: null });
+  const marked = await terminalRunFixture(paths, { delivered: false });
   const merged = await mergeRun(paths, marked.run.run_id, { undelivered: true });
   const lines = await readArchive(merged.archive_file);
   assert.equal(lines.find((line) => line.type === "run" && line.run_id === marked.run.run_id).undelivered, true);

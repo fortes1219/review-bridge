@@ -800,7 +800,7 @@
               "properties": {
                 "kind": {
                   "enum": [
-                    "gate_a",
+                    "test",
                     "reviewer"
                   ]
                 },

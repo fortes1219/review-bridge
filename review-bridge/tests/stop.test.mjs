@@ -65,7 +65,7 @@ async function planFakeWork(root, bridge, name = "stop") {
   const id = name + "-1";
   const planArg = ".review-bridge/review-queue/" + id + ".plan.json";
   const planned = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/" + name + ".md", "--owner", "Fortes", "--work-package", id,
-    "--breakpoint", "return after review", "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2",
+    "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000",
     "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(root, planArg));
@@ -112,7 +112,7 @@ test("P7 stop: unknown and finished runs exit 1; a running writer is killed and 
   const code = await exit;
   assert.equal(code, 130, stdout);
   const run = await readJson(path.join(paths.runsDir, runId + ".json"));
-  assert.equal(run.status, "stopped");
+  assert.equal(run.conclusion, "cancelled");
   assert.equal(run.closed_reason, "stopped");
   assert.equal(await fsp.stat(processFile).catch(() => null), null);
   const events = await readIoEvents(paths, runId);
@@ -135,16 +135,16 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   const { root, bridge, paths } = await install(t);
   const { plan, planArg } = await planFakeWork(root, bridge);
   // T0-06 R1/R3 on the CLI: the plain summary names the sealed command; JSON carries it; no entry point refuses.
-  assert.equal(plan.gate_a.command, "npm test");
+  assert.equal(plan.test.command, "npm test");
   const plainOut = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-plain",
-    "--breakpoint", "return after review", "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2",
+    "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000",
     "--out", ".review-bridge/review-queue/stop-plain.plan.json", "--plain"]);
   assert.equal(plainOut.status, 0, plainOut.stderr);
   assert.match(plainOut.stdout, /驗收：會跑 npm test（profile 核准）/);
   const manifest = await fsp.readFile(path.join(root, "package.json"), "utf8");
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo" }));
   const refused = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-refused",
-    "--breakpoint", "return after review", "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2",
+    "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000",
     "--out", ".review-bridge/review-queue/stop-refused.plan.json", "--plain"]);
   assert.equal(refused.status, 1);
   assert.match(refused.stdout, /沒找到 profile 核准的測試入口/);
@@ -170,8 +170,8 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   const contractSha = events.find((event) => event.event === "contract.sealed").contract_sha256;
   assert.equal(run.contract_sha256, contractSha);
   // T0-05: typed results on both sides, the reviewer packet, and the reviewer's own usage and read.
-  assert.deepEqual(kinds.filter((kind) => /result|input$/.test(kind)), ["task.input", "writer.result", "gate_a_result", "review.input", "review.result"]);
-  const gateEvent = events.find((event) => event.event === "gate_a_result");
+  assert.deepEqual(kinds.filter((kind) => /result|input$/.test(kind)), ["task.input", "writer.result", "test_result", "review.input", "review.result"]);
+  const gateEvent = events.find((event) => event.event === "test_result");
   assert.equal(gateEvent.command, "npm test");
   assert.equal(gateEvent.passed, true);
   const writerResult = events.find((event) => event.event === "writer.result");
@@ -204,7 +204,7 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   assert.match(prompt, new RegExp("Contract: " + contractSha));
   // A path named in the work order is context for the writer, not a file Bridge injects.
   assert.doesNotMatch(prompt, /=== package\.json \([0-9a-f]{12}\) ===/);
-  assert.equal((await readJson(path.join(paths.runsDir, plan.proposed_run_id + ".json"))).status, "pass");
+  assert.equal((await readJson(path.join(paths.runsDir, plan.proposed_run_id + ".json"))).conclusion, "success");
 });
 
 test("S7 / S5 live: work-start prints three plain lines, writes the result beside the work order, and the fake notification is captured", async (t) => {
@@ -258,7 +258,7 @@ test("S4b the rebuild commands in a needs-fix result run as written in sh and in
   await fsp.copyFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), order);
   await fsp.appendFile(order, "- package.json\n");
   const planned = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/quote.md", "--owner", "Fortes O'Neil", "--work-package", "quote-1",
-    "--breakpoint", breakpoint, "--change-types", "code", "--allow-paths", "package.json", "--max-claude-calls", "1", "--max-claude-minutes", "2",
+    "--breakpoint", breakpoint, "--change-types", "code", "--allow-paths", "package.json", "--rounds", "1", "--call-timeout", "120000",
     "--out", ".review-bridge/review-queue/quote-1.plan.json"]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(root, ".review-bridge", "review-queue", "quote-1.plan.json"));
@@ -320,8 +320,9 @@ test("S1e an external stop before the writer enqueued still lists the files chan
   assert.equal(stopped.status, 0, stopped.stderr);
   await exit;
   const run = await readJson(path.join(paths.runsDir, runId + ".json"));
-  assert.equal(run.status, "stopped");
-  assert.equal(run.outcome, "stopped");
+  assert.equal(run.conclusion, "cancelled");
+  assert.equal(run.closed_reason, "stopped");
+  assert.equal(run.result_sha256.length, 64);
   const result = await fsp.readFile(run.result_path, "utf8");
   assert.match(result, /^# 已停止/m);
   assert.match(result, /- package\.json（修改）/);
@@ -345,7 +346,8 @@ test("S1c the prune command delivers a run whose delivery was lost, then folds i
   const pruned = bridge(["prune"]);
   assert.equal(pruned.status, 0, pruned.stderr + pruned.stdout);
   const run = JSON.parse(await fsp.readFile(path.join(paths.runsDir, runId + ".json"), "utf8"));
-  assert.equal(run.outcome, "delivered");
+  assert.equal(run.conclusion, "success");
+  assert.equal(run.result_sha256.length, 64);
   assert.ok(run.archived_at);
   assert.match(await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "stop-lost.result.md"), "utf8"), /\n# 已交付\n/);
   const day = (await fsp.readFile(run.archive_file, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
@@ -377,7 +379,7 @@ test("stop during the review kills the reviewer and the run stays stopped", asyn
   const { isPidAlive } = await import("../service/agentCli/process.mjs");
   assert.equal(isPidAlive(record.pid), false);
   const run = await readJson(path.join(paths.runsDir, runId + ".json"));
-  assert.equal(run.status, "stopped");
+  assert.equal(run.conclusion, "cancelled");
   assert.equal(run.closed_reason, "stopped");
   const events = await readIoEvents(paths, runId);
   assert.equal(events.some((event) => event.event === "review.result"), false);

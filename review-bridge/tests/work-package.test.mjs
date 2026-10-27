@@ -27,10 +27,10 @@ async function runtime(t) {
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, active_runs: "derive_from_run_projections",
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
-    gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
+    test: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
   await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({ name: "wp", scripts: { test: "node -e \"process.exit(0)\"" } }));
-  await writeJson(paths.policyOverridePath, { schema_version: 4 });
+  await writeJson(paths.policyOverridePath, { schema_version: 5 });
   await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
   await fsp.mkdir(path.join(repoRoot, "src", "game"), { recursive: true });
   await fsp.writeFile(path.join(repoRoot, "src", "game", "farm.js"), "// farm\n");
@@ -69,8 +69,8 @@ async function plan(runtime, { task, allowedPaths, id = "wp-" + Math.random().to
     breakpoint: "return after review",
     changeTypes: "code",
     allowedPaths,
-    maxCalls: 1,
-    maxMinutes: 5,
+    rounds: 1,
+    callTimeout: 300_000,
     outPath: path.join(runtime.paths.privateRoot, id + ".plan.json"),
   });
 }
@@ -114,7 +114,7 @@ test("T8 an explicit --allow-paths must exist and stay out of the forbidden list
   // Legacy inline task without markers still needs an explicit scope.
   await assert.rejects(createWorkPackagePlan({
     paths: r.paths, task: "plain task", owner: "o", workPackage: "legacy-1", breakpoint: "b", changeTypes: "code",
-    maxCalls: 1, maxMinutes: 5, outPath: path.join(r.paths.privateRoot, "legacy.plan.json"),
+    rounds: 1, callTimeout: 300_000, outPath: path.join(r.paths.privateRoot, "legacy.plan.json"),
   }), /allowed path is required/);
 });
 
@@ -191,9 +191,9 @@ test("T13 the workspace delta flags a forbidden path as a scope violation even i
   assert.ok(delta.changed_paths.includes("src/index.js"));
 });
 
-// The calling side of the stop protocol for writer and Gate A processes: a process that starts
+// The calling side of the stop protocol for writer and test processes: a process that starts
 // around a stop (the stop command may already have looked for a pid) is killed once it is recorded.
-test("a writer or Gate A process recorded after its run was stopped is killed; one in a running run is left alone", { timeout: 30_000 }, async (t) => {
+test("a writer or test process recorded after its run was stopped is killed; one in a running run is left alone", { timeout: 30_000 }, async (t) => {
   const r = await runtime(t);
   const sleeper = () => spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { windowsHide: true, stdio: "ignore" });
   const waitExit = (child) => new Promise((resolve) => child.once("exit", resolve));

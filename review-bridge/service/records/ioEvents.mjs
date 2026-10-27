@@ -11,7 +11,7 @@ export const IO_EVENT_SCHEMA_VERSION = 1;
 export const IO_EVENT_TYPES = Object.freeze([
   "task.input", "handoff", "read", "usage", "stop",
   "writer.result", "review.input", "review.result", "recheck",
-  "gate_a_result", "fix.input", "contract.translation", "contract.check", "contract.sealed", "acceptance",
+  "test_result", "fix.input", "contract.translation", "contract.check", "contract.sealed", "acceptance",
   "notified", "delivery_skipped",
 ]);
 

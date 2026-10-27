@@ -107,8 +107,8 @@ Required fields include:
 - `work_package_sha256`
 - `authorization_ids[]`
 - `effective_policy_sha256`
-- Claude session identity
-- status and transition sequence
+- writer session identity
+- status, conclusion, closed reason, and transition sequence
 - consumed and remaining budget
 - `run_deadline_at`
 - workspace baseline and evidence pointers
@@ -177,18 +177,14 @@ Recommendation: **A**.
 
 Required protected merge rules:
 
-- Every package-default classification rule that participates in a protected boundary has a stable rule ID and explicit `protected: true`. Snapshot validation derives the protected rule set from this field; a project override cannot clear, replace, or shadow it.
 - mandatory non-retryable auth and rate-limit classes: set union; project cannot remove
 - forbidden paths and disallowed tools: set union; project can add only
 - call, wall-clock, authorization-TTL, and recovery ceilings: numeric minimum
-- minimum review effort for protected classes: ordered maximum (`low < medium < high`)
+- writer and reviewer effort for each priority (`low`, `medium`, `high`, `urgent`): ordered maximum (`low < medium < high`); the model for each priority may be replaced
 - mandatory human hard-stop classes: set union; project cannot remove
 - release actions requiring human approval: immutable true
-- protected classification positive patterns, path globs, and semantic triggers: set union; project can add but cannot remove or narrow
-- protected classification exclusions: project cannot add an exclusion; removing a package exclusion is allowed because it tightens classification
-- protected classification level and priority: ordered maximum; project cannot lower or shadow a protected match
 
-Classification evaluates all matching rules and selects the highest required review level. Rule ordering or an earlier project rule cannot short-circuit a protected SECURITY, FINAL_CLOSURE, or other package-protected match. Arrays use explicit per-field semantics; there is no generic deep-merge or implicit append. Snapshot creation validates the merged result before hashing it.
+A run's priority is a field the person sets, never read from the work order's words; until work orders carry one, every run uses the policy's default priority. Arrays use explicit per-field semantics; there is no generic deep-merge or implicit append. Snapshot creation validates the merged result before hashing it.
 
 ### D5 - Policy upgrade invalidation
 
@@ -270,7 +266,7 @@ Implementation is not complete until disposable tests prove all of these:
 15. Unsafe synchronized/network storage produces the documented preflight result.
 16. Windows local filesystem tests exercise exclusive claim, stale-lock recovery, stale reconcile-guard takeover, and interrupted-run resume on a real local NTFS volume. Mocked, in-memory, OneDrive-synchronized, or network filesystems cannot satisfy this acceptance case. Equivalent native APFS/ext4 evidence is required before claiming support for those platforms.
 17. Two budget-extension authorizations concurrently claiming the same run are serialized; each authorization is consumed at most once and the effective total never exceeds the policy ceiling.
-18. Removing or narrowing a protected SECURITY classification path/pattern, adding a bypass exclusion, or shadowing it with a LIGHT rule is rejected during policy snapshot creation.
+18. A project override that lowers the writer or reviewer effort of any priority is rejected during policy snapshot creation.
 19. A run that crashes while an upgrade is in progress follows the 0.x current-only rule: if activation did not complete, the previous runtime remains authoritative and normal D1 recovery may proceed; after activation changes the schema/default-policy identity, the run stops at a human hard stop without losing claim, events, or evidence.
 
 ### 7.1 Acceptance traceability and evidence

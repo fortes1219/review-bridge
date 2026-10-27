@@ -58,7 +58,7 @@ work order body and fill it in.
 
 ## Verification hints (optional)
 
-[For example a user flow to try, test data, the expected screen or existing test names. These are hints for people to check against; the actual Gate A command is chosen by Bridge from the installed rules.]
+[For example a user flow to try, test data, the expected screen or existing test names. These are hints for people to check against; the actual test command is chosen by Bridge from the installed rules.]
 
 ## Defect reproduction (defect work orders only)
 

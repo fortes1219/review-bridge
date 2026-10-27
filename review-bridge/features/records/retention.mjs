@@ -10,12 +10,13 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import {
-  ACTIVE_RUN_STATUSES,
   appendArchiveLine,
   appendArchiveLines,
   ARCHIVE_SCHEMA_VERSION,
   archiveFileForDate,
+  CLOSED_REASONS,
   fileExists,
+  isActiveRun,
   listFiles,
   listJson,
   parseReviewerUsage,
@@ -25,17 +26,14 @@ import {
   pruneProbeRecords,
   readJson,
   retentionDays,
-  TERMINAL_RUN_STATUSES,
   writeJsonAtomicDurable,
 } from "../../service/index.mjs";
 import { DAY_MS, olderThan } from "../../utils/dates.mjs";
 
 const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
 
-// One status list for the whole runtime (Codex finding 2026-10-13: this copy had lost the
-// terminal statuses added since T0-04, so those runs were never archived or pruned).
-const terminalStatuses = new Set(TERMINAL_RUN_STATUSES);
-const activeStatuses = new Set(ACTIVE_RUN_STATUSES);
+// One list of closed reasons for the whole runtime (Codex finding 2026-10-13: a copy here had lost
+// the terminal statuses added since T0-04, so those runs were never archived or pruned).
 
 // Files directly in the queue or reviews root that are part of the Bridge's own
 // control surface; never archived as orphans.
@@ -73,7 +71,7 @@ function stampOf(filePath) {
 
 function statePaths(state) {
   if (!state || typeof state !== "object") return [];
-  return [state.stdout_path, state.stderr_path, state.claude_stdout_path, state.claude_stderr_path, state.review_path]
+  return [state.stdout_path, state.stderr_path, state.writer_stdout_path, state.writer_stderr_path, state.review_path]
     .filter((value) => typeof value === "string" && value);
 }
 
@@ -101,18 +99,18 @@ async function reviewJobsForRun(paths, runId) {
 }
 
 function reviewKind(base) {
-  if (base.endsWith("-codex-review.md")) return "review_result";
-  if (base.endsWith("-claude-report.md")) return "writer_report";
+  if (base.endsWith("-reviewer-review.md")) return "review_result";
+  if (base.endsWith("-writer-report.md")) return "writer_report";
   if (base.endsWith("-review-prompt.md")) return "review_prompt";
-  if (base.endsWith("-codex.stdout.log")) return "reviewer_stdout";
-  if (base.endsWith("-codex.stderr.log")) return "reviewer_stderr";
+  if (base.endsWith("-reviewer.stdout.log")) return "reviewer_stdout";
+  if (base.endsWith("-reviewer.stderr.log")) return "reviewer_stderr";
   if (base.endsWith("-job.json")) return "review_job_copy";
   return "review_other";
 }
 
 function writerKind(base) {
-  if (base.endsWith("-claude.stdout.json")) return "writer_stdout";
-  if (base.endsWith("-claude.stderr.log")) return "writer_stderr";
+  if (base.endsWith("-writer.stdout.json")) return "writer_stdout";
+  if (base.endsWith("-writer.stderr.log")) return "writer_stderr";
   if (base.endsWith("-stop-payload.json")) return "stop_payload";
   if (base.endsWith("-writer-only-prompt.txt")) return "writer_prompt";
   if (base.endsWith("-bounded-correction.txt")) return "correction_prompt";
@@ -194,12 +192,10 @@ async function artifactLine(kind, file) {
 }
 
 export function isTerminalRun(run) {
-  return Boolean(run) && terminalStatuses.has(run.status);
+  return Boolean(run) && run.status === "completed" && CLOSED_REASONS.includes(run.closed_reason);
 }
 
-export function isActiveRun(run) {
-  return Boolean(run) && activeStatuses.has(run.status);
-}
+export { isActiveRun };
 
 function runTerminalAt(run) {
   return run.closed_at || run.updated_at || run.created_at || new Date().toISOString();
@@ -235,7 +231,7 @@ export async function mergeRun(paths, runId, { clock = Date.now, undelivered = f
     const line = await artifactLine(kind, file);
     lines.push({ ...base, ...line });
     if (kind === "reviewer_stderr" && !ioUsageRoles.has("reviewer")) {
-      const jobId = path.basename(file).replace(/-codex\.stderr\.log$/, "");
+      const jobId = path.basename(file).replace(/-reviewer\.stderr\.log$/, "");
       lines.push({ ...base, type: "usage", ...parseReviewerUsage(line.text || "", { jobId }) });
     }
   }
@@ -281,7 +277,7 @@ async function activeReferences(paths, runs) {
   return { stamps, jobIds };
 }
 
-export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_400, deliver = null } = {}) {
+export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000, deliver = null } = {}) {
   const days = retentionDays(config); // RetentionConfigError here means nothing is deleted
   const now = clock();
   const summary = {
@@ -311,12 +307,12 @@ export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_4
     // prune (the prune command, watch at start, the daily timer). A run that still cannot be
     // delivered waits; once it is older than the retention window it is folded anyway, marked.
     let current = run;
-    if (!current.outcome && deliver) {
+    if (!current.result_sha256 && deliver) {
       try { await deliver(run.run_id); } catch { /* reported below as undelivered */ }
       current = (await readOptionalJson(path.join(paths.runsDir, run.run_id + ".json"))) || run;
     }
     let undelivered = false;
-    if (!current.outcome) {
+    if (!current.result_sha256) {
       if (!olderThan(runTerminalAt(current), days, now)) { summary.undelivered.push(run.run_id); continue; }
       undelivered = true;
     }
@@ -353,7 +349,7 @@ export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_4
       const runId = record?.run_id || null;
       if (runId && activeIds.has(runId)) continue;
       const stampedAt = record?.claimed_at || record?.authorized_at || record?.invalidated_at || null;
-      const ttlPassed = stampedAt ? now - Date.parse(stampedAt) > ttlSeconds * 1000 : false;
+      const ttlPassed = stampedAt ? now - Date.parse(stampedAt) > ttl : false;
       const runGone = runId ? !knownRunIds.has(runId) || expiredRunIds.has(runId) : false;
       if (runGone || (ttlPassed && olderThan(stampedAt, days, now))) {
         await fsp.rm(file, { force: true });
@@ -391,7 +387,7 @@ export async function prune(paths, { config, clock = Date.now, ttlSeconds = 86_4
         if (owner && (isActiveRun(owner) || !owner.archived_at)) continue;
       }
       if (root === paths.reviewsRoot) {
-        const jobId = base.replace(/-(job\.json|review-prompt\.md|claude-report\.md|codex-review\.md|codex\.stdout\.log|codex\.stderr\.log|error\.txt)$/, "");
+        const jobId = base.replace(/-(job\.json|review-prompt\.md|writer-report\.md|reviewer-review\.md|reviewer\.stdout\.log|reviewer\.stderr\.log|error\.txt)$/, "");
         if (activeJobIds.has(jobId)) continue;
       }
       const stat = await fsp.stat(file).catch(() => null);
@@ -438,7 +434,7 @@ export async function removeRun(paths, runId, { clock = Date.now } = {}) {
   let merged = null;
   // Codex 2026-10-14: a run removed without a result is marked, never lost silently. A run folded
   // earlier keeps its old day-file line; today's day file gets a line saying it was removed undelivered.
-  const undelivered = !run.outcome;
+  const undelivered = !run.result_sha256;
   if (!run.archived_at) merged = await mergeRun(paths, runId, { clock, undelivered });
   else if (undelivered) await appendArchiveLine(paths, { type: "removed", run_id: runId, undelivered: true, archive_file: run.archive_file || null }, clock);
   for (const directory of [paths.runsDir, paths.runLocksDir, paths.reconcileGuardsDir]) {

@@ -13,9 +13,9 @@ import { createTranslator, resolveLocale } from "../features/workOrder/i18n.mjs"
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import { loadOrCreatePolicySnapshot } from "../service/records/policySnapshots.mjs";
-import { classifyOutcome, composeSections, deliverOutcome, deliverPendingRuns, OUTCOMES, renderResult, RESULT_MAX_BYTES, shellQuote, stdoutLines, tokenRows, windowsArgQuote } from "../features/workOrder/delivery.mjs";
+import { composeSections, deliverOutcome, deliverPendingRuns, renderResult, resultKey, RESULT_MAX_BYTES, shellQuote, stdoutLines, tokenRows, windowsArgQuote } from "../features/workOrder/delivery.mjs";
 import { mergeRun } from "../features/records/retention.mjs";
-import { consumeRun, readRun, recordRunState, TERMINAL_RUN_STATUSES, withRunLock } from "../service/records/runStore.mjs";
+import { CLOSED_REASONS, consumeRun, readRun, recordRunState, withRunLock } from "../service/records/runStore.mjs";
 import { authorizeWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -30,9 +30,9 @@ async function runtime(t, { locale = "zh-TW" } = {}) {
     schema_version: 4, active_runs: "derive_from_run_projections",
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     ...(locale ? { locale } : {}),
-    gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
+    test: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
-  await writeJson(paths.policyOverridePath, { schema_version: 4 });
+  await writeJson(paths.policyOverridePath, { schema_version: 5 });
   await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
   await fsp.mkdir(path.join(paths.privateRoot, "work-packages"), { recursive: true });
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# demo\n");
@@ -48,7 +48,7 @@ async function terminalRun(rt, status, { changeTypes = "docs", state = null, gat
   if (!task) await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
     paths: rt.paths, ...(task ? { task } : { taskFile }), owner: "Fortes", workPackage: id, breakpoint, changeTypes,
-    ...(task || allowedPaths ? { allowedPaths: allowedPaths || "README.md" } : {}), maxCalls: 2, maxMinutes: 1, outPath: path.join(rt.paths.queueRoot, id + "-" + Math.random().toString(16).slice(2, 6) + ".plan.json"),
+    ...(task || allowedPaths ? { allowedPaths: allowedPaths || "README.md" } : {}), rounds: 2, callTimeout: 60_000, outPath: path.join(rt.paths.queueRoot, id + "-" + Math.random().toString(16).slice(2, 6) + ".plan.json"),
   });
   const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
   const runId = authorization.run.run_id;
@@ -66,21 +66,23 @@ async function projectionEvents(rt, runId) {
   return text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
-test("S1 every terminal status delivers once: two files, the right title, three sections, one run_delivered event", async (t) => {
+test("S1 every closed reason delivers once: two files, the right title, three sections, one run_delivered event", async (t) => {
   const rt = await runtime(t);
   const tr = await createTranslator("zh-TW");
   const cases = {
-    pass: { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "gate_a_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }, { event: "review.result", call: 1, gate: "PASS", hard_stop: false, hard_stop_reason: null, findings: [], verified: ["read the delta"], not_run: ["ui"] }] },
-    call_budget_exhausted: { state: { status: "call_budget_exhausted", review_gate: "FAIL" }, events: [{ event: "task.input", call: 1 }, { event: "review.result", call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1")], verified: [], not_run: [] }] },
-    hard_stop: { gate: { review_gate: "FAIL", hard_stop_required: true, hard_stop_reason: "release_action" }, state: { status: "hard_stop", hard_stop_reason: "release_action" } },
+    review_pass: { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }, { event: "review.result", call: 1, gate: "PASS", hard_stop: false, hard_stop_reason: null, findings: [], verified: ["read the delta"], not_run: ["ui"] }] },
+    rounds_exhausted: { state: { status: "rounds_exhausted", review_gate: "FAIL" }, events: [{ event: "task.input", call: 1 }, { event: "review.result", call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1")], verified: [], not_run: [] }] },
+    review_hard_stop: { gate: { review_gate: "FAIL", hard_stop_required: true, hard_stop_reason: "release_action" }, state: { status: "hard_stop", hard_stop_reason: "release_action" } },
+    runtime_policy_identity_changed: { gate: { review_gate: "FAIL", hard_stop_required: true } },
+    superseded: {}, database_unavailable: {},
     needs_human: { state: { status: "needs_human", writer_status: "blocked" }, events: [{ event: "writer.result", call: 1, status: "blocked", needs_human: [{ question: "which colour?", options: ["red", "blue"] }] }] },
     token_limit: { state: { status: "token_limit", token_limit: "per_call", token_limit_role: "writer", tokens_this_call: 2_000_006 } },
     rate_limited: { state: { status: "rate_limited", failure: { role: "reviewer", provider: "codex", reason: "provider_usage_limit", reset_hint: "Oct 10th, 2026 1:00 AM" } } },
     stopped: { events: [{ event: "stop", status: "stopped", role: "writer", provider: "claude", detail_ref: "pid:1:killed" }] },
     cancelled: {},
     policy_failure: {},
-    claude_failed: { state: { status: "claude_failed", stderr_path: "C:/x/err.log", failure: { role: "writer", provider: "claude", reason: "provider_error" } } },
-    reviewer_failed: {}, claude_timeout: {}, controller_failure: {}, reference_changed: {}, malformed_writer_result: {}, malformed_review_result: {},
+    writer_failed: { state: { status: "writer_failed", stderr_path: "C:/x/err.log", failure: { role: "writer", provider: "claude", reason: "provider_error" } } },
+    reviewer_failed: {}, writer_timeout: {}, controller_failure: {}, reference_changed: {}, malformed_writer_result: {}, malformed_review_result: {},
     contract_rejected: { state: { status: "contract_rejected", contract_problems: ["$.acceptance[0].id: expected AC1"] } },
     contract_changed: {},
     contract_unconfirmed: { state: { status: "contract_unconfirmed", contract_problems: ["the reviewer could not confirm the translation"] } },
@@ -92,25 +94,25 @@ test("S1 every terminal status delivers once: two files, the right title, three 
     evidence_unconfirmable: { state: { status: "evidence_unconfirmable" } },
     scope_unverified: { state: { status: "scope_unverified", scope_unverified: ["README.md"] } },
   };
-  assert.equal(Object.keys(cases).length, TERMINAL_RUN_STATUSES.length, "every terminal status has a case");
-  for (const status of TERMINAL_RUN_STATUSES) {
+  assert.equal(Object.keys(cases).length, CLOSED_REASONS.length, "every closed reason has a case");
+  for (const status of CLOSED_REASONS) {
     const spec = cases[status];
     assert.ok(spec, "missing case for " + status);
     const { runId, taskFile } = await terminalRun(rt, status, { state: spec.state, gate: spec.gate, events: [usage("writer", 1, 1000), ...(spec.events || [])] });
     const delivery = await deliverOutcome({ paths: rt.paths, runId, notify: false });
     assert.equal(delivery.already, false, status);
-    const outcome = classifyOutcome(await readRun(rt.paths, runId));
-    assert.ok(OUTCOMES.includes(outcome));
-    assert.equal(delivery.outcome, outcome);
+    const closed = await readRun(rt.paths, runId);
+    assert.equal(closed.status, "completed", status);
+    assert.equal(delivery.conclusion, closed.conclusion, status);
+    assert.equal(delivery.closed_reason, status);
     const runCopy = await fsp.readFile(path.join(rt.paths.queueRoot, runId + ".result.md"), "utf8");
     const latest = await fsp.readFile(taskFile.replace(/\.md$/, ".result.md"), "utf8");
-    assert.equal(runCopy.split("\n")[0], "# " + tr("outcome." + outcome) + (runCopy.split("\n")[0].includes("（") ? runCopy.split("\n")[0].slice(runCopy.split("\n")[0].indexOf("（")) : ""), status);
+    assert.equal(runCopy.split("\n")[0], "# " + tr(resultKey(tr, "outcome", closed)) + (runCopy.split("\n")[0].includes("（") ? runCopy.split("\n")[0].slice(runCopy.split("\n")[0].indexOf("（")) : ""), status);
     assert.match(latest, new RegExp("^<!-- rb:latest run=" + runId + " closed_at=\\S+ -->\n" + tr("result.latest_of_run", { run_id: runId }).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     for (const heading of ["## 為什麼", "## 下一步", "## 改了哪些檔", "## token"]) assert.ok(runCopy.includes(heading), status + " " + heading);
     const delivered = (await projectionEvents(rt, runId)).filter((event) => event.type === "run_delivered");
     assert.equal(delivered.length, 1, status);
     const run = await readRun(rt.paths, runId);
-    assert.equal(run.outcome, outcome);
     assert.equal(run.result_sha256.length, 64);
     // A second delivery is a no-op: no new event, no rewrite.
     const again = await deliverOutcome({ paths: rt.paths, runId, notify: false });
@@ -121,12 +123,12 @@ test("S1 every terminal status delivers once: two files, the right title, three 
 
 test("S1b / S2 / S3 the why section is built from typed fields: findings, gate failure, questions, limits, quota", async (t) => {
   const rt = await runtime(t);
-  const once = await terminalRun(rt, "call_budget_exhausted", { state: { status: "call_budget_exhausted", review_gate: "FAIL" }, events: [{ event: "task.input", call: 1 }, { event: "review.result", call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1"), finding("F2")], verified: [], not_run: [] }] });
+  const once = await terminalRun(rt, "rounds_exhausted", { state: { status: "rounds_exhausted", review_gate: "FAIL" }, events: [{ event: "task.input", call: 1 }, { event: "review.result", call: 1, gate: "FAIL", hard_stop: false, hard_stop_reason: null, findings: [finding("F1"), finding("F2")], verified: [], not_run: [] }] });
   const onceText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: once.runId, notify: false })).result_path, "utf8");
   assert.doesNotMatch(onceText, /自動修過/);
   assert.match(onceText, /- F1（HIGH）README\.md:1：claim F1　→ fix F1/);
   assert.match(onceText, /- F2（HIGH）/);
-  const twice = await terminalRun(rt, "call_budget_exhausted", { state: { status: "call_budget_exhausted", call: 2, gate_a_passed: false, gate_a_exit_code: 3 }, events: [{ event: "task.input", call: 1 }, { event: "task.input", call: 2 }, { event: "gate_a_result", kind: "command", command: "npm test", exit_code: 3, timed_out: false, passed: false, call: 2, stderr_tail: "a\nb\nAssertionError: boom\n" }] });
+  const twice = await terminalRun(rt, "rounds_exhausted", { state: { status: "rounds_exhausted", call: 2, test_passed: false, test_exit_code: 3 }, events: [{ event: "task.input", call: 1 }, { event: "task.input", call: 2 }, { event: "test_result", kind: "command", command: "npm test", exit_code: 3, timed_out: false, passed: false, call: 2, stderr_tail: "a\nb\nAssertionError: boom\n" }] });
   const twiceText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: twice.runId, notify: false })).result_path, "utf8");
   assert.match(twiceText, /^# 需修正（Bridge 已自動修過 1 次）/);
   assert.match(twiceText, /現有測試沒過：npm test，exit 3/);
@@ -162,12 +164,12 @@ test("S4 the token table comes only from usage events; a role without usage show
 
 test("S5 a delivered result names the gate honestly and never claims the features were verified", async (t) => {
   const rt = await runtime(t);
-  const tested = await terminalRun(rt, "pass", { changeTypes: "code", gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "gate_a_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }] });
+  const tested = await terminalRun(rt, "pass", { changeTypes: "code", gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }] });
   const testedText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: tested.runId, notify: false })).result_path, "utf8");
   assert.match(testedText, /現有測試通過：npm test/);
   assert.doesNotMatch(testedText, /功能驗過|全部驗過/);
   assert.doesNotMatch(testedText, /work-plan/); // delivered has no rebuild command
-  const docs = await terminalRun(rt, "pass", { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "gate_a_result", kind: "not_applicable", call: 1 }] });
+  const docs = await terminalRun(rt, "pass", { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "not_applicable", call: 1 }] });
   const docsText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: docs.runId, notify: false })).result_path, "utf8");
   assert.match(docsText, /不跑測試（純文件）/);
 });
@@ -207,7 +209,7 @@ test("S1f a held run lock is retried; a lock that never frees is reported as del
   const delivery = await deliverOutcome({ paths: rt.paths, runId, notify: false, retry: { attempts: 40, delayMs: 50 } });
   await holder;
   assert.equal(delivery.already, false);
-  assert.equal(delivery.outcome, "cancelled");
+  assert.equal(delivery.conclusion, "cancelled");
   // Never freed within the retry window.
   const second = await terminalRun(rt, "cancelled");
   let release2;
@@ -222,17 +224,17 @@ test("S1f a held run lock is retried; a lock that never frees is reported as del
   release2();
   await holder2;
   const repaired = await deliverPendingRuns(rt.paths);
-  assert.deepEqual(repaired, [{ run_id: second.runId, outcome: "cancelled" }]);
-  assert.equal((await readRun(rt.paths, second.runId)).outcome, "cancelled");
+  assert.deepEqual(repaired, [{ run_id: second.runId, conclusion: "cancelled", closed_reason: "cancelled" }]);
+  assert.equal((await readRun(rt.paths, second.runId)).result_sha256.length, 64);
 });
 
 test("S4c a result over 64 KB is trimmed in the fixed order and keeps its headings; the archive holds the full text", async (t) => {
   const rt = await runtime(t);
   const tr = await createTranslator("zh-TW");
-  const run = { run_id: "run-x", status: "call_budget_exhausted", closed_at: "2026-10-14T00:00:00.000Z", last_state: { status: "call_budget_exhausted", review_gate: "FAIL", call: 2 } };
+  const run = { run_id: "run-x", status: "completed", conclusion: "action_required", closed_reason: "rounds_exhausted", closed_at: "2026-10-14T00:00:00.000Z", last_state: { status: "rounds_exhausted", review_gate: "FAIL", call: 2 } };
   const events = [{ event: "task.input", call: 1 }, { event: "review.result", call: 1, sequence: 5, gate: "FAIL", findings: Array.from({ length: 60 }, (_, i) => finding("F" + (i + 1))), verified: [], not_run: [] }];
   const delta = { changed_files: Array.from({ length: 3000 }, (_, i) => ({ path: "src/very/long/path/to/file-" + i + ".js", change: "modified" })), scope_violations: [] };
-  const sections = composeSections({ t: tr, run, outcome: "needs_fix", workPackage: { work_package_id: "wo", budget: { max_claude_calls: 2 }, scope: {} }, plan: null, events, delta });
+  const sections = composeSections({ t: tr, run, workPackage: { work_package_id: "wo", budget: { rounds: 2 }, scope: {} }, plan: null, events, delta });
   const full = renderResult({ t: tr, sections, commands: null, runId: "run-x", latest: false });
   assert.ok(Buffer.byteLength(full, "utf8") <= RESULT_MAX_BYTES);
   assert.match(full, /還有 \d+ 個檔，見日檔事件/);
@@ -252,7 +254,7 @@ test("S4c a result over 64 KB is trimmed in the fixed order and keeps its headin
 test("S6 the language pack drives every string; unknown locales fall back; missing keys return the key", async (t) => {
   const en = await runtime(t, { locale: "en" });
   assert.equal(await resolveLocale(en.paths), "en");
-  const { runId } = await terminalRun(en, "pass", { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "gate_a_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }] });
+  const { runId } = await terminalRun(en, "pass", { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }] });
   const delivery = await deliverOutcome({ paths: en.paths, runId, notify: false });
   const text = await fsp.readFile(delivery.result_path, "utf8");
   assert.match(text, /^# Delivered/);
@@ -330,7 +332,7 @@ test("C1 the rebuild command keeps an explicit scope; the default scope of a wor
 
 test("C3 the 64 KB cap holds for any list size: out-of-scope files, changed files, long why sections", async (t) => {
   const tr = await createTranslator("zh-TW");
-  const run = { run_id: "run-big", status: "needs_human", closed_at: "2026-10-14T00:00:00.000Z", last_state: { status: "hard_stop", hard_stop_reason: "scope_expansion", call: 1 } };
+  const run = { run_id: "run-big", status: "completed", conclusion: "action_required", closed_reason: "needs_human", closed_at: "2026-10-14T00:00:00.000Z", last_state: { status: "hard_stop", hard_stop_reason: "scope_expansion", call: 1 } };
   const events = [
     { event: "task.input", call: 1 },
     { event: "writer.result", call: 1, status: "done", needs_human: Array.from({ length: 800 }, (_, i) => ({ question: "q".repeat(200) + i, options: Array.from({ length: 30 }, () => "o".repeat(40)) })) },
@@ -338,7 +340,7 @@ test("C3 the 64 KB cap holds for any list size: out-of-scope files, changed file
   ];
   const files = (prefix, count) => Array.from({ length: count }, (_, i) => ({ path: prefix + "/deep/path/segment/file-" + i + ".js", change: "modified" }));
   const delta = { changed_files: [...files("src", 5000), ...files("outside", 5000)], scope_violations: files("outside", 5000).map((entry) => entry.path) };
-  const sections = composeSections({ t: tr, run, outcome: "needs_human", workPackage: { work_package_id: "wo", budget: { max_claude_calls: 2 }, scope: {} }, plan: null, events, delta });
+  const sections = composeSections({ t: tr, run, workPackage: { work_package_id: "wo", budget: { rounds: 2 }, scope: {} }, plan: null, events, delta });
   for (const latest of [false, true]) {
     const text = renderResult({ t: tr, sections, commands: { powershell: "node --% x", sh: "node 'x'" }, runId: "run-big", latest, closedAt: run.closed_at });
     assert.ok(Buffer.byteLength(text, "utf8") <= RESULT_MAX_BYTES, "bytes " + Buffer.byteLength(text, "utf8"));
@@ -389,7 +391,7 @@ test("C6 work-cancel delivers on the spot", async (t) => {
   await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
     paths: rt.paths, taskFile, owner: "Fortes", workPackage: "cancel-1", breakpoint: "b", changeTypes: "docs",
-    maxCalls: 1, maxMinutes: 1, outPath: path.join(rt.paths.queueRoot, "cancel-1.plan.json"),
+    rounds: 1, callTimeout: 60_000, outPath: path.join(rt.paths.queueRoot, "cancel-1.plan.json"),
   });
   const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
   const original = process.stdout.write;
@@ -402,8 +404,8 @@ test("C6 work-cancel delivers on the spot", async (t) => {
   }
   assert.equal(exitCode, 0);
   const run = await readRun(rt.paths, authorization.run.run_id);
-  assert.equal(run.status, "cancelled");
-  assert.equal(run.outcome, "cancelled");
+  assert.equal(run.closed_reason, "cancelled");
+  assert.equal(run.result_sha256.length, 64);
   const latest = await fsp.readFile(path.join(rt.paths.privateRoot, "work-packages", "cancel.result.md"), "utf8");
   assert.match(latest, /\n# 已取消\n/);
 });

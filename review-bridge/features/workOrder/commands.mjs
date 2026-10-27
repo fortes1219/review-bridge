@@ -12,7 +12,7 @@ import {
 import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
 import { loadContract } from "./contract.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
-import { GateAError } from "./gateA.mjs";
+import { TestError } from "./test.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { queueStatus, waitForPending } from "./reviewQueue.mjs";
 import {
@@ -22,6 +22,7 @@ import {
   closeFailedStart,
   createWorkPackagePlan,
   optionAgainstCard,
+  PLAN_SCHEMA_VERSION,
   workOrderUnchanged,
   workPackageStatus,
 } from "./workPackage.mjs";
@@ -66,7 +67,7 @@ async function askMissing(options, clack) {
 const interactive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
 // The plan step work-plan, start and resume share: { plan }, { cancelled }, or { refused } when
-// Gate A has no approved command for non-docs work (T0-06 G2.3; nothing is written). At a terminal
+// the tests have no approved command for non-docs work (T0-06 G2.3; nothing is written). At a terminal
 // a missing breakpoint or change types are asked; without one, start takes their defaults (an
 // agent runs it, and the card it prints shows them), while work-plan still requires them.
 const workPackageName = (options) => options.workPackage || (options.taskFile ? path.basename(options.taskFile, path.extname(options.taskFile)) : null);
@@ -126,20 +127,20 @@ async function planFromOptions({ paths, options, command }) {
       breakpoint,
       changeTypes,
       allowedPaths: options.allowedPaths,
-      maxCalls: options.maxCalls ?? 2,
-      maxMinutes: options.maxMinutes ?? 8,
+      rounds: options.rounds ?? 2,
+      callTimeout: options.callTimeout ?? 480_000,
       outPath,
       workOrder,
     });
     if (records) await recordCard(records.db, { projectId: records.projectId, plan, snapshot: (await loadOrCreatePolicySnapshot(paths)).snapshot, shown: false });
     return { plan, records };
   } catch (error) {
-    if (!(error instanceof GateAError)) throw error;
+    if (!(error instanceof TestError)) throw error;
     return { refused: error };
   }
 }
 
-function gateARefusal(error, json) {
+function testRefusal(error, json) {
   return json
     ? JSON.stringify({ valid: false, reason: error.reason, checked: error.checked }, null, 2) + "\n"
     : error.plain() + "\nOnly docs-only work can start without one. Add a test script to the project, or plan the work as docs: --change-types docs\n";
@@ -149,7 +150,7 @@ export async function planWork({ paths, options }) {
   const planned = await planFromOptions({ paths, options, command: "work-plan" });
   if (planned.cancelled) return 1;
   if (planned.refused) {
-    process.stdout.write(options.plain ? planned.refused.plain() + "\n" : gateARefusal(planned.refused, options.json));
+    process.stdout.write(options.plain ? planned.refused.plain() + "\n" : testRefusal(planned.refused, options.json));
     return 1;
   }
   const { plan } = planned;
@@ -158,7 +159,7 @@ export async function planWork({ paths, options }) {
     process.stdout.write([
       plan.task_file ? "工單：" + plan.task_file : "工作包：" + plan.work_package_id,
       "範圍：" + ({ default: "預設（整個專案減禁改清單）", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
-      "驗收：" + (plan.gate_a?.kind === "command" ? "會跑 " + plan.gate_a.command + "（profile 核准）" : plan.gate_a?.label || "未定"),
+      "驗收：" + (plan.test?.kind === "command" ? "會跑 " + plan.test.command + "（profile 核准）" : plan.test?.label || "未定"),
       ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
       "plan：" + plan.plan_path,
       "sha：" + plan.plan_sha256,
@@ -175,7 +176,7 @@ export async function planWork({ paths, options }) {
       owner: plan.owner,
       breakpoint: plan.breakpoint,
       scope: plan.scope,
-      gate_a: plan.gate_a,
+      test: plan.test,
       budget: plan.budget,
       next_command: "work-start --plan <plan_path>",
     }, null, 2) + "\n");
@@ -236,8 +237,8 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
       control: authorization.control,
       adapter,
       promptPath: authorization.promptPath,
-      maxCalls: authorization.plan.budget.max_claude_calls,
-      maxMinutes: authorization.plan.budget.max_claude_minutes_per_call,
+      rounds: authorization.plan.budget.rounds,
+      callTimeout: authorization.plan.budget.call_timeout,
       startNewSession: true,
       runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
       workLock: authorization.workLock,
@@ -370,6 +371,7 @@ async function cardForYes({ paths, planPath, taskFile, options, again }) {
   const card = await cardFor(db, { projectId, fileName: taskFileOf(paths, taskFile) });
   const refuse = (line) => { write(line); return null; };
   if (!card) return refuse("No card was shown for this work order, so there is no yes to run on. Run: " + again + " and show the person the card.");
+  if (card.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse("This card was made by an older Bridge and is not read again. Run: " + again + " and show the person the new card.");
   if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) return refuse("The work order changed after you saw the card. Run: " + again + " and look again.");
   const option = optionAgainstCard(card.body, options);
   if (option) return refuse(option + " is not what the card showed. Run: " + again + " --yes without it, or " + again + " to show the person a new card.");
@@ -382,7 +384,7 @@ async function cardForYes({ paths, planPath, taskFile, options, again }) {
 
 async function planOrSay({ paths, options, command }) {
   const planned = await planFromOptions({ paths, options, command });
-  if (planned.refused) process.stdout.write(gateARefusal(planned.refused, false));
+  if (planned.refused) process.stdout.write(testRefusal(planned.refused, false));
   if (planned.plan) write("Plan written to " + shownPath(planned.plan.plan_path));
   return planned.plan || null;
 }
@@ -430,8 +432,8 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
       breakpoint: workPackage.breakpoint,
       changeTypes: workPackage.scope.change_types.join(","),
       allowedPaths: workPackage.scope.source === "explicit" ? workPackage.scope.allowed_paths.join(",") : undefined,
-      maxCalls: workPackage.budget.max_claude_calls,
-      maxMinutes: workPackage.budget.max_claude_minutes_per_call,
+      rounds: workPackage.budget.rounds,
+      callTimeout: workPackage.budget.call_timeout,
       outPath: planPath,
     },
   });
@@ -487,7 +489,7 @@ export async function statusOverview({ paths, options, page }) {
   } else {
     write("Work: " + active.length + " running");
     for (const run of runs) {
-      write("  " + [run.run_id, run.status.padEnd(14), (run.closed_reason || "-").padEnd(20), run.source_file, run.created_at.toISOString()].join("  "));
+      write("  " + [run.run_id, run.status.padEnd(11), (run.conclusion || "-").padEnd(15), (run.closed_reason || "-").padEnd(20), run.source_file, run.created_at.toISOString()].join("  "));
     }
     if (more) write("  More: review-bridge status --after " + runs.at(-1).run_id);
   }
@@ -557,19 +559,19 @@ export async function resumeWork({ paths, options, adapter }) {
   const runtimeState = createRunRuntimeState(paths, activeControl.run.run_id);
   await assertRunResumable(paths, activeControl.run.run_id);
   if (!options.promptPath) throw new Error("bounded-resume requires --prompt.");
-  const maxCalls = options.maxCalls ?? 2;
-  const maxMinutes = options.maxMinutes ?? 8;
-  if (maxCalls < 1 || maxCalls > 2) throw new Error("max Claude calls must be 1 or 2.");
-  if (maxMinutes < 1 || maxMinutes > 15) throw new Error("max Claude minutes must be 1 through 15.");
+  const rounds = options.rounds ?? 2;
+  const callTimeout = options.callTimeout ?? 480_000;
+  if (rounds < 1 || rounds > 2) throw new Error("Writer rounds must be 1 or 2.");
+  if (callTimeout < 60_000 || callTimeout > 900_000) throw new Error("Writer call timeout must be 60000 through 900000 ms.");
   if (options.validateOnly) {
     const result = await validateBoundedResume({
-      paths, control: activeControl, adapter, promptPath: options.promptPath, maxCalls, maxMinutes,
+      paths, control: activeControl, adapter, promptPath: options.promptPath, rounds, callTimeout,
     });
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
     return 0;
   }
   return await runBoundedResume({
-    paths, control: activeControl, adapter, promptPath: options.promptPath, maxCalls, maxMinutes,
+    paths, control: activeControl, adapter, promptPath: options.promptPath, rounds, callTimeout,
     runtimeState,
   });
 }

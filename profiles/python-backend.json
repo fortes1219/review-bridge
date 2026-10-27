@@ -118,21 +118,5 @@
         "\\[tool\\.mypy"
       ]
     }
-  ],
-  "review_terms": {
-    "security": [
-      "authentication",
-      "authorization",
-      "credential",
-      "csrf",
-      "request cancellation"
-    ],
-    "full": [
-      "API contract",
-      "ORM model",
-      "migration",
-      "transaction state",
-      "async task lifecycle"
-    ]
-  }
+  ]
 }

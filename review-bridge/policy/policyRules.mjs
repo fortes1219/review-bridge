@@ -1,116 +1,65 @@
 // The default policy, a project override, and the effective policy they make: validation and the
 // tighten-only merge. Pure: no files are read or written here.
 
-const levelRank = new Map([
-  ["LIGHT", 1],
-  ["STANDARD", 2],
-  ["FULL", 3],
-  ["SECURITY", 4],
-  ["FINAL_CLOSURE", 5],
-]);
-const WRITER_MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,79}$/;
+const MODEL = /^[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,79}$/;
 const effortRank = new Map([["low", 1], ["medium", 2], ["high", 3]]);
+// Jira's priorities: a field the person sets, never read from the work order's words.
+export const PRIORITIES = Object.freeze(["low", "medium", "high", "urgent"]);
+const ROLES = Object.freeze(["writer", "reviewer"]);
 
 function union(left = [], right = []) {
   return [...new Set([...left, ...right])].sort();
 }
 
-function validatePattern(source, label) {
-  if (typeof source !== "string" || !source.trim()) throw new Error(label + " has an empty pattern.");
-  try {
-    new RegExp(source, "i");
-  } catch (error) {
-    throw new Error(label + " has an invalid pattern: " + error.message);
-  }
+// null: the provider CLI is given no --model and uses its own default.
+function validModel(model) {
+  return model === null || (typeof model === "string" && MODEL.test(model));
 }
 
-function validateRule(rule, allowedLevels, label) {
-  if (!rule || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(String(rule.id || ""))) {
-    throw new Error(label + " has no stable rule id.");
+function validatePriorityTable(priority) {
+  if (!PRIORITIES.includes(priority?.default)) throw new Error("Default priority is invalid.");
+  for (const role of ROLES) {
+    for (const level of PRIORITIES) {
+      const entry = priority[role]?.[level];
+      if (!entry || !effortRank.has(entry.effort) || !validModel(entry.model)) {
+        throw new Error("Priority setting is invalid: " + role + "." + level + ".");
+      }
+    }
   }
-  if (!allowedLevels.includes(rule.level) || !levelRank.has(rule.level)) {
-    throw new Error(label + " has an invalid review level.");
-  }
-  if (!Number.isInteger(rule.priority)) throw new Error(label + " has no integer priority.");
-  if (!Array.isArray(rule.any) || !rule.any.length) throw new Error(label + " has no positive patterns.");
-  for (const pattern of rule.any) validatePattern(pattern, label);
-  for (const pattern of rule.none || []) validatePattern(pattern, label);
 }
 
 export function validateDefaultPolicy(policy) {
-  if (policy?.schema_version !== 4 || policy?.policy_schema_version !== 4) {
+  if (policy?.schema_version !== 5 || policy?.policy_schema_version !== 5) {
     throw new Error("Default policy has an unsupported schema.");
   }
   const limits = policy.limits || {};
   for (const key of [
-    "max_claude_calls",
-    "max_claude_minutes_per_call",
+    "rounds",
+    "call_timeout",
     "max_turns",
-    "max_tokens_per_call",
-    "max_tokens_per_run",
-    "gate_a_minutes",
-    "authorization_ttl_seconds",
-    "recovery_window_seconds",
-    "heartbeat_interval_seconds",
-    "lock_stale_seconds",
-    "reconcile_grace_seconds",
-    "reconcile_guard_ttl_seconds",
+    "tokens_per_call",
+    "tokens",
+    "test_timeout",
+    "authorization_ttl",
+    "recovery_window",
+    "heartbeat_interval",
+    "lock_stale",
+    "reconcile_grace",
+    "reconcile_guard_ttl",
   ]) {
     if (!Number.isInteger(limits[key]) || limits[key] < 1) throw new Error("Default policy limit is invalid: " + key);
   }
-  if (limits.reconcile_guard_ttl_seconds <= limits.reconcile_grace_seconds) {
+  if (limits.reconcile_guard_ttl <= limits.reconcile_grace) {
     throw new Error("Reconcile guard TTL must exceed the grace period.");
   }
-  if (policy.writer?.model !== undefined && !WRITER_MODEL.test(String(policy.writer.model))) {
-    throw new Error("Writer model setting is invalid.");
-  }
   if (policy.release_actions_require_human !== true) throw new Error("Release approval cannot be disabled.");
-  const classification = policy.classification || {};
-  const allowed = classification.allowed_review_levels || [];
-  if (!allowed.length || !allowed.includes(classification.default_review_level)) {
-    throw new Error("Default classification levels are invalid.");
-  }
-  const seen = new Set();
-  for (const rule of classification.rules || []) {
-    validateRule(rule, allowed, "classification rule " + String(rule?.id || "<missing>"));
-    if (seen.has(rule.id)) throw new Error("Duplicate classification rule id: " + rule.id);
-    seen.add(rule.id);
-  }
+  validatePriorityTable(policy.priority);
   return true;
-}
-
-function mergeProtectedRule(base, candidate) {
-  if (candidate.protected === false) throw new Error("Protected rule cannot be unprotected: " + base.id);
-  if (levelRank.get(candidate.level || base.level) < levelRank.get(base.level)) {
-    throw new Error("Protected rule level cannot be lowered: " + base.id);
-  }
-  if (Number(candidate.priority ?? base.priority) < base.priority) {
-    throw new Error("Protected rule priority cannot be lowered: " + base.id);
-  }
-  const requestedAny = candidate.any || [];
-  const requestedNone = candidate.none || [];
-  if (candidate.any && base.any.some((entry) => !candidate.any.includes(entry))) {
-    throw new Error("Protected rule patterns cannot be removed or narrowed: " + base.id);
-  }
-  if (requestedNone.some((entry) => !(base.none || []).includes(entry))) {
-    throw new Error("Protected rule cannot add a bypass exclusion: " + base.id);
-  }
-  return {
-    ...base,
-    ...candidate,
-    protected: true,
-    level: levelRank.get(candidate.level || base.level) >= levelRank.get(base.level)
-      ? candidate.level || base.level
-      : base.level,
-    priority: Math.max(base.priority, Number(candidate.priority ?? base.priority)),
-    any: union(base.any, requestedAny),
-    none: (base.none || []).filter((entry) => requestedNone.length ? requestedNone.includes(entry) : true),
-  };
 }
 
 export function mergePolicy(defaultPolicy, override = {}) {
   validateDefaultPolicy(defaultPolicy);
-  if (override.schema_version !== undefined && override.schema_version !== 4) {
+  if (override.schema_version !== undefined && override.schema_version !== 5) {
     throw new Error("Project policy override has an unsupported schema.");
   }
   const merged = structuredClone(defaultPolicy);
@@ -126,62 +75,41 @@ export function mergePolicy(defaultPolicy, override = {}) {
     merged.writer.disallowed_tools,
     override.writer?.disallowed_tools,
   );
-  // Not protected: a project may pick any writer model the CLI accepts.
-  if (override.writer?.model !== undefined) {
-    if (typeof override.writer.model !== "string" || !WRITER_MODEL.test(override.writer.model)) {
-      throw new Error("Project override writer model is invalid.");
-    }
-    merged.writer.model = override.writer.model;
-  }
   if (override.release_actions_require_human === false) {
     throw new Error("Project override cannot disable human release approval.");
   }
-  for (const [level, effort] of Object.entries(override.classification?.effort_by_level || {})) {
-    const current = merged.classification.effort_by_level[level];
-    if (!effortRank.has(effort) || !current || effortRank.get(effort) < effortRank.get(current)) {
-      throw new Error("Project override cannot lower review effort for " + level + ".");
-    }
-    merged.classification.effort_by_level[level] = effort;
-  }
-  const byId = new Map(merged.classification.rules.map((rule) => [rule.id, rule]));
-  for (const candidate of override.classification?.rules || []) {
-    const base = byId.get(candidate.id);
-    if (base?.protected) byId.set(candidate.id, mergeProtectedRule(base, candidate));
-    else {
-      const normalized = { protected: false, none: [], ...candidate };
-      validateRule(normalized, merged.classification.allowed_review_levels, "classification rule " + candidate.id);
-      for (const protectedRule of [...byId.values()].filter((rule) => rule.protected)) {
-        const overlaps = normalized.any.some((pattern) => protectedRule.any.includes(pattern));
-        if (overlaps && levelRank.get(normalized.level) < levelRank.get(protectedRule.level)) {
-          throw new Error("Lower-level rule cannot shadow a protected match: " + candidate.id);
-        }
+  for (const role of ROLES) {
+    for (const [level, entry] of Object.entries(override.priority?.[role] || {})) {
+      const current = merged.priority[role][level];
+      // Not protected: a project may pick any model the CLI accepts.
+      if (entry?.model !== undefined) {
+        if (!current || !validModel(entry.model)) throw new Error("Project override " + role + " model for " + level + " is invalid.");
+        current.model = entry.model;
       }
-      byId.set(candidate.id, normalized);
+      // Effort may only go up.
+      if (entry?.effort !== undefined) {
+        if (!effortRank.has(entry.effort) || !current || effortRank.get(entry.effort) < effortRank.get(current.effort)) {
+          throw new Error("Project override cannot lower " + role + " effort for " + level + ".");
+        }
+        current.effort = entry.effort;
+      }
     }
   }
-  merged.classification.rules = [...byId.values()];
   validateDefaultPolicy(merged);
   return merged;
 }
 
-export function classificationProfileFromSnapshot(snapshot) {
-  const classification = snapshot.effective_policy.classification;
+// The model and effort each role uses at one priority. Every run uses the default priority until
+// work orders carry their own.
+export function priorityChoice(policy, priority = policy.priority.default) {
   return {
-    schema_version: 1,
-    profile_id: "snapshot-" + snapshot.effective_policy_sha256,
-    rules: structuredClone(classification.rules),
+    priority,
+    writer: structuredClone(policy.priority.writer[priority]),
+    reviewer: structuredClone(policy.priority.reviewer[priority]),
   };
 }
 
-export function codexPolicyFromSnapshot(snapshot) {
-  const classification = snapshot.effective_policy.classification;
-  return {
-    classification_profile: "snapshot-" + snapshot.effective_policy_sha256,
-    classification: "controller_dynamic",
-    default_review_level: classification.default_review_level,
-    allowed_review_levels: structuredClone(classification.allowed_review_levels),
-    effort_by_level: structuredClone(classification.effort_by_level),
-    classification_owner: "controller",
-    claude_may_select_or_downgrade: false,
-  };
+export function reviewerPolicyFromSnapshot(snapshot) {
+  const { priority, reviewer } = priorityChoice(snapshot.effective_policy);
+  return { priority, model: reviewer.model, effort: reviewer.effort };
 }

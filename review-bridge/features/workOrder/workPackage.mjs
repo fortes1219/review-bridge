@@ -12,7 +12,9 @@ import {
   createAuthorization,
   createImmutableWorkPackage,
   fileExists,
+  isActiveRun,
   isPidAlive,
+  isStoppedRun,
   listRuns,
   loadControlView,
   loadOrCreatePolicySnapshot,
@@ -20,15 +22,17 @@ import {
   readRun,
   recordRunState,
   recordsDatabase,
+  STOP_REASONS,
   writeJson,
   writeText,
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspaceEvidence.mjs";
-import { recheckGateA, selectGateA } from "./gateA.mjs";
+import { recheckTest, selectTest } from "./test.mjs";
 import { MAX_TRANSLATION_ATTEMPTS } from "./contract.mjs";
 import { processFile, startLockFile, workLockFile } from "./processRecords.mjs";
-import { DEFAULT_WRITER_MODEL, stopRun } from "./writerLoop.mjs";
+import { priorityChoice } from "../../policy/policyRules.mjs";
+import { stopRun } from "./writerLoop.mjs";
 
 // The model calls that turn a work order into a contract run before any work, so the plan names
 // them for the human to approve: who translates, who checks, how often, and for how long. The
@@ -39,10 +43,10 @@ async function contractSteps(paths, snapshot, budget) {
   const reviewer = config?.roles?.reviewer?.provider_id;
   if (!writer || !reviewer) throw new Error("The writer and reviewer roles are not set in bridge.json; a work order cannot be planned.");
   return {
-    translate: { role: "writer", provider: writer, model: snapshot.effective_policy?.writer?.model || DEFAULT_WRITER_MODEL },
+    translate: { role: "writer", provider: writer, model: priorityChoice(snapshot.effective_policy).writer.model },
     check: { role: "reviewer", provider: reviewer },
     max_attempts: MAX_TRANSLATION_ATTEMPTS,
-    minutes_per_call: budget.max_claude_minutes_per_call,
+    call_timeout: budget.call_timeout,
   };
 }
 
@@ -136,16 +140,26 @@ function parseAllowedPaths(value) {
   return values.sort();
 }
 
-function validateBudget(policy, maxCalls, maxMinutes) {
-  const calls = Number(maxCalls);
-  const minutes = Number(maxMinutes);
-  if (!Number.isInteger(calls) || calls < 1 || calls > policy.limits.max_claude_calls) {
-    throw new Error("Claude call budget exceeds policy.");
+// A plan is content-addressed, as a policy snapshot is, so one made by an older Bridge (its budget in
+// calls and minutes) is never rewritten; it is refused where it is read, and a new card is made.
+export const PLAN_SCHEMA_VERSION = 5;
+
+export function assertCurrentPlan(plan) {
+  if (plan?.operation !== "start_work_package") throw new Error("Unsupported work plan.");
+  if (plan.schema_version === 4) throw new Error("This plan was made by an older Bridge and is not read again. Run: review-bridge start <file> to make a new card");
+  if (plan.schema_version !== PLAN_SCHEMA_VERSION) throw new Error("Unsupported work plan.");
+}
+
+function validateBudget(policy, rounds, callTimeout) {
+  const calls = Number(rounds);
+  const timeout = Number(callTimeout);
+  if (!Number.isInteger(calls) || calls < 1 || calls > policy.limits.rounds) {
+    throw new Error("Writer rounds exceed policy.");
   }
-  if (!Number.isInteger(minutes) || minutes < 1 || minutes > policy.limits.max_claude_minutes_per_call) {
-    throw new Error("Claude minute budget exceeds policy.");
+  if (!Number.isInteger(timeout) || timeout < 60_000 || timeout > policy.limits.call_timeout) {
+    throw new Error("Writer call timeout exceeds policy.");
   }
-  return { max_claude_calls: calls, max_claude_minutes_per_call: minutes };
+  return { rounds: calls, call_timeout: timeout };
 }
 
 export async function createWorkPackagePlan({
@@ -157,8 +171,8 @@ export async function createWorkPackagePlan({
   breakpoint,
   changeTypes,
   allowedPaths,
-  maxCalls = 2,
-  maxMinutes = 8,
+  rounds = 2,
+  callTimeout = 480_000,
   outPath,
   // Which work order this file is (Q13), as the card shows it; sealed with the plan, so the yes
   // approves it too.
@@ -179,15 +193,16 @@ export async function createWorkPackagePlan({
   // the human starts the work; inline --task text is the legacy/test path and needs --allow-paths.
   const workOrderFile = Boolean(taskFile);
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
-  const budget = validateBudget(snapshot.effective_policy, maxCalls, maxMinutes);
+  const budget = validateBudget(snapshot.effective_policy, rounds, callTimeout);
+  const choice = priorityChoice(snapshot.effective_policy);
   const scope = await resolveScope({ paths, workOrderFile, allowedPaths });
   const rules = workOrderFile ? await snapshotRules(paths) : null;
   const contract = workOrderFile ? await contractSteps(paths, snapshot, budget) : null;
   const changeTypeList = parseChangeTypes(changeTypes);
   // T0-06 G2: the verification is decided here, from the installed rules, and sealed for approval.
-  const gateA = await selectGateA({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})), changeTypes: changeTypeList });
+  const test = await selectTest({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})), changeTypes: changeTypeList });
   const plan = {
-    schema_version: 4,
+    schema_version: PLAN_SCHEMA_VERSION,
     operation: "start_work_package",
     created_at: new Date().toISOString(),
     repo_root: paths.repoRoot,
@@ -206,11 +221,15 @@ export async function createWorkPackagePlan({
       change_types: changeTypeList,
       ...scope,
     },
-    gate_a: gateA,
+    test,
     budget,
+    // What every call of this run will use, as the policy's priority table gives it.
+    priority: choice.priority,
+    writer: choice.writer,
+    reviewer: choice.reviewer,
     effective_policy_sha256: snapshot.effective_policy_sha256,
     authorization_expires_at: new Date(
-      Date.now() + snapshot.effective_policy.limits.authorization_ttl_seconds * 1000,
+      Date.now() + snapshot.effective_policy.limits.authorization_ttl,
     ).toISOString(),
   };
   plan.plan_sha256 = planDigest(plan);
@@ -235,14 +254,12 @@ export function optionAgainstCard(plan, options) {
   if (options.changeTypes !== undefined && !same(list(String(options.changeTypes).toLowerCase()), scope.change_types)) return "--change-types";
   if (options.allowedPaths !== undefined && !(scope.source === "explicit" && same(list(String(options.allowedPaths).replaceAll("\\", "/")), scope.allowed_paths))) return "--allow-paths";
   if (options.owner !== undefined && String(options.owner).trim() !== plan.owner) return "--owner";
-  if (options.maxCalls !== undefined && Number(options.maxCalls) !== plan.budget?.max_claude_calls) return "--max-claude-calls";
-  if (options.maxMinutes !== undefined && Number(options.maxMinutes) !== plan.budget?.max_claude_minutes_per_call) return "--max-claude-minutes";
+  if (options.rounds !== undefined && Number(options.rounds) !== plan.budget?.rounds) return "--rounds";
+  if (options.callTimeout !== undefined && Number(options.callTimeout) !== plan.budget?.call_timeout) return "--call-timeout";
   if (options.asNew && plan.work_order?.decision !== "new") return "--as-new";
   if (options.update !== undefined && plan.work_order?.work_order_id !== options.update) return "--update";
   return null;
 }
-
-const RUNNING_STATUSES = new Set(["running", "review_pending", "correction_pending", "interrupted"]);
 
 // A work order is a place: the folder it is in and the name its entry has there (decision A,
 // 2026-10-22). Two spellings of one entry (Abc and abc where names ignore case) are one place; two
@@ -295,8 +312,8 @@ export async function runningVersions(paths, plan) {
   if (!location) throw new Error("The work order " + plan.task_file + " is missing.");
   const found = [];
   for (const run of await listRuns(paths)) {
-    const unresolved = run.status === "stopped" && await fileExists(processFile(paths, run.run_id));
-    if (!RUNNING_STATUSES.has(run.status) && !unresolved) continue;
+    const unresolved = isStoppedRun(run) && await fileExists(processFile(paths, run.run_id));
+    if (!isActiveRun(run) && !unresolved) continue;
     let control;
     try {
       control = await loadControlView(paths, run.run_id);
@@ -306,7 +323,7 @@ export async function runningVersions(paths, plan) {
     // The same place, however each start spelled its path; the same test as the start lock's key.
     const theirs = control.run?.work_package?.task_file;
     if (!theirs || (await workOrderLocation(paths, theirs)) !== location) continue;
-    found.push({ runId: run.run_id, unchanged: RUNNING_STATUSES.has(run.status) && control.run.work_package.task === plan.task });
+    found.push({ runId: run.run_id, unchanged: isActiveRun(run) && control.run.work_package.task === plan.task });
   }
   return found;
 }
@@ -324,8 +341,8 @@ async function runningVersionsOf(paths, plan, db) {
     .filter((name) => name.endsWith(".process.json")).map((name) => name.slice(0, -".process.json".length))
     .filter((runId) => !found.some((run) => run.runId === runId));
   if (unconfirmed.length) {
-    const { rows } = await db.query("select run_id from runs where run_id = any($1::uuid[]) and work_order_id = $2 and status = 'stopped'",
-      [unconfirmed.filter((runId) => /^[0-9a-f-]{36}$/.test(runId)), workOrderId]);
+    const { rows } = await db.query("select run_id from runs where run_id = any($1::uuid[]) and work_order_id = $2 and status = 'completed' and closed_reason = any($3::text[])",
+      [unconfirmed.filter((runId) => /^[0-9a-f-]{36}$/.test(runId)), workOrderId, STOP_REASONS]);
     found.push(...rows.map((row) => ({ runId: row.run_id, unchanged: false })));
   }
   return found;
@@ -387,7 +404,7 @@ export async function closeFailedStart(paths, runId, error) {
 export async function authorizeWorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
   const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
   const plan = await readJson(resolvedPlan);
-  if (plan.schema_version !== 4 || plan.operation !== "start_work_package") throw new Error("Unsupported work plan.");
+  assertCurrentPlan(plan);
   const actual = planDigest(plan);
   if (plan.plan_sha256 !== actual || String(approval || "").toLowerCase() !== actual) {
     throw new Error("Work plan approval checksum is invalid.");
@@ -399,7 +416,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
   if (snapshot.effective_policy_sha256 !== plan.effective_policy_sha256) {
     throw new Error("Work plan is stale because effective policy changed: Bridge was upgraded or its policy changed. Make a new plan with work-plan.");
   }
-  validateBudget(snapshot.effective_policy, plan.budget.max_claude_calls, plan.budget.max_claude_minutes_per_call);
+  validateBudget(snapshot.effective_policy, plan.budget.rounds, plan.budget.call_timeout);
   // C3.7: what the model will be shown must still be what the Owner approved.
   if (plan.rules) {
     const current = await snapshotRules(paths);
@@ -413,8 +430,8 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
     }
   }
   // T0-06 G2.5: the sealed test entry point must still exist when the human approves.
-  if (plan.gate_a) {
-    const recheck = await recheckGateA(paths.repoRoot, plan.gate_a);
+  if (plan.test) {
+    const recheck = await recheckTest(paths.repoRoot, plan.test);
     if (!recheck.ok) throw new Error("批准後專案的測試入口變了（" + recheck.reasons.join("；") + "），重新建 plan");
   }
   // One start of a work order at a time, from looking for its running version until the new run
@@ -477,7 +494,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
       breakpoint: plan.breakpoint,
       rules: plan.rules || null,
       contract_steps: plan.contract_steps || null,
-      gate_a: plan.gate_a || null,
+      test: plan.test || null,
       task_file: plan.task_file || null,
     }, () => Date.parse(plan.created_at));
     const authorization = await createAuthorization(paths, {
@@ -489,7 +506,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
       workOrderSha256: plan.task_file ? plan.task_sha256 : null,
       workPackageSha256: workPackage.record.content_sha256,
       policySha256: snapshot.effective_policy_sha256,
-      ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,
+      ttl: snapshot.effective_policy.limits.authorization_ttl,
       sourcePlanSha256: plan.plan_sha256,
     });
     const workspaceEvidence = await createWorkspaceBaseline({
@@ -569,16 +586,18 @@ export async function workPackageStatus(paths, runId = null) {
     breakpoint: control.breakpoint,
     scope: control.authorized_scope,
     iteration: selected.iteration,
-    session_present: Boolean(selected.claude_session_id),
+    session_present: Boolean(selected.writer_session_id),
     execution_mode: selected.execution_mode,
+    conclusion: selected.conclusion || null,
     closed_reason: selected.closed_reason || null,
     latest_state: selected.last_state,
     stop_reason: selected.last_state?.failure || null,
-    active_runs: runs.filter((run) => ["running", "review_pending", "correction_pending", "interrupted"].includes(run.status)).length,
+    active_runs: runs.filter(isActiveRun).length,
     runs: ordered.map((run) => ({
       run_id: run.run_id,
       work_package: run.work_package_id || null,
       status: run.status,
+      conclusion: run.conclusion || null,
       updated_at: run.updated_at || run.created_at || null,
     })),
   };

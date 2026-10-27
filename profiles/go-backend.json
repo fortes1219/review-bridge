@@ -61,20 +61,5 @@
         "github\\.com/jackc/pgx"
       ]
     }
-  ],
-  "review_terms": {
-    "security": [
-      "authentication",
-      "authorization",
-      "credential",
-      "context cancellation"
-    ],
-    "full": [
-      "API contract",
-      "database schema",
-      "transaction state",
-      "goroutine lifecycle",
-      "cross-package architecture"
-    ]
-  }
+  ]
 }

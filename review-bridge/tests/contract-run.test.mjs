@@ -53,7 +53,7 @@ async function install(t) {
 }
 
 const planArgs = (order, name, planArg) => ["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name,
-  "--breakpoint", "return after review", "--change-types", "code", "--max-claude-calls", "1", "--max-claude-minutes", "2", "--out", planArg];
+  "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000", "--out", planArg];
 
 async function planWork(rt, name, text) {
   const order = ".review-bridge/work-packages/" + name + ".md";
@@ -102,7 +102,7 @@ const translation = (overrides) => ({
   unused_lines: [{ start: 3, end: 3 }, { start: 6, end: 6 }],
   ...overrides,
 });
-const visible = { id: "AC1", statement: "The farm is visible.", quote: "The farm is visible.", source_refs: [{ start: 7, end: 7 }], verify: [{ kind: "gate_a", check: null }], run_refs: [] };
+const visible = { id: "AC1", statement: "The farm is visible.", quote: "The farm is visible.", source_refs: [{ start: 7, end: 7 }], verify: [{ kind: "test", check: null }], run_refs: [] };
 
 const SINGLE = "# Work order: farm\n\n## Work\nBuild a small farm.\n\n## Acceptance\n- The farm is visible.\n";
 
@@ -136,7 +136,7 @@ test("the plan names the contract calls before the work, and the human approves 
     translate: { role: "writer", provider: "claude", model: work.plan.contract_steps.translate.model },
     check: { role: "reviewer", provider: "codex" },
     max_attempts: 2,
-    minutes_per_call: 2,
+    call_timeout: 120_000,
   });
   const plain = rt.bridge([...planArgs(work.order, "farm-plain", ".review-bridge/review-queue/farm-plain.plan.json"), "--plain"]);
   assert.match(plain.stdout, /Before the work: up to 2 work-order translation\(s\) by the writer \(claude\) and 2 check\(s\) by the reviewer \(codex\), 2 minute\(s\) per call/);
@@ -156,7 +156,7 @@ test("the reviewer checks the translation in its own call before the writer star
   const started = start(rt, work);
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const run = await runOf(rt, work);
-  assert.equal(run.status, "pass");
+  assert.equal(run.conclusion, "success");
   const events = await eventsOf(rt, work);
   const kinds = events.map((event) => event.event);
   assert.deepEqual(kinds.slice(0, 5), ["usage", "contract.translation", "usage", "contract.check", "contract.sealed"]);
@@ -174,7 +174,7 @@ test("a translation the reviewer finds wrong is redone, not sent to the human; a
   const redone = await planWork(rt, "redone", SINGLE);
   assert.equal(start(rt, redone, { FAKE_CONTRACT_CHECK: "unfaithful_first" }).status, 0);
   const passed = await runOf(rt, redone);
-  assert.equal(passed.status, "pass");
+  assert.equal(passed.conclusion, "success");
   const checks = (await eventsOf(rt, redone)).filter((event) => event.event === "contract.check");
   assert.deepEqual(checks.map((event) => event.decision), ["retranslate", "pass"]);
   assert.equal((await loadContract(rt.paths, passed.contract_sha256)).translated_by.attempt, 2);
@@ -183,7 +183,7 @@ test("a translation the reviewer finds wrong is redone, not sent to the human; a
   const exhausted = await planWork(rt, "exhausted", SINGLE);
   assert.equal(start(rt, exhausted, { FAKE_CONTRACT_CHECK: "unfaithful_always" }).status, 79);
   const rejected = await runOf(rt, exhausted);
-  assert.equal(rejected.status, "contract_rejected");
+  assert.equal(rejected.closed_reason, "contract_rejected");
   assert.equal(rejected.contract_sha256, undefined);
   assert.equal((await eventsOf(rt, exhausted)).some((event) => event.event === "task.input"), false);
 });
@@ -192,17 +192,17 @@ test("an ambiguity in the work order goes to the human; a reviewer that cannot c
   const rt = await install(t);
   const unclear = await planWork(rt, "unclear", SINGLE);
   assert.equal(start(rt, unclear, { FAKE_CONTRACT_CHECK: "ambiguous" }).status, 0);
-  assert.equal((await runOf(rt, unclear)).status, "needs_human");
+  assert.equal((await runOf(rt, unclear)).closed_reason, "needs_human");
   assert.match(await resultOf(rt, "unclear"), /- Which page should show the farm\?/);
   const doubtful = await planWork(rt, "doubtful", SINGLE);
   assert.equal(start(rt, doubtful, { FAKE_CONTRACT_CHECK: "cannot_confirm" }).status, 0);
   const unconfirmed = await runOf(rt, doubtful);
-  assert.equal(unconfirmed.status, "contract_unconfirmed");
+  assert.equal(unconfirmed.closed_reason, "contract_unconfirmed");
   assert.equal(unconfirmed.contract_sha256, undefined);
   assert.match(await resultOf(rt, "doubtful"), /could not confirm that the contract matches the work order[\s\S]*- fake: the work order refers to a design not given/);
   const partial = await planWork(rt, "partial", SINGLE + "- The cart moves.\n");
   assert.equal(start(rt, partial, { FAKE_CONTRACT_CHECK: "skip_ac" }).status, 0);
-  assert.equal((await runOf(rt, partial)).status, "contract_unconfirmed");
+  assert.equal((await runOf(rt, partial)).closed_reason, "contract_unconfirmed");
   assert.deepEqual((await runOf(rt, partial)).last_state.contract_problems, ["$.acceptance: must judge exactly AC1, AC2"]);
 });
 
@@ -210,19 +210,19 @@ test("a wrong field is redone; a reviewer that leaves a field unjudged stops the
   const rt = await install(t);
   const redone = await planWork(rt, "field", SINGLE);
   assert.equal(start(rt, redone, { FAKE_CONTRACT_CHECK: "field_unfaithful_first" }).status, 0);
-  assert.equal((await runOf(rt, redone)).status, "pass");
+  assert.equal((await runOf(rt, redone)).conclusion, "success");
   const checks = (await eventsOf(rt, redone)).filter((event) => event.event === "contract.check");
   assert.deepEqual(checks.map((event) => event.decision), ["retranslate", "pass"]);
   assert.deepEqual(checks[0].feedback, ["scope_notes.include does not match the work order: an exclusion was copied as an inclusion"]);
   const skipped = await planWork(rt, "skipped", SINGLE);
   assert.equal(start(rt, skipped, { FAKE_CONTRACT_CHECK: "skip_field" }).status, 0);
   const unconfirmed = await runOf(rt, skipped);
-  assert.equal(unconfirmed.status, "contract_unconfirmed");
+  assert.equal(unconfirmed.closed_reason, "contract_unconfirmed");
   assert.match(unconfirmed.last_state.contract_problems[0], /^\$\.fields: must judge exactly ticket, /);
   const unknown = await planWork(rt, "unknown", SINGLE);
   assert.equal(start(rt, unknown, { FAKE_CONTRACT_CHECK_USAGE: "none" }).status, 76);
   const stopped = await runOf(rt, unknown);
-  assert.equal(stopped.status, "usage_unknown");
+  assert.equal(stopped.closed_reason, "usage_unknown");
   assert.equal(stopped.contract_sha256, undefined);
   assert.equal((await eventsOf(rt, unknown)).some((event) => event.event === "task.input"), false);
   assert.match(await resultOf(rt, "unknown"), /could not read how many tokens the contract check call used/);
@@ -231,7 +231,7 @@ test("a wrong field is redone; a reviewer that leaves a field unjudged stops the
 test("a work order with two runs keeps its run plan as data; one source line gives three conditions; Bridge still starts one run", async (t) => {
   const rt = await install(t);
   const work = await planWork(rt, "multi", MULTI);
-  const gate = [{ kind: "gate_a", check: null }];
+  const gate = [{ kind: "test", check: null }];
   const file = await translationFile(rt, translation({
     run_plan: { runs: [
       { name: "RUN A", depends_on: [], depends_on_quote: "Depends on: none", source_refs: [{ start: 9, end: 12 }] },
@@ -247,7 +247,7 @@ test("a work order with two runs keeps its run plan as data; one source line giv
   const started = start(rt, work, { FAKE_CONTRACT_FILE: file });
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const run = await runOf(rt, work);
-  assert.equal(run.status, "pass");
+  assert.equal(run.conclusion, "success");
   const contract = await loadContract(rt.paths, run.contract_sha256);
   assert.deepEqual(contract.run_plan.runs.map((entry) => [entry.name, entry.depends_on]), [["RUN A", []], ["RUN B", ["RUN A"]]]);
   assert.equal(contract.run_plan.runs[1].text, "### RUN B: cart\n- Work: add a cart\n- Acceptance: the cart drives\n- Depends on: RUN A");
@@ -262,7 +262,7 @@ test("a writer that rewrites the sealed contract ends the run as contract_change
   const work = await planWork(rt, "tamper", SINGLE);
   assert.equal(start(rt, work, { FAKE_CONTRACT_TAMPER: "1" }).status, 78);
   const run = await runOf(rt, work);
-  assert.equal(run.status, "contract_changed");
+  assert.equal(run.closed_reason, "contract_changed");
   await assert.rejects(loadContract(rt.paths, run.contract_sha256), /changed after it was sealed/);
   const kinds = (await eventsOf(rt, work)).map((event) => event.event);
   assert.equal(kinds.includes("review.input"), false);
@@ -274,11 +274,11 @@ test("an answer that names another contract is refused, from the writer and from
   const writer = await planWork(rt, "echo-writer", SINGLE);
   assert.equal(start(rt, writer, { FAKE_CONTRACT_ECHO: "other" }).status, 79);
   const writerRun = await runOf(rt, writer);
-  assert.equal(writerRun.status, "malformed_writer_result");
+  assert.equal(writerRun.closed_reason, "malformed_writer_result");
   assert.ok(writerRun.last_state.errors.includes("$.contract_sha256: expected " + writerRun.contract_sha256));
   const reviewer = await planWork(rt, "echo-reviewer", SINGLE);
   assert.equal(start(rt, reviewer, { FAKE_CODEX_CONTRACT: "other" }).status, 79);
-  assert.equal((await runOf(rt, reviewer)).status, "malformed_review_result");
+  assert.equal((await runOf(rt, reviewer)).closed_reason, "malformed_review_result");
 });
 
 test("editing the work order never changes a running contract; only starting again makes a new version, and the old one stays", async (t) => {
@@ -300,7 +300,7 @@ test("editing the work order never changes a running contract; only starting aga
   await fsp.writeFile(path.join(rt.root, first.order), edited);
   assert.equal(await exit, 0);
   const firstRun = await runOf(rt, first);
-  assert.equal(firstRun.status, "pass");
+  assert.equal(firstRun.conclusion, "success");
   // The result marks the edit and says it was not used; the work was judged on the sealed text.
   const firstResult = await resultOf(rt, "farm");
   assert.match(firstResult, /## Work order changed after the start/);
@@ -367,7 +367,7 @@ test("starting an edited work order again stops the running version first, and n
   // Saving the work order stops nothing.
   await fsp.writeFile(path.join(rt.root, first.order), edited);
   await pause(1000);
-  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
 
   // A stop of the old version that cannot be confirmed refuses the new start; nothing of it is made.
@@ -385,7 +385,7 @@ test("starting an edited work order again stops the running version first, and n
   assert.equal(alive(old.record.pid), false);
   await old.exit;
   const oldRun = await runOf(rt, first);
-  assert.equal(oldRun.status, "stopped");
+  assert.equal(oldRun.conclusion, "cancelled");
   assert.equal(oldRun.closed_reason, "superseded");
   const oldStop = (await eventsOf(rt, first)).find((event) => event.event === "stop" && event.status === "stopped");
   assert.equal(oldStop.superseded_by, second.plan.proposed_run_id);
@@ -393,7 +393,7 @@ test("starting an edited work order again stops the running version first, and n
   assert.ok(oldStop.occurred_at <= newEvents[0].occurred_at, "the new version started before the old one was stopped");
   // The new version has its own contract and verdicts; the old run left none of its records in it.
   const newRun = await runOf(rt, second);
-  assert.equal(newRun.status, "pass");
+  assert.equal(newRun.conclusion, "success");
   assert.notEqual(newRun.contract_sha256, oldRun.contract_sha256);
   assert.equal((await loadContract(rt.paths, newRun.contract_sha256)).acceptance.length, 2);
   assert.ok(newEvents.every((event) => event.run_id === second.plan.proposed_run_id));
@@ -414,7 +414,7 @@ test("an old version's verdict and finding are not carried into the new version"
   const order = ".review-bridge/work-packages/farm.md";
   await fsp.writeFile(path.join(rt.root, order), SINGLE);
   const planArg = ".review-bridge/review-queue/farm-two-calls.plan.json";
-  const twoCalls = planArgs(order, "farm", planArg).map((arg, index, all) => (all[index - 1] === "--max-claude-calls" ? "2" : arg));
+  const twoCalls = planArgs(order, "farm", planArg).map((arg, index, all) => (all[index - 1] === "--rounds" ? "2" : arg));
   const planned = rt.bridge(twoCalls);
   assert.equal(planned.status, 0, planned.stderr);
   const first = { plan: await readJson(path.join(rt.root, planArg)), planArg, order };
@@ -534,7 +534,7 @@ test("a save by renaming while a start runs keeps the place: that start goes on,
   assert.equal(record?.role, "writer", "the first start never got to work");
   t.after(() => { try { process.kill(record.pid); } catch {} });
   const firstRun = await runOf(rt, first);
-  assert.equal(firstRun.status, "running");
+  assert.equal(firstRun.status, "in_progress");
   assert.equal((await loadContract(rt.paths, firstRun.contract_sha256)).acceptance.length, 2, "the first start uses the text it sealed");
   // Only the person's retry replaces it.
   const retried = start(rt, second);
@@ -542,7 +542,7 @@ test("a save by renaming while a start runs keeps the place: that start goes on,
   await exit;
   assert.equal((await runOf(rt, first)).closed_reason, "superseded");
   const secondRun = await runOf(rt, second);
-  assert.equal(secondRun.status, "pass");
+  assert.equal(secondRun.conclusion, "success");
   assert.equal((await loadContract(rt.paths, secondRun.contract_sha256)).acceptance.length, 3);
 });
 
@@ -562,7 +562,7 @@ test("between two starts a save by renaming keeps the place: the same text is re
   const refused = start(rt, same);
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, new RegExp("already running unchanged as run " + first.plan.proposed_run_id));
-  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
   // Saved with a new text, by renaming: the new start replaces the running version.
   const edited = SINGLE + "- The cart is red.\n";
@@ -572,7 +572,7 @@ test("between two starts a save by renaming keeps the place: the same text is re
   assert.equal(started.status, 0, started.stderr);
   await old.exit;
   assert.equal((await runOf(rt, first)).closed_reason, "superseded");
-  assert.equal((await runOf(rt, changed)).status, "pass");
+  assert.equal((await runOf(rt, changed)).conclusion, "success");
 });
 
 test("two hard links to one file in one folder are two places, so two work orders", async (t) => {
@@ -588,8 +588,8 @@ test("two hard links to one file in one folder are two places, so two work order
   // The other link is another work order: it neither waits for, nor stops, nor is refused by the first.
   const started = start(rt, second);
   assert.equal(started.status, 0, started.stderr);
-  assert.equal((await runOf(rt, second)).status, "pass");
-  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal((await runOf(rt, second)).conclusion, "success");
+  assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
   const stopped = rt.bridge(["stop", first.plan.proposed_run_id]);
   assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
@@ -637,11 +637,11 @@ test("the new version starts only after the old work-start has let go of its run
   const started = start(rt, second);
   assert.equal(started.status, 0, started.stderr);
   assert.equal(alive(old.record.pid), false);
-  assert.equal((await runOf(rt, second)).status, "pass");
+  assert.equal((await runOf(rt, second)).conclusion, "success");
   // The old version's work-start is gone, so the new start delivered it.
   const oldRun = await runOf(rt, first);
   assert.equal(oldRun.closed_reason, "superseded");
-  assert.equal(oldRun.outcome, "stopped");
+  assert.equal(oldRun.result_sha256.length, 64);
 });
 
 // Codex review: two plans of one unchanged work order started together must leave one run, not two,
@@ -665,7 +665,7 @@ test("a second start of a work order while the first is still starting is refuse
   await pause(500);
   const started = start(rt, first);
   assert.equal(started.status, 0, started.stderr);
-  assert.equal((await runOf(rt, first)).status, "pass");
+  assert.equal((await runOf(rt, first)).conclusion, "success");
 });
 
 test("a second start of an unchanged work order that is already running is refused, and the running one goes on", async (t) => {
@@ -687,7 +687,7 @@ test("a second start of an unchanged work order that is already running is refus
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, new RegExp("already running unchanged as run " + first.plan.proposed_run_id + "; nothing was created"));
   await assert.rejects(runOf(rt, current));
-  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
   // The start card says the start will be refused, not that it will stop the run.
   const card = spawnSync(process.execPath, [rt.bootstrap, "work-start", "--plan", current.planArg, "--fake-cli"], {
@@ -715,7 +715,7 @@ test("two plans of one unchanged work order started at the same moment leave exa
   assert.equal(runs.filter(Boolean).length, 1, "runs: " + JSON.stringify(runs.map((run) => run?.status ?? null)) + " " + exits.map((exit) => exit.stderr).join(" | "));
   const winner = runs.findIndex(Boolean);
   assert.equal(exits[winner].code, 0, exits[winner].stderr);
-  assert.equal(runs[winner].status, "pass");
+  assert.equal(runs[winner].conclusion, "success");
   assert.notEqual(runs[winner].closed_reason, "superseded");
   assert.notEqual(exits[1 - winner].code, 0);
   assert.match(exits[1 - winner].stderr, /nothing was created/);
@@ -763,7 +763,7 @@ test("where names ignore case, farm.md and FARM.md are one work order: one start
   const exits = await startTogether(rt, [lower, upper]);
   const runs = await Promise.all([lower, upper].map((work) => runOf(rt, work).catch(() => null)));
   assert.equal(runs.filter(Boolean).length, 1, exits.map((exit) => exit.stderr).join(" | "));
-  assert.equal(runs.find(Boolean).status, "pass");
+  assert.equal(runs.find(Boolean).conclusion, "success");
   assert.match(exits[runs.findIndex((run) => !run)].stderr, /nothing was created/);
   // One spelling running, the other refused: the running one goes on.
   const running = await planWork(rt, "farm", SINGLE);
@@ -773,7 +773,7 @@ test("where names ignore case, farm.md and FARM.md are one work order: one start
   const refused = start(rt, other);
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, new RegExp("already running unchanged as run " + running.plan.proposed_run_id));
-  assert.equal((await runOf(rt, running)).status, "running");
+  assert.equal((await runOf(rt, running)).status, "in_progress");
   const stopped = rt.bridge(["stop", running.plan.proposed_run_id]);
   assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
   await old.exit;
@@ -791,7 +791,7 @@ test("where names keep case and both files exist, farm.md and FARM.md are two wo
   for (const [index, work] of [lower, upper].entries()) {
     assert.equal(exits[index].code, 0, exits[index].stderr);
     const run = await runOf(rt, work);
-    assert.equal(run.status, "pass");
+    assert.equal(run.conclusion, "success");
     assert.notEqual(run.closed_reason, "superseded");
   }
 });
@@ -807,14 +807,14 @@ test("the start card names the running version it will stop, and answering no le
   });
   assert.notEqual(declined.status, 0);
   assert.match(declined.stdout, new RegExp("Starting stops the version still running from this work order: run " + first.plan.proposed_run_id));
-  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
   // Another work order's start works beside it, to the end, and leaves this one running.
   const other = await planWork(rt, "barn", SINGLE);
   const otherStart = start(rt, other);
   assert.equal(otherStart.status, 0, otherStart.stderr);
-  assert.equal((await runOf(rt, other)).status, "pass");
-  assert.equal((await runOf(rt, first)).status, "running");
+  assert.equal((await runOf(rt, other)).conclusion, "success");
+  assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
   const stopped = rt.bridge(["stop", first.plan.proposed_run_id]);
   assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
@@ -829,7 +829,7 @@ test("an open question from the translation stops the work before the writer and
   }));
   assert.equal(start(rt, work, { FAKE_CONTRACT_FILE: file }).status, 0);
   const run = await runOf(rt, work);
-  assert.equal(run.status, "needs_human");
+  assert.equal(run.closed_reason, "needs_human");
   assert.equal(run.contract_sha256, undefined);
   assert.equal((await eventsOf(rt, work)).some((event) => event.event === "task.input"), false);
   assert.match(await resultOf(rt, "asked"), /- Which page shows the farm\?/);
@@ -841,7 +841,7 @@ test("a translation that points past the text is refused, tried again, and nothi
   const file = await translationFile(rt, translation({ context: at(40), acceptance: [visible] }));
   assert.equal(start(rt, work, { FAKE_CONTRACT_FILE: file }).status, 79);
   const run = await runOf(rt, work);
-  assert.equal(run.status, "contract_rejected");
+  assert.equal(run.closed_reason, "contract_rejected");
   assert.deepEqual(run.last_state.contract_problems, ["$.context.source_refs[0]: line 40 is past the last line 7"]);
   assert.equal((await eventsOf(rt, work)).filter((event) => event.event === "contract.translation").length, 2);
   assert.deepEqual(await fsp.readdir(rt.paths.contractsDir).catch(() => []), []);

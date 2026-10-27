@@ -62,7 +62,7 @@ function translationOutput() {
     used.add(entry.line);
     acceptance.push({
       id: "AC" + (acceptance.length + 1), statement: item[1], quote: item[1], source_refs: [{ start: entry.line, end: entry.line }],
-      verify: [gate ? { kind: "gate_a", check: null } : { kind: "reviewer", check: "fake: the reviewer reads the change" }], run_refs: [],
+      verify: [gate ? { kind: "test", check: null } : { kind: "reviewer", check: "fake: the reviewer reads the change" }], run_refs: [],
     });
   }
   const unused = numbered.filter((entry) => entry.text.trim() && !used.has(entry.line)).map((entry) => ({ start: entry.line, end: entry.line }));

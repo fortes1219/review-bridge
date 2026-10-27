@@ -80,22 +80,5 @@
         ]
       }
     ]
-  },
-  "review_terms": {
-    "security": [
-      "authentication",
-      "authorization",
-      "policy",
-      "guard",
-      "csrf",
-      "mass assignment"
-    ],
-    "full": [
-      "API resource contract",
-      "eloquent model",
-      "migration",
-      "transaction boundary",
-      "queue lifecycle"
-    ]
   }
 }

@@ -53,8 +53,8 @@ node .review-bridge/tools/review-bridge/bootstrap.mjs work-plan `
   --breakpoint "return after Codex review" `
   --change-types docs `
   --allow-paths "README.md" `
-  --max-claude-calls 2 `
-  --max-claude-minutes 8 `
+  --rounds 2 `
+  --call-timeout 480000 `
   --out .review-bridge/review-queue/trial-001.plan.json
 ```
 

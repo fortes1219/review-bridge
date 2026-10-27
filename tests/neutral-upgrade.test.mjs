@@ -182,7 +182,7 @@ async function fakeRun(root, id) {
   // A work order with something to check; one without stops at translation and asks the human.
   await fsp.writeFile(taskPath, "# Update the README\n\nUpdate README.md only.\n\n## Acceptance\n\n- README.md says hello.\n");
   bootstrapRun(root, ["work-plan", "--task-file", taskPath, "--owner", "o", "--work-package", id, "--breakpoint", "b",
-    "--change-types", "docs", "--allow-paths", "README.md", "--max-claude-calls", "2", "--max-claude-minutes", "1", "--out", planPath]);
+    "--change-types", "docs", "--allow-paths", "README.md", "--rounds", "2", "--call-timeout", "60000", "--out", planPath]);
   const started = bootstrapRun(root, ["work-start", "--plan", planPath, "--yes", "--fake-cli", "--fake-scenario", "PASS", "--json"]);
   assert.equal(JSON.parse(started.stdout).latest_state.status, "pass");
 }
@@ -226,7 +226,7 @@ async function workApi(root, runtimeRoot = sourceRuntime) {
 async function makePlan(api, id) {
   return await api.createWorkPackagePlan({
     paths: api.paths, task: "Update README.md only.", owner: "o", workPackage: id, breakpoint: "b", changeTypes: "docs",
-    allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(api.paths.queueRoot, id + ".plan.json"),
+    allowedPaths: "README.md", rounds: 1, callTimeout: 60_000, outPath: path.join(api.paths.queueRoot, id + ".plan.json"),
   });
 }
 
@@ -485,7 +485,7 @@ test("W4 work-start is refused once the marker is written; a run claimed just be
   await assert.rejects(upgrade(root, {
     afterMarker: async () => assert.rejects(api.cancelIfMaintenance(api.paths, authorized.run.run_id), /maintenance_in_progress/),
   }), /The project changed after the plan was shown/);
-  assert.equal((await api.readRun(api.paths, authorized.run.run_id)).status, "cancelled");
+  assert.equal((await api.readRun(api.paths, authorized.run.run_id)).closed_reason, "cancelled");
   assert.equal(await exists(markerOf(root)), false);
   assert.equal((await upgrade(root)).result.ok, true);
 });
@@ -509,7 +509,7 @@ test("W5 / W6 / W8 approval binds the plan; running work, a failed verification,
   const running = await makePlan(api, "running-1");
   await api.authorizeWorkPackage({ paths: api.paths, planPath: running.plan_path, approval: running.plan_sha256, executionMode: "fake_cli" });
   const busy = await persistent(root);
-  await assert.rejects(upgrade(root), /Work is still running: .+ \(running\)\. Stop it or let it finish first/);
+  await assert.rejects(upgrade(root), /Work is still running: .+ \(in_progress\)\. Stop it or let it finish first/);
   sameTree(await persistent(root), busy, "W6 running work");
   assert.equal(await exists(markerOf(root)), false);
   // W6: a held install lock.
@@ -544,11 +544,11 @@ test("W7 a new default policy invalidates unstarted authorizations, reports them
   const { snapshot } = await before.loadOrCreatePolicySnapshot(before.paths);
   const workPackage = await before.createImmutableWorkPackage(before.paths, {
     work_package_id: "wp-" + randomUUID(), task: "Unclaimed fixture.", acceptance_criteria: [],
-    scope: { change_types: ["docs"], allowed_paths: ["README.md"] }, budget: { max_claude_calls: 1, max_claude_minutes_per_call: 1 }, breakpoint: "b",
+    scope: { change_types: ["docs"], allowed_paths: ["README.md"] }, budget: { rounds: 1, call_timeout: 1 }, breakpoint: "b",
   });
   const authorization = await before.createAuthorization(before.paths, {
     authorizedBy: "Human Owner", workPackageSha256: workPackage.record.content_sha256, policySha256: snapshot.effective_policy_sha256,
-    ttlSeconds: snapshot.effective_policy.limits.authorization_ttl_seconds,
+    ttl: snapshot.effective_policy.limits.authorization_ttl,
   });
   const stalePlan = await makePlan(before, "stale-1");
   const { plan, result } = await upgrade(root);

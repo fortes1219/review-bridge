@@ -57,7 +57,7 @@ const contract = {
     schema: "review-bridge.contract",
     acceptance: [
       { id: "AC1", statement: "看得到牧場", source_refs: [{ start: 2, end: 2 }], verify: [{ kind: "reviewer", check: "畫面" }], run_refs: [] },
-      { id: "AC2", statement: "農車會動", source_refs: [{ start: 2, end: 2 }], verify: [{ kind: "gate_a", check: null }], run_refs: [] },
+      { id: "AC2", statement: "農車會動", source_refs: [{ start: 2, end: 2 }], verify: [{ kind: "test", check: null }], run_refs: [] },
     ],
   },
 };

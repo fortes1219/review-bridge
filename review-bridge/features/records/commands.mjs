@@ -6,15 +6,15 @@ import { formatPruneSummary, prune, removeRun } from "./retention.mjs";
 // T0-02 R3: one entry point for every prune trigger (CLI, watch start, daily timer).
 export async function runPrune(paths, { json = false, out = process.stdout, deliver }) {
   const config = (await fileExists(paths.bridgeConfigPath)) ? await readJson(paths.bridgeConfigPath).catch(() => ({})) : {};
-  let ttlSeconds = 86_400;
+  let ttl = 86_400_000;
   for (const file of [paths.defaultPolicyPath, paths.policyOverridePath]) {
     const policy = (await fileExists(file)) ? await readJson(file).catch(() => null) : null;
-    if (Number.isInteger(policy?.limits?.authorization_ttl_seconds)) ttlSeconds = policy.limits.authorization_ttl_seconds;
+    if (Number.isInteger(policy?.limits?.authorization_ttl)) ttl = policy.limits.authorization_ttl;
   }
   try {
     // T0-07: every prune (command, watch start, daily timer) delivers pending results first; prune
     // itself refuses to fold a run that has none.
-    const summary = await prune(paths, { config, ttlSeconds, deliver });
+    const summary = await prune(paths, { config, ttl, deliver });
     out.write(json ? JSON.stringify(summary, null, 2) + "\n" : formatPruneSummary(summary) + "\n");
     return summary.merge_errors.length ? 1 : 0;
   } catch (error) {

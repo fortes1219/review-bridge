@@ -68,19 +68,5 @@
         "(^|\\n)\\s*socketioxide\\s*="
       ]
     }
-  ],
-  "review_terms": {
-    "security": [
-      "tenant boundary",
-      "credential",
-      "csrf",
-      "request cancel(lation)?"
-    ],
-    "full": [
-      "database schema",
-      "migration contract",
-      "transaction state",
-      "cross-module architecture"
-    ]
-  }
+  ]
 }

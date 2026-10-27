@@ -42,7 +42,7 @@ const LINES = [
 ];
 
 const at = (start, end = start) => ({ source_refs: [{ start, end }] });
-const criterion = (id, statement, quote, line, verify = [{ kind: "gate_a", check: null }], runRefs = []) => ({
+const criterion = (id, statement, quote, line, verify = [{ kind: "test", check: null }], runRefs = []) => ({
   id, statement, quote, source_refs: [{ start: line, end: line }], verify, run_refs: runRefs,
 });
 
@@ -69,7 +69,7 @@ function translation(overrides = {}) {
   };
 }
 
-const check = (value, gateA = GATE) => checkTranslation(value, { lines: LINES, gateA });
+const check = (value, rule = GATE) => checkTranslation(value, { lines: LINES, test: rule });
 const workPackage = { work_package_id: "farm-1", task: LINES.join("\n"), task_file: ".review-bridge/work-packages/farm.md" };
 const translator = { role: "writer", provider: "claude", model: "opus", attempt: 1 };
 const checker = { role: "reviewer", provider: "codex" };
@@ -113,7 +113,7 @@ test("a translation may only point at lines that exist, in order, and number its
 
 test("the translation cannot choose a command, a path, a budget or a role", async () => {
   const items = translation().acceptance;
-  const command = await check(translation({ acceptance: [{ ...items[0], verify: [{ kind: "gate_a", check: null, command: "rm -rf /" }] }, items[1], items[2]] }));
+  const command = await check(translation({ acceptance: [{ ...items[0], verify: [{ kind: "test", check: null, command: "rm -rf /" }] }, items[1], items[2]] }));
   assert.deepEqual(command.problems, ["$.acceptance[0].verify[0]: unexpected command"]);
   const scope = await check({ ...translation(), allowed_paths: ["**"], budget: { calls: 99 } });
   assert.deepEqual(scope.problems, ["$: unexpected allowed_paths", "$: unexpected budget"]);
@@ -126,7 +126,7 @@ test("the translation cannot choose a command, a path, a budget or a role", asyn
 const RUN_LINES = ["# farm", "### RUN A: trees", "plant trees", "### RUN B: cart", "add a cart", "## Acceptance", "- trees and cart"];
 const runCheck = (runPlan, acceptance) => checkTranslation(translation({
   requested_work: null, run_plan: runPlan, acceptance, unused_lines: [{ start: 6, end: 6 }],
-}), { lines: RUN_LINES, gateA: GATE });
+}), { lines: RUN_LINES, test: GATE });
 const run = (name, start, end, dependsOn = [], quote = null) => ({ name, depends_on: dependsOn, depends_on_quote: quote, source_refs: [{ start, end }] });
 
 test("runs come only from the work order's own run plan: names appear in their lines, dependencies exist and do not loop", async () => {
@@ -135,7 +135,7 @@ test("runs come only from the work order's own run plan: names appear in their l
   const looped = await checkTranslation(translation({
     requested_work: null, run_plan: { runs: [run("RUN A", 1, 2, ["RUN B"], "after RUN B"), run("RUN B", 3, 4, ["RUN A"], "after RUN A")] },
     acceptance: [criterion("AC1", "x", "both", 5, undefined, ["RUN A"])], unused_lines: [],
-  }), { lines: ["### RUN A", "after RUN B", "### RUN B", "after RUN A", "both"], gateA: GATE });
+  }), { lines: ["### RUN A", "after RUN B", "### RUN B", "after RUN A", "both"], test: GATE });
   assert.deepEqual(looped.problems, ["$.run_plan: dependency cycle RUN A -> RUN B -> RUN A"]);
   const invented = await runCheck({ runs: [run("RUN A", 2, 3), run("RUN C", 4, 5)] }, [criterion("AC1", "x", "trees and cart", 7, undefined, ["RUN A"])]);
   assert.deepEqual(invented.problems, ["$.run_plan.runs[1].name: \"RUN C\" does not appear in its lines"]);
@@ -164,13 +164,13 @@ test("Bridge copies the referenced lines into the contract; the model wrote only
 test("the prompts number every line, name the output language, and the check shows the full text and the candidate", () => {
   const lines = numberedLines(LINES.join("\n") + "\n");
   assert.equal(lines.length, 8);
-  const prompt = composeTranslationPrompt({ workPackageId: "farm-1", lines, gateA: GATE, locale: "ja", attempt: 2, feedback: ["AC1 does not match its lines"] });
+  const prompt = composeTranslationPrompt({ workPackageId: "farm-1", lines, test: GATE, locale: "ja", attempt: 2, feedback: ["AC1 does not match its lines"] });
   assert.equal(prompt.split("\n")[0], CONTRACT_MODE_HEADER);
   assert.match(prompt, /^7\| 1\. Trees and a barn show/m);
   assert.match(prompt, /BCP 47 tag "ja"/);
   assert.match(prompt, /Attempt: 2/);
   assert.match(prompt, /- AC1 does not match its lines/);
-  assert.match(composeTranslationPrompt({ workPackageId: "farm-1", lines, gateA: NO_GATE, locale: "en" }), /Bridge runs no verification command/);
+  assert.match(composeTranslationPrompt({ workPackageId: "farm-1", lines, test: NO_GATE, locale: "en" }), /Bridge runs no verification command/);
   const candidate = buildContract({ workPackage, lines: LINES, translation: translation(), translator, checker });
   const checkPrompt = composeCheckPrompt({ workPackageId: "farm-1", lines, candidate, sha256: digest(candidate), locale: "en", attempt: 1 });
   assert.equal(checkPrompt.split("\n")[0], CHECK_MODE_HEADER);
@@ -235,7 +235,7 @@ test("an exclusion copied into include passes the code checks, so the reviewer m
     unused_lines: [{ start: 2, end: 2 }, { start: 5, end: 5 }],
   });
   // Code cannot tell an inclusion from an exclusion; every line is used and every quote is verbatim.
-  assert.equal((await checkTranslation(moved, { lines, gateA: GATE })).ok, true);
+  assert.equal((await checkTranslation(moved, { lines, test: GATE })).ok, true);
   const candidate = buildContract({ workPackage: { ...workPackage, task: lines.join("\n") }, lines, translation: moved, translator, checker });
   const sha256 = digest(candidate);
   const judged = (field, faithful, note) => CHECKED_FIELDS.map((name) => ({ field: name, faithful: name === field ? faithful : true, note: name === field ? note : null }));
@@ -259,7 +259,7 @@ test("a run arrangement must come from the work order: no added dependency, no s
   const plan = (runB) => ({ runs: [run("RUN A", 2, 3, [], "Depends on: none"), runB] });
   const withPlan = (runPlan, runRefs = ["RUN A", "RUN B"]) => checkTranslation(translation({
     requested_work: null, run_plan: runPlan, acceptance: [criterion("AC1", "x", "trees and cart", 7, undefined, runRefs)], unused_lines: [{ start: 6, end: 6 }],
-  }), { lines, gateA: GATE });
+  }), { lines, test: GATE });
   assert.equal((await withPlan(plan(run("RUN B", 4, 5, [], "Depends on: none")))).ok, true);
   // Both runs say "none"; a model that adds "RUN B depends on RUN A" has no line to quote for it.
   const added = await withPlan(plan(run("RUN B", 4, 5, ["RUN A"], null)));
@@ -285,14 +285,14 @@ test("a stop between two contract calls is honoured before the next call starts"
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-stop-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, minutes_per_call: 1 };
-  const limits = { max_tokens_per_call: 10_000_000, max_tokens_per_run: 10_000_000 };
+  const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, call_timeout: 60_000 };
+  const limits = { tokens_per_call: 10_000_000, tokens: 10_000_000 };
   let calls = 0;
   // Not stopped before the translation; stopped by the time the check would start.
   const isStopped = async () => (calls++ > 0);
   const result = await establishContract({
-    paths, runId: "run-stop-between-calls", workPackage: { ...workPackage, gate_a: GATE, contract_steps: steps },
-    adapter: createFakeAdapter(bridgeRoot, "PASS"), limits, effort: "low", executionMode: "fake_cli", isStopped, onSpawn: async () => {},
+    paths, runId: "run-stop-between-calls", workPackage: { ...workPackage, test: GATE, contract_steps: steps },
+    adapter: createFakeAdapter(bridgeRoot, "PASS"), limits, effort: "low", translateEffort: "low", executionMode: "fake_cli", isStopped, onSpawn: async () => {},
   });
   assert.equal(result.status, "stopped");
   const events = await readIoEvents(paths, "run-stop-between-calls");
@@ -312,15 +312,15 @@ test("a stop between the pre-call check and the pid record kills the call that j
   process.env.FAKE_CONTRACT_SLEEP_MS = "20000";
   t.after(() => { if (previous === undefined) delete process.env.FAKE_CONTRACT_SLEEP_MS; else process.env.FAKE_CONTRACT_SLEEP_MS = previous; });
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, minutes_per_call: 1 };
+  const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, call_timeout: 60_000 };
   const seen = [];
   // Running at the check before the call; stopped by the time the call has its pid.
   const isStopped = async () => seen.push("status") > 1;
   const recorded = [];
   const startedAt = Date.now();
   const result = await establishContract({
-    paths, runId: "run-stop-race-0001", workPackage: { ...workPackage, gate_a: GATE, contract_steps: steps },
-    adapter: createFakeAdapter(bridgeRoot, "PASS"), limits: { max_tokens_per_call: 1e7, max_tokens_per_run: 1e7 }, effort: "low",
+    paths, runId: "run-stop-race-0001", workPackage: { ...workPackage, test: GATE, contract_steps: steps },
+    adapter: createFakeAdapter(bridgeRoot, "PASS"), limits: { tokens_per_call: 1e7, tokens: 1e7 }, effort: "low", translateEffort: "low",
     executionMode: "fake_cli", isStopped, onSpawn: async (pid, role) => { recorded.push(role); },
   });
   assert.equal(result.status, "stopped");

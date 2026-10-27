@@ -22,7 +22,7 @@ export async function runProcess({
     env: invocation.env || process.env,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    // T0-06 G3.2: a sealed Gate A command string runs through the platform shell as one line.
+    // T0-06 G3.2: a sealed test command string runs through the platform shell as one line.
     shell: invocation.shell === true,
     // A shell run gets its own process group on POSIX so a timeout can reach its descendants.
     detached: invocation.shell === true && process.platform !== "win32",

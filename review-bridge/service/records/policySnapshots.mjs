@@ -14,7 +14,7 @@ export async function loadOrCreatePolicySnapshot(paths) {
   const defaults = await readJson(paths.defaultPolicyPath);
   const override = await fileExists(paths.policyOverridePath)
     ? await readJson(paths.policyOverridePath)
-    : { schema_version: 4 };
+    : { schema_version: 5 };
   const effective = mergePolicy(defaults, override);
   const snapshot = {
     schema_version: 4,

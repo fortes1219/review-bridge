@@ -1,5 +1,5 @@
 // The calling side of the stop protocol, shared by every process Bridge starts for a run: the
-// writer, Gate A, the contract calls and the reviewer. `stop` marks the run stopped inside the run
+// writer, the tests, the contract calls and the reviewer. `stop` marks the run stopped inside the run
 // lock and only then reads the recorded pid; a call records its pid and then reads the status.
 // Whichever side comes second sees the other, so a process started around a stop does not keep
 // running.
@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { ensureDir, killProcessTree, readRun, writeJsonAtomic } from "../../service/index.mjs";
+import { ensureDir, isStoppedRun, killProcessTree, readRun, writeJsonAtomic } from "../../service/index.mjs";
 import { timestampId } from "../../utils/dates.mjs";
 
 export function processFile(paths, runId) {
@@ -40,11 +40,11 @@ export async function recordProcess(paths, runId, record) {
 }
 
 // Fails closed: a run that is stopped, missing, or whose record cannot be read must not keep a
-// model call or Gate A command running.
+// model call or test command running.
 export async function runMustStop(paths, runId) {
   if (!runId) return false;
   try {
-    return (await readRun(paths, runId)).status === "stopped";
+    return isStoppedRun(await readRun(paths, runId));
   } catch {
     return true;
   }
@@ -77,7 +77,8 @@ export async function clearProcess(paths, runId) {
   await fsp.rm(processFile(paths, runId), { force: true });
 }
 
-export async function readRunStatus(paths, runId) {
-  if (!runId) return null;
-  return (await readRun(paths, runId).catch(() => null))?.status || null;
+// Whether the run was closed by a stop; false when its record cannot be read.
+export async function runStopped(paths, runId) {
+  if (!runId) return false;
+  return isStoppedRun(await readRun(paths, runId).catch(() => null));
 }

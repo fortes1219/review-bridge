@@ -1,5 +1,5 @@
 // Project detection for the installer: which profile fits the target, what it can verify, and
-// the classification override that profile adds. Read only; nothing here writes to the target.
+// the project override it starts with. Read only; nothing here writes to the target.
 import fsp from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -25,34 +25,11 @@ async function readJsonOptional(file) {
   return (await exists(file)) ? await readJson(file) : null;
 }
 
+// The project starts with no override of its own; the person adds one when the project needs it.
 export function projectPolicyOverride(profile) {
-  const rules = [];
-  if ((profile.review_terms?.security || []).length) {
-    rules.push({
-      id: "project-" + profile.profile_id + "-security",
-      protected: false,
-      level: "SECURITY",
-      priority: 410,
-      reason: "project security boundary",
-      any: profile.review_terms.security,
-      none: [],
-    });
-  }
-  if ((profile.review_terms?.full || []).length) {
-    rules.push({
-      id: "project-" + profile.profile_id + "-full",
-      protected: false,
-      level: "FULL",
-      priority: 310,
-      reason: "project full semantic review",
-      any: profile.review_terms.full,
-      none: [],
-    });
-  }
   return {
-    schema_version: 4,
+    schema_version: 5,
     profile_id: profile.profile_id,
-    classification: { rules },
   };
 }
 
@@ -125,8 +102,8 @@ async function autoProfileMatches(target, profile) {
   return Object.values(rules).some((value) => Array.isArray(value) && value.length > 0);
 }
 
-// No project type: nothing is detected, no review terms are added and Gate A has no rules, so only
-// docs-only work can pass it. Recorded as profile_id null; `--profile none` selects it.
+// No project type: nothing is detected, and the tests have no rules, so only
+// docs-only work can pass them. Recorded as profile_id null; `--profile none` selects it.
 export const UNBOUND_PROFILE = Object.freeze({
   schema_version: 2,
   profile_id: null,
@@ -192,7 +169,7 @@ export async function detectProject(target, profile) {
     }
   }
   verificationCommands.push(...(profile.verification_candidates || []));
-  // T0-06: Gate A reads verification_rules only; lint_rules stay here for the detection summary.
+  // T0-06: the tests read verification_rules only; lint_rules stay here for the detection summary.
   for (const rule of [...(profile.verification_rules || []), ...(profile.lint_rules || [])]) {
     const filesAny = rule.files_any || [];
     const filesNone = rule.files_none || [];

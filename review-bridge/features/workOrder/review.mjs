@@ -51,17 +51,16 @@ export async function validateReviewWorker({ paths, control, adapter }) {
   if (!(await fileExists(reviewPromptPath))) {
     throw new Error("Review prompt template is missing.");
   }
-  const codex = await adapter.resolveExecutable("codex");
+  const reviewerExecutable = await adapter.resolveExecutable("codex");
   return {
     valid: true,
     repo_root: paths.repoRoot,
     queue_root: paths.queueRoot,
     reviews_dir: paths.reviewsRoot,
-    codex,
+    reviewer_executable: reviewerExecutable,
     prompt_template: reviewPromptPath,
-    default_review_level: control.codex_policy?.default_review_level,
-    effort_by_level: control.codex_policy?.effort_by_level,
-    classification_profile: control.codex_policy?.classification_profile,
+    priority: control.reviewer_policy?.priority,
+    reasoning_effort: control.reviewer_policy?.effort,
   };
 }
 
@@ -86,7 +85,7 @@ export async function buildReviewInput({ paths, job, control }) {
     event: "review.input",
     work_order: workPackage.work_package_id,
     call: job.call,
-    level: job.review_level,
+    priority: job.priority,
     ...work,
     scope: {
       change_types: workPackage.scope?.change_types || [],
@@ -105,7 +104,7 @@ export async function buildReviewInput({ paths, job, control }) {
     },
     writer_claim_mismatch: writerClaimMismatch(job.writer_result, changed),
     // T0-06 G3.4: the controller's own test run, as evidence; the reviewer does not rerun it.
-    gate_a_result: job.gate_a_result || null,
+    test_result: job.test_result || null,
     work_version: job.work_version || null,
     open_findings: openFindings,
     read_list: buildReadList({ deltaPaths: proofless ? claimed : changed.map((entry) => entry.path), findings: openFindings }),
@@ -144,7 +143,7 @@ export async function runReviewWorker({
   if (!(await fileExists(reviewPromptPath))) {
     throw new Error("Review prompt template is missing.");
   }
-  const codex = await adapter.resolveExecutable("codex");
+  const reviewerExecutable = await adapter.resolveExecutable("codex");
   // A run reviewing its own job takes no project lock: claiming the job by moving it from pending to
   // running is atomic, so other runs' reviews go on beside it. The review command, which works
   // through every pending job, still runs one at a time.
@@ -160,12 +159,12 @@ export async function runReviewWorker({
       const runningPath = path.join(paths.runningDir, name);
       const donePath = path.join(paths.doneDir, name);
       const failedPath = path.join(paths.failedDir, name);
-      const reportPath = path.join(paths.reviewsRoot, jobId + "-claude-report.md");
-      const resultPath = path.join(paths.reviewsRoot, jobId + "-codex-review.md");
+      const reportPath = path.join(paths.reviewsRoot, jobId + "-writer-report.md");
+      const resultPath = path.join(paths.reviewsRoot, jobId + "-reviewer-review.md");
       const promptPath = path.join(paths.reviewsRoot, jobId + "-review-prompt.md");
       const metadataPath = path.join(paths.reviewsRoot, jobId + "-job.json");
-      const stdoutPath = path.join(paths.reviewsRoot, jobId + "-codex.stdout.log");
-      const stderrPath = path.join(paths.reviewsRoot, jobId + "-codex.stderr.log");
+      const stdoutPath = path.join(paths.reviewsRoot, jobId + "-reviewer.stdout.log");
+      const stderrPath = path.join(paths.reviewsRoot, jobId + "-reviewer.stderr.log");
       for (const candidate of [
         runningPath, donePath, failedPath, reportPath, resultPath,
         promptPath, metadataPath, stdoutPath, stderrPath,
@@ -192,9 +191,8 @@ export async function runReviewWorker({
           JOB_PATH: metadataPath,
           REPORT_PATH: reportPath,
           REPO_ROOT: paths.repoRoot,
-          REVIEW_LEVEL: job.review_level,
+          PRIORITY: job.priority,
           REASONING_EFFORT: job.reasoning_effort,
-          CLASSIFICATION_REASONS: (job.classification_reasons || []).join("; "),
           RULES: String(control.run?.work_package?.rules?.text || "").trim(),
           REVIEW_INPUT: [REVIEW_INPUT_OPEN, JSON.stringify(reviewInput, null, 2), REVIEW_INPUT_CLOSE].join("\n"),
         });
@@ -213,10 +211,10 @@ export async function runReviewWorker({
             "PASS: queue, prompt rendering, path checks, and result routing completed.",
             "",
             "Job: `" + jobId + "`",
-            "Review level: `" + job.review_level + "`",
+            "Priority: `" + job.priority + "`",
             "Reasoning effort: `" + job.reasoning_effort + "`",
             "",
-            "No Codex model call was made.",
+            "No reviewer model call was made.",
           ].join("\n") + "\n");
         } else if (reviewInput.scope_violations.length) {
           // D2.5: out-of-scope changes are decided here; the reviewer is not asked.
@@ -226,9 +224,11 @@ export async function runReviewWorker({
             contractSha256: reviewInput.contract_sha256,
           }));
         } else {
-          const codexArgs = [
+          const reviewerArgs = [
             "--ask-for-approval", "never",
             "-c", "model_reasoning_effort=\"" + job.reasoning_effort + "\"",
+            // A model of null leaves the choice to the CLI.
+            ...(control.reviewer_policy?.model ? ["--model", control.reviewer_policy.model] : []),
             "exec",
             "--ephemeral",
             // A project without Git is still reviewed (Owner 2026-10-17); Codex otherwise refuses an
@@ -240,7 +240,7 @@ export async function runReviewWorker({
             "--output-last-message", resultPath,
             "-",
           ];
-          const invocation = adapter.buildInvocation("codex", codex, codexArgs);
+          const invocation = adapter.buildInvocation("codex", reviewerExecutable, reviewerArgs);
           // The reviewer's pid is recorded like the writer's, so a stop during the review reaches it.
           const processResult = await runProcess({
             invocation,
@@ -291,14 +291,14 @@ export async function runReviewWorker({
             report_path: reportPath,
           });
           providerFailure = { ...written.record, record_path: written.record_path };
-          throw new Error("Codex review failed or produced no result (exit code " + exitCode + ").");
+          throw new Error("The review failed or produced no result (exit code " + exitCode + ").");
         }
         const completed = {
           ...job,
           status: "done",
           completed_at: new Date().toISOString(),
           result_path: resultPath,
-          codex_exit_code: exitCode,
+          reviewer_exit_code: exitCode,
           controller_decided: controllerDecided,
         };
         await writeJson(runningPath, completed);
@@ -309,7 +309,7 @@ export async function runReviewWorker({
           typed: true, controller_decided: controllerDecided, usage, reads, review_input: reviewInput,
         });
         if (!dryRun) await writeText(paths.latestPath, resultPath + "\n");
-        if (!noNotification) await adapter.notify("Codex review complete", resultPath);
+        if (!noNotification) await adapter.notify("Review complete", resultPath);
       } catch (error) {
         const errorPath = path.join(paths.reviewsRoot, jobId + "-error.txt");
         await writeText(errorPath, new Date().toISOString() + "\n" + error.message + "\n");
@@ -340,7 +340,7 @@ export async function runReviewWorker({
           job_path: preservedJobPath && await fileExists(preservedJobPath) ? preservedJobPath : null,
           provider_failure: providerFailure,
         });
-        if (!noNotification) await adapter.notify("Codex review failed", errorPath);
+        if (!noNotification) await adapter.notify("Review failed", errorPath);
       }
     }
   } finally {

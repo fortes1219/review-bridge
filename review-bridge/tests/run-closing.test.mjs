@@ -24,7 +24,7 @@ async function project(t) {
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
-  await writeJson(paths.policyOverridePath, { schema_version: 4 });
+  await writeJson(paths.policyOverridePath, { schema_version: 5 });
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# demo\n");
   return paths;
 }
@@ -32,7 +32,7 @@ async function project(t) {
 async function planFor(paths, name) {
   return await createWorkPackagePlan({
     paths, task: "Update README.md only.", owner: "Fortes", workPackage: name, breakpoint: "return after review",
-    changeTypes: "docs", allowedPaths: "README.md", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, name + ".plan.json"),
+    changeTypes: "docs", allowedPaths: "README.md", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.queueRoot, name + ".plan.json"),
   });
 }
 
@@ -61,7 +61,7 @@ test("stop first: a PASS that arrives later is refused and the run stays stopped
   await assert.rejects(recordRunState(paths, runId, passState), /already closed/);
   await consumeRun(paths, runId, "review_pass", passGate);
   const run = await readRun(paths, runId);
-  assert.equal(run.status, "stopped");
+  assert.equal(run.conclusion, "cancelled");
   assert.equal(run.closed_reason, "stopped");
 });
 
@@ -73,7 +73,7 @@ test("PASS first: a later stop reports the work already ended, and the PASS stil
   assert.match(stopped.line, /已經結束：pass/);
   await consumeRun(paths, runId, "review_pass", passGate);
   const run = await readRun(paths, runId);
-  assert.equal(run.status, "pass");
+  assert.equal(run.conclusion, "success");
   assert.equal(run.closed_reason, "review_pass");
   assert.ok(run.closed_at);
 });
@@ -89,7 +89,7 @@ test("a stop whose process cannot be killed says so, keeps the pid for a retry, 
   assert.notEqual(stopped.exitCode, 0);
   assert.match(stopped.line, /停止未完成/);
   assert.equal((await fsp.readFile(record, "utf8")).includes(String(pid)), true);
-  assert.equal((await readRun(paths, runId)).status, "stopped");
+  assert.equal((await readRun(paths, runId)).conclusion, "cancelled");
 });
 
 // The decision must be made inside the run lock: stop's own early read of the run cannot see a PASS
@@ -98,10 +98,10 @@ test("a stop whose process cannot be killed says so, keeps the pid for a retry, 
 test("the stop written inside the run lock refuses a run a PASS has already ended", async (t) => {
   const { paths, runId } = await runningRun(t);
   await recordRunState(paths, runId, passState);
-  await assert.rejects(stopRunRecord(paths, runId), (error) => error instanceof RunEndedError && error.status === "pass");
+  await assert.rejects(stopRunRecord(paths, runId), (error) => error instanceof RunEndedError && error.reason === "pass");
   await consumeRun(paths, runId, "review_pass", passGate);
   const run = await readRun(paths, runId);
-  assert.equal(run.status, "pass");
+  assert.equal(run.conclusion, "success");
   assert.equal(run.closed_reason, "review_pass");
 });
 
@@ -129,7 +129,7 @@ test("a second stop retries the kill it could not finish, without writing the st
   assert.equal(isPidAlive(survivor.pid), false);
   await assert.rejects(fsp.access(record));
   const run = await readRun(paths, runId);
-  assert.equal(run.status, "stopped");
+  assert.equal(run.conclusion, "cancelled");
   assert.equal(run.closed_at, closedAt);
 });
 
@@ -197,10 +197,10 @@ test("a run whose checks fail after it was created is closed and its lock let go
   const runId = authorization.run.run_id;
   await assert.rejects(runBoundedResume({
     paths, control: authorization.control, adapter: {}, promptPath: path.join(paths.privateRoot, "missing-prompt.txt"),
-    maxCalls: 1, maxMinutes: 1, startNewSession: true, runtimeState: createRunRuntimeState(paths, runId), workLock: authorization.workLock,
+    rounds: 1, callTimeout: 60_000, startNewSession: true, runtimeState: createRunRuntimeState(paths, runId), workLock: authorization.workLock,
   }), /Prompt file is missing/);
   const run = await readRun(paths, runId);
-  assert.equal(run.status, "controller_failure");
+  assert.equal(run.closed_reason, "controller_failure");
   assert.ok(run.closed_at);
   await assert.rejects(fsp.access(workLockFile(paths, runId)));
 });
@@ -211,8 +211,8 @@ test("with several runs active, cancel names the one to cancel and leaves the ot
   const second = (await authorized(paths, await planFor(paths, "second"))).run.run_id;
   await assert.rejects(cancelWorkPackage({ paths }), /Several runs are active; name the one to cancel with --run/);
   await cancelWorkPackage({ paths, runId: second });
-  assert.equal((await readRun(paths, second)).status, "cancelled");
-  assert.equal((await readRun(paths, first)).status, "running");
+  assert.equal((await readRun(paths, second)).closed_reason, "cancelled");
+  assert.equal((await readRun(paths, first)).status, "in_progress");
   await assert.rejects(cancelWorkPackage({ paths, runId: second }), /No active run/);
 });
 
@@ -221,7 +221,7 @@ test("only this run's own review jobs hold its start back; another run's review 
   const authorization = await authorized(paths, await planFor(paths, "queued"));
   const check = () => validateBoundedResume({
     paths, control: authorization.control, adapter: { resolveExecutable: async () => "claude" },
-    promptPath: authorization.promptPath, maxCalls: 1, maxMinutes: 1,
+    promptPath: authorization.promptPath, rounds: 1, callTimeout: 60_000,
   });
   await fsp.mkdir(paths.pendingDir, { recursive: true });
   await writeJson(path.join(paths.pendingDir, "other.json"), { authorization: { run_id: "5e3b1a7c-2d4f-4a6b-8c9d-0e1f2a3b4c5d" } });

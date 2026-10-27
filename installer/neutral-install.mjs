@@ -7,13 +7,13 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
-  ACTIVE_RUN_STATUSES as RUN_ACTIVE,
   canonical,
+  CLOSED_REASONS,
   getBridgePaths,
   inspectStateFilesystem,
+  isActiveRun,
   planUpgradeInvalidations,
   policyIdentity,
-  TERMINAL_RUN_STATUSES as RUN_TERMINAL,
 } from "../review-bridge/service/index.mjs";
 import { AGENT_COMMAND_RELATIVE, agentFilesState, planAgentFiles, undoAgentFiles, writeAgentFiles } from "./agent-files.mjs";
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
@@ -144,7 +144,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
   const profile = await resolveProfile(root, profileId);
   const detection = await detectProject(root, profile);
   // Only a detected type must fit the folder. A type the person chose is used as chosen; if it
-  // does not fit, its Gate A rules fail at work time, where that check belongs.
+  // does not fit, its test rules fail at work time, where that check belongs.
   if (profileId === "auto" && profile.profile_id !== null && detection.evidence.length === 0) throw new Error("The selected profile has no project evidence.");
   if (await statOptional(path.join(root, privateName))) {
     throw new Error("Bridge neutral state already exists; fresh install cannot overwrite it.");
@@ -201,8 +201,8 @@ function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { p
     retention: { days: retentionDays },
     // The language pack for result files, notifications and the stdout summary.
     locale: "en",
-    // T0-06 G1.3: the profile-approved verification rules; work-plan picks Gate A from here.
-    gate_a: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
+    // T0-06 G1.3: the profile-approved verification rules; work-plan picks the test command from here.
+    test: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
     readiness: { reviewer_readonly_proven: "not_run" },
     // In the Bridge folder, which every project shares.
     default_policy_ref: "review-bridge/config/default-policy.json",
@@ -493,16 +493,14 @@ export const TRANSIENT_FILES = Object.freeze([
   "logs/watch.stderr.log",
   MAINTENANCE_MARKER,
 ]);
-// Codex 2026-10-14: the run status lists come from the state machine, never a second copy.
-const ACTIVE_RUN_STATUSES = new Set(RUN_ACTIVE);
-const TERMINAL_RUN_STATUSES = new Set(RUN_TERMINAL);
+// Codex 2026-10-14: what counts as running or closed comes from the state machine, never a second copy.
 const JOURNAL_SCHEMA = 1;
 
 // B1: the persistent backup root for this platform; --backup-root overrides it.
 export function defaultBackupRoot({ platform = process.platform, env = process.env, home = os.homedir() } = {}) {
-  if (platform === "win32") return path.join(env.LOCALAPPDATA || path.join(home, "AppData", "Local"), "CodexReviewBridge", "backups");
-  if (platform === "darwin") return path.join(home, "Library", "Application Support", "CodexReviewBridge", "backups");
-  return path.join(env.XDG_DATA_HOME || path.join(home, ".local", "share"), "CodexReviewBridge", "backups");
+  if (platform === "win32") return path.join(env.LOCALAPPDATA || path.join(home, "AppData", "Local"), "ReviewBridge", "backups");
+  if (platform === "darwin") return path.join(home, "Library", "Application Support", "ReviewBridge", "backups");
+  return path.join(env.XDG_DATA_HOME || path.join(home, ".local", "share"), "ReviewBridge", "backups");
 }
 
 async function realpathExisting(target) {
@@ -713,8 +711,8 @@ async function activeRuns(privateRoot) {
     if (!run || typeof run.run_id !== "string" || typeof run.status !== "string") {
       throw new Error("Cannot confirm that no work is running: the run record " + name + " has no run id or status.");
     }
-    if (ACTIVE_RUN_STATUSES.has(run.status)) active.push({ run_id: run.run_id, status: run.status });
-    else if (!TERMINAL_RUN_STATUSES.has(run.status)) {
+    if (isActiveRun(run)) active.push({ run_id: run.run_id, status: run.status });
+    else if (run.status !== "completed" || !CLOSED_REASONS.includes(run.closed_reason)) {
       throw new Error("Cannot confirm that no work is running: the run " + run.run_id + " (" + name + ") has a status this Bridge does not know: " + run.status + ".");
     }
   }
@@ -1308,7 +1306,7 @@ export async function applyNeutralUninstall(plan, approval, hooks = {}) {
 // upgrade is undone from the marker and the backup alone (P2.12).
 // ---------------------------------------------------------------------------------------------
 
-const OWNER_EDITABLE_KEYS = Object.freeze(["watch", "retention", "locale", "gate_a"]);
+const OWNER_EDITABLE_KEYS = Object.freeze(["watch", "retention", "locale", "test"]);
 const PROTECTED_KEYS = Object.freeze(["roles", "requires_human_authorization", "readiness"]);
 // The project's identity in the database: never replaced by an upgrade.
 const IDENTITY_KEYS = Object.freeze(["project_id"]);

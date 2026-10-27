@@ -1,8 +1,7 @@
 import path from "node:path";
 
 import { activeRuns, fileExists, listJson, listRuns, loadOrCreatePolicySnapshot, readJson } from "../../service/index.mjs";
-import { validateClassificationProfile } from "../../policy/policyChecks.mjs";
-import { classificationProfileFromSnapshot, codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
+import { priorityChoice } from "../../policy/policyRules.mjs";
 import { inspectStateFilesystem } from "../../utils/filesystem.mjs";
 import { consoleEncodingHint, powershellCodePage } from "./consoleEncoding.mjs";
 
@@ -17,16 +16,6 @@ export async function inspectDoctor({
   const bridgeConfig = await readJson(paths.bridgeConfigPath);
   const neutralLayout = path.basename(paths.privateRoot) === ".review-bridge";
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
-  const profile = classificationProfileFromSnapshot(snapshot);
-  const control = { codex_policy: codexPolicyFromSnapshot(snapshot) };
-  let profileValid = true;
-  let profileError = null;
-  try {
-    validateClassificationProfile(profile, control);
-  } catch (error) {
-    profileValid = false;
-    profileError = error.message;
-  }
   const encodingHint = consoleEncodingHint({ platform, codePage });
   // RC3-BLOCKER-01 step 4: a project with an id reads its running runs from the person's database
   // (and stops with the reason when it cannot be opened); one set up before ids reads its files.
@@ -38,7 +27,8 @@ export async function inspectDoctor({
     pending: paths.pendingDir, running: paths.runningDir, done: paths.doneDir, failed: paths.failedDir,
   })) queue[state] = (await listJson(directory)).length;
   return {
-    valid: profileValid,
+    // The policy was validated when its snapshot was made; an invalid one throws before this.
+    valid: true,
     native_readiness: neutralLayout ? {
       ready: false,
       roles: bridgeConfig.roles || null,
@@ -61,11 +51,8 @@ export async function inspectDoctor({
       status: active.length ? "active" : "inactive",
       active_run_count: active.length,
     },
-    classification: {
-      expected_profile: profile.profile_id,
-      loaded_profile: profile.profile_id,
-      valid: profileValid,
-      error: profileError,
+    priority: {
+      ...priorityChoice(snapshot.effective_policy),
       effective_policy_sha256: snapshot.effective_policy_sha256,
     },
     queue,

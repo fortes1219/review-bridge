@@ -62,9 +62,9 @@ function numbered(lines) {
 const flat = (text) => String(text).replace(/\s+/g, " ").trim();
 const linesOf = (lines, refs) => refs.flatMap((ref) => lines.slice(ref.start - 1, ref.end));
 
-export function composeTranslationPrompt({ workPackageId, lines, gateA, locale, attempt = 1, feedback = [] }) {
-  const gateLine = gateA?.kind === "command"
-    ? "Bridge will run this verification after the work: " + gateA.command + ". A condition it can show may use {\"kind\": \"gate_a\", \"check\": null}."
+export function composeTranslationPrompt({ workPackageId, lines, test, locale, attempt = 1, feedback = [] }) {
+  const gateLine = test?.kind === "command"
+    ? "Bridge will run this verification after the work: " + test.command + ". A condition it can show may use {\"kind\": \"test\", \"check\": null}."
     : "Bridge runs no verification command for this work; every condition uses {\"kind\": \"reviewer\", \"check\": \"<what the reviewer checks>\"}.";
   return [
     CONTRACT_MODE_HEADER,
@@ -173,7 +173,7 @@ function runPlanProblems(runPlan, lines) {
   return [...problems, ...cycleProblems(runPlan.runs)];
 }
 
-function acceptanceProblems(acceptance, { lines, gateA, runNames }) {
+function acceptanceProblems(acceptance, { lines, test, runNames }) {
   const problems = [];
   const ids = new Set();
   for (const [index, item] of acceptance.entries()) {
@@ -184,8 +184,8 @@ function acceptanceProblems(acceptance, { lines, gateA, runNames }) {
     if (!flat(linesOf(lines, item.source_refs).join(" ")).includes(flat(item.quote))) problems.push(at + ".quote: not found verbatim in its source lines");
     for (const [verifyIndex, verify] of item.verify.entries()) {
       const where = at + ".verify[" + verifyIndex + "]";
-      if (verify.kind === "gate_a" && gateA?.kind !== "command") problems.push(where + ": Bridge runs no verification command for this work");
-      if (verify.kind === "gate_a" && verify.check !== null) problems.push(where + ".check: must be null for gate_a");
+      if (verify.kind === "test" && test?.kind !== "command") problems.push(where + ": Bridge runs no verification command for this work");
+      if (verify.kind === "test" && verify.check !== null) problems.push(where + ".check: must be null for test");
       if (verify.kind === "reviewer" && !verify.check) problems.push(where + ".check: say what the reviewer checks");
     }
     if (!runNames && item.run_refs.length) problems.push(at + ".run_refs: there is no run_plan");
@@ -197,7 +197,7 @@ function acceptanceProblems(acceptance, { lines, gateA, runNames }) {
 
 // Shape first, then the rules only code can check. `problems` refuse the translation (the model
 // erred and may try again); `questions` mean the work order itself needs the human.
-export async function checkTranslation(value, { lines, gateA }) {
+export async function checkTranslation(value, { lines, test }) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, problems: ["$: not an object"], questions: [] };
   const problems = validateAgainstSchema(value, await loadSchema(CONTRACT_TRANSLATION_SCHEMA));
   if (problems.length) return { ok: false, problems, questions: [] };
@@ -208,7 +208,7 @@ export async function checkTranslation(value, { lines, gateA }) {
   problems.push(...coverageProblems(lines, refLists, value.unused_lines));
   problems.push(...runPlanProblems(value.run_plan, lines));
   const runNames = value.run_plan ? new Set(value.run_plan.runs.map((run) => run.name)) : null;
-  problems.push(...acceptanceProblems(value.acceptance, { lines, gateA, runNames }));
+  problems.push(...acceptanceProblems(value.acceptance, { lines, test, runNames }));
   const questions = value.open_questions.map((entry) => entry.question);
   if (!value.acceptance.length && !questions.length) questions.push("The work order states no result that can be checked.");
   return { ok: problems.length === 0, problems, questions };
@@ -249,7 +249,7 @@ export function composeCheckPrompt({ workPackageId, lines, candidate, sha256, lo
     "Check:",
     "- Judge every part in fields, empty ones too, exactly once: " + CHECKED_FIELDS.join(", ") + ". A part is faithful only if it holds what the work order puts there and nothing else: an exclusion copied as an inclusion, a constraint left out, a hint treated as a requirement, or an empty part the work order does fill is not faithful.",
     "- run_plan: is the work really laid out as several runs in the work order, and does each dependency match what the work order states, no added and no dropped ones?",
-    "- For every condition in acceptance: does its statement say what its source lines mean, no more and no less; does its verify fit (gate_a only where the sealed test can show it); do its run_refs match the runs the work order gives it? Answer faithful true or false for each id, with a short note when false.",
+    "- For every condition in acceptance: does its statement say what its source lines mean, no more and no less; does its verify fit (test only where the sealed test can show it); do its run_refs match the runs the work order gives it? Answer faithful true or false for each id, with a short note when false.",
     "- Is any requirement the work order states clearly missing from the conditions? Look especially at unused_lines and at parts copied as context. List each under missing with its lines.",
     "- Is anything genuinely ambiguous in the work order itself, so that only the human can decide? List it under ambiguities. A translation mistake is not an ambiguity.",
     "- If you cannot judge, set cannot_confirm true and say why. Do not guess a pass.",

@@ -42,7 +42,7 @@ async function makeRuntime(prefix) {
   );
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { schema_version: 4, roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } });
-  await writeJson(paths.policyOverridePath, { schema_version: 4 });
+  await writeJson(paths.policyOverridePath, { schema_version: 5 });
   return { repoRoot, bridgeRoot, paths };
 }
 
@@ -54,14 +54,14 @@ async function startRun(runtime, { workPackageId, runId, timestamp }) {
     task: "Exercise status ordering.",
     acceptance_criteria: ["status is observable"],
     scope: { change_types: ["tests"], allowed_paths: ["fixture.txt"] },
-    budget: { max_claude_calls: 1, max_claude_minutes_per_call: 1 },
+    budget: { rounds: 1, call_timeout: 1 },
     breakpoint: "return to owner",
   }, clock);
   const authorization = await createAuthorization(runtime.paths, {
     authorizedBy: "RC2 Test Owner",
     workPackageSha256: workPackage.record.content_sha256,
     policySha256: snapshot.effective_policy_sha256,
-    ttlSeconds: 3600,
+    ttl: 3_600_000,
   }, clock);
   return await claimStartAuthorization(runtime.paths, authorization.authorization_id, {
     runId,
@@ -95,8 +95,8 @@ test("R1 multiline task files allow newline, tab, and backticks", async () => {
     breakpoint: "return after review",
     changeTypes: "docs",
     allowedPaths: "README.md",
-    maxCalls: 1,
-    maxMinutes: 1,
+    rounds: 1,
+    callTimeout: 60_000,
     outPath,
   });
   assert.equal(plan.task, task);
@@ -118,5 +118,5 @@ test("R3 work-status selects updated_at newest and lists every run", async () =>
   const status = await workPackageStatus(runtime.paths);
   assert.equal(status.run_id, "a-newer-run");
   assert.deepEqual(status.runs.map((run) => run.run_id), ["a-newer-run", "z-older-run"]);
-  assert.deepEqual(Object.keys(status.runs[0]).sort(), ["run_id", "status", "updated_at", "work_package"]);
+  assert.deepEqual(Object.keys(status.runs[0]).sort(), ["conclusion", "run_id", "status", "updated_at", "work_package"]);
 });

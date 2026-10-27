@@ -54,9 +54,9 @@ export function unsupportedContractStep(steps) {
 async function providerStop({ paths, stamp, role, provider, phase, processResult, texts, evidence }) {
   const classified = classifyProviderFailure({ role, provider, phase, exitCode: processResult.exitCode, timedOut: processResult.timedOut, texts });
   const written = await writeFailureRecord(paths, paths.queueRoot, stamp + "-" + phase, classified, evidence);
-  const status = processResult.timedOut ? (role === "translator" ? "claude_timeout" : "reviewer_failed")
+  const status = processResult.timedOut ? (role === "translator" ? "writer_timeout" : "reviewer_failed")
     : classified.reason === "provider_usage_limit" ? "rate_limited"
-      : role === "translator" ? "claude_failed" : "reviewer_failed";
+      : role === "translator" ? "writer_failed" : "reviewer_failed";
   return { status, detail: classified.reason, failure: failureSummary(classified, written.record_path) };
 }
 
@@ -66,13 +66,13 @@ async function ceilingStop({ paths, runId, usage, limits }) {
   if (usage.parse_error || usage.partial) return { status: "usage_unknown", detail: usage.role, token_limit_role: usage.role, missing: usage.missing || [] };
   const callTotal = tokenTotal(usage.tokens);
   const runTotal = await usageTotalForRun(paths, runId);
-  if (callTotal <= limits.max_tokens_per_call && runTotal <= limits.max_tokens_per_run) return null;
-  const which = callTotal > limits.max_tokens_per_call ? "per_call" : "per_run";
+  if (callTotal <= limits.tokens_per_call && runTotal <= limits.tokens) return null;
+  const which = callTotal > limits.tokens_per_call ? "per_call" : "per_run";
   return { status: "token_limit", detail: which, token_limit: which, token_limit_role: usage.role, tokens_this_call: callTotal, tokens_this_run: runTotal };
 }
 
-async function translateOnce({ paths, runId, workPackage, adapter, steps, lines, locale, attempt, feedback, onSpawn }) {
-  const prompt = composeTranslationPrompt({ workPackageId: workPackage.work_package_id, lines, gateA: workPackage.gate_a, locale, attempt, feedback });
+async function translateOnce({ paths, runId, workPackage, adapter, steps, lines, locale, attempt, feedback, effort, onSpawn }) {
+  const prompt = composeTranslationPrompt({ workPackageId: workPackage.work_package_id, lines, test: workPackage.test, locale, attempt, feedback });
   const stamp = callStamp(runId);
   const streamPath = path.join(paths.queueRoot, stamp + "-contract.stream.jsonl");
   const stderrPath = path.join(paths.queueRoot, stamp + "-contract.stderr.log");
@@ -83,8 +83,9 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
     "--session-id", randomUUID(),
     // No tool exists in this session: the work order is in the prompt and nothing is written.
     "--tools", "",
-    "--model", steps.translate.model,
-    "--effort", "low",
+    // A model of null leaves the choice to the CLI.
+    ...(steps.translate.model ? ["--model", steps.translate.model] : []),
+    "--effort", effort,
     "--max-turns", String(TRANSLATION_MAX_TURNS),
     "--output-format", "stream-json",
     "--verbose",
@@ -93,7 +94,7 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
   const startedAt = Date.now();
   const processResult = await runProcess({
     invocation: adapter.buildInvocation("claude", executable, args), cwd: paths.repoRoot, input: prompt,
-    stdoutPath: streamPath, stderrPath, timeoutMs: steps.minutes_per_call * 60_000, onSpawn,
+    stdoutPath: streamPath, stderrPath, timeoutMs: steps.call_timeout, onSpawn,
   });
   const stream = parseClaudeStream(await fsp.readFile(streamPath, "utf8").catch(() => ""));
   const durationMs = Date.now() - startedAt;
@@ -113,7 +114,7 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
   return { usage, translation, resultPath };
 }
 
-async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, candidate, sha256, locale, attempt, effort, onSpawn }) {
+async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, candidate, sha256, locale, attempt, effort, model, onSpawn }) {
   const prompt = composeCheckPrompt({ workPackageId: workPackage.work_package_id, lines, candidate, sha256, locale, attempt });
   const stamp = callStamp(runId);
   const stdoutPath = path.join(paths.queueRoot, stamp + "-contract-check.stdout.log");
@@ -125,6 +126,7 @@ async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, can
   const args = [
     "--ask-for-approval", "never",
     "-c", "model_reasoning_effort=\"" + effort + "\"",
+    ...(model ? ["--model", model] : []),
     // A project without Git still gets a contract (Owner 2026-10-17); Codex otherwise refuses any
     // folder that is not a trusted Git repository. The session stays read-only and writes nothing.
     "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", paths.repoRoot,
@@ -133,7 +135,7 @@ async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, can
   const startedAt = Date.now();
   const processResult = await runProcess({
     invocation: adapter.buildInvocation("codex", executable, args), cwd: paths.repoRoot, input: prompt,
-    stdoutPath, stderrPath, timeoutMs: steps.minutes_per_call * 60_000, onSpawn,
+    stdoutPath, stderrPath, timeoutMs: steps.call_timeout, onSpawn,
   });
   const stream = parseCodexJsonl(await fsp.readFile(stdoutPath, "utf8").catch(() => ""));
   const usage = { ...reviewerUsageEvent({ usage: stream.usage, trailerTokens: null, call: 0, durationMs: Date.now() - startedAt }), role: "contract_checker", attempt };
@@ -162,7 +164,9 @@ function guardedSpawn({ onSpawn, isStopped, role, provider }) {
 
 // Returns { status: "sealed", sha256 } or { status, ... } for the run to stop with. The stop
 // state is read before every model call and again once each call has its pid, retries included.
-export async function establishContract({ paths, runId, workPackage, adapter, limits, effort, executionMode, isStopped, onSpawn }) {
+// `effort` and `model` are the reviewer's and `translateEffort` the writer's, from the policy's
+// priority table; a model of null leaves the choice to the CLI.
+export async function establishContract({ paths, runId, workPackage, adapter, limits, effort, model = null, translateEffort, executionMode, isStopped, onSpawn }) {
   const steps = workPackage.contract_steps;
   const unsupported = executionMode === "fake_cli" ? null : unsupportedContractStep(steps);
   if (unsupported) return { status: "policy_failure", detail: "unsupported_role", problems: [unsupported] };
@@ -175,12 +179,12 @@ export async function establishContract({ paths, runId, workPackage, adapter, li
   let lastProblems = [];
   for (let attempt = 1; attempt <= steps.max_attempts; attempt += 1) {
     if (await isStopped()) return stopped;
-    const translated = await translateOnce({ paths, runId, workPackage, adapter, steps, lines, locale, attempt, feedback, onSpawn: translatorSpawn });
+    const translated = await translateOnce({ paths, runId, workPackage, adapter, steps, lines, locale, attempt, feedback, effort: translateEffort, onSpawn: translatorSpawn });
     if (await isStopped()) return stopped;
     if (translated.stop) return translated.stop;
     const overTranslation = await ceilingStop({ paths, runId, usage: translated.usage, limits });
     if (overTranslation) return overTranslation;
-    const checked = await checkTranslation(translated.translation, { lines, gateA: workPackage.gate_a });
+    const checked = await checkTranslation(translated.translation, { lines, test: workPackage.test });
     await appendIoEvent(paths, runId, {
       event: "contract.translation", attempt, ok: checked.ok, problems: checked.problems.slice(0, 20), questions: checked.questions, result_path: translated.resultPath,
     });
@@ -197,7 +201,7 @@ export async function establishContract({ paths, runId, workPackage, adapter, li
     });
     const sha256 = digest(candidate);
     if (await isStopped()) return stopped;
-    const review = await checkOnce({ paths, runId, workPackage, adapter, steps, lines, candidate, sha256, locale, attempt, effort, onSpawn: checkerSpawn });
+    const review = await checkOnce({ paths, runId, workPackage, adapter, steps, lines, candidate, sha256, locale, attempt, effort, model, onSpawn: checkerSpawn });
     if (await isStopped()) return stopped;
     if (review.stop) return review.stop;
     const overCheck = await ceilingStop({ paths, runId, usage: review.usage, limits });

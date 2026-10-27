@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
 import { ensureDir, fileExists, listJson, readJson, writeJsonAtomic } from "../../service/index.mjs";
 import { timestampId } from "../../utils/dates.mjs";
-import { classifyReview } from "../../policy/policyChecks.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
 export function validateHookPayload(payload) {
@@ -27,22 +26,14 @@ export function validateHookPayload(payload) {
   return { valid: invalidFields.length === 0, invalid_fields: invalidFields };
 }
 
-// T0-05 D2.4: the classifier reads the work text and the writer's typed claims, not prose.
-function classificationText(control, writerResult) {
-  const work = control.run?.work_package?.task || "";
-  const claims = (writerResult.changed || []).map((entry) => entry.path + " " + entry.summary);
-  return [work, ...claims].join("\n");
-}
-
 export async function enqueueReview({
   payload,
   paths,
   control,
-  classificationProfile,
   writerResult = null,
   call = null,
   openFindings = [],
-  gateAResult = null,
+  testResult = null,
   workVersion = null,
   sealedEvidence = null,
 }) {
@@ -59,7 +50,7 @@ export async function enqueueReview({
   if (control.authorization_status !== "active") {
     return { accepted: false, reason: "authorization_inactive" };
   }
-  if (String(payload.session_id) !== String(control.active_claude_session || "")) {
+  if (String(payload.session_id) !== String(control.active_writer_session || "")) {
     return { accepted: false, reason: "session_mismatch" };
   }
   const message = payload.last_assistant_message;
@@ -67,7 +58,8 @@ export async function enqueueReview({
   // T0-05 D1.6: a run is driven by the harness; only its typed writer result is a submission.
   if (!writerResult) return { accepted: false, reason: "harness_driven" };
 
-  const policy = classifyReview(classificationText(control, writerResult), control, classificationProfile);
+  // The reviewer's priority and effort come from the policy's table, never from the work order's words.
+  const policy = { priority: control.reviewer_policy?.priority, reasoning_effort: control.reviewer_policy?.effort };
   const sessionId = String(payload.session_id || "");
   const hash = createHash("sha256").update(sessionId + "\n" + message, "utf8").digest("hex");
   const shortHash = hash.slice(0, 16);
@@ -101,7 +93,7 @@ export async function enqueueReview({
     call,
     writer_result: writerResult,
     open_findings: openFindings,
-    gate_a_result: gateAResult,
+    test_result: testResult,
     // The version of the work the reviewer reads (RC3-BLOCKER-00).
     work_version: workVersion,
     authorization: {
@@ -137,18 +129,18 @@ export async function queueStatus(paths) {
   if (await fileExists(paths.latestPath)) {
     latestReview = (await fsp.readFile(paths.latestPath, "utf8")).trim();
   }
-  let latestReviewLevel = null;
+  let latestPriority = null;
   let latestReasoningEffort = null;
   const done = await listJson(paths.doneDir);
   if (done.length) {
     const latest = await readJson(done.at(-1));
-    latestReviewLevel = latest.review_level || "LEGACY_UNRECORDED";
+    latestPriority = latest.priority || "LEGACY_UNRECORDED";
     latestReasoningEffort = latest.reasoning_effort || "LEGACY_UNRECORDED";
   }
   return {
     ...counts,
     latest_review: latestReview,
-    latest_review_level: latestReviewLevel,
+    latest_priority: latestPriority,
     latest_reasoning_effort: latestReasoningEffort,
   };
 }
@@ -168,5 +160,5 @@ export async function waitForPending(paths, timeoutMinutes = 120) {
     if (jobs.length) return jobs[0];
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
-  throw new Error("No Claude review submission arrived within " + timeoutMinutes + " minutes.");
+  throw new Error("No writer review submission arrived within " + timeoutMinutes + " minutes.");
 }

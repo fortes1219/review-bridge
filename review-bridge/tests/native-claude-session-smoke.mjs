@@ -113,7 +113,7 @@ try {
     target,
     adapter: definition.id,
     manifest_status: definition.status,
-    claude_executable: claude,
+    writer_executable: claude,
     session_id_preserved: true,
     resumed_context_verified: true,
     live_model_calls: 2,

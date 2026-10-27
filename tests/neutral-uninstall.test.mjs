@@ -181,10 +181,10 @@ test("V2 / V8k a run in progress, a changed plan, a failed backup and a changed 
   };
   // A run in progress.
   const runFile = path.join(root, ".review-bridge", "review-queue", "runs", "run-0001.json");
-  await fsp.writeFile(runFile, JSON.stringify({ run_id: "run-0001", status: "running" }));
+  await fsp.writeFile(runFile, JSON.stringify({ run_id: "run-0001", status: "in_progress" }));
   before.set("review-queue/runs/run-0001.json", sha(await fsp.readFile(runFile)));
   let plan = await planNeutralUninstall({ target: root });
-  await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256), /Work is still running: run-0001 \(running\)/);
+  await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256), /Work is still running: run-0001 \(in_progress\)/);
   await checkCancelled(plan, "active_run");
   await fsp.rm(runFile);
   before.delete("review-queue/runs/run-0001.json");
@@ -230,7 +230,7 @@ test("V3 maintenance blocks new work, and a run claimed as the marker appears is
   const paths = getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" });
   const makePlan = async (id) => createWorkPackagePlan({
     paths, task: "Update package.json only.", owner: "o", workPackage: id, breakpoint: "b", changeTypes: "docs",
-    allowedPaths: "package.json", maxCalls: 1, maxMinutes: 1, outPath: path.join(paths.queueRoot, id + ".plan.json"),
+    allowedPaths: "package.json", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.queueRoot, id + ".plan.json"),
   });
   const marker = path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
   const blocked = await makePlan("blocked-1");
@@ -242,7 +242,7 @@ test("V3 maintenance blocks new work, and a run claimed as the marker appears is
   await fsp.writeFile(marker, JSON.stringify({ operation: "uninstall", upgrade_id: "x" }));
   await assert.rejects(cancelIfMaintenance(paths, authorized.run.run_id), /maintenance_in_progress/);
   const run = await readRun(paths, authorized.run.run_id);
-  assert.equal(run.status, "cancelled");
+  assert.equal(run.closed_reason, "cancelled");
   assert.equal(run.last_state.status, "maintenance_blocked");
   await fsp.rm(marker);
   // The cancelled run is not "in progress"; uninstall goes ahead.
@@ -504,11 +504,11 @@ test("V10 install, uninstall, install, uninstall gives the same clean project", 
 
 test("V11 the default backup root follows each platform's convention", () => {
   const home = path.join("H", "user");
-  assert.equal(defaultBackupRoot({ platform: "win32", env: { LOCALAPPDATA: path.join("C", "AppData", "Local") }, home }), path.join("C", "AppData", "Local", "CodexReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "win32", env: {}, home }), path.join(home, "AppData", "Local", "CodexReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "darwin", env: {}, home }), path.join(home, "Library", "Application Support", "CodexReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "linux", env: {}, home }), path.join(home, ".local", "share", "CodexReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "linux", env: { XDG_DATA_HOME: path.join("X", "data") }, home }), path.join("X", "data", "CodexReviewBridge", "backups"));
+  assert.equal(defaultBackupRoot({ platform: "win32", env: { LOCALAPPDATA: path.join("C", "AppData", "Local") }, home }), path.join("C", "AppData", "Local", "ReviewBridge", "backups"));
+  assert.equal(defaultBackupRoot({ platform: "win32", env: {}, home }), path.join(home, "AppData", "Local", "ReviewBridge", "backups"));
+  assert.equal(defaultBackupRoot({ platform: "darwin", env: {}, home }), path.join(home, "Library", "Application Support", "ReviewBridge", "backups"));
+  assert.equal(defaultBackupRoot({ platform: "linux", env: {}, home }), path.join(home, ".local", "share", "ReviewBridge", "backups"));
+  assert.equal(defaultBackupRoot({ platform: "linux", env: { XDG_DATA_HOME: path.join("X", "data") }, home }), path.join("X", "data", "ReviewBridge", "backups"));
 });
 
 test("L1 two processes racing to take over a stale install lock: exactly one enters", async (t) => {
@@ -576,7 +576,7 @@ test("R1 a run record that cannot be read refuses and cancels cleanly", async (t
   await assert.rejects(applyNeutralUninstall(second, second.plan_sha256), /run run-odd \(broken\.json\) has a status this Bridge does not know: paused_by_future_version/);
   assert.equal(await exists(path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"))), false);
   // Every status the state machine knows is either active or terminal; a terminal one lets uninstall go on.
-  await fsp.writeFile(path.join(root, ".review-bridge", "review-queue", "runs", "broken.json"), JSON.stringify({ run_id: "run-done", status: "token_limit" }));
+  await fsp.writeFile(path.join(root, ".review-bridge", "review-queue", "runs", "broken.json"), JSON.stringify({ run_id: "run-done", status: "completed", conclusion: "failure", closed_reason: "token_limit" }));
   const third = await planNeutralUninstall({ target: root });
   assert.equal((await applyNeutralUninstall(third, third.plan_sha256)).ok, true);
 });

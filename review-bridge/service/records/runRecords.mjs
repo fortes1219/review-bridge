@@ -1,5 +1,5 @@
 // Every fact a run writes also goes into the person's database (RC3-BLOCKER-01 step 3): the run, its
-// one ordered timeline (state events and I/O events in one sequence), Gate A, the review's verdicts
+// one ordered timeline (state events and I/O events in one sequence), the tests, the review's verdicts
 // and findings, Bridge's acceptance decision, the delivery. appendProjectionEvent and appendIoEvent
 // hand each event to the recorder a command installed; the files stay the running copy. The reads a
 // person and an agent use (status, work-status, doctor) come from here too (step 4).
@@ -27,7 +27,7 @@ export class DatabaseUnavailableError extends Error {
 // Fields each fact table holds; the rest of the event stays in run_events.payload, so every field
 // is in one place.
 const ENVELOPE = ["schema_version", "run_id", "sequence", "occurred_at", "event"];
-const GATE_A_COLUMNS = ["call", "kind", "command", "passed", "exit_code", "timed_out", "duration_ms", "work_version", "stdout_tail", "stderr_tail"];
+const TEST_COLUMNS = ["call", "kind", "command", "passed", "exit_code", "timed_out", "duration_ms", "work_version", "stdout_tail", "stderr_tail"];
 const REVIEW_COLUMNS = ["call", "gate", "hard_stop", "hard_stop_reason", "verified", "not_run", "source", "verdicts", "findings"];
 const FINDING_COLUMNS = ["id", "severity", "path", "line", "reach", "claim", "evidence", "fix", "acceptance_ref", "source"];
 const ACCEPTANCE_COLUMNS = ["call", "decision", "review_version", "rows"];
@@ -37,14 +37,14 @@ const orNull = (value) => (value === undefined ? null : value);
 const json = (value) => (value === undefined || value === null ? null : JSON.stringify(value));
 const text = (value) => (value === undefined || value === null ? null : String(value));
 
-async function gateAFacts(client, runId, sequence, event) {
+async function testFacts(client, runId, sequence, event) {
   await client.query(
-    "insert into gate_a_results (run_id, sequence, call, kind, command, passed, exit_code, timed_out, duration_ms, work_version, stdout_tail, stderr_tail)"
+    "insert into test_results (run_id, sequence, call, kind, command, passed, exit_code, timed_out, duration_ms, work_version, stdout_tail, stderr_tail)"
     + " values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     [runId, sequence, orNull(event.call), event.kind, orNull(event.command), orNull(event.passed), orNull(event.exit_code),
       orNull(event.timed_out), orNull(event.duration_ms), json(event.work_version), orNull(event.stdout_tail), orNull(event.stderr_tail)],
   );
-  return without(event, GATE_A_COLUMNS);
+  return without(event, TEST_COLUMNS);
 }
 
 async function reviewFacts(client, runId, sequence, event) {
@@ -77,24 +77,25 @@ async function acceptanceFacts(client, runId, sequence, event) {
     [runId, sequence, orNull(event.call), event.decision, json(event.review_version)]);
   for (const row of event.rows || []) {
     await client.query(
-      "insert into acceptance_rows (run_id, sequence, ac_id, statement, writer, verdict, gate_a, result, evidence) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-      [runId, sequence, row.id, orNull(row.statement), orNull(row.writer), orNull(row.verdict), row.gate_a, row.result, orNull(row.evidence)],
+      "insert into acceptance_rows (run_id, sequence, ac_id, statement, writer, verdict, test, result, evidence) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+      [runId, sequence, row.id, orNull(row.statement), orNull(row.writer), orNull(row.verdict), row.test, row.result, orNull(row.evidence)],
     );
   }
   return without(event, ACCEPTANCE_COLUMNS);
 }
 
-const FACTS = { gate_a_result: gateAFacts, "review.result": reviewFacts, acceptance: acceptanceFacts };
+const FACTS = { test_result: testFacts, "review.result": reviewFacts, acceptance: acceptanceFacts };
 
 // The run's state columns, from the projection the state event wrote.
-const STATE = (run) => [run.status, orNull(run.closed_reason), orNull(run.closed_at), orNull(run.superseded_by), orNull(run.outcome),
+const STATE = (run) => [run.status, orNull(run.closed_reason), orNull(run.closed_at), orNull(run.superseded_by), orNull(run.conclusion),
   orNull(run.run_deadline_at), orNull(run.contract_sha256)];
 
-// `late`: written after the fact (replayUnrecorded), marked so on the event.
+// `late`: written after the fact (replayUnrecorded), marked so on the event. A run_delivered event
+// sets the run's delivered_at in the same update.
 async function append(client, entry, { late = false } = {}) {
-  const sets = entry.state
-    ? ", status = $3, closed_reason = $4, closed_at = $5, superseded_by = $6, outcome = $7, run_deadline_at = $8, contract_sha256 = $9"
-    : "";
+  const sets = (entry.state
+    ? ", status = $3, closed_reason = $4, closed_at = $5, superseded_by = $6, conclusion = $7, run_deadline_at = $8, contract_sha256 = $9"
+    : "") + (entry.type === "run_delivered" ? ", delivered_at = $2" : "");
   const { rows } = await client.query(
     "update runs set last_event_sequence = last_event_sequence + 1, updated_at = $2" + sets + " where run_id = $1 returning last_event_sequence",
     [entry.runId, entry.occurredAt, ...(entry.state ? STATE(entry.state) : [])],
@@ -172,12 +173,10 @@ export function installRunRecorder(recorder, database = null) {
 export function runRecorder() { return installed; }
 export function recordsDatabase() { return installedDatabase; }
 
-const ACTIVE = "('running', 'review_pending', 'correction_pending', 'interrupted')";
-
 // Q12: a project's runs, newest first, one page; `after` is the last run id of the page before.
 export async function projectRuns(db, projectId, { limit = 10, after = null } = {}) {
   const { rows } = await db.query(
-    "select r.run_id, r.status, r.closed_reason, r.outcome, r.created_at, r.closed_at, p.source_file, a.authorized_via"
+    "select r.run_id, r.status, r.conclusion, r.closed_reason, r.created_at, r.closed_at, p.source_file, a.authorized_via"
     + " from runs r join plans p using (plan_sha256) left join authorizations a on a.plan_sha256 = r.plan_sha256 and a.kind = 'start'"
     + " where r.project_id = $1 and ($3::uuid is null or (r.created_at, r.run_id) < (select created_at, run_id from runs where run_id = $3::uuid))"
     + " order by r.created_at desc, r.run_id desc limit $2",
@@ -188,24 +187,25 @@ export async function projectRuns(db, projectId, { limit = 10, after = null } = 
 
 // Q6: the project's running runs.
 export async function activeRuns(db, projectId) {
-  return (await db.query("select run_id, work_order_id, content_sha256, status from runs where project_id = $1 and status in " + ACTIVE + " order by created_at", [projectId])).rows;
+  return (await db.query("select run_id, work_order_id, content_sha256, status from runs where project_id = $1 and status = 'in_progress' order by created_at", [projectId])).rows;
 }
 
 // The running runs of one work order (a start replaces them; an unchanged one refuses the start).
 export async function activeRunsOfWorkOrder(db, workOrderId) {
-  return (await db.query("select run_id, content_sha256 from runs where work_order_id = $1 and status in " + ACTIVE, [workOrderId])).rows;
+  return (await db.query("select run_id, content_sha256 from runs where work_order_id = $1 and status = 'in_progress'", [workOrderId])).rows;
 }
 
 // A project's ended runs without a delivery, oldest first, at most `limit`.
 export async function undeliveredRuns(db, projectId, { limit = 50 } = {}) {
-  return (await db.query("select run_id from runs where project_id = $1 and outcome is null and closed_at is not null order by closed_at limit $2", [projectId, limit])).rows;
+  return (await db.query("select run_id from runs where project_id = $1 and status = 'completed' and delivered_at is null"
+    + " order by closed_at limit $2", [projectId, limit])).rows;
 }
 
 // One run as work-status shows it: its state, its work order version and contract, the yes, the
 // plan's stop point, scope and budget, and the last stop the controller recorded.
 export async function runDetail(db, runId) {
   const { rows } = await db.query(
-    "select r.run_id, r.status, r.closed_reason, r.outcome, r.created_at, r.closed_at, r.updated_at, r.execution_mode, r.contract_sha256,"
+    "select r.run_id, r.status, r.conclusion, r.closed_reason, r.created_at, r.closed_at, r.updated_at, r.execution_mode, r.contract_sha256,"
     + " r.work_order_id, v.version_no, v.title, p.source_file, p.body->'breakpoint' as breakpoint, p.body->'scope' as scope, p.body->'budget' as budget,"
     + " a.authorized_by, a.authorized_via,"
     + " (select payload from run_events e where e.run_id = r.run_id and e.type = 'stop' order by sequence desc limit 1) as last_stop"

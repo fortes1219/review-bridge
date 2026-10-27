@@ -41,8 +41,8 @@ test("the migrations make the records' tables once, in name order", { timeout: 1
   const names = (await migrationFiles()).map((file) => file.name);
   assert.deepEqual(await applyMigrations(client), names);
   assert.deepEqual(await tables(client), [
-    "acceptance_decisions", "acceptance_rows", "authorization_claims", "authorizations", "contracts", "gate_a_results", "plans", "policy_snapshots",
-    "projects", "review_findings", "review_results", "review_verdicts", "run_events", "runs", "schema_migrations", "work_order_versions", "work_orders",
+    "acceptance_decisions", "acceptance_rows", "authorization_claims", "authorizations", "contracts", "plans", "policy_snapshots",
+    "projects", "review_findings", "review_results", "review_verdicts", "run_events", "runs", "schema_migrations", "test_results", "work_order_versions", "work_orders",
   ]);
   assert.deepEqual(await applyMigrations(client), [], "nothing is applied twice");
   assert.deepEqual((await client.query("select name from schema_migrations order by name")).rows.map((row) => row.name), names);

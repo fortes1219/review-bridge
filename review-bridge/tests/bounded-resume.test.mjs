@@ -120,7 +120,7 @@ if (process.argv.includes("--output-schema")) {
 await fsp.writeFile(out, "HARD_STOP_REQUIRED: false\\nREVIEW_GATE: " + (mode === "fail" ? "FAIL" : "PASS") + "\\n");
 `;
 
-async function makeRuntime(t, override = { schema_version: 4 }, { git = false } = {}) {
+async function makeRuntime(t, override = { schema_version: 5 }, { git = false } = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-bounded-"));
   // T0-05 D2.5: anything written inside the repo outside README.md is a scope violation, so the
   // fake CLIs and their argument dump live next to the repo, not in it.
@@ -130,7 +130,7 @@ async function makeRuntime(t, override = { schema_version: 4 }, { git = false } 
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, active_runs: "derive_from_run_projections",
-    gate_a: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
+    test: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
   await writeJson(paths.policyOverridePath, override);
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# fixture\n", "utf8");
@@ -167,8 +167,8 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     breakpoint: "return after review",
     changeTypes,
     allowedPaths: "README.md",
-    maxCalls,
-    maxMinutes: 1,
+    rounds: maxCalls,
+    callTimeout: 60_000,
     outPath: planPath,
   });
   const authorization = await authorizeWorkPackage({
@@ -199,7 +199,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
   if (beforeResume) await beforeResume(runtime, authorization);
   let exitCode;
   let error = null;
-  // Gate A runs through the real shell with the controller's environment, not the adapter's.
+  // The tests run through the real shell with the controller's environment, not the adapter's.
   const previousGateExit = process.env.FAKE_GATE_EXIT;
   process.env.FAKE_GATE_EXIT = String(gateExit);
   try {
@@ -208,8 +208,8 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
       control: authorization.control,
       adapter,
       promptPath: authorization.promptPath,
-      maxCalls,
-      maxMinutes: 1,
+      rounds: maxCalls,
+      callTimeout: 60_000,
       startNewSession: true,
       runtimeState: createRunRuntimeState(runtime.paths, runId),
       workLock: authorization.workLock,
@@ -229,7 +229,7 @@ test("reviewer usage limit ends rate_limited as reviewer provider_usage_limit, n
   const { exitCode, error, status, run } = await start(t, { codexMode: "limit" });
   assert.equal(error, null);
   assert.equal(exitCode, 75);
-  assert.equal(run.status, "rate_limited");
+  assert.equal(run.closed_reason, "rate_limited");
   assert.equal(status.closed_reason, "rate_limited");
   assert.equal(status.latest_state.status, "rate_limited");
   assert.deepEqual(
@@ -243,7 +243,7 @@ test("reviewer usage limit ends rate_limited as reviewer provider_usage_limit, n
   const record = await readJson(status.stop_reason.record_path);
   assert.match(await fsp.readFile(record.evidence.stderr_path, "utf8"), /hit your usage limit/);
   assert.equal(await fileExists(status.latest_state.failed_review_job_path), true);
-  const writer = JSON.parse(await fsp.readFile(status.latest_state.claude_stdout_path, "utf8"));
+  const writer = JSON.parse(await fsp.readFile(status.latest_state.writer_stdout_path, "utf8"));
   assert.equal(writer.structured_output.event, "writer.result");
 });
 
@@ -251,7 +251,7 @@ test("a project-owned review prompt replaces the packaged one for the reviewer",
   const { runtime, exitCode, error, status } = await start(t, { reviewPrompt: "PROJECT REVIEW {{REVIEW_INPUT}}\n" });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
-  const jobId = path.basename(status.latest_state.review_path).replace(/-codex-review\.md$/, "");
+  const jobId = path.basename(status.latest_state.review_path).replace(/-reviewer-review\.md$/, "");
   const rendered = await fsp.readFile(path.join(runtime.paths.reviewsRoot, jobId + "-review-prompt.md"), "utf8");
   assert.match(rendered, /^PROJECT REVIEW /);
   assert.equal(rendered.includes("{{REVIEW_INPUT}}"), false);
@@ -261,7 +261,7 @@ test("an unrelated pending job is left alone: a bounded run reviews only its own
   const { runtime, exitCode, error, status, run } = await start(t, { staleJob: true });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
-  assert.notEqual(run.status, "rate_limited");
+  assert.notEqual(run.closed_reason, "rate_limited");
   assert.equal(status.latest_state.status, "pass");
   assert.equal(status.latest_state.failed_review_job_path, undefined);
   assert.equal(status.stop_reason?.reason === "provider_usage_limit", false);
@@ -302,25 +302,25 @@ test("Claude stdout quota is writer provider_usage_limit without guessed reset",
 test("Claude stderr quota with absent JSON stdout is still writer provider_usage_limit", async (t) => {
   const { exitCode, status } = await start(t, { claudeMode: "stderr_limit" });
   assert.equal(exitCode, 75);
-  assert.equal(status.latest_state.claude_json_valid, false);
+  assert.equal(status.latest_state.writer_json_valid, false);
   assert.equal(status.stop_reason.reason, "provider_usage_limit");
   assert.equal(status.stop_reason.reset_hint, "3pm (Asia/Taipei)");
 });
 
-test("generic Claude failure with invalid JSON is claude_failed provider_error", async (t) => {
+test("generic Claude failure with invalid JSON is writer_failed provider_error", async (t) => {
   const { exitCode, error, status } = await start(t, { claudeMode: "stderr_generic" });
   assert.equal(error, null);
   assert.equal(exitCode, 1);
-  assert.equal(status.latest_state.status, "claude_failed");
+  assert.equal(status.latest_state.status, "writer_failed");
   assert.equal(status.stop_reason.reason, "provider_error");
-  assert.equal(status.closed_reason, "claude_failed");
+  assert.equal(status.closed_reason, "writer_failed");
 });
 
 test("plan call budget exhaustion is labeled as the work package budget", async (t) => {
   const { exitCode, status } = await start(t, { codexMode: "fail", maxCalls: 1 });
   assert.equal(exitCode, 76);
-  assert.equal(status.closed_reason, "call_budget_exhausted");
-  assert.equal(status.latest_state.status, "call_budget_exhausted");
+  assert.equal(status.closed_reason, "rounds_exhausted");
+  assert.equal(status.latest_state.status, "rounds_exhausted");
   assert.equal(status.stop_reason.reason, "work_package_call_budget");
   assert.equal(status.stop_reason.provider, "review-bridge");
   assert.equal(status.stop_reason.reset_hint, null);
@@ -337,23 +337,23 @@ test("the writer may start sub-agents by default; a project override can still d
   const open = await start(t);
   assert.equal(open.exitCode, 0);
   assert.equal(open.claudeArgs.includes("--disallowedTools"), false);
-  const closed = await start(t, { override: { schema_version: 4, writer: { disallowed_tools: ["Agent"] } } });
+  const closed = await start(t, { override: { schema_version: 5, writer: { disallowed_tools: ["Agent"] } } });
   assert.equal(closed.exitCode, 0);
   assert.equal(closed.claudeArgs[closed.claudeArgs.indexOf("--disallowedTools") + 1], "Agent");
 });
 
 test("project override sets the writer model; failure states record it too", async (t) => {
-  const override = { schema_version: 4, writer: { model: "claude-opus-5-5" } };
+  const override = { schema_version: 5, priority: { writer: { medium: { model: "claude-opus-5-5" } } } };
   const passed = await start(t, { override });
   assert.equal(passed.claudeArgs[passed.claudeArgs.indexOf("--model") + 1], "claude-opus-5-5");
   assert.equal(passed.status.latest_state.writer_model, "claude-opus-5-5");
   const failed = await start(t, { override, claudeMode: "stderr_generic" });
-  assert.equal(failed.status.latest_state.status, "claude_failed");
+  assert.equal(failed.status.latest_state.status, "writer_failed");
   assert.equal(failed.status.latest_state.writer_model, "claude-opus-5-5");
 });
 
 test("a malformed writer model override is refused", async (t) => {
-  const runtime = await makeRuntime(t, { schema_version: 4, writer: { model: "opus --dangerously" } });
+  const runtime = await makeRuntime(t, { schema_version: 5, priority: { writer: { medium: { model: "opus --dangerously" } } } });
   await assert.rejects(createWorkPackagePlan({
     paths: runtime.paths,
     task: "Update README.md only.",
@@ -362,27 +362,27 @@ test("a malformed writer model override is refused", async (t) => {
     breakpoint: "return after review",
     changeTypes: "docs",
     allowedPaths: "README.md",
-    maxCalls: 1,
-    maxMinutes: 1,
+    rounds: 1,
+    callTimeout: 60_000,
     outPath: path.join(runtime.paths.queueRoot, "plan.json"),
-  }), /writer model is invalid/);
+  }), /writer model for medium is invalid/);
 });
 
 test("P4 stream output: task.input, read and usage are recorded; the result file stays a single JSON; args carry the limits", async (t) => {
   const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream" });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
-  assert.equal(run.status, "pass");
+  assert.equal(run.conclusion, "success");
   const events = await readIoEvents(runtime.paths, run.run_id);
-  assert.deepEqual(events.map((event) => event.event), ["task.input", "read", "usage", "writer.result", "gate_a_result", "review.input", "usage", "review.result"]);
+  assert.deepEqual(events.map((event) => event.event), ["task.input", "read", "usage", "writer.result", "test_result", "review.input", "usage", "review.result"]);
   assert.equal(events[0].work_order, "s2-04-fixture");
   assert.equal(events[1].path, "README.md");
   assert.equal(events[1].outside_list, null); // legacy inline task: no read list, nothing to compare against
   assert.equal(events[2].tokens.cache_read, 1000);
-  assert.equal(events[4].kind, "not_applicable"); // docs-only: Gate A is recorded, nothing runs
+  assert.equal(events[4].kind, "not_applicable"); // docs-only: the tests are recorded, nothing runs
   assert.equal(events[6].role, "reviewer");
   assert.equal(events[6].source, "cli_json"); // the inline fake reports usage, as a real CLI does
-  const writer = JSON.parse(await fsp.readFile(status.latest_state.claude_stdout_path, "utf8"));
+  const writer = JSON.parse(await fsp.readFile(status.latest_state.writer_stdout_path, "utf8"));
   assert.equal(writer.type, "result");
   assert.equal(writer.structured_output.event, "writer.result");
   const args = JSON.parse(await fsp.readFile(path.join(runtime.toolsRoot, "claude-args.json"), "utf8"));
@@ -398,7 +398,7 @@ test("Q2 a writer.result that misses fields ends malformed_writer_result with ex
   const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", writer: "malformed" });
   assert.equal(error, null);
   assert.equal(exitCode, 79);
-  assert.equal(run.status, "malformed_writer_result");
+  assert.equal(run.closed_reason, "malformed_writer_result");
   assert.ok(status.latest_state.errors.some((line) => /missing call/.test(line)));
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.at(-1).event, "stop");
@@ -411,7 +411,7 @@ test("Q3 needs_human or a non-done status ends needs_human with exit 0 and no re
     const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", writer });
     assert.equal(error, null);
     assert.equal(exitCode, 0);
-    assert.equal(run.status, "needs_human");
+    assert.equal(run.closed_reason, "needs_human");
     assert.equal(status.closed_reason, "needs_human");
     assert.equal(status.latest_state.writer_status, writer === "blocked" ? "blocked" : "done");
     const events = await readIoEvents(runtime.paths, run.run_id);
@@ -424,7 +424,7 @@ test("Q5 a review.result that breaks the schema ends malformed_review_result wit
   const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", codexMode: "malformed" });
   assert.equal(error, null);
   assert.equal(exitCode, 79);
-  assert.equal(run.status, "malformed_review_result");
+  assert.equal(run.closed_reason, "malformed_review_result");
   assert.ok(status.latest_state.errors.length > 0);
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.at(-1).status, "malformed_event");
@@ -435,7 +435,7 @@ test("Q7 a finding that survives one correction is a loop: hard_stop, no third w
   const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", codexMode: "fail", maxCalls: 2 });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
-  assert.equal(run.status, "hard_stop");
+  assert.equal(run.conclusion, "action_required");
   assert.equal(status.latest_state.call, 2);
   assert.equal(status.latest_state.hard_stop_reason, "needs_human_decision");
   const events = await readIoEvents(runtime.paths, run.run_id);
@@ -454,7 +454,7 @@ test("Q8 reviewer usage from the --json stream counts against the per-call ceili
   const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", codexTokens: 2_000_000 });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
-  assert.equal(run.status, "token_limit");
+  assert.equal(run.closed_reason, "token_limit");
   assert.equal(status.latest_state.token_limit_role, "reviewer");
   const events = await readIoEvents(runtime.paths, run.run_id);
   const reviewer = events.find((event) => event.event === "usage" && event.role === "reviewer");
@@ -464,11 +464,11 @@ test("Q8 reviewer usage from the --json stream counts against the per-call ceili
   assert.equal(events.at(-1).role, "reviewer");
 });
 
-test("P5 a call over max_tokens_per_call ends token_limit with exit 76, no review, no second call", async (t) => {
+test("P5 a call over tokens_per_call ends token_limit with exit 76, no review, no second call", async (t) => {
   const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", tokens: 2_000_000, maxCalls: 2, codexMode: "fail" });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
-  assert.equal(run.status, "token_limit");
+  assert.equal(run.closed_reason, "token_limit");
   assert.equal(status.latest_state.token_limit, "per_call");
   assert.equal(status.latest_state.tokens_this_call, 2_000_006);
   const events = await readIoEvents(runtime.paths, run.run_id);
@@ -480,16 +480,16 @@ test("P5 a call over max_tokens_per_call ends token_limit with exit 76, no revie
 test("P5b the per-run ceiling adds up across calls and the second call rotates the session", async (t) => {
   const { runtime, exitCode, error, run, status } = await start(t, {
     claudeMode: "stream", tokens: 1000, maxCalls: 2, codexMode: "fail",
-    override: { schema_version: 4, limits: { max_tokens_per_run: 1500 } },
+    override: { schema_version: 5, limits: { tokens: 1500 } },
   });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
-  assert.equal(run.status, "token_limit");
+  assert.equal(run.closed_reason, "token_limit");
   assert.equal(status.latest_state.token_limit, "per_run");
   assert.equal(status.latest_state.tokens_this_run, 2013); // two writer calls of 1006 and one reviewer output token
-  assert.equal(run.claude_session_ids.length, 2);
-  assert.notEqual(run.claude_session_ids[0], run.claude_session_ids[1]);
-  assert.equal(run.claude_session_id, run.claude_session_ids[1]);
+  assert.equal(run.writer_session_ids.length, 2);
+  assert.notEqual(run.writer_session_ids[0], run.writer_session_ids[1]);
+  assert.equal(run.writer_session_id, run.writer_session_ids[1]);
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.filter((event) => event.event === "handoff").length, 1);
   const handoff = events.find((event) => event.event === "handoff");
@@ -498,102 +498,102 @@ test("P5b the per-run ceiling adds up across calls and the second call rotates t
 });
 
 test("P6 a project override may lower max_turns but never raise it", async (t) => {
-  const { runtime, error } = await start(t, { claudeMode: "stream", override: { schema_version: 4, limits: { max_turns: 5 } } });
+  const { runtime, error } = await start(t, { claudeMode: "stream", override: { schema_version: 5, limits: { max_turns: 5 } } });
   assert.equal(error, null);
   const args = JSON.parse(await fsp.readFile(path.join(runtime.toolsRoot, "claude-args.json"), "utf8"));
   assert.equal(args[args.indexOf("--max-turns") + 1], "5");
-  await assert.rejects(start(t, { override: { schema_version: 4, limits: { max_turns: 50 } } }), /only tighten limit: max_turns/);
-  await assert.rejects(start(t, { override: { schema_version: 4, limits: { max_tokens_per_call: 9_000_000 } } }), /only tighten limit: max_tokens_per_call/);
+  await assert.rejects(start(t, { override: { schema_version: 5, limits: { max_turns: 50 } } }), /only tighten limit: max_turns/);
+  await assert.rejects(start(t, { override: { schema_version: 5, limits: { tokens_per_call: 9_000_000 } } }), /only tighten limit: tokens_per_call/);
 });
 
-test("R5 Gate A runs after the writer and before the review; its result reaches review.input and the run", async (t) => {
+test("R5 the tests run after the writer and before the review; its result reaches review.input and the run", async (t) => {
   const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code" });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
-  assert.equal(run.status, "pass");
-  assert.equal(run.gate_a_passed, true);
+  assert.equal(run.conclusion, "success");
+  assert.equal(run.test_passed, true);
   const events = await readIoEvents(runtime.paths, run.run_id);
   const kinds = events.map((event) => event.event);
-  assert.ok(kinds.indexOf("writer.result") < kinds.indexOf("gate_a_result"));
-  assert.ok(kinds.indexOf("gate_a_result") < kinds.indexOf("review.input"));
-  const gate = events.find((event) => event.event === "gate_a_result");
+  assert.ok(kinds.indexOf("writer.result") < kinds.indexOf("test_result"));
+  assert.ok(kinds.indexOf("test_result") < kinds.indexOf("review.input"));
+  const gate = events.find((event) => event.event === "test_result");
   assert.equal(gate.command, "npm test");
   assert.equal(gate.exit_code, 0);
   assert.equal(gate.passed, true);
   assert.match(gate.stdout_tail, /GATE-A-RAN/);
   const reviewInput = events.find((event) => event.event === "review.input");
-  assert.equal(reviewInput.gate_a_result.command, "npm test");
-  assert.equal(reviewInput.gate_a_result.exit_code, 0);
-  assert.equal(events.find((event) => event.event === "task.input").gate_a.label, "跑現有測試：npm test");
+  assert.equal(reviewInput.test_result.command, "npm test");
+  assert.equal(reviewInput.test_result.exit_code, 0);
+  assert.equal(events.find((event) => event.event === "task.input").test.label, "跑現有測試：npm test");
 });
 
 test("R5b docs-only work records not_applicable and runs nothing", async (t) => {
   const { runtime, exitCode, run } = await start(t, { claudeMode: "stream" });
   assert.equal(exitCode, 0);
-  assert.equal(run.gate_a_passed, null);
-  const gate = (await readIoEvents(runtime.paths, run.run_id)).find((event) => event.event === "gate_a_result");
+  assert.equal(run.test_passed, null);
+  const gate = (await readIoEvents(runtime.paths, run.run_id)).find((event) => event.event === "test_result");
   assert.equal(gate.kind, "not_applicable");
   assert.equal(gate.label, "不跑測試（純文件）");
 });
 
-test("R6 a failed Gate A skips the review and goes back to the writer as fix.input; the budget still ends the run", async (t) => {
+test("R6 failed tests skip the review and goes back to the writer as fix.input; the budget still ends the run", async (t) => {
   const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 3, maxCalls: 1 });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
-  assert.equal(run.status, "call_budget_exhausted");
-  assert.equal(status.latest_state.gate_a_passed, false);
-  assert.equal(status.latest_state.gate_a_exit_code, 3);
+  assert.equal(run.closed_reason, "rounds_exhausted");
+  assert.equal(status.latest_state.test_passed, false);
+  assert.equal(status.latest_state.test_exit_code, 3);
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.some((event) => event.event === "review.input"), false);
   assert.equal(events.some((event) => event.event === "review.result"), false);
-  assert.equal(events.find((event) => event.event === "gate_a_result").passed, false);
+  assert.equal(events.find((event) => event.event === "test_result").passed, false);
 });
 
-test("R6b the second writer call gets the Gate A result in its handoff, not a finding", async (t) => {
+test("R6b the second writer call gets the test result in its handoff, not a finding", async (t) => {
   const { runtime, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 3, maxCalls: 2 });
   assert.equal(error, null);
   const events = await readIoEvents(runtime.paths, run.run_id);
   const fix = events.find((event) => event.event === "fix.input");
-  assert.equal(fix.reason, "gate_a_failed");
+  assert.equal(fix.reason, "test_failed");
   assert.equal(fix.call, 2);
-  assert.equal(fix.gate_a_result.exit_code, 3);
+  assert.equal(fix.test_result.exit_code, 3);
   const handoff = events.find((event) => event.event === "handoff");
-  assert.equal(handoff.reason, "gate_a_failed");
-  assert.equal(handoff.gate_a_result.command, "npm test");
+  assert.equal(handoff.reason, "test_failed");
+  assert.equal(handoff.test_result.command, "npm test");
   assert.deepEqual(handoff.open_findings, []);
   assert.match(handoff.next, /現有測試失敗/);
   assert.equal(events.filter((event) => event.event === "task.input").length, 2);
 });
 
-test("R7 two Gate A failures on an unchanged delta are a loop: hard_stop, no third writer call", async (t) => {
+test("R7 two test failures on an unchanged delta are a loop: hard_stop, no third writer call", async (t) => {
   const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2, git: true });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
-  assert.equal(run.status, "hard_stop");
+  assert.equal(run.conclusion, "action_required");
   assert.equal(status.latest_state.hard_stop_reason, "needs_human_decision");
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.filter((event) => event.event === "task.input").length, 2);
-  assert.equal(events.at(-1).detail_ref, "gate_a_loop");
+  assert.equal(events.at(-1).detail_ref, "test_loop");
   assert.equal(events.some((event) => event.event === "review.input"), false);
 });
 
 // Without Git there is no list of changes, so two failures in a row cannot be shown to be "nothing
 // changed"; the call budget ends the run instead of a loop verdict.
-test("R7b without Git two Gate A failures are not called a loop; the budget ends the run", async (t) => {
+test("R7b without Git two test failures are not called a loop; the budget ends the run", async (t) => {
   const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2 });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
-  assert.equal(run.status, "call_budget_exhausted");
+  assert.equal(run.closed_reason, "rounds_exhausted");
   const events = await readIoEvents(runtime.paths, run.run_id);
-  assert.equal(events.some((event) => event.detail_ref === "gate_a_loop"), false);
+  assert.equal(events.some((event) => event.detail_ref === "test_loop"), false);
 });
 
-test("R9 Gate A passed but the reviewer failed: correction_pending with gate_a_passed still true", async (t) => {
+test("R9 the tests passed but the reviewer failed: correction_pending with test_passed still true", async (t) => {
   const { runtime, exitCode, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", codexMode: "fail", maxCalls: 1 });
   assert.equal(exitCode, 76);
-  assert.equal(status.latest_state.gate_a_passed, true);
+  assert.equal(status.latest_state.test_passed, true);
   assert.equal(status.latest_state.review_gate, "FAIL");
-  assert.equal(run.gate_a_passed, true);
+  assert.equal(run.test_passed, true);
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.find((event) => event.event === "review.result").gate, "FAIL");
 });
@@ -612,7 +612,7 @@ test("resuming a run whose earlier calls left work-proof records stops before an
   });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
-  assert.equal(run.status, "evidence_unconfirmable");
+  assert.equal(run.closed_reason, "evidence_unconfirmable");
   assert.equal(claudeArgs, null, "no writer call was started");
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.some((event) => event.event === "task.input"), false);

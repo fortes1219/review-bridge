@@ -52,7 +52,7 @@ if (prompt.includes("[REVIEW_BRIDGE_MODE: CONTRACT_CHECK]")) {
   process.exit(0);
 }
 
-if (!prompt.includes("Claude")) {
+if (!prompt.includes("You are the independent reviewer")) {
   process.stderr.write("review prompt did not reach fake Codex\n");
   process.exit(3);
 }
@@ -120,7 +120,7 @@ function verdictsOutput() {
     if (index === 0 && (failing || mode === "fail_under_pass")) return { id, verdict: "fail", evidence: "fake: blocked by the first finding" };
     if (index === 0 && mode === "cannot_verify") return { id, verdict: "cannot_verify", evidence: "fake: needs a browser to see it" };
     if (index === 0 && mode === "no_evidence") return { id, verdict: "pass", evidence: "" };
-    return { id, verdict: "pass", evidence: "fake: read the delta and the Gate A output for " + id };
+    return { id, verdict: "pass", evidence: "fake: read the delta and the test output for " + id };
   });
   return mode === "missing" ? items.slice(0, -1) : items;
 }

@@ -109,21 +109,5 @@
         ]
       }
     ]
-  },
-  "review_terms": {
-    "security": [
-      "authentication",
-      "authorization",
-      "credential",
-      "csrf",
-      "request cancellation"
-    ],
-    "full": [
-      "API contract",
-      "database schema",
-      "transaction state",
-      "event contract",
-      "cross-module architecture"
-    ]
   }
 }

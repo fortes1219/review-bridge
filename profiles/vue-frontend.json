@@ -86,19 +86,5 @@
         ]
       }
     ]
-  },
-  "review_terms": {
-    "security": [
-      "xss",
-      "csrf",
-      "content security policy",
-      "credential"
-    ],
-    "full": [
-      "state management contract",
-      "router contract",
-      "API contract",
-      "cross-module architecture"
-    ]
   }
 }

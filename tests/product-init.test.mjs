@@ -229,7 +229,7 @@ test("init without a terminal takes claude and codex when no role is given or sa
   assert.equal(output.profile, null);
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
   assert.equal(config.profile_id, null);
-  assert.deepEqual(config.gate_a, { profile_id: null, rules: [] });
+  assert.deepEqual(config.test, { profile_id: null, rules: [] });
 });
 
 test("init with an unknown --profile is refused and writes nothing", async (t) => {
@@ -370,11 +370,11 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   assert.equal(output.plan_path, path.join(root, ".review-bridge", "review-queue", "add-readme.plan.json"));
   await fsp.access(output.plan_path);
 
-  // A type-none project has no Gate A rules: docs-only work needs none; other work is refused as before.
-  assert.equal(output.gate_a.kind, "not_applicable");
+  // A type-none project has no test rules: docs-only work needs none; other work is refused as before.
+  assert.equal(output.test.kind, "not_applicable");
   const code = run(file, "--breakpoint", "after the review", "--change-types", "code", "--json");
   assert.equal(code.status, 1);
-  assert.deepEqual(JSON.parse(code.stdout), { valid: false, reason: "no_gate_a", checked: [] });
+  assert.deepEqual(JSON.parse(code.stdout), { valid: false, reason: "no_test", checked: [] });
   const codePlain = run(file, "--breakpoint", "after the review", "--change-types", "code");
   assert.equal(codePlain.status, 1);
   assert.match(codePlain.stdout, /--change-types docs\n$/);
@@ -393,8 +393,8 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
 });
 
 // The Owner's case: an empty folder set up as vue-frontend. A chosen type is used as chosen;
-// the mismatch stops code work at Gate A, not at setup.
-test("a chosen project type that does not fit the folder is set up and stopped at Gate A", async (t) => {
+// the mismatch stops code work at the tests, not at setup.
+test("a chosen project type that does not fit the folder is set up and stopped at the tests", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-chosen-type-"));
   t.after(() => removeWorkspace(root));
   const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--profile", "vue-frontend", "--yes"), {
@@ -403,7 +403,7 @@ test("a chosen project type that does not fit the folder is set up and stopped a
   assert.equal(init.status, 0, init.stderr);
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
   assert.equal(config.profile_id, "vue-frontend");
-  assert.deepEqual(config.gate_a.rules, [{ command: "npm test", package_script: "test" }]);
+  assert.deepEqual(config.test.rules, [{ command: "npm test", package_script: "test" }]);
 
   await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "fix.md"), "# Work order: fix\n\nIt works.\n");
   const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ".review-bridge/work-packages/fix.md", ...args], {
@@ -413,7 +413,7 @@ test("a chosen project type that does not fit the folder is set up and stopped a
   assert.equal(code.status, 1);
   const refused = JSON.parse(code.stdout);
   assert.equal(refused.valid, false);
-  assert.equal(refused.reason, "no_gate_a");
+  assert.equal(refused.reason, "no_test");
   assert.deepEqual(refused.checked.map((rule) => rule.command), ["npm test"]);
   assert.equal(run("--breakpoint", "after the review", "--change-types", "docs").status, 0);
 });
@@ -438,7 +438,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   const lines = done.stdout.trimEnd().split(/\r?\n/);
   assert.equal(lines[0], "Plan from the card: " + path.join(".review-bridge", "review-queue", "hello.plan.json"));
   assert.equal(lines[1], "Reviewer read-only check: not needed with the fake CLI (no model is called)");
-  for (const line of ["Work order:   " + order, "Stops:        after the review", "Changes:      docs", "Gate A:       not needed for docs-only work",
+  for (const line of ["Work order:   " + order, "Stops:        after the review", "Changes:      docs", "Tests:        not needed for docs-only work",
     "Budget:       2 writer call(s), up to 8 minute(s) each", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
     assert.ok(lines.includes(line), line);
   }
@@ -447,7 +447,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     "  Writer (claude) turns the work order into a contract; reviewer (codex) checks it",
     "  Contract sealed",
     "  Writer working (call 1 of 2)",
-    "  Gate A: not needed for docs-only work",
+    "  Tests: not needed for docs-only work",
     "  Reviewer checking the work",
   ]);
   assert.match(done.stdout, /\nDelivered: .*\nResult file: .*hello\.result\.md\nTokens: /);
@@ -479,7 +479,7 @@ test("an agent's start prints the card and stops; with --yes it runs and records
   const card = cli(["start", order, "--fake-cli"]);
   assert.equal(card.status, 1);
   const lines = card.stdout.trimEnd().split(/\r?\n/);
-  for (const line of ["Stops:        after the review", "Changes:      docs", "Gate A:       not needed for docs-only work",
+  for (const line of ["Stops:        after the review", "Changes:      docs", "Tests:        not needed for docs-only work",
     "Budget:       2 writer call(s), up to 8 minute(s) each", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
     assert.ok(lines.includes(line), line);
   }
@@ -623,26 +623,26 @@ test("two --yes to one card at once start one run; clean --all clears the projec
   assert.match(elsewhere.stderr, /records were cleared \(clean --all\)/, "the project named by --project was the one looked at");
 });
 
-// RC3-BLOCKER-01 step 3: the run, its one timeline, each condition's verdict, Gate A and the delivery
+// RC3-BLOCKER-01 step 3: the run, its one timeline, each condition's verdict, the tests and the delivery
 // are in the database; a stopped run is recorded as stopped; clean <run_id> is one delete that takes
 // every row the run owns and keeps its authorization and claim.
-test("a run's events, verdicts, Gate A and delivery are in the database; stop and clean <run_id> follow", async (t) => {
+test("a run's events, verdicts, tests and delivery are in the database; stop and clean <run_id> follow", async (t) => {
   const { order, cli, queue } = await fourActionsProject(t, "review-bridge-run-records-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
   const [runFile] = (await fsp.readdir(path.join(queue, "runs"))).filter((name) => name.endsWith(".json"));
   const runId = runFile.slice(0, -5);
   const file = JSON.parse(await fsp.readFile(path.join(queue, "runs", runFile), "utf8"));
-  const [run] = await queryRecords("select status, outcome, contract_sha256, last_event_sequence from runs where run_id = $1", [runId]);
-  assert.deepEqual({ status: run.status, outcome: run.outcome, contract: run.contract_sha256 }, { status: "pass", outcome: "delivered", contract: file.contract_sha256 });
+  const [run] = await queryRecords("select status, conclusion, closed_reason, contract_sha256, last_event_sequence from runs where run_id = $1", [runId]);
+  assert.deepEqual({ status: run.status, conclusion: run.conclusion, closed_reason: run.closed_reason, contract: run.contract_sha256 },
+    { status: "completed", conclusion: "success", closed_reason: "review_pass", contract: file.contract_sha256 });
   const types = (await queryRecords("select type from run_events where run_id = $1 order by sequence", [runId])).map((row) => row.type);
   assert.equal(types.length, run.last_event_sequence, "one sequence, no gaps");
-  for (const type of ["run_started", "contract_sealed", "task.input", "gate_a_result", "review.result", "acceptance", "run_terminal", "run_delivered"]) assert.ok(types.includes(type), type);
+  for (const type of ["run_started", "contract_sealed", "task.input", "test_result", "review.result", "acceptance", "run_terminal", "run_delivered"]) assert.ok(types.includes(type), type);
   assert.deepEqual(await queryRecords("select ac_id, verdict, result from acceptance_rows where run_id = $1", [runId]), [{ ac_id: "AC1", verdict: "pass", result: "proven" }]);
   assert.deepEqual(await queryRecords("select ac_id, verdict from review_verdicts where run_id = $1", [runId]), [{ ac_id: "AC1", verdict: "pass" }]);
-  assert.deepEqual(await queryRecords("select kind, passed from gate_a_results where run_id = $1", [runId]), [{ kind: "not_applicable", passed: null }]);
+  assert.deepEqual(await queryRecords("select kind, passed from test_results where run_id = $1", [runId]), [{ kind: "not_applicable", passed: null }]);
   const [delivered] = await queryRecords("select payload from run_events where run_id = $1 and type = 'run_delivered'", [runId]);
-  assert.equal(delivered.payload.outcome, "delivered");
   assert.equal(delivered.payload.sha256, file.result_sha256);
 
   // A run stopped from another process is recorded as stopped there too.
@@ -662,11 +662,11 @@ test("a run's events, verdicts, Gate A and delivery are in the database; stop an
   assert.ok(stoppedId, "the writer never started");
   assert.equal(cli(["stop", stoppedId]).status, 0);
   await ended;
-  const [stopped] = await queryRecords("select status, closed_reason from runs where run_id = $1", [stoppedId]);
-  assert.equal(stopped.status, "stopped");
+  const [stopped] = await queryRecords("select status, conclusion, closed_reason from runs where run_id = $1", [stoppedId]);
+  assert.deepEqual(stopped, { status: "completed", conclusion: "cancelled", closed_reason: "stopped" });
 
   // clean <run_id>: one delete takes the run's rows; its authorization and claim stay.
-  const owned = async () => Object.fromEntries(await Promise.all(["runs", "run_events", "gate_a_results", "review_results", "review_verdicts", "acceptance_decisions", "acceptance_rows"]
+  const owned = async () => Object.fromEntries(await Promise.all(["runs", "run_events", "test_results", "review_results", "review_verdicts", "acceptance_decisions", "acceptance_rows"]
     .map(async (table) => [table, (await queryRecords("select count(*)::int as n from " + table + " where run_id = $1", [runId]))[0].n])));
   assert.ok(Object.values(await owned()).every((n) => n > 0));
   assert.equal(cli(["clean", runId]).status, 0);
@@ -701,13 +701,15 @@ test("a run whose database goes away stops as database_unavailable; reads withou
   assert.ok(lost > 0, "the stop is recorded");
   assert.equal(events.slice(lost).some((event) => ["task.input", "review.input", "contract.translation", "contract.check"].includes(event.event)), false, "no model call after it");
   const file = JSON.parse(await fsp.readFile(path.join(queue, "runs", runId + ".json"), "utf8"));
-  assert.deepEqual([file.status, file.closed_reason], ["stopped", "database_unavailable"]);
+  assert.deepEqual([file.status, file.conclusion, file.closed_reason], ["completed", "cancelled", "database_unavailable"]);
   // status opens the database again (it starts the server) and writes what the run kept meanwhile.
   const status = cli(["status"]);
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, new RegExp("\\n  " + runId + "  stopped +  database_unavailable +\\.review-bridge/work-packages/hello\\.md  "));
-  const [row] = await queryRecords("select status, closed_reason, outcome from runs where run_id = $1", [runId]);
-  assert.deepEqual(row, { status: "stopped", closed_reason: "database_unavailable", outcome: "stopped" });
+  assert.match(status.stdout, new RegExp("\\n  " + runId + "  completed +  cancelled +  database_unavailable +\\.review-bridge/work-packages/hello\\.md  "));
+  const [row] = await queryRecords("select status, conclusion, closed_reason from runs where run_id = $1", [runId]);
+  assert.deepEqual(row, { status: "completed", conclusion: "cancelled", closed_reason: "database_unavailable" });
+  // Its delivery was written after the fact too.
+  assert.equal((await queryRecords("select count(*)::int as n from run_events where run_id = $1 and type = 'run_delivered'", [runId]))[0].n, 1);
   // What was written after the fact says so; what was written as it happened does not.
   const timeline = await queryRecords("select type, recorded_late from run_events where run_id = $1 order by sequence", [runId]);
   assert.equal(timeline.find((event) => event.type === "run_started").recorded_late, false);
@@ -774,12 +776,12 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
   assert.equal(stopped.status, 0, stopped.stderr);
   await exited;
   const record = JSON.parse(await fsp.readFile(path.join(queue, "runs", runId + ".json"), "utf8"));
-  assert.equal(record.status, "stopped", "paused, and its record is kept");
+  assert.equal(record.conclusion, "cancelled", "paused, and its record is kept");
 
   const status = cli(["status"]);
   assert.equal(status.status, 0, status.stderr);
   // From the database: the run, its status, why it stopped, its work order file and when it began.
-  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running\\n  " + runId + "  stopped +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\dT", "m"));
+  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running\\n  " + runId + "  completed +  cancelled +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\dT", "m"));
   assert.match(status.stdout, /\nReview queue: pending \d+, running \d+, done \d+, failed \d+\n/);
   assert.match(status.stdout, /\nDatabase: host 127\.0\.0\.1  port \d+  database bridge  user bridge\n {10}password file: .*[\\/]postgres[\\/]secret\n$/);
   assert.doesNotMatch(status.stdout, new RegExp((await fsp.readFile(path.join(dataHome, "postgres", "secret"), "utf8")).trim()), "the password itself is not printed");
@@ -794,7 +796,7 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
   const runs = await fsp.readdir(path.join(queue, "runs"));
   assert.equal(runs.length, 2);
   const carried = JSON.parse(await fsp.readFile(path.join(queue, "runs", runs.find((name) => name !== runId + ".json")), "utf8"));
-  assert.equal(carried.status, "pass");
+  assert.equal(carried.conclusion, "success");
   assert.equal(carried.authorized_via, "agent");
 
   const cleaned = cli(["clean", runId]);

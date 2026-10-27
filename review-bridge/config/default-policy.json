@@ -1,28 +1,25 @@
 {
-  "schema_version": 4,
-  "policy_schema_version": 4,
+  "schema_version": 5,
+  "policy_schema_version": 5,
   "package_policy_id": "review-bridge-default",
   "limits": {
-    "max_claude_calls": 2,
-    "max_claude_minutes_per_call": 15,
+    "rounds": 2,
+    "call_timeout": 900000,
     "max_turns": 20,
-    "max_tokens_per_call": 1500000,
-    "max_tokens_per_run": 4000000,
-    "gate_a_minutes": 10,
-    "authorization_ttl_seconds": 86400,
-    "recovery_window_seconds": 86400,
-    "heartbeat_interval_seconds": 5,
-    "lock_stale_seconds": 30,
-    "reconcile_grace_seconds": 5,
-    "reconcile_guard_ttl_seconds": 15
+    "tokens_per_call": 1500000,
+    "tokens": 4000000,
+    "test_timeout": 600000,
+    "authorization_ttl": 86400000,
+    "recovery_window": 86400000,
+    "heartbeat_interval": 5000,
+    "lock_stale": 30000,
+    "reconcile_grace": 5000,
+    "reconcile_guard_ttl": 15000
   },
   "writer": {
     "mode": "writer_only",
-    "model": "opus",
-    "effort": "low",
     "disallowed_tools": [],
-    "self_review": "one_local_consistency_pass",
-    "independent_reviewer": "Codex"
+    "self_review": "one_local_consistency_pass"
   },
   "hard_stops": [
     "new human decision required",
@@ -34,54 +31,20 @@
     "token, call-count, or wall-clock budget exhausted",
     "authentication or rate-limit failure"
   ],
-  "classification": {
-    "default_review_level": "STANDARD",
-    "allowed_review_levels": ["LIGHT", "STANDARD", "FULL", "SECURITY", "FINAL_CLOSURE"],
-    "effort_by_level": {
-      "LIGHT": "low",
-      "STANDARD": "medium",
-      "FULL": "high",
-      "SECURITY": "high",
-      "FINAL_CLOSURE": "high"
+  "priority": {
+    "default": "medium",
+    "writer": {
+      "low": { "model": "opus", "effort": "low" },
+      "medium": { "model": "opus", "effort": "medium" },
+      "high": { "model": "opus", "effort": "high" },
+      "urgent": { "model": "opus", "effort": "high" }
     },
-    "rules": [
-      {
-        "id": "package-final-closure",
-        "protected": true,
-        "level": "FINAL_CLOSURE",
-        "priority": 500,
-        "reason": "final closure or completion review",
-        "any": ["final[ -]closure", "final completion", "closure review"],
-        "none": []
-      },
-      {
-        "id": "package-security",
-        "protected": true,
-        "level": "SECURITY",
-        "priority": 400,
-        "reason": "security or authorization boundary",
-        "any": ["\\bauth\\b", "authentication", "authorization", "permission", "security boundary", "transaction boundary", "request cancel(lation)?"],
-        "none": []
-      },
-      {
-        "id": "package-full",
-        "protected": true,
-        "level": "FULL",
-        "priority": 300,
-        "reason": "cross-contract or full semantic review",
-        "any": ["cross[ -]?contract", "state machine", "truth table", "precedence matrix", "architecture review", "full review"],
-        "none": []
-      },
-      {
-        "id": "package-light",
-        "protected": false,
-        "level": "LIGHT",
-        "priority": 100,
-        "reason": "narrow mechanical review",
-        "any": ["smoke test", "named finding", "focused correction", "boundary check", "typo", "formatting only"],
-        "none": ["contract", "architecture", "decision", "schema", "endpoint", "auth", "permission", "security", "implementation"]
-      }
-    ]
+    "reviewer": {
+      "low": { "model": null, "effort": "low" },
+      "medium": { "model": null, "effort": "medium" },
+      "high": { "model": null, "effort": "high" },
+      "urgent": { "model": null, "effort": "high" }
+    }
   },
   "release_actions_require_human": true
 }

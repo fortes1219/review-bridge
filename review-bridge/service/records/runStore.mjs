@@ -12,29 +12,70 @@ import {
   writeJsonAtomicDurable,
   writeJsonExclusiveDurable,
 } from "./fileStore.mjs";
-import { codexPolicyFromSnapshot } from "../../policy/policyRules.mjs";
+import { priorityChoice, reviewerPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { loadOrCreatePolicySnapshot } from "./policySnapshots.mjs";
 import { DatabaseUnavailableError, runRecorder } from "./runRecords.mjs";
 
-// The one list of run statuses; retention and the CLI read it from here so a new terminal
-// status cannot be forgotten by the archive again.
-export const ACTIVE_RUN_STATUSES = Object.freeze(["running", "review_pending", "correction_pending", "interrupted"]);
-export const TERMINAL_RUN_STATUSES = Object.freeze([
-  "pass", "hard_stop", "rate_limited", "cancelled", "policy_failure",
-  "call_budget_exhausted", "claude_timeout", "claude_failed", "reviewer_failed", "controller_failure",
-  "token_limit", "stopped", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
+// A run's status and conclusion, as GitHub Actions has them for a workflow run; why it closed is
+// its closed_reason. The one list of closed reasons; retention and the CLI read it from here so a
+// new one cannot be forgotten by the archive again.
+export const RUN_STATUSES = Object.freeze(["in_progress", "completed"]);
+export const CLOSED_REASONS = Object.freeze([
+  "review_pass", "review_hard_stop", "runtime_policy_identity_changed", "stopped", "superseded", "database_unavailable",
+  "rate_limited", "cancelled", "policy_failure",
+  "rounds_exhausted", "writer_timeout", "writer_failed", "reviewer_failed", "controller_failure",
+  "token_limit", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
   "needs_human", "malformed_writer_result", "malformed_review_result",
 ]);
-const activeStatuses = new Set(ACTIVE_RUN_STATUSES);
-const terminalStatuses = new Set(TERMINAL_RUN_STATUSES);
+// Closed by the stop command, by a start of a newer version, or because the database went away.
+export const STOP_REASONS = Object.freeze(["stopped", "superseded", "database_unavailable"]);
+// A reviewer PASS, a hard stop or a quota stop is recorded on the run's last state before the run
+// closes; from then on the run is settled, and a stop cannot take it over.
+const SETTLING_STATES = new Set(["pass", "hard_stop", "rate_limited"]);
+const ACTION_REQUIRED = new Set([
+  "hard_stop", "needs_human", "rounds_exhausted", "contract_unconfirmed", "acceptance_unverified",
+  "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
+]);
+
+export function isActiveRun(run) {
+  return run?.status === "in_progress";
+}
+
+export function isStoppedRun(run) {
+  return run?.status === "completed" && STOP_REASONS.includes(run.closed_reason);
+}
+
+function settledState(run) {
+  return SETTLING_STATES.has(run.last_state?.status) ? run.last_state.status : null;
+}
+
+// A closing run's conclusion: from the state it settled in, else the gate, else the reason itself.
+function conclusionOf(run, reason, gate) {
+  const settled = settledState(run)
+    ?? (gate?.review_gate === "PASS" ? "pass"
+      : gate?.hard_stop_required ? "hard_stop"
+        : CLOSED_REASONS.includes(reason) ? reason : "policy_failure");
+  if (settled === "pass") return "success";
+  if (settled === "cancelled" || STOP_REASONS.includes(settled)) return "cancelled";
+  if (settled === "writer_timeout") return "timed_out";
+  if (ACTION_REQUIRED.has(settled)) return "action_required";
+  return "failure";
+}
+
+// A run recorded under an older policy shape is neither resumed nor delivered.
+export function assertCurrentPolicy(policySchemaVersion, runId) {
+  if (policySchemaVersion !== 5) {
+    throw new Error("This run's policy is from an older Bridge; run: review-bridge clean " + runId);
+  }
+}
 
 function nowIso(clock) {
   return new Date(clock()).toISOString();
 }
 
-function plusSeconds(source, seconds) {
-  return new Date(Date.parse(source) + seconds * 1000).toISOString();
+function plusMs(source, milliseconds) {
+  return new Date(Date.parse(source) + milliseconds).toISOString();
 }
 
 function assertId(value, label) {
@@ -122,7 +163,7 @@ async function acquireReconcileGuard(paths, runId, policy, { clock }) {
       guard_nonce: randomUUID(),
       owner_pid: process.pid,
       acquired_at: acquiredAt,
-      expires_at: plusSeconds(acquiredAt, policy.limits.reconcile_guard_ttl_seconds),
+      expires_at: plusMs(acquiredAt, policy.limits.reconcile_guard_ttl),
     };
     try {
       await writeJsonExclusiveDurable(file, record);
@@ -190,7 +231,7 @@ export async function acquireRunLock(paths, runId, policy, {
       let heartbeatFailure = null;
       const interval = setInterval(() => {
         heartbeatLock(file, record, clock).catch((error) => { heartbeatFailure = error; });
-      }, policy.limits.heartbeat_interval_seconds * 1000);
+      }, policy.limits.heartbeat_interval);
       interval.unref?.();
       return {
         ...record,
@@ -214,14 +255,14 @@ export async function acquireRunLock(paths, runId, policy, {
       const existing = await readOptional(file);
       if (!existing) continue;
       const heartbeatExpired = clock() - Date.parse(existing.heartbeat_at)
-        >= policy.limits.lock_stale_seconds * 1000;
+        >= policy.limits.lock_stale;
       const live = await pidAlive(Number(existing.pid)) && !heartbeatExpired;
       if (live || !heartbeatExpired || !allowReconcile) throw new Error("Run lock is already held.");
       const guard = await acquireReconcileGuard(paths, runId, policy, { clock });
       try {
         const originalNonce = existing.lock_nonce;
         const originalHeartbeat = existing.heartbeat_at;
-        await sleep(policy.limits.reconcile_grace_seconds * 1000);
+        await sleep(policy.limits.reconcile_grace);
         await guard.assertOwner();
         const reread = await readOptional(file);
         if (!reread) continue;
@@ -255,10 +296,10 @@ async function appendProjectionEvent(paths, previous, next, type, details, clock
     last_event_sequence: sequence,
     updated_at: occurredAt,
   };
-  if (substantive && activeStatuses.has(projected.status)) {
-    projected.run_deadline_at = plusSeconds(
+  if (substantive && isActiveRun(projected)) {
+    projected.run_deadline_at = plusMs(
       occurredAt,
-      projected.recovery_window_seconds,
+      projected.recovery_window,
     );
   }
   // The database first (RC3-BLOCKER-01 step 3): the event and the state it sets, in one transaction.
@@ -305,7 +346,7 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     // T0-03/T0-04: what the writer will be shown travels with the immutable package.
     ...(input.rules !== undefined ? { rules: structuredClone(input.rules) } : {}),
     ...(input.references !== undefined ? { references: structuredClone(input.references) } : {}),
-    ...(input.gate_a !== undefined ? { gate_a: structuredClone(input.gate_a) } : {}),
+    ...(input.test !== undefined ? { test: structuredClone(input.test) } : {}),
     ...(input.task_file !== undefined ? { task_file: input.task_file } : {}),
     ...(input.contract_steps ? { contract_steps: structuredClone(input.contract_steps) } : {}),
     created_at: nowIso(clock),
@@ -328,7 +369,7 @@ export async function createAuthorization(paths, {
   workOrderSha256 = null,
   workPackageSha256,
   policySha256,
-  ttlSeconds,
+  ttl,
   runId = null,
   additionalBudget = null,
   sourceRunId = null,
@@ -359,7 +400,7 @@ export async function createAuthorization(paths, {
     authorized_by: String(authorizedBy || ""),
     ...(authorizedVia ? { authorized_via: String(authorizedVia) } : {}),
     authorized_at: authorizedAt,
-    expires_at: plusSeconds(authorizedAt, ttlSeconds),
+    expires_at: plusMs(authorizedAt, ttl),
     work_package_sha256: workPackageSha256,
     effective_policy_sha256: policySha256,
   };
@@ -435,7 +476,7 @@ export async function claimStartAuthorization(paths, authorizationId, {
     authorization_id: authorization.authorization_id,
     authorization_sha256: authorization.authorization_sha256,
     run_id: assertId(runId, "Run id"),
-    claude_session_id: assertId(sessionId, "Session id"),
+    writer_session_id: assertId(sessionId, "Session id"),
     execution_mode: executionMode,
     claimed_at: nowIso(clock),
     claim_kind: authorization.kind,
@@ -448,7 +489,7 @@ export async function claimStartAuthorization(paths, authorizationId, {
     if (error.code !== "EEXIST") throw error;
     const existing = await readJson(claimFile(paths, claimKey));
     if (existing.run_id !== claim.run_id
-        || existing.claude_session_id !== claim.claude_session_id
+        || existing.writer_session_id !== claim.writer_session_id
         || existing.authorization_sha256 !== claim.authorization_sha256) {
       if (sourcePlanClaim) throw new Error("Work plan already consumed, generate a new plan.");
       throw new Error("Authorization is already claimed by another run or session.");
@@ -472,20 +513,20 @@ export async function claimStartAuthorization(paths, authorizationId, {
     effective_policy_sha256: authorization.effective_policy_sha256,
     policy_schema_version: snapshot.policy_schema_version,
     package_default_policy_sha256: snapshot.package_default_policy_sha256,
-    claude_session_id: assertId(sessionId, "Session id"),
+    writer_session_id: assertId(sessionId, "Session id"),
     authorized_by: authorization.authorized_by,
     authorized_via: authorization.authorized_via || null,
-    status: "running",
+    status: "in_progress",
     transition_sequence: 0,
     iteration: 0,
     execution_mode: executionMode,
     budget: {
-      max_claude_calls: workPackage.budget.max_claude_calls,
-      max_claude_minutes_per_call: workPackage.budget.max_claude_minutes_per_call,
-      consumed_claude_calls: 0,
+      rounds: workPackage.budget.rounds,
+      call_timeout: workPackage.budget.call_timeout,
+      consumed_rounds: 0,
     },
-    recovery_window_seconds: snapshot.effective_policy.limits.recovery_window_seconds,
-    run_deadline_at: plusSeconds(nowIso(clock), snapshot.effective_policy.limits.recovery_window_seconds),
+    recovery_window: snapshot.effective_policy.limits.recovery_window,
+    run_deadline_at: plusMs(nowIso(clock), snapshot.effective_policy.limits.recovery_window),
     workspace_evidence: workspaceEvidence,
     last_state: null,
     created_at: nowIso(clock),
@@ -513,7 +554,7 @@ export async function readRun(paths, runId) {
 export async function listRuns(paths, { activeOnly = false } = {}) {
   const files = await listJson(paths.runsDir);
   const runs = await Promise.all(files.map((file) => readJson(file)));
-  return activeOnly ? runs.filter((run) => activeStatuses.has(run.status)) : runs;
+  return activeOnly ? runs.filter(isActiveRun) : runs;
 }
 
 export async function reconcileRunProjection(paths, runId) {
@@ -554,28 +595,27 @@ async function mutateRun(paths, runId, type, details, mutator, { substantive = t
   }, { duringMaintenance });
 }
 
-// T0-07 V2.7: delivery has its own locked path. Inside the lease: a run that already has an
-// outcome returns at once with no event and no file written; otherwise `build` writes the
+// T0-07 V2.7: delivery has its own locked path. Inside the lease: a run that already has a
+// result returns at once with no event and no file written; otherwise `build` writes the
 // result files and exactly one `run_delivered` projection event records them.
 export async function deliverRun(paths, runId, build, { clock = Date.now } = {}) {
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   return await withRunLock(paths, runId, snapshot.effective_policy, async (lease) => {
     await lease.assertOwner();
     const current = await reconcileRunProjection(paths, runId);
-    if (current.outcome) return { already: true, run: current };
-    if (!terminalStatuses.has(current.status)) throw new Error("Run is still active: " + runId);
+    if (current.result_sha256) return { already: true, run: current };
+    if (current.status !== "completed") throw new Error("Run is still active: " + runId);
     const written = await build(structuredClone(current));
     await lease.assertOwner();
     const next = {
       ...current,
-      outcome: written.outcome,
       result_path: written.result_path,
       latest_result_path: written.latest_path,
       latest_result_written: written.latest_written !== false,
       result_sha256: written.sha256,
     };
     const projected = await appendProjectionEvent(paths, current, next, "run_delivered", {
-      outcome: written.outcome, result_path: written.result_path, sha256: written.sha256,
+      result_path: written.result_path, sha256: written.sha256,
     }, clock, false);
     return { already: false, run: projected };
   });
@@ -591,22 +631,24 @@ export class RunClosedError extends Error {
   }
 }
 
+// `reason` is the closed run's closed_reason, or the state a settled run is closing with.
 export class RunEndedError extends Error {
-  constructor(status) {
-    super("The run has already ended: " + status + ".");
+  constructor(reason) {
+    super("The run has already ended: " + reason + ".");
     this.name = "RunEndedError";
-    this.status = status;
+    this.reason = reason;
   }
 }
 
 // `closedReason` is "stopped" for the stop command and "superseded" when the work order is started
-// again; the status is "stopped" either way. `supersededBy`, the new start's run id, is written in
+// again; the conclusion is "cancelled" either way. `supersededBy`, the new start's run id, is written in
 // the same locked step, so whoever delivers the stopped run can name it.
 export async function stopRunRecord(paths, runId, { closedReason = "stopped", supersededBy = null, ...options } = {}) {
   const details = { reason: closedReason, gate: null, ...(supersededBy ? { superseded_by: supersededBy } : {}) };
   return await mutateRun(paths, runId, "run_terminal", details, (run) => {
-    if (run.closed_at || terminalStatuses.has(run.status)) throw new RunEndedError(run.status);
-    run.status = "stopped";
+    if (run.closed_at || run.status === "completed" || settledState(run)) throw new RunEndedError(run.closed_reason || settledState(run));
+    run.status = "completed";
+    run.conclusion = "cancelled";
     run.closed_reason = closedReason;
     if (supersededBy) run.superseded_by = supersededBy;
     run.closed_at = nowIso(options.clock || Date.now);
@@ -620,24 +662,17 @@ export async function recordRunState(paths, runId, state, options = {}) {
     if (run.closed_at) throw new RunClosedError(runId);
     run.last_state = structuredClone(state);
     // T0-06 G3.7: both halves of PASS are kept on the run, not only the reviewer's.
-    if (typeof state.gate_a_passed === "boolean" || state.gate_a_passed === null) run.gate_a_passed = state.gate_a_passed;
-    if (state.status === "correction_required" || state.status === "gate_a_failed") run.status = "correction_pending";
-    else if (state.status === "pass") run.status = "pass";
-    else if (state.status === "hard_stop") run.status = "hard_stop";
-    else if (state.status === "rate_limited") run.status = "rate_limited";
+    if (typeof state.test_passed === "boolean" || state.test_passed === null) run.test_passed = state.test_passed;
     return run;
   }, options);
 }
 
 export async function consumeRun(paths, runId, reason, gate = null, options = {}) {
   return await mutateRun(paths, runId, "run_terminal", { reason, gate }, (run) => {
-    // Already closed (by a stop, or an earlier close): its status and reason stand.
+    // Already closed (by a stop, or an earlier close): its conclusion and reason stand.
     if (run.closed_at) return null;
-    if (!terminalStatuses.has(run.status)) {
-      run.status = gate?.review_gate === "PASS" ? "pass"
-        : gate?.hard_stop_required ? "hard_stop"
-          : terminalStatuses.has(reason) ? reason : "policy_failure";
-    }
+    run.status = "completed";
+    run.conclusion = conclusionOf(run, reason, gate);
     run.closed_reason = reason;
     run.closed_at = nowIso(options.clock || Date.now);
     run.review_gate = gate || null;
@@ -654,12 +689,12 @@ export async function recordRunContract(paths, runId, sha256, options = {}) {
   }, options);
 }
 
-// T0-04 D2.1: every writer call runs in a fresh Claude session; the run records each one.
+// T0-04 D2.1: every writer call runs in a fresh session; the run records each one.
 export async function rotateRunSession(paths, runId, sessionId, options = {}) {
   return await mutateRun(paths, runId, "session_rotated", { session_id: sessionId }, (run) => {
-    const history = Array.isArray(run.claude_session_ids) ? run.claude_session_ids : [run.claude_session_id];
-    run.claude_session_ids = [...history, assertId(sessionId, "Session id")];
-    run.claude_session_id = assertId(sessionId, "Session id");
+    const history = Array.isArray(run.writer_session_ids) ? run.writer_session_ids : [run.writer_session_id];
+    run.writer_session_ids = [...history, assertId(sessionId, "Session id")];
+    run.writer_session_id = assertId(sessionId, "Session id");
     return run;
   }, { ...options, substantive: false });
 }
@@ -667,7 +702,6 @@ export async function rotateRunSession(paths, runId, sessionId, options = {}) {
 export async function incrementRunIteration(paths, runId, options = {}) {
   return await mutateRun(paths, runId, "iteration_incremented", {}, (run) => {
     run.iteration = Number(run.iteration || 0) + 1;
-    run.status = "correction_pending";
     return run;
   }, options);
 }
@@ -681,7 +715,7 @@ export async function applyBudgetExtension(paths, authorizationId, options = {})
   return await withRunLock(paths, authorization.run_id, snapshot.effective_policy, async (lease) => {
     await lease.assertOwner();
     const run = await reconcileRunProjection(paths, authorization.run_id);
-    if (!activeStatuses.has(run.status)) throw new Error("Budget extension requires an active run.");
+    if (!isActiveRun(run)) throw new Error("Budget extension requires an active run.");
     if (run.work_package_sha256 !== authorization.work_package_sha256
         || run.effective_policy_sha256 !== authorization.effective_policy_sha256) {
       throw new Error("Budget extension does not match the run.");
@@ -703,16 +737,16 @@ export async function applyBudgetExtension(paths, authorizationId, options = {})
       }
       if (run.authorization_ids.includes(authorization.authorization_id)) return run;
     }
-    const addedCalls = Number(authorization.additional_budget?.max_claude_calls || 0);
-    const nextCalls = Number(run.budget.max_claude_calls) + addedCalls;
+    const addedCalls = Number(authorization.additional_budget?.rounds || 0);
+    const nextCalls = Number(run.budget.rounds) + addedCalls;
     if (!Number.isInteger(addedCalls) || addedCalls < 1
-        || nextCalls > snapshot.effective_policy.limits.max_claude_calls) {
+        || nextCalls > snapshot.effective_policy.limits.rounds) {
       throw new Error("Budget extension exceeds the effective policy ceiling.");
     }
     if (!existingClaim) await writeJsonExclusiveDurable(claimFile(paths, authorization.authorization_id), claim);
     await lease.assertOwner();
     run.authorization_ids.push(authorization.authorization_id);
-    run.budget.max_claude_calls = nextCalls;
+    run.budget.rounds = nextCalls;
     return await appendProjectionEvent(paths, await readRun(paths, run.run_id), run, "budget_extended", {
       authorization_id: authorization.authorization_id,
       added_calls: addedCalls,
@@ -728,7 +762,7 @@ export async function loadControlView(paths, runId) {
   const policy = snapshot.effective_policy;
   return {
     schema_version: 4,
-    authorization_status: activeStatuses.has(run.status) ? "active" : "consumed",
+    authorization_status: isActiveRun(run) ? "active" : "consumed",
     mode: "bounded_standing_correction",
     work_package: workPackage.work_package_id,
     authorized_by: authorization.authorized_by,
@@ -738,21 +772,20 @@ export async function loadControlView(paths, runId) {
     execution_mode: run.execution_mode,
     authorized_scope: structuredClone(workPackage.scope),
     workspace_evidence: run.workspace_evidence,
-    active_claude_session: run.claude_session_id,
+    active_writer_session: run.writer_session_id,
     iteration: run.iteration,
-    dispatch_transport: "claude_cli_resume_same_session",
+    dispatch_transport: "writer_cli_resume_same_session",
     hard_stops: structuredClone(policy.hard_stops),
-    codex_policy: codexPolicyFromSnapshot(snapshot),
+    reviewer_policy: reviewerPolicyFromSnapshot(snapshot),
     token_policy: {
-      claude_disallowed_tools: structuredClone(policy.writer.disallowed_tools),
-      claude_mode: policy.writer.mode,
-      claude_effort: policy.writer.effort,
-      independent_semantic_reviewer: policy.writer.independent_reviewer,
-      claude_self_review: policy.writer.self_review,
+      writer_disallowed_tools: structuredClone(policy.writer.disallowed_tools),
+      writer_mode: policy.writer.mode,
+      writer_effort: priorityChoice(policy).writer.effort,
+      writer_self_review: policy.writer.self_review,
       full_reconstruction_on_correction: false,
       full_reconstruction_requires_human: true,
-      max_claude_calls_per_resume: run.budget.max_claude_calls,
-      max_claude_minutes_per_call: run.budget.max_claude_minutes_per_call,
+      rounds_per_resume: run.budget.rounds,
+      call_timeout: run.budget.call_timeout,
     },
     run: { run_id: run.run_id, policy_snapshot: snapshot, work_package: workPackage, contract_sha256: run.contract_sha256 || null },
   };
@@ -767,9 +800,10 @@ export async function loadSingleActiveControlView(paths) {
 export async function assertRunResumable(paths, runId, { clock = Date.now } = {}) {
   if (await fileExists(paths.upgradeMarkerPath)) throw new Error("Runtime upgrade is in progress.");
   const run = await reconcileRunProjection(paths, runId);
-  if (!activeStatuses.has(run.status)) throw new Error("Terminal run cannot resume.");
+  if (!isActiveRun(run)) throw new Error("Terminal run cannot resume.");
+  assertCurrentPolicy(run.policy_schema_version, runId);
   if (Date.parse(run.run_deadline_at) <= clock()) throw new Error("Run recovery deadline is expired.");
-  if (Number(run.budget.consumed_claude_calls || 0) >= Number(run.budget.max_claude_calls || 0)) {
+  if (Number(run.budget.consumed_rounds || 0) >= Number(run.budget.rounds || 0)) {
     throw new Error("Run has no remaining budget.");
   }
   const authorization = await readJson(authorizationFile(paths, run.authorization_ids[0]));

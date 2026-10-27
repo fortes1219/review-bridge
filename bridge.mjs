@@ -89,8 +89,8 @@ async function runFakeScenarios(target, privateName) {
       "--breakpoint", "return to human after fake review gate",
       "--change-types", "docs",
       "--allow-paths", "README.md",
-      "--max-claude-calls", "2",
-      "--max-claude-minutes", "1",
+      "--rounds", "2",
+      "--call-timeout", "60000",
       "--out", planPath,
       "--json",
     ], { cwd: target }), scenario.name + " work plan");
