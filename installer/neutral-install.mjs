@@ -65,19 +65,21 @@ function under(child, parent) {
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
-async function runtimeFingerprint(root = path.join(packageRoot, "review-bridge")) {
+export async function runtimeFingerprint(root = path.join(packageRoot, "review-bridge")) {
   const rootStat = await fsp.lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("Runtime root must be a normal directory.");
   const files = [];
-  async function visit(directory, relative = "") {
+  // A queue of directories, not recursion; the files are sorted afterwards.
+  const queue = [[root, ""]];
+  while (queue.length) {
+    const [directory, relative] = queue.shift();
     for (const entry of await fsp.readdir(directory, { withFileTypes: true })) {
       if (entry.isSymbolicLink()) throw new Error("Runtime source contains a symlink.");
       const next = path.posix.join(relative, entry.name);
-      if (entry.isDirectory()) await visit(path.join(directory, entry.name), next);
+      if (entry.isDirectory()) queue.push([path.join(directory, entry.name), next]);
       else if (entry.isFile()) files.push([next, sha256(await fsp.readFile(path.join(directory, entry.name)))]);
     }
   }
-  await visit(root);
   files.sort((left, right) => left[0].localeCompare(right[0]));
   return sha256(JSON.stringify(files));
 }
@@ -287,13 +289,18 @@ export async function withInstallLock(target, operation) {
   }
 }
 
-async function fileSnapshot(root, relative = "") {
+// A queue of directories, not recursion; the files are sorted afterwards.
+export async function fileSnapshot(root, relative = "") {
   const files = [];
-  for (const entry of await fsp.readdir(path.join(root, relative), { withFileTypes: true })) {
-    const next = path.posix.join(relative.replaceAll("\\", "/"), entry.name);
-    if (entry.isSymbolicLink()) throw new Error("Bridge state contains a symlink.");
-    if (entry.isDirectory()) files.push(...await fileSnapshot(root, next));
-    else if (entry.isFile()) files.push([next, sha256(await fsp.readFile(path.join(root, next)))]);
+  const queue = [relative];
+  while (queue.length) {
+    const directory = queue.shift();
+    for (const entry of await fsp.readdir(path.join(root, directory), { withFileTypes: true })) {
+      const next = path.posix.join(directory.replaceAll("\\", "/"), entry.name);
+      if (entry.isSymbolicLink()) throw new Error("Bridge state contains a symlink.");
+      if (entry.isDirectory()) queue.push(next);
+      else if (entry.isFile()) files.push([next, sha256(await fsp.readFile(path.join(root, next)))]);
+    }
   }
   return files.sort((left, right) => left[0].localeCompare(right[0]));
 }
@@ -1009,11 +1016,21 @@ async function deleteChecked(privateRoot, name, expected, context) {
   await fsp.rm(aside);
 }
 
-async function removeEmptyDirectories(directory) {
-  for (const entry of await fsp.readdir(directory, { withFileTypes: true })) {
-    if (entry.isDirectory()) await removeEmptyDirectories(path.join(directory, entry.name));
+// Every directory is listed first with a stack, each before the ones inside it; they are then
+// tried deepest first, so a parent is only tried once its children are gone.
+export async function removeEmptyDirectories(directory) {
+  const directories = [];
+  const stack = [directory];
+  while (stack.length) {
+    const current = stack.pop();
+    directories.push(current);
+    for (const entry of await fsp.readdir(current, { withFileTypes: true })) {
+      if (entry.isDirectory()) stack.push(path.join(current, entry.name));
+    }
   }
-  if ((await fsp.readdir(directory)).length === 0) await fsp.rmdir(directory);
+  for (const current of directories.reverse()) {
+    if ((await fsp.readdir(current)).length === 0) await fsp.rmdir(current);
+  }
 }
 
 // M6 (a)-(e): runtime moved aside first, the marker deleted last, every file checked against the backup.

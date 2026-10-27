@@ -1,12 +1,26 @@
 import { createHash } from "node:crypto";
 
-// Key order does not change a value's identity.
+const isTree = (value) => Boolean(value) && typeof value === "object";
+const open = (source) => ({ source, keys: Array.isArray(source) ? [...source.keys()] : Object.keys(source).sort(), values: [] });
+
+// Key order does not change a value's identity. Walked with a stack, not recursion: each open
+// array or object collects its children's results and is closed once it has all of them.
 export function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  if (!isTree(value)) return value;
+  const stack = [open(value)];
+  for (;;) {
+    const top = stack[stack.length - 1];
+    if (top.values.length < top.keys.length) {
+      const child = top.source[top.keys[top.values.length]];
+      if (isTree(child)) stack.push(open(child));
+      else top.values.push(child);
+      continue;
+    }
+    stack.pop();
+    const closed = Array.isArray(top.source) ? top.values : Object.fromEntries(top.keys.map((key, index) => [key, top.values[index]]));
+    if (!stack.length) return closed;
+    stack[stack.length - 1].values.push(closed);
   }
-  return value;
 }
 
 export function digest(value) {

@@ -11,6 +11,7 @@ import {
   pathFromCommand,
   recheckFindings,
   reviewerUsageEvent,
+  validateAgainstSchema,
   validateReviewResult,
   validateWriterResult,
   writerClaimMismatch,
@@ -194,4 +195,27 @@ test("Q8b a missing or partial usage object is unknown, never zero", async () =>
   const rows = tokenRows([{ event: "task.input", call: 1 }, none, { event: "review.input", call: 1 }, { event: "review.result", call: 1 }, empty]);
   assert.equal(rows.writer.complete, false);
   assert.equal(rows.reviewer.complete, false);
+});
+
+// The expected list was recorded when the validator called itself; the stack-based walk keeps it.
+test("schema errors keep their depth-first order, an object's unexpected keys after its properties", () => {
+  const schema = { type: "object", additionalProperties: false, required: ["a", "list"], properties: {
+    a: { type: "object", additionalProperties: false, required: ["b"], properties: { b: { type: "object", additionalProperties: false, properties: { c: { type: "array", minItems: 3, items: { type: "string", pattern: "^x" } } } } } },
+    list: { type: "array", items: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "integer", minimum: 1 }, kind: { enum: ["one", "two"] } } } },
+    tag: { const: "t" },
+  } };
+  const value = { a: { b: { c: ["xa", "yb"], extra: 1 }, more: 2 }, list: [{ id: 0, kind: "three" }, { id: "1", stray: true }, {}], tag: "u", top: 3 };
+  assert.deepEqual(validateAgainstSchema(value, schema), [
+    "$.a.b.c: fewer than 3 items",
+    "$.a.b.c[1]: does not match ^x",
+    "$.a.b: unexpected extra",
+    "$.a: unexpected more",
+    "$.list[0].id: below 1",
+    "$.list[0].kind: must be one of [\"one\",\"two\"]",
+    "$.list[1].id: must be integer, got string",
+    "$.list[1]: unexpected stray",
+    "$.list[2]: missing id",
+    "$.tag: must be \"t\"",
+    "$: unexpected top",
+  ]);
 });

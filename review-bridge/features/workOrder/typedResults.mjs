@@ -34,29 +34,40 @@ function typeMatches(value, expected) {
 }
 
 // A small draft-07 subset: enough for the result and contract schemas, no external dependency.
+// Walked with a stack, children pushed last first. An object's unexpected keys are a separate
+// entry pushed below its properties, so they are reported after them, in depth-first order.
 export function validateAgainstSchema(value, schema, at = "$", errors = []) {
-  if (schema.const !== undefined && value !== schema.const) errors.push(at + ": must be " + JSON.stringify(schema.const));
-  if (schema.enum && !schema.enum.some((option) => option === value)) errors.push(at + ": must be one of " + JSON.stringify(schema.enum));
-  if (schema.type) {
-    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
-    if (!types.some((type) => typeMatches(value, type))) {
-      errors.push(at + ": must be " + types.join("|") + ", got " + typeOf(value));
-      return errors;
+  const stack = [{ value, schema, at }];
+  while (stack.length) {
+    const { value: item, schema: rule, at: where, unexpected } = stack.pop();
+    if (unexpected) {
+      for (const key of Object.keys(item)) if (!(key in (rule.properties || {}))) errors.push(where + ": unexpected " + key);
+      continue;
     }
-  }
-  if (typeof value === "string") {
-    if (schema.minLength !== undefined && value.length < schema.minLength) errors.push(at + ": shorter than " + schema.minLength);
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) errors.push(at + ": longer than " + schema.maxLength);
-    if (schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(at + ": does not match " + schema.pattern);
-  }
-  if (typeof value === "number" && schema.minimum !== undefined && value < schema.minimum) errors.push(at + ": below " + schema.minimum);
-  if (Array.isArray(value) && schema.minItems !== undefined && value.length < schema.minItems) errors.push(at + ": fewer than " + schema.minItems + " items");
-  if (Array.isArray(value) && schema.items) value.forEach((item, index) => validateAgainstSchema(item, schema.items, at + "[" + index + "]", errors));
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    for (const key of schema.required || []) if (!(key in value)) errors.push(at + ": missing " + key);
-    for (const [key, child] of Object.entries(schema.properties || {})) if (key in value) validateAgainstSchema(value[key], child, at + "." + key, errors);
-    if (schema.additionalProperties === false) {
-      for (const key of Object.keys(value)) if (!(key in (schema.properties || {}))) errors.push(at + ": unexpected " + key);
+    if (rule.const !== undefined && item !== rule.const) errors.push(where + ": must be " + JSON.stringify(rule.const));
+    if (rule.enum && !rule.enum.some((option) => option === item)) errors.push(where + ": must be one of " + JSON.stringify(rule.enum));
+    if (rule.type) {
+      const types = Array.isArray(rule.type) ? rule.type : [rule.type];
+      if (!types.some((type) => typeMatches(item, type))) {
+        errors.push(where + ": must be " + types.join("|") + ", got " + typeOf(item));
+        continue;
+      }
+    }
+    if (typeof item === "string") {
+      if (rule.minLength !== undefined && item.length < rule.minLength) errors.push(where + ": shorter than " + rule.minLength);
+      if (rule.maxLength !== undefined && item.length > rule.maxLength) errors.push(where + ": longer than " + rule.maxLength);
+      if (rule.pattern && !new RegExp(rule.pattern).test(item)) errors.push(where + ": does not match " + rule.pattern);
+    }
+    if (typeof item === "number" && rule.minimum !== undefined && item < rule.minimum) errors.push(where + ": below " + rule.minimum);
+    if (Array.isArray(item) && rule.minItems !== undefined && item.length < rule.minItems) errors.push(where + ": fewer than " + rule.minItems + " items");
+    if (Array.isArray(item) && rule.items) {
+      for (let index = item.length - 1; index >= 0; index -= 1) stack.push({ value: item[index], schema: rule.items, at: where + "[" + index + "]" });
+    }
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      for (const key of rule.required || []) if (!(key in item)) errors.push(where + ": missing " + key);
+      if (rule.additionalProperties === false) stack.push({ value: item, schema: rule, at: where, unexpected: true });
+      const present = Object.entries(rule.properties || {}).filter(([key]) => key in item);
+      for (const [key, child] of present.reverse()) stack.push({ value: item[key], schema: child, at: where + "." + key });
     }
   }
   return errors;

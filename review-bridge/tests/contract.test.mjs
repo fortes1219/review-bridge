@@ -23,7 +23,7 @@ import {
   numberedLines,
   sealContract,
 } from "../features/workOrder/contract.mjs";
-import { digest } from "../utils/digest.mjs";
+import { canonical, digest } from "../utils/digest.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -330,4 +330,54 @@ test("a stop between the pre-call check and the pid record kills the call that j
   const events = await readIoEvents(paths, "run-stop-race-0001");
   assert.deepEqual(events.filter((event) => event.event === "usage").map((event) => [event.role, event.partial === true]), [["translator", true]]);
   assert.equal(events.some((event) => event.event === "contract.check"), false);
+});
+
+// The walks below used to call themselves; the expected values were recorded from that version,
+// so the stack-based walks are held to the same output, character for character.
+test("a nested value has the same canonical form and hash as before the walk used a stack", () => {
+  const nested = { zeta: [{ b: 2, a: { y: [3, { d: null, c: "é" }], x: true } }, "s"], alpha: { 10: 1, 2: 2, beta: { gamma: { delta: [] } } }, "": 0 };
+  assert.equal(JSON.stringify(canonical(nested)), "{\"\":0,\"alpha\":{\"2\":2,\"10\":1,\"beta\":{\"gamma\":{\"delta\":[]}}},\"zeta\":[{\"a\":{\"x\":true,\"y\":[3,{\"c\":\"é\",\"d\":null}]},\"b\":2},\"s\"]}");
+  assert.equal(digest(nested), "02519f8dccbcf7ae92c12a39b9403f5525a77586986fc3a7ce3c44b9895ca0b8");
+});
+
+test("line references are checked in document order, however deep they sit", async () => {
+  const pastEnd = await check(translation({
+    ticket: { ...translation().ticket, title: at(1, 90) },
+    scope_notes: { include: at(4, 91), exclude: null, must_keep: null, expected_locations: null },
+    run_plan: { runs: [run("RUN A", 2, 94), run("RUN B", 4, 95)] },
+    acceptance: translation().acceptance.map((item, index) => (index === 1 ? { ...item, source_refs: [{ start: 7, end: 7 }, { start: 8, end: 92 }] } : item)),
+    references: [at(3), at(5, 93)],
+    unused_lines: [{ start: 3, end: 96 }],
+  }));
+  assert.deepEqual(pastEnd.problems, [
+    "$.ticket.title.source_refs[0]: line 90 is past the last line 8",
+    "$.scope_notes.include.source_refs[0]: line 91 is past the last line 8",
+    "$.run_plan.runs[0].source_refs[0]: line 94 is past the last line 8",
+    "$.run_plan.runs[1].source_refs[0]: line 95 is past the last line 8",
+    "$.acceptance[1].source_refs[1]: line 92 is past the last line 8",
+    "$.references[1].source_refs[0]: line 93 is past the last line 8",
+    "$.unused_lines[0]: line 96 is past the last line 8",
+  ]);
+});
+
+test("dependency cycles are found in the same order as before the walk used a stack", async () => {
+  const lines = ["### RUN A: after RUN B", "### RUN B: after RUN C", "### RUN C: after RUN A and RUN D", "### RUN D: after RUN D", "### RUN E: after RUN A", "- all runs"];
+  const looped = await checkTranslation(translation({
+    requested_work: null,
+    run_plan: { runs: [run("RUN A", 1, 1, ["RUN B"], "after RUN B"), run("RUN B", 2, 2, ["RUN C"], "after RUN C"), run("RUN C", 3, 3, ["RUN A", "RUN D"], "after RUN A and RUN D"), run("RUN D", 4, 4, ["RUN D"], "after RUN D"), run("RUN E", 5, 5, ["RUN A"], "after RUN A")] },
+    acceptance: [criterion("AC1", "All runs work.", "all runs", 6, undefined, ["RUN A"])],
+    unused_lines: [],
+  }), { lines, test: GATE });
+  assert.deepEqual(looped.problems, [
+    "$.run_plan: dependency cycle RUN A -> RUN B -> RUN C -> RUN A",
+    "$.run_plan: dependency cycle RUN D -> RUN D",
+  ]);
+});
+
+test("a contract built from nested parts is the same text as before the copy used a stack", () => {
+  const contract = buildContract({ workPackage, lines: LINES, translator, checker, translation: translation({
+    scope_notes: { include: at(4), exclude: null, must_keep: at(7, 8), expected_locations: null },
+    references: [at(3), { source_refs: [{ start: 7, end: 7 }, { start: 8, end: 8 }] }],
+  }) });
+  assert.equal(JSON.stringify(contract), "{\"schema\":\"review-bridge.contract\",\"schema_version\":1,\"work_package_id\":\"farm-1\",\"source\":{\"path\":\".review-bridge/work-packages/farm.md\",\"sha256\":\"dcd82ed2d1b7ddea9a5475608bfb2c2ccbc531d19d5f30c6b489925eb5a89b8a\",\"lines\":[\"# Work order: farm\",\"\",\"## Work\",\"Build a small farm.\",\"\",\"## Acceptance\",\"1. Trees and a barn show; the cart drives with the arrow keys.\",\"2. The cart stops at the barn.\"]},\"translated_by\":{\"role\":\"writer\",\"provider\":\"claude\",\"model\":\"opus\",\"attempt\":1},\"checked_by\":{\"role\":\"reviewer\",\"provider\":\"codex\"},\"ticket\":{\"title\":{\"text\":\"# Work order: farm\",\"source_refs\":[{\"start\":1,\"end\":1}]},\"type\":null,\"source_id\":null,\"product_version\":null,\"people\":null,\"schedule\":null,\"related\":null},\"context\":null,\"outcome\":null,\"requested_work\":{\"text\":\"Build a small farm.\",\"source_refs\":[{\"start\":4,\"end\":4}]},\"scope_notes\":{\"include\":{\"text\":\"Build a small farm.\",\"source_refs\":[{\"start\":4,\"end\":4}]},\"exclude\":null,\"must_keep\":{\"text\":\"1. Trees and a barn show; the cart drives with the arrow keys.\\n2. The cart stops at the barn.\",\"source_refs\":[{\"start\":7,\"end\":8}]},\"expected_locations\":null},\"acceptance\":[{\"id\":\"AC1\",\"statement\":\"Trees and a barn are shown.\",\"quote\":\"Trees and a barn show\",\"source_refs\":[{\"start\":7,\"end\":7}],\"verify\":[{\"kind\":\"reviewer\",\"check\":\"the screen shows trees and a barn\"}],\"run_refs\":[]},{\"id\":\"AC2\",\"statement\":\"The cart drives with the arrow keys.\",\"quote\":\"the cart drives with the arrow keys\",\"source_refs\":[{\"start\":7,\"end\":7}],\"verify\":[{\"kind\":\"test\",\"check\":null}],\"run_refs\":[]},{\"id\":\"AC3\",\"statement\":\"The cart stops at the barn.\",\"quote\":\"The cart stops at the barn.\",\"source_refs\":[{\"start\":8,\"end\":8}],\"verify\":[{\"kind\":\"test\",\"check\":null}],\"run_refs\":[]}],\"verification_hints\":[],\"reproduction\":null,\"references\":[{\"text\":\"## Work\",\"source_refs\":[{\"start\":3,\"end\":3}]},{\"text\":\"1. Trees and a barn show; the cart drives with the arrow keys.\\n2. The cart stops at the barn.\",\"source_refs\":[{\"start\":7,\"end\":7},{\"start\":8,\"end\":8}]}],\"open_questions\":[],\"run_plan\":null,\"unused_lines\":[{\"text\":\"## Work\",\"source_refs\":[{\"start\":3,\"end\":3}]},{\"text\":\"## Acceptance\",\"source_refs\":[{\"start\":6,\"end\":6}]}]}");
 });

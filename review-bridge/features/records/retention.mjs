@@ -39,7 +39,6 @@ const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
 // control surface; never archived as orphans.
 const PROTECTED_ROOT_FILES = new Set([
   "CONTROL.json",
-  "classification-policy.json",
   "bounded-resume-state.json",
   "upgrade-in-progress.json",
   "worker.node.lock",

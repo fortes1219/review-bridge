@@ -5,3 +5,6 @@ coverage/
 *.sha256
 .tmp/
 
+.claude/
+.review-bridge/
+_fable-inbox/

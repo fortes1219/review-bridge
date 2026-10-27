@@ -8,7 +8,15 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { applyNeutralInstall, planNeutralInstall, rollbackFreshNeutralInstall, verifyNeutralInstall } from "../installer/neutral-install.mjs";
+import {
+  applyNeutralInstall,
+  fileSnapshot,
+  planNeutralInstall,
+  removeEmptyDirectories,
+  rollbackFreshNeutralInstall,
+  runtimeFingerprint,
+  verifyNeutralInstall,
+} from "../installer/neutral-install.mjs";
 
 async function workspace(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-neutral-test-"));
@@ -218,4 +226,41 @@ test("install rollback removes the agent files it wrote and restores AGENTS.md; 
   assert.deepEqual((await rollbackFreshNeutralInstall(again)).agent_files, { command: "kept_changed", agents: "kept_changed" });
   assert.match(await fsp.readFile(path.join(edited, "AGENTS.md"), "utf8"), /My own line\.\n$/);
   assert.match(await fsp.readFile(path.join(edited, ".claude", "commands", "review-bridge.md"), "utf8"), /edited\n$/);
+});
+
+async function tree(t, files, directories = []) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-tree-test-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  for (const directory of directories) await fsp.mkdir(path.join(root, ...directory.split("/")), { recursive: true });
+  for (const [name, text] of Object.entries(files)) {
+    await fsp.mkdir(path.dirname(path.join(root, ...name.split("/"))), { recursive: true });
+    await fsp.writeFile(path.join(root, ...name.split("/")), text);
+  }
+  return root;
+}
+
+// The expected values were recorded when these walks called themselves; the queue and stack
+// versions are held to the same output.
+const NESTED_FILES = { "B.txt": "b\n", "a.txt": "a\n", "a/x.txt": "ax\n", "a/b/c/deep.txt": "deep\n", "a-b/z.txt": "z\n", "é.txt": "e\n" };
+
+test("a nested folder has the same runtime fingerprint and file snapshot as before the walk used a queue", async (t) => {
+  const root = await tree(t, NESTED_FILES, ["a/b/empty"]);
+  assert.equal(await runtimeFingerprint(root), "27a5bdb30a18abc5c20bc3ace360e026fc5d00e3fa447a1dfd5527e37fe2e9bb");
+  assert.deepEqual(await fileSnapshot(root), [
+    ["a-b/z.txt", "c865f6c5ab8d1b0bcd383a5e1e3879d22681c96bf462c269b7581d523fbe70ab"],
+    ["a.txt", "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7"],
+    ["a/b/c/deep.txt", "64896f89fd11190013b70103e603a1c5826e56b7fb7d2197ab279b0690043599"],
+    ["a/x.txt", "18b22c496be9a73d8aceeed68339bb1e93487725bedb32a8df0bc5a694a9854a"],
+    ["B.txt", "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f"],
+    ["é.txt", "a2bbdb2de53523b8099b37013f251546f3d65dbe7a0774fa41af0a4176992fd4"],
+  ]);
+});
+
+test("empty folders are removed deepest first, and the folder itself when nothing is left", async (t) => {
+  const mixed = await tree(t, { "keep/file.txt": "k\n" }, ["keep/empty1/empty2", "gone/g1/g2", "gone2"]);
+  await removeEmptyDirectories(mixed);
+  assert.deepEqual(await fsp.readdir(mixed, { recursive: true }).then((names) => names.map((name) => name.replaceAll("\\", "/")).sort()), ["keep","keep/file.txt"]);
+  const empty = await tree(t, {}, ["e1/e2/e3"]);
+  await removeEmptyDirectories(empty);
+  assert.equal(await fsp.stat(empty).then(() => "kept", () => "removed"), "removed");
 });

@@ -101,15 +101,19 @@ function refProblems(refs, lineCount, at) {
 }
 
 // Every source_refs array in the object except unused_lines, with its location for messages.
+// Walked with a stack; children are pushed last first, so the list keeps document order.
 function everyRefList(value, at = "$", found = []) {
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => everyRefList(item, at + "[" + index + "]", found));
-    return found;
-  }
-  if (!value || typeof value !== "object") return found;
-  for (const [key, child] of Object.entries(value)) {
-    if (key === "source_refs") found.push({ refs: child, at: at + ".source_refs" });
-    else if (key !== "unused_lines") everyRefList(child, at + "." + key, found);
+  const stack = [{ value, at }];
+  while (stack.length) {
+    const { value: item, at: where, refs } = stack.pop();
+    if (refs) {
+      found.push({ refs: item, at: where });
+    } else if (Array.isArray(item)) {
+      for (let index = item.length - 1; index >= 0; index -= 1) stack.push({ value: item[index], at: where + "[" + index + "]" });
+    } else if (item && typeof item === "object") {
+      const children = Object.entries(item).filter(([key]) => key !== "unused_lines");
+      for (const [key, child] of children.reverse()) stack.push({ value: child, at: where + "." + key, refs: key === "source_refs" });
+    }
   }
   return found;
 }
@@ -130,17 +134,33 @@ function range(ref) {
   return Array.from({ length: Math.max(0, ref.end - ref.start + 1) }, (_, offset) => ref.start + offset);
 }
 
+// Depth first with a stack: trail holds the runs still open and next the dependency each goes to
+// next. A run is done once all its dependencies are.
 function cycleProblems(runs) {
   const byName = new Map(runs.map((run) => [run.name, run]));
   const done = new Set();
-  const visit = (name, trail) => {
-    if (trail.includes(name)) return [trail.slice(trail.indexOf(name)).concat(name).join(" -> ")];
-    if (done.has(name) || !byName.has(name)) return [];
-    const found = byName.get(name).depends_on.flatMap((next) => visit(next, [...trail, name]));
-    done.add(name);
-    return found;
-  };
-  return [...new Set(runs.flatMap((run) => visit(run.name, [])))].map((cycle) => "$.run_plan: dependency cycle " + cycle);
+  const cycles = [];
+  for (const run of runs) {
+    const trail = [];
+    const next = [];
+    const enter = (name) => {
+      if (trail.includes(name)) cycles.push(trail.slice(trail.indexOf(name)).concat(name).join(" -> "));
+      else if (!done.has(name) && byName.has(name)) { trail.push(name); next.push(0); }
+    };
+    enter(run.name);
+    while (trail.length) {
+      const top = trail.length - 1;
+      const dependsOn = byName.get(trail[top]).depends_on;
+      if (next[top] < dependsOn.length) {
+        next[top] += 1;
+        enter(dependsOn[next[top] - 1]);
+      } else {
+        done.add(trail.pop());
+        next.pop();
+      }
+    }
+  }
+  return [...new Set(cycles)].map((cycle) => "$.run_plan: dependency cycle " + cycle);
 }
 
 // A dependency must be stated in the run's own lines: its quote is verbatim there and names
@@ -215,12 +235,31 @@ export async function checkTranslation(value, { lines, test }) {
 }
 
 // Bridge copies the referenced lines into every part; the model wrote only conditions and questions.
+// Walked with a stack, as canonical is: each open array or object closes once its children are
+// copied. source_refs is kept as it is.
 function copyText(value, lines) {
-  if (Array.isArray(value)) return value.map((item) => copyText(item, lines));
-  if (!value || typeof value !== "object") return value;
-  const copied = Object.fromEntries(Object.entries(value).map(([key, child]) => [key, key === "source_refs" ? child : copyText(child, lines)]));
-  const isPart = Object.keys(value).length === 1 && Array.isArray(value.source_refs);
-  return isPart ? { text: linesOf(lines, value.source_refs).join("\n"), source_refs: value.source_refs } : copied;
+  const isTree = (item) => Boolean(item) && typeof item === "object";
+  const open = (source) => ({ source, keys: Array.isArray(source) ? [...source.keys()] : Object.keys(source), values: [] });
+  const close = ({ source, keys, values }) => {
+    if (Array.isArray(source)) return values;
+    const isPart = keys.length === 1 && Array.isArray(source.source_refs);
+    return isPart ? { text: linesOf(lines, source.source_refs).join("\n"), source_refs: source.source_refs } : Object.fromEntries(keys.map((key, index) => [key, values[index]]));
+  };
+  if (!isTree(value)) return value;
+  const stack = [open(value)];
+  for (;;) {
+    const top = stack[stack.length - 1];
+    if (top.values.length < top.keys.length) {
+      const key = top.keys[top.values.length];
+      const child = top.source[key];
+      if (isTree(child) && key !== "source_refs") stack.push(open(child));
+      else top.values.push(child);
+      continue;
+    }
+    stack.pop();
+    if (!stack.length) return close(top);
+    stack[stack.length - 1].values.push(close(top));
+  }
 }
 
 export function buildContract({ workPackage, lines, translation, translator, checker }) {
