@@ -67,7 +67,6 @@ async function plan(runtime, { task, allowedPaths, id = "wp-" + Math.random().to
     owner: "Fortes",
     workPackage: id,
     breakpoint: "return after review",
-    changeTypes: "code",
     allowedPaths,
     rounds: 1,
     callTimeout: 300_000,
@@ -113,7 +112,7 @@ test("T8 an explicit --allow-paths must exist and stay out of the forbidden list
   assert.deepEqual(outside.scope.allowed_paths, ["README.md"]);
   // Legacy inline task without markers still needs an explicit scope.
   await assert.rejects(createWorkPackagePlan({
-    paths: r.paths, task: "plain task", owner: "o", workPackage: "legacy-1", breakpoint: "b", changeTypes: "code",
+    paths: r.paths, task: "plain task", owner: "o", workPackage: "legacy-1", breakpoint: "b",
     rounds: 1, callTimeout: 300_000, outPath: path.join(r.paths.privateRoot, "legacy.plan.json"),
   }), /allowed path is required/);
 });

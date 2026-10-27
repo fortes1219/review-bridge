@@ -120,7 +120,8 @@ if (process.argv.includes("--output-schema")) {
 await fsp.writeFile(out, "HARD_STOP_REQUIRED: false\\nREVIEW_GATE: " + (mode === "fail" ? "FAIL" : "PASS") + "\\n");
 `;
 
-async function makeRuntime(t, override = { schema_version: 5 }, { git = false } = {}) {
+// withTests: the project's rules give the test command (npm test); without, its tests are not configured.
+async function makeRuntime(t, override = { schema_version: 5 }, { git = false, withTests = false } = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-bounded-"));
   // T0-05 D2.5: anything written inside the repo outside README.md is a scope violation, so the
   // fake CLIs and their argument dump live next to the repo, not in it.
@@ -130,7 +131,7 @@ async function makeRuntime(t, override = { schema_version: 5 }, { git = false } 
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, {
     schema_version: 4, active_runs: "derive_from_run_projections",
-    test: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
+    test: { profile_id: "node-backend", rules: withTests ? [{ command: "npm test", package_script: "test" }] : [] },
   });
   await writeJson(paths.policyOverridePath, override);
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# fixture\n", "utf8");
@@ -151,8 +152,8 @@ async function makeRuntime(t, override = { schema_version: 5 }, { git = false } 
   return { repoRoot, toolsRoot, paths, claude, codex };
 }
 
-async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, changeTypes = "docs", gateExit = 0, reviewPrompt = null, git = false, beforeResume = null } = {}) {
-  const runtime = await makeRuntime(t, override, { git });
+async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, withTests = false, gateExit = 0, reviewPrompt = null, git = false, beforeResume = null } = {}) {
+  const runtime = await makeRuntime(t, override, { git, withTests });
   if (reviewPrompt !== null) {
     await fsp.mkdir(path.dirname(runtime.paths.reviewPromptOverridePath), { recursive: true });
     await fsp.writeFile(runtime.paths.reviewPromptOverridePath, reviewPrompt, "utf8");
@@ -165,7 +166,6 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     owner: "Human Owner",
     workPackage: "s2-04-fixture",
     breakpoint: "return after review",
-    changeTypes,
     allowedPaths: "README.md",
     rounds: maxCalls,
     callTimeout: 60_000,
@@ -360,7 +360,6 @@ test("a malformed writer model override is refused", async (t) => {
     owner: "Human Owner",
     workPackage: "s2-06-fixture",
     breakpoint: "return after review",
-    changeTypes: "docs",
     allowedPaths: "README.md",
     rounds: 1,
     callTimeout: 60_000,
@@ -379,7 +378,7 @@ test("P4 stream output: task.input, read and usage are recorded; the result file
   assert.equal(events[1].path, "README.md");
   assert.equal(events[1].outside_list, null); // legacy inline task: no read list, nothing to compare against
   assert.equal(events[2].tokens.cache_read, 1000);
-  assert.equal(events[4].kind, "not_applicable"); // docs-only: the tests are recorded, nothing runs
+  assert.equal(events[4].kind, "not_configured"); // no test rule: the tests are recorded as not configured, nothing runs
   assert.equal(events[6].role, "reviewer");
   assert.equal(events[6].source, "cli_json"); // the inline fake reports usage, as a real CLI does
   const writer = JSON.parse(await fsp.readFile(status.latest_state.writer_stdout_path, "utf8"));
@@ -507,7 +506,7 @@ test("P6 a project override may lower max_turns but never raise it", async (t) =
 });
 
 test("R5 the tests run after the writer and before the review; its result reaches review.input and the run", async (t) => {
-  const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code" });
+  const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", withTests: true });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
   assert.equal(run.conclusion, "success");
@@ -527,17 +526,18 @@ test("R5 the tests run after the writer and before the review; its result reache
   assert.equal(events.find((event) => event.event === "task.input").test.label, "跑現有測試：npm test");
 });
 
-test("R5b docs-only work records not_applicable and runs nothing", async (t) => {
+test("R5b a project whose rules give no test command records not_configured, runs nothing, and still works", async (t) => {
   const { runtime, exitCode, run } = await start(t, { claudeMode: "stream" });
   assert.equal(exitCode, 0);
+  assert.equal(run.conclusion, "success");
   assert.equal(run.test_passed, null);
   const gate = (await readIoEvents(runtime.paths, run.run_id)).find((event) => event.event === "test_result");
-  assert.equal(gate.kind, "not_applicable");
-  assert.equal(gate.label, "不跑測試（純文件）");
+  assert.equal(gate.kind, "not_configured");
+  assert.equal(gate.label, "沒有設定測試");
 });
 
 test("R6 failed tests skip the review and goes back to the writer as fix.input; the budget still ends the run", async (t) => {
-  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 3, maxCalls: 1 });
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", withTests: true, gateExit: 3, maxCalls: 1 });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
   assert.equal(run.closed_reason, "rounds_exhausted");
@@ -550,7 +550,7 @@ test("R6 failed tests skip the review and goes back to the writer as fix.input; 
 });
 
 test("R6b the second writer call gets the test result in its handoff, not a finding", async (t) => {
-  const { runtime, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 3, maxCalls: 2 });
+  const { runtime, error, run } = await start(t, { claudeMode: "stream", withTests: true, gateExit: 3, maxCalls: 2 });
   assert.equal(error, null);
   const events = await readIoEvents(runtime.paths, run.run_id);
   const fix = events.find((event) => event.event === "fix.input");
@@ -566,7 +566,7 @@ test("R6b the second writer call gets the test result in its handoff, not a find
 });
 
 test("R7 two test failures on an unchanged delta are a loop: hard_stop, no third writer call", async (t) => {
-  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2, git: true });
+  const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", withTests: true, gateExit: 1, maxCalls: 2, git: true });
   assert.equal(error, null);
   assert.equal(exitCode, 0);
   assert.equal(run.conclusion, "action_required");
@@ -580,7 +580,7 @@ test("R7 two test failures on an unchanged delta are a loop: hard_stop, no third
 // Without Git there is no list of changes, so two failures in a row cannot be shown to be "nothing
 // changed"; the call budget ends the run instead of a loop verdict.
 test("R7b without Git two test failures are not called a loop; the budget ends the run", async (t) => {
-  const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", changeTypes: "code", gateExit: 1, maxCalls: 2 });
+  const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", withTests: true, gateExit: 1, maxCalls: 2 });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
   assert.equal(run.closed_reason, "rounds_exhausted");
@@ -589,7 +589,7 @@ test("R7b without Git two test failures are not called a loop; the budget ends t
 });
 
 test("R9 the tests passed but the reviewer failed: correction_pending with test_passed still true", async (t) => {
-  const { runtime, exitCode, run, status } = await start(t, { claudeMode: "stream", changeTypes: "code", codexMode: "fail", maxCalls: 1 });
+  const { runtime, exitCode, run, status } = await start(t, { claudeMode: "stream", withTests: true, codexMode: "fail", maxCalls: 1 });
   assert.equal(exitCode, 76);
   assert.equal(status.latest_state.test_passed, true);
   assert.equal(status.latest_state.review_gate, "FAIL");

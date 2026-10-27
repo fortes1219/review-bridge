@@ -9,6 +9,7 @@
     "tokens_per_call": 1500000,
     "tokens": 4000000,
     "test_timeout": 600000,
+    "run_timeout": 21600000,
     "authorization_ttl": 86400000,
     "recovery_window": 86400000,
     "heartbeat_interval": 5000,

@@ -20,7 +20,7 @@ import { assertUnder } from "../../utils/pathGuard.mjs";
 import { validateJobPolicy } from "../../policy/policyChecks.mjs";
 import { buildReadList } from "./writerPrompt.mjs";
 import { loadContract } from "./contract.mjs";
-import { clearProcess, recordProcessOrKill, runMustStop } from "./processRecords.mjs";
+import { callTimeLeft, clearProcess, recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 import {
   controllerScopeResult,
   parseCodexJsonl,
@@ -88,7 +88,6 @@ export async function buildReviewInput({ paths, job, control }) {
     priority: job.priority,
     ...work,
     scope: {
-      change_types: workPackage.scope?.change_types || [],
       allowed_paths: workPackage.scope?.allowed_paths || [],
       forbidden_paths: workPackage.scope?.forbidden_paths || [],
     },
@@ -241,6 +240,17 @@ export async function runReviewWorker({
             "-",
           ];
           const invocation = adapter.buildInvocation("codex", reviewerExecutable, reviewerArgs);
+          // The review has no limit of its own; it is cut to what is left of the run's time. With
+          // nothing left the run is closed as timed out and the job as stopped, before any call.
+          const reviewTimeout = await callTimeLeft(paths, runId, undefined);
+          if (reviewTimeout === null) {
+            const stoppedJob = { ...job, status: "stopped", completed_at: new Date().toISOString() };
+            await writeJson(runningPath, stoppedJob);
+            await writeJson(metadataPath, stoppedJob);
+            await fsp.rename(runningPath, failedPath);
+            outcomes.push({ job_id: jobId, status: "stopped" });
+            continue;
+          }
           // The reviewer's pid is recorded like the writer's, so a stop during the review reaches it.
           const processResult = await runProcess({
             invocation,
@@ -248,6 +258,7 @@ export async function runReviewWorker({
             input: prompt,
             stdoutPath,
             stderrPath,
+            timeoutMs: reviewTimeout,
             onSpawn: runId ? (pid) => recordProcessOrKill(paths, runId, { pid, role: "reviewer", provider: "codex", job_id: jobId, call: job.call }) : null,
           });
           await clearProcess(paths, runId);

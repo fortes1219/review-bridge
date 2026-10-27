@@ -3,6 +3,7 @@ import readline from "node:readline/promises";
 
 import { readJson } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
+import { BUDGET_KEYS } from "./workOrderFormat.mjs";
 import { assertCurrentPlan, runningVersions } from "./workPackage.mjs";
 
 // The model calls before the work, as the plan seals them; the human approves them with the plan.
@@ -20,12 +21,21 @@ export function decisionLine(workOrder) {
   return "Updates " + title + ": version " + (workOrder.from_version ?? 0) + " → " + workOrder.to_version + ", " + workOrder.changed_lines + " line(s) changed";
 }
 
+// Where each value the card shows came from, in the person's words.
+const SOURCE = Object.freeze({ cli: "flag", work_order: "work order", priority: "priority table", config: "config" });
+
+// The six budget values in their fixed order (a card read back from the database has its keys
+// reordered), each with where it came from: the work order, a flag, or the config.
+export function budgetLine(plan) {
+  return BUDGET_KEYS.map((key) => key + " " + plan.budget[key] + " (" + SOURCE[plan.budget_source[key]] + ")").join(", ");
+}
+
 // start's card: what the answer authorizes, in the words a person checks it by. Every line comes
 // from the sealed plan. The numbered acceptance conditions are written only after the answer (the
 // translation is part of the authorized work), so the card shows the work order as it is sealed.
 export async function startCard(paths, plan) {
   const replaced = await runningVersions(paths, plan);
-  const gate = plan.test?.kind === "command" ? "runs " + plan.test.command + " after each writer call" : "not needed for docs-only work";
+  const gate = plan.test?.kind === "command" ? "runs " + plan.test.command + " after each writer call" : "not configured (no test rule matched; the work starts without tests)";
   const scope = plan.scope.source === "explicit"
     ? plan.scope.allowed_paths.join(", ")
     : "the whole project except protected files (" + plan.scope.forbidden_paths.length + " patterns)";
@@ -33,10 +43,11 @@ export async function startCard(paths, plan) {
     "Work order:   " + plan.task_file,
     ...(plan.work_order ? ["              " + decisionLine(plan.work_order)] : []),
     "Stops:        " + plan.breakpoint,
-    "Changes:      " + plan.scope.change_types.join(", "),
     "Scope:        " + scope,
     "Tests:        " + gate,
-    "Budget:       " + plan.budget.rounds + " writer call(s), up to " + plan.budget.call_timeout / 60_000 + " minute(s) each",
+    "Priority:     " + plan.priority + " (" + SOURCE[plan.priority_source] + ")",
+    "Effort:       " + plan.effort + " (" + SOURCE[plan.effort_source] + "), for every writer call",
+    "Budget:       " + budgetLine(plan),
     ...(plan.contract_steps ? ["Contract:     " + contractStepsLine(plan.contract_steps).replace(/^Before the work: /, "")] : []),
     "Valid until:  " + plan.authorization_expires_at,
     ...replaced.map(({ runId, unchanged }) => (unchanged
@@ -63,10 +74,10 @@ export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask
     ...(plan.work_order ? ["Work order: " + decisionLine(plan.work_order)] : []),
     "Owner: " + plan.owner,
     "Breakpoint: " + plan.breakpoint,
-    "Allowed change types: " + plan.scope.change_types.join(", "),
     "Allowed paths: " + plan.scope.allowed_paths.join(", "),
-    "Writer budget: " + plan.budget.rounds + " call(s), "
-      + plan.budget.call_timeout / 60_000 + " minute(s) per call",
+    "Priority: " + plan.priority + " (" + SOURCE[plan.priority_source] + ")",
+    "Writer effort: " + plan.effort + " (" + SOURCE[plan.effort_source] + ")",
+    "Budget: " + budgetLine(plan),
     ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
     "Authorization expires at: " + plan.authorization_expires_at,
     ...replaced.map(({ runId, unchanged }) => (unchanged

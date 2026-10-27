@@ -12,13 +12,11 @@ import {
 import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
 import { loadContract } from "./contract.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
-import { TestError } from "./test.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { queueStatus, waitForPending } from "./reviewQueue.mjs";
 import {
   authorizeWorkPackage,
   cancelWorkPackage,
-  CHANGE_TYPES,
   closeFailedStart,
   createWorkPackagePlan,
   optionAgainstCard,
@@ -29,47 +27,30 @@ import {
 import {
   canonicalTaskFile, cardFor, cardUsed, clearProject, ensureProject, identifyWorkOrder, markCardShown, recordCard, recordContract, recordStart, withdrawCard,
 } from "./workOrderRecords.mjs";
+import { parseWorkOrder } from "./workOrderFormat.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
 
 export const DEFAULT_BREAKPOINT = "after the review";
-const DEFAULT_CHANGE_TYPES = Object.freeze(["docs"]);
 
 // For a work-order file the rest has defaults: the work package is the file name, the plan goes
-// to review-queue/<name>.plan.json, the owner is the signed-in OS user. The breakpoint and the
-// change types are asked at a terminal with a default that Enter takes; the work order has no
-// field that names its change types, so they are never guessed from its text. Without a terminal
-// both are required. The prompt library is loaded only then, like every other dependency of the
-// runtime.
+// to review-queue/<name>.plan.json, the owner is the signed-in OS user, and priority, effort and
+// budget come from the work order or the policy. The breakpoint is asked at a terminal with a
+// default that Enter takes; without a terminal start takes the default and work-plan requires it.
+// The prompt library is loaded only then, like every other dependency of the runtime.
 async function askMissing(options, clack) {
-  const asked = {};
-  if (!options.breakpoint) {
-    const answer = await clack.text({
-      message: "Where should the work stop and come back to you?",
-      placeholder: DEFAULT_BREAKPOINT,
-      defaultValue: DEFAULT_BREAKPOINT,
-    });
-    if (clack.isCancel(answer)) return null;
-    asked.breakpoint = answer;
-  }
-  if (!options.changeTypes) {
-    const answer = await clack.multiselect({
-      message: "What will this work change?",
-      options: CHANGE_TYPES.map((type) => ({ value: type, label: type })),
-      initialValues: [...DEFAULT_CHANGE_TYPES],
-      required: true,
-    });
-    if (clack.isCancel(answer)) return null;
-    asked.changeTypes = answer.join(",");
-  }
-  return asked;
+  const answer = await clack.text({
+    message: "Where should the work stop and come back to you?",
+    placeholder: DEFAULT_BREAKPOINT,
+    defaultValue: DEFAULT_BREAKPOINT,
+  });
+  return clack.isCancel(answer) ? null : { breakpoint: answer };
 }
 
 const interactive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
-// The plan step work-plan, start and resume share: { plan }, { cancelled }, or { refused } when
-// the tests have no approved command for non-docs work (T0-06 G2.3; nothing is written). At a terminal
-// a missing breakpoint or change types are asked; without one, start takes their defaults (an
-// agent runs it, and the card it prints shows them), while work-plan still requires them.
+// The plan step work-plan, start and resume share: { plan } or { cancelled }. At a terminal a
+// missing breakpoint is asked; without one, start takes the default (an agent runs it, and the card
+// it prints shows it), while work-plan still requires it.
 const workPackageName = (options) => options.workPackage || (options.taskFile ? path.basename(options.taskFile, path.extname(options.taskFile)) : null);
 const planPathFor = (paths, options) => {
   const named = workPackageName(options);
@@ -98,7 +79,7 @@ async function planFromOptions({ paths, options, command }) {
   if (!outPath) throw new Error(command + " needs a work order. Run: review-bridge " + command + " .review-bridge/work-packages/<file>.md");
   if (options.update !== undefined && options.asNew) throw new Error("Give --update <work_order_id> or --as-new, not both.");
   let answers = {};
-  if (options.taskFile && (!options.breakpoint || !options.changeTypes) && interactive()) {
+  if (options.taskFile && !options.breakpoint && interactive()) {
     const clack = await import("@clack/prompts");
     answers = await askMissing(options, clack);
     if (answers === null) {
@@ -108,58 +89,43 @@ async function planFromOptions({ paths, options, command }) {
   }
   const defaults = command === "start" && !interactive();
   const breakpoint = options.breakpoint || answers.breakpoint || (defaults ? DEFAULT_BREAKPOINT : undefined);
-  const changeTypes = options.changeTypes || answers.changeTypes || (defaults ? DEFAULT_CHANGE_TYPES.join(",") : undefined);
   if (options.taskFile && !breakpoint) throw new Error("A breakpoint is required. Add --breakpoint \"<where to stop>\" or answer the prompt.");
-  if (options.taskFile && !changeTypes) throw new Error("The change types are required. Add --change-types " + DEFAULT_CHANGE_TYPES.join(",") + " (any of " + CHANGE_TYPES.join(", ") + ") or answer the prompt.");
   const text = options.taskFile ? await fsp.readFile(path.resolve(options.taskFile), "utf8").catch(() => null) : null;
+  // A work order Bridge cannot split is refused, with its lines, before anything about it is recorded.
+  if (text !== null) parseWorkOrder(text.trim());
   const records = text !== null ? await openRecords(paths) : null;
   const workOrder = records ? await identifyWorkOrder(records.db, {
     projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), repoRoot: paths.repoRoot,
     update: options.update, asNew: Boolean(options.asNew),
   }) : null;
-  try {
-    const plan = await createWorkPackagePlan({
-      paths,
-      task: options.task,
-      taskFile: options.taskFile,
-      owner: options.owner || (options.taskFile ? os.userInfo().username : undefined),
-      workPackage: named,
-      breakpoint,
-      changeTypes,
-      allowedPaths: options.allowedPaths,
-      rounds: options.rounds ?? 2,
-      callTimeout: options.callTimeout ?? 480_000,
-      outPath,
-      workOrder,
-    });
-    if (records) await recordCard(records.db, { projectId: records.projectId, plan, snapshot: (await loadOrCreatePolicySnapshot(paths)).snapshot, shown: false });
-    return { plan, records };
-  } catch (error) {
-    if (!(error instanceof TestError)) throw error;
-    return { refused: error };
-  }
-}
-
-function testRefusal(error, json) {
-  return json
-    ? JSON.stringify({ valid: false, reason: error.reason, checked: error.checked }, null, 2) + "\n"
-    : error.plain() + "\nOnly docs-only work can start without one. Add a test script to the project, or plan the work as docs: --change-types docs\n";
+  // A flag given at the terminal comes before the work order's own budget (settleWorkOrder).
+  const plan = await createWorkPackagePlan({
+    paths,
+    task: options.task,
+    taskFile: options.taskFile,
+    owner: options.owner || (options.taskFile ? os.userInfo().username : undefined),
+    workPackage: named,
+    breakpoint,
+    allowedPaths: options.allowedPaths,
+    rounds: options.rounds,
+    callTimeout: options.callTimeout,
+    outPath,
+    workOrder,
+  });
+  if (records) await recordCard(records.db, { projectId: records.projectId, plan, snapshot: (await loadOrCreatePolicySnapshot(paths)).snapshot, shown: false });
+  return { plan, records };
 }
 
 export async function planWork({ paths, options }) {
   const planned = await planFromOptions({ paths, options, command: "work-plan" });
   if (planned.cancelled) return 1;
-  if (planned.refused) {
-    process.stdout.write(options.plain ? planned.refused.plain() + "\n" : testRefusal(planned.refused, options.json));
-    return 1;
-  }
   const { plan } = planned;
   // --plain is the human summary (C5.2); --json is what scripts and tests read.
   if (options.plain) {
     process.stdout.write([
       plan.task_file ? "工單：" + plan.task_file : "工作包：" + plan.work_package_id,
       "範圍：" + ({ default: "預設（整個專案減禁改清單）", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
-      "驗收：" + (plan.test?.kind === "command" ? "會跑 " + plan.test.command + "（profile 核准）" : plan.test?.label || "未定"),
+      "驗收：" + (plan.test?.kind === "command" ? "會跑 " + plan.test.command + "（profile 核准）" : plan.test?.label || "沒有設定測試"),
       ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
       "plan：" + plan.plan_path,
       "sha：" + plan.plan_sha256,
@@ -177,7 +143,10 @@ export async function planWork({ paths, options }) {
       breakpoint: plan.breakpoint,
       scope: plan.scope,
       test: plan.test,
+      priority: plan.priority,
+      effort: plan.effort,
       budget: plan.budget,
+      budget_source: plan.budget_source,
       next_command: "work-start --plan <plan_path>",
     }, null, 2) + "\n");
     return 0;
@@ -384,7 +353,6 @@ async function cardForYes({ paths, planPath, taskFile, options, again }) {
 
 async function planOrSay({ paths, options, command }) {
   const planned = await planFromOptions({ paths, options, command });
-  if (planned.refused) process.stdout.write(testRefusal(planned.refused, false));
   if (planned.plan) write("Plan written to " + shownPath(planned.plan.plan_path));
   return planned.plan || null;
 }
@@ -406,7 +374,8 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, gua
 
 // `resume <run_id>`: a stopped run is closed for good (its records were sealed by the controller
 // that ran it, which no later process can vouch for), so the work order is carried on as a new
-// run with that run's own stop point, change types, scope and budget, after the same card and yes.
+// run with that run's own stop point and scope, after the same card and yes. Its priority, effort and
+// budget come from the work order again, as they did for the run it carries on.
 export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdapter, guard, reviewerCheck }) {
   if (!runId) throw new Error("resume needs a run id. Run: review-bridge status to see the runs, then review-bridge resume <run_id>");
   if (options.fakeScenario && !options.fakeCli) {
@@ -430,10 +399,7 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
       taskFile,
       workPackage: workPackage.work_package_id,
       breakpoint: workPackage.breakpoint,
-      changeTypes: workPackage.scope.change_types.join(","),
       allowedPaths: workPackage.scope.source === "explicit" ? workPackage.scope.allowed_paths.join(",") : undefined,
-      rounds: workPackage.budget.rounds,
-      callTimeout: workPackage.budget.call_timeout,
       outPath: planPath,
     },
   });

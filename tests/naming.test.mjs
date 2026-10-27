@@ -64,7 +64,7 @@ test("the shipped policy has exactly the keys of the policy's priority table and
   assert.deepEqual(keyPaths(readJson("config/default-policy.json")), new Set([
     "schema_version", "policy_schema_version", "package_policy_id",
     "limits", "limits.rounds", "limits.call_timeout", "limits.max_turns", "limits.tokens_per_call", "limits.tokens",
-    "limits.test_timeout", "limits.authorization_ttl", "limits.recovery_window", "limits.heartbeat_interval",
+    "limits.test_timeout", "limits.run_timeout", "limits.authorization_ttl", "limits.recovery_window", "limits.heartbeat_interval",
     "limits.lock_stale", "limits.reconcile_grace", "limits.reconcile_guard_ttl",
     "writer", "writer.mode", "writer.disallowed_tools", "writer.self_review",
     "hard_stops",
@@ -80,10 +80,9 @@ test("every enum in the schemas holds the new values", () => {
     for (const [at, values] of enumsOf(readJson(path.join("features", "workOrder", "schemas", name)))) actual.set(name + " " + at, values);
   }
   assert.deepEqual(actual, new Map([
-    ["contract.check.schema.json properties.fields.items.properties.field", [
-      "ticket", "context", "outcome", "requested_work", "scope_notes.include", "scope_notes.exclude", "scope_notes.must_keep",
-      "scope_notes.expected_locations", "run_plan", "verification_hints", "reproduction", "references", "unused_lines",
-    ]],
+    ["contract.schema.json properties.ticket.properties.priority", ["low", "medium", "high", "urgent", null]],
+    ["contract.schema.json properties.ticket.properties.effort", ["low", "medium", "high", null]],
+    ["contract.schema.json properties.run_plan.properties.runs.items.properties.effort", ["low", "medium", "high", null]],
     ["contract.schema.json properties.acceptance.items.properties.verify.items.properties.kind", ["test", "reviewer"]],
     ["contract.translation.schema.json properties.acceptance.items.properties.verify.items.properties.kind", ["test", "reviewer"]],
     ["review.result.schema.json properties.findings.items.properties.severity", ["HIGH", "MEDIUM", "LOW"]],
@@ -118,6 +117,8 @@ test("after every migration the tables and CHECK values carry the new names", { 
   assert.ok((await columns("acceptance_rows")).has("test"));
   assert.ok(!(await columns("runs")).has("outcome"));
   assert.ok((await columns("runs")).has("delivered_at"));
+  assert.ok((await columns("runs")).has("timeout_at"));
+  assert.ok((await columns("runs")).has("run_deadline_at"), "the recovery deadline stays beside the run's time limit");
 
   // The quoted values of one CHECK, as PostgreSQL itself prints the constraint.
   const checkValues = async (table, name) => {
@@ -128,6 +129,7 @@ test("after every migration the tables and CHECK values carry the new names", { 
   };
   assert.deepEqual(await checkValues("runs", "runs_status_check"), new Set(["in_progress", "completed"]));
   assert.deepEqual(await checkValues("runs", "runs_conclusion_check"), new Set(["success", "failure", "cancelled", "timed_out", "action_required"]));
+  assert.deepEqual(await checkValues("test_results", "test_results_kind_check"), new Set(["command", "not_configured"]));
   const types = await checkValues("run_events", "run_events_type_check");
   assert.ok(types.has("test_result"));
   assert.ok(!types.has("gate_a_result"));

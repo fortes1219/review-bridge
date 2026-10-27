@@ -58,14 +58,19 @@ async function freePort() {
   return port;
 }
 
+// The installed template as a work order, with package.json in its references block.
+async function workOrderFromTemplate(root, order) {
+  const template = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), "utf8");
+  await fsp.writeFile(order, template.replace("- [Links, paths, designs, related work orders]", "- package.json"));
+}
+
 async function planFakeWork(root, bridge, name = "stop") {
   const order = path.join(root, ".review-bridge", "work-packages", name + ".md");
-  await fsp.copyFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), order);
-  await fsp.appendFile(order, "- package.json\n");
+  await workOrderFromTemplate(root, order);
   const id = name + "-1";
   const planArg = ".review-bridge/review-queue/" + id + ".plan.json";
   const planned = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/" + name + ".md", "--owner", "Fortes", "--work-package", id,
-    "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000",
+    "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000",
     "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(root, planArg));
@@ -134,22 +139,24 @@ test("P7 stop: unknown and finished runs exit 1; a running writer is killed and 
 test("live: a fake work-start leaves task.input, read and usage events and an injected prompt", async (t) => {
   const { root, bridge, paths } = await install(t);
   const { plan, planArg } = await planFakeWork(root, bridge);
-  // T0-06 R1/R3 on the CLI: the plain summary names the sealed command; JSON carries it; no entry point refuses.
+  // T0-06 R1/R3 on the CLI: the plain summary names the sealed command; JSON carries it; no entry point
+  // still plans, and says the tests are not configured.
   assert.equal(plan.test.command, "npm test");
   const plainOut = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-plain",
-    "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000",
+    "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000",
     "--out", ".review-bridge/review-queue/stop-plain.plan.json", "--plain"]);
   assert.equal(plainOut.status, 0, plainOut.stderr);
   assert.match(plainOut.stdout, /驗收：會跑 npm test（profile 核准）/);
   const manifest = await fsp.readFile(path.join(root, "package.json"), "utf8");
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo" }));
-  const refused = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-refused",
-    "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000",
-    "--out", ".review-bridge/review-queue/stop-refused.plan.json", "--plain"]);
-  assert.equal(refused.status, 1);
-  assert.match(refused.stdout, /沒找到 profile 核准的測試入口/);
-  assert.match(refused.stdout, /npm test：package\.json 沒有 scripts\.test/);
-  assert.equal(await fsp.stat(path.join(root, ".review-bridge", "review-queue", "stop-refused.plan.json")).catch(() => null), null);
+  const untested = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-untested",
+    "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000",
+    "--out", ".review-bridge/review-queue/stop-untested.plan.json", "--plain"]);
+  assert.equal(untested.status, 0, untested.stderr);
+  assert.match(untested.stdout, /驗收：沒有設定測試/);
+  const untestedPlan = await readJson(path.join(root, ".review-bridge", "review-queue", "stop-untested.plan.json"));
+  assert.equal(untestedPlan.test.kind, "not_configured");
+  assert.deepEqual(untestedPlan.test.checked, [{ command: "npm test", reasons: ["package.json 沒有 scripts.test"] }]);
   await fsp.writeFile(path.join(root, "package.json"), manifest);
   const started = bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli", "--json"]);
   assert.equal(started.status, 0, started.stderr + started.stdout);
@@ -255,10 +262,9 @@ test("S4b the rebuild commands in a needs-fix result run as written in sh and in
   const { root, bridge, paths } = await install(t);
   const breakpoint = "it's \"quoted\" $x `y` 中文 done";
   const order = path.join(root, ".review-bridge", "work-packages", "quote.md");
-  await fsp.copyFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), order);
-  await fsp.appendFile(order, "- package.json\n");
+  await workOrderFromTemplate(root, order);
   const planned = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/quote.md", "--owner", "Fortes O'Neil", "--work-package", "quote-1",
-    "--breakpoint", breakpoint, "--change-types", "code", "--allow-paths", "package.json", "--rounds", "1", "--call-timeout", "120000",
+    "--breakpoint", breakpoint, "--allow-paths", "package.json", "--rounds", "1", "--call-timeout", "120000",
     "--out", ".review-bridge/review-queue/quote-1.plan.json"]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(root, ".review-bridge", "review-queue", "quote-1.plan.json"));
@@ -290,7 +296,6 @@ test("S4b the rebuild commands in a needs-fix result run as written in sh and in
       assert.equal(rebuilt.task_file, plan.task_file);
       assert.equal(rebuilt.owner, "Fortes O'Neil");
       assert.equal(rebuilt.breakpoint, breakpoint);
-      assert.deepEqual(rebuilt.scope.change_types, plan.scope.change_types);
       // Codex 2026-10-14: the explicit scope survives the rebuild instead of widening.
       assert.equal(rebuilt.scope.source, "explicit");
       assert.deepEqual(rebuilt.scope.allowed_paths, ["package.json"]);

@@ -164,7 +164,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     profile: { id: profile.profile_id, label: profile.display_name, sha256: sha256(JSON.stringify(profile)) },
     detection,
     runtime_sha256: await runtimeFingerprint(),
-    work_template_sha256: sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md"))),
+    work_template_sha256: await shippedTemplateHashes(),
     rules_sha256: sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "rules.md"))),
     git: boundary,
     agent_files: agentFiles,
@@ -357,8 +357,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
     }));
     await writeJson(path.join(privateRoot, "review-bridge", "policy.override.json"), projectPolicyOverride(profile));
     await fsp.mkdir(path.join(privateRoot, "work-packages"), { recursive: true });
-    await fsp.copyFile(path.join(packageRoot, "project-templates", "work-package.md"),
-      path.join(privateRoot, "work-packages", "TEMPLATE.md"));
+    for (const template of TEMPLATES) await fsp.copyFile(templateSource(template), inPrivate(privateRoot, template.relative));
     await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"),
       path.join(privateRoot, "review-bridge", "rules.md"));
     for (const name of ["pending", "running", "done", "failed", "work-packages", "authorizations",
@@ -471,10 +470,13 @@ export async function verifyNeutralInstall(target) {
     if (!config.retention || typeof config.retention !== "object") throw new Error("Neutral install retention settings are invalid.");
     if (config.retention.days !== undefined) validateRetentionDays(config.retention.days);
   }
-  // T0-10: TEMPLATE.md is owner-editable (an upgrade keeps an edited one); it only has to exist.
-  // work_template_sha256 records the template this version shipped, to tell an edited one apart.
-  const templateText = await fsp.readFile(path.join(privateRoot, "work-packages", "TEMPLATE.md"), "utf8").catch(() => null);
-  if (!templateText?.trim()) throw new Error("Neutral work template is missing or empty (.review-bridge/work-packages/TEMPLATE.md).");
+  // T0-10: each work-order template is owner-editable (an upgrade keeps an edited one); each one the
+  // install recorded only has to exist. work_template_sha256 records the templates this version
+  // shipped, to tell an edited one apart.
+  for (const relative of Object.keys(recordedTemplateHashes(manifest))) {
+    const templateText = await fsp.readFile(inPrivate(privateRoot, relative), "utf8").catch(() => null);
+    if (!templateText?.trim()) throw new Error("Neutral work template is missing or empty (.review-bridge/" + relative + ").");
+  }
   // rules.md is owner-editable: it must exist and stay within one page; its content is not pinned.
   const rulesText = await fsp.readFile(path.join(privateRoot, "review-bridge", "rules.md"), "utf8").catch(() => null);
   if (rulesText === null) throw new Error("Neutral rules digest is missing (.review-bridge/review-bridge/rules.md).");
@@ -1330,8 +1332,26 @@ const IDENTITY_KEYS = Object.freeze(["project_id"]);
 // Keys an earlier Bridge wrote and no longer uses; an upgrade removes them.
 const RETIRED_KEYS = Object.freeze(["state_contract"]);
 const CONFIG_RELATIVE = "review-bridge/bridge.json";
-const TEMPLATE_RELATIVE = "work-packages/TEMPLATE.md";
-const TEMPLATE_NEW_RELATIVE = "work-packages/TEMPLATE.new.md";
+// The work-order templates init copies and an upgrade keeps up to date: where each goes in the
+// project, and the template in the package it comes from. TEMPLATE.md is the English one.
+const TEMPLATES = Object.freeze([
+  { relative: "work-packages/TEMPLATE.md", source: "work-package.md" },
+  { relative: "work-packages/TEMPLATE.zh-TW.md", source: "work-package.zh-TW.md" },
+]);
+const templateSource = (template) => path.join(packageRoot, "project-templates", template.source);
+
+async function shippedTemplateHashes() {
+  const hashes = {};
+  for (const template of TEMPLATES) hashes[template.relative] = sha256(await fsp.readFile(templateSource(template)));
+  return hashes;
+}
+
+// One hash per template the install recorded. An install from before there were two recorded
+// TEMPLATE.md's alone, as a string.
+function recordedTemplateHashes(manifest) {
+  const recorded = manifest.work_template_sha256;
+  return typeof recorded === "string" ? { [TEMPLATES[0].relative]: recorded } : recorded || {};
+}
 const MANIFEST_RELATIVE = "review-bridge-install.json";
 
 function inPrivate(privateRoot, relative) {
@@ -1384,20 +1404,43 @@ async function defaultConfigFor(root, current, manifest) {
   return neutralBridgeConfig({ projectId: current.project_id || randomUUID(), profileId: current.profile_id, roles: manifest.roles, profile: await resolveProfile(root, current.profile_id) });
 }
 
-// Where the new template goes when TEMPLATE.md was edited. TEMPLATE.new.md is reused only while it
-// is absent, already the new template, or still exactly what an earlier upgrade wrote; one a human
-// edited is never overwritten (Codex 2026-10-15). The fallback name carries a safe version string.
-async function templateDestination(privateRoot, manifest, templateNew, to) {
+// Where a new template goes when its installed one was edited: TEMPLATE.new.md beside TEMPLATE.md,
+// TEMPLATE.zh-TW.new.md beside TEMPLATE.zh-TW.md. That name is reused only while it is absent,
+// already the new template, or still exactly what an earlier upgrade wrote; one a human edited is
+// never overwritten (Codex 2026-10-15). The fallback name carries a safe version string.
+async function templateDestination(privateRoot, manifest, relative, templateNew, to) {
   const installed = new Map(manifest.installed_files || []);
-  const free = async (relative) => {
-    const now = await hashOptional(inPrivate(privateRoot, relative));
-    return now === null || now === templateNew || now === installed.get(relative);
+  const free = async (candidate) => {
+    const now = await hashOptional(inPrivate(privateRoot, candidate));
+    return now === null || now === templateNew || now === installed.get(candidate);
   };
-  if (await free(TEMPLATE_NEW_RELATIVE)) return TEMPLATE_NEW_RELATIVE;
+  const base = relative.slice(0, -".md".length);
+  if (await free(base + ".new.md")) return base + ".new.md";
   const version = String(to.version || to.runtime_sha256.slice(0, 12)).replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(0, 60) || "next";
-  const fallback = "work-packages/TEMPLATE.new." + version + ".md";
+  const fallback = base + ".new." + version + ".md";
   if (await free(fallback)) return fallback;
-  throw new Error("You edited both " + TEMPLATE_NEW_RELATIVE + " and " + fallback + "; the upgrade will not overwrite either. Move one of them out of .review-bridge/work-packages/ and make a new plan.");
+  throw new Error("You edited both " + base + ".new.md and " + fallback + "; the upgrade will not overwrite either. Move one of them out of .review-bridge/work-packages/ and make a new plan.");
+}
+
+// What the upgrade does with each template: the same as the new one, nothing; missing, the new one
+// is added; edited since it was installed, it is kept and the new one written beside it; otherwise
+// it is replaced.
+async function templatePlans(privateRoot, manifest, to) {
+  const recorded = recordedTemplateHashes(manifest);
+  const plans = {};
+  for (const template of TEMPLATES) {
+    const now = await hashOptional(inPrivate(privateRoot, template.relative));
+    const templateNew = sha256(await fsp.readFile(templateSource(template)));
+    const modified = now !== null && now !== recorded[template.relative];
+    const action = now === templateNew ? "unchanged" : now === null ? "add" : modified ? "keep_and_write_new" : "replace";
+    plans[template.relative] = {
+      modified,
+      action,
+      new_sha256: templateNew,
+      new_path: action === "keep_and_write_new" ? await templateDestination(privateRoot, manifest, template.relative, templateNew, to) : null,
+    };
+  }
+  return plans;
 }
 
 // The tools/ copy an older setup put in the project: its files, relative to .review-bridge/.
@@ -1434,12 +1477,7 @@ async function planFreshUpgrade(root, backupRootOverride) {
       + defaults.schema_version + "); converting data across schemas is not supported.");
   }
   const merge = mergeBridgeConfig(config, defaults);
-  const templateNow = sha256(await fsp.readFile(inPrivate(privateRoot, TEMPLATE_RELATIVE)));
-  const templateNew = sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md")));
-  const templateModified = templateNow !== manifest.work_template_sha256;
-  const templateAction = templateNow === templateNew ? "unchanged" : templateModified ? "keep_and_write_new" : "replace";
-  const templateNewPath = templateAction === "keep_and_write_new"
-    ? await templateDestination(privateRoot, manifest, templateNew, to) : null;
+  const templates = await templatePlans(privateRoot, manifest, to);
   // The policy before is what these settings were last set up against; an older setup's tools/
   // copy carries it when the record does not.
   const policyFrom = manifest.policy_identity
@@ -1467,12 +1505,7 @@ async function planFreshUpgrade(root, backupRootOverride) {
     config_added_keys: merge.added,
     config_updated_keys: merge.updated,
     config_removed_keys: merge.removed,
-    template: {
-      modified: templateModified,
-      action: templateAction,
-      new_sha256: templateNew,
-      new_path: templateNewPath,
-    },
+    templates,
     policy_changed: policy.from !== null && !sameValue(policy.from, policy.to),
     policy,
     backup_root: backupRoot,
@@ -1544,16 +1577,19 @@ async function mergeSettings(context, plan) {
   const configText = await fsp.readFile(inPrivate(privateRoot, CONFIG_RELATIVE), "utf8");
   const current = JSON.parse(configText);
   const merge = mergeBridgeConfig(current, await defaultConfigFor(context.root, current, manifest));
-  context.before = {
-    [CONFIG_RELATIVE]: sha256(configText),
-    [TEMPLATE_RELATIVE]: await hashOptional(inPrivate(privateRoot, TEMPLATE_RELATIVE)),
-  };
+  context.before = { [CONFIG_RELATIVE]: sha256(configText) };
+  for (const template of TEMPLATES) context.before[template.relative] = await hashOptional(inPrivate(privateRoot, template.relative));
   const text = JSON.stringify(merge.merged, null, 2) + "\n";
   if (text !== configText) await writeRecorded(context, CONFIG_RELATIVE, Buffer.from(text, "utf8"));
-  const template = await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md"));
-  if (plan.template.action === "replace") await writeRecorded(context, TEMPLATE_RELATIVE, template);
-  if (plan.template.action === "keep_and_write_new") await writeRecorded(context, plan.template.new_path, template);
-  return { added: merge.added, template: plan.template.action, template_new_path: plan.template.new_path };
+  const templates = {};
+  for (const template of TEMPLATES) {
+    const { action, new_path: newPath } = plan.templates[template.relative];
+    const content = await fsp.readFile(templateSource(template));
+    if (action === "replace" || action === "add") await writeRecorded(context, template.relative, content);
+    if (action === "keep_and_write_new") await writeRecorded(context, newPath, content);
+    templates[template.relative] = { action, new_path: newPath };
+  }
+  return { added: merge.added, templates };
 }
 
 // D5: unclaimed authorizations bound to the old default policy are invalidated and reported.
@@ -1587,17 +1623,19 @@ async function removeLegacyRuntime(context, plan) {
 async function writeUpgradeManifest(context, plan, report) {
   const manifest = JSON.parse(await fsp.readFile(inPrivate(context.privateRoot, MANIFEST_RELATIVE), "utf8"));
   const installed = new Map((manifest.installed_files || []).filter(([name]) => !name.startsWith(RUNTIME_RELATIVE + "/")));
-  // A file Bridge wrote over its own unedited copy stays Bridge's; an edited one stays the human's.
-  for (const relative of [CONFIG_RELATIVE, TEMPLATE_RELATIVE]) {
+  // A file Bridge wrote over its own unedited copy, or added, stays Bridge's; an edited one stays the
+  // human's.
+  for (const relative of [CONFIG_RELATIVE, ...TEMPLATES.map((template) => template.relative)]) {
     const written = context.marker.written[relative];
-    if (written && context.before[relative] === installed.get(relative)) installed.set(relative, written);
+    if (written && (context.before[relative] === installed.get(relative) || context.before[relative] === null)) installed.set(relative, written);
   }
-  const newPath = plan.template.new_path;
-  if (newPath && context.marker.written[newPath]) installed.set(newPath, context.marker.written[newPath]);
+  for (const { new_path: newPath } of Object.values(plan.templates)) {
+    if (newPath && context.marker.written[newPath]) installed.set(newPath, context.marker.written[newPath]);
+  }
   const next = {
     ...manifest,
     runtime_sha256: plan.to.runtime_sha256,
-    work_template_sha256: plan.template.new_sha256,
+    work_template_sha256: Object.fromEntries(Object.entries(plan.templates).map(([relative, template]) => [relative, template.new_sha256])),
     bridge_version: plan.to.version,
     policy_identity: plan.policy.to,
     installed_files: [...installed].sort((left, right) => left[0].localeCompare(right[0])),
@@ -1839,7 +1877,7 @@ async function applyUpgradeLocked(plan, hooks) {
   }
   return {
     ok: true, operation: "upgrade", target: root, from: plan.from, to: plan.to, backup_dir: context.marker.backup_dir,
-    kept_user_file_count: plan.user_file_count, config_added_keys: settings.added, template: settings.template, template_new_path: settings.template_new_path,
+    kept_user_file_count: plan.user_file_count, config_added_keys: settings.added, templates: settings.templates,
     legacy_runtime_removed: legacyRemoved,
     invalidated_count: report.invalidated_count, invalidated_authorization_ids: report.invalidated_authorization_ids,
     service_restarted: restarted, reviewer_readonly: "not_run", warnings,
@@ -1933,11 +1971,15 @@ const PROOF_REDO_LINE = "reviewer 唯讀實測要在網頁上重做一次，才�
 const versionText = (side) => (side.version || "未標版本") + "（" + String(side.runtime_sha256).slice(0, 8) + "）";
 
 export function formatUpgradePlan(plan) {
-  const template = {
-    replace: "TEMPLATE.md：你沒改過，換成新版。",
-    keep_and_write_new: "TEMPLATE.md：你改過，保留不動；新版另存成 " + path.posix.basename(plan.template.new_path || "") + "。",
-    unchanged: "TEMPLATE.md：與新版相同，不動。",
-  }[plan.template.action];
+  const templates = Object.entries(plan.templates).map(([relative, template]) => {
+    const name = path.posix.basename(relative);
+    return {
+      replace: name + "：你沒改過，換成新版。",
+      add: name + "：還沒有，加上新版。",
+      keep_and_write_new: name + "：你改過，保留不動；新版另存成 " + path.posix.basename(template.new_path || "") + "。",
+      unchanged: name + "：與新版相同，不動。",
+    }[template.action];
+  });
   return [
     "升級這個專案的 Bridge 設定：" + plan.target,
     versionText(plan.from) + " → " + versionText(plan.to),
@@ -1948,7 +1990,7 @@ export function formatUpgradePlan(plan) {
     ...(plan.config_added_keys.length ? ["bridge.json 會補上新設定：" + plan.config_added_keys.join("、")] : []),
     ...(plan.config_updated_keys.length ? ["bridge.json 會更新 Bridge 自己的設定：" + plan.config_updated_keys.join("、")] : []),
     ...(plan.config_removed_keys.length ? ["bridge.json 會移除 Bridge 不再使用的設定：" + plan.config_removed_keys.join("、")] : []),
-    template,
+    ...templates,
     ...(plan.policy_changed ? ["新版的預設 policy 不同：升級後未開始的授權會失效，需重新建 plan。"] : []),
     ...(plan.service_running ? ["會先停掉網頁服務，升級後再啟動。"] : []),
     "整份先備份到專案外，核對後才改：" + plan.backup_parent,
@@ -1963,7 +2005,8 @@ export function formatUpgradeResult(result) {
     "保留了你的 " + result.kept_user_file_count + " 個檔；備份在 " + result.backup_dir,
     ...(result.legacy_runtime_removed ? ["拿掉了舊的 tools/（" + result.legacy_runtime_removed + " 個檔）"] : []),
     ...(result.invalidated_count ? ["失效的授權 " + result.invalidated_count + " 個；要做那些工作得重新建 plan"] : []),
-    ...(result.template === "keep_and_write_new" ? ["TEMPLATE.md 你改過，保留了；新版在 " + path.posix.basename(result.template_new_path)] : []),
+    ...Object.entries(result.templates).filter(([, template]) => template.action === "keep_and_write_new")
+      .map(([relative, template]) => path.posix.basename(relative) + " 你改過，保留了；新版在 " + path.posix.basename(template.new_path)),
     PROOF_REDO_LINE,
     ...result.warnings.map((warning) => "警告：" + warning),
   ].join("\n") + "\n";

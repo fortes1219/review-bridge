@@ -40,14 +40,14 @@ async function runtime(t, { locale = "zh-TW" } = {}) {
   return { repoRoot, paths };
 }
 
-const ORDER = "# Work order: farm\n\n## Work\nBuild a small farm.\n\n## Acceptance\n- The farm is visible.\n\n## References\n- README.md\n";
+const ORDER = "# Work order: farm\n\n<!-- bridge:requested_work -->\n## Work\nBuild a small farm.\n\n<!-- bridge:acceptance -->\n## Acceptance\n- The farm is visible.\n\n<!-- bridge:references -->\n## References\n- README.md\n";
 
 // A real run brought to `status` the way the state machine does it, with typed events behind it.
-async function terminalRun(rt, status, { changeTypes = "docs", state = null, gate = null, events = [], task = null, id = "wo-" + Math.random().toString(16).slice(2, 8), breakpoint = "return after review", allowedPaths = null } = {}) {
+async function terminalRun(rt, status, { state = null, gate = null, events = [], task = null, id = "wo-" + Math.random().toString(16).slice(2, 8), breakpoint = "return after review", allowedPaths = null } = {}) {
   const taskFile = path.join(rt.paths.privateRoot, "work-packages", id + ".md");
   if (!task) await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
-    paths: rt.paths, ...(task ? { task } : { taskFile }), owner: "Fortes", workPackage: id, breakpoint, changeTypes,
+    paths: rt.paths, ...(task ? { task } : { taskFile }), owner: "Fortes", workPackage: id, breakpoint,
     ...(task || allowedPaths ? { allowedPaths: allowedPaths || "README.md" } : {}), rounds: 2, callTimeout: 60_000, outPath: path.join(rt.paths.queueRoot, id + "-" + Math.random().toString(16).slice(2, 6) + ".plan.json"),
   });
   const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
@@ -93,6 +93,7 @@ test("S1 every closed reason delivers once: two files, the right title, three se
     version_changed: { state: { status: "version_changed" } },
     evidence_unconfirmable: { state: { status: "evidence_unconfirmable" } },
     scope_unverified: { state: { status: "scope_unverified", scope_unverified: ["README.md"] } },
+    run_timeout: {},
   };
   assert.equal(Object.keys(cases).length, CLOSED_REASONS.length, "every closed reason has a case");
   for (const status of CLOSED_REASONS) {
@@ -164,14 +165,21 @@ test("S4 the token table comes only from usage events; a role without usage show
 
 test("S5 a delivered result names the gate honestly and never claims the features were verified", async (t) => {
   const rt = await runtime(t);
-  const tested = await terminalRun(rt, "pass", { changeTypes: "code", gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }] });
+  const tested = await terminalRun(rt, "pass", { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "command", command: "npm test", exit_code: 0, passed: true, call: 1 }] });
   const testedText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: tested.runId, notify: false })).result_path, "utf8");
   assert.match(testedText, /現有測試通過：npm test/);
   assert.doesNotMatch(testedText, /功能驗過|全部驗過/);
   assert.doesNotMatch(testedText, /work-plan/); // delivered has no rebuild command
-  const docs = await terminalRun(rt, "pass", { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "not_applicable", call: 1 }] });
-  const docsText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: docs.runId, notify: false })).result_path, "utf8");
-  assert.match(docsText, /不跑測試（純文件）/);
+  // A project whose rules give no test command says so, whatever the outcome.
+  const untested = await terminalRun(rt, "pass", { gate: { review_gate: "PASS", hard_stop_required: false }, events: [{ event: "test_result", kind: "not_configured", call: 1 }] });
+  const untestedText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: untested.runId, notify: false })).result_path, "utf8");
+  assert.match(untestedText, /測試：這個專案沒有設定測試/);
+  assert.doesNotMatch(untestedText, /現有測試通過/);
+  const timedOut = await terminalRun(rt, "run_timeout", { events: [{ event: "test_result", kind: "not_configured", call: 1 }] });
+  const timedOutText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: timedOut.runId, notify: false })).result_path, "utf8");
+  assert.match(timedOutText, /^# 逾時/);
+  assert.match(timedOutText, /這次執行到了時間上限（run_timeout，21600000 毫秒）/);
+  assert.match(timedOutText, /測試：這個專案沒有設定測試/);
 });
 
 test("S1d three concurrent deliveries all return, one file and one run_delivered event; a crash before the event is repaired", async (t) => {
@@ -390,7 +398,7 @@ test("C6 work-cancel delivers on the spot", async (t) => {
   const taskFile = path.join(rt.paths.privateRoot, "work-packages", "cancel.md");
   await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
-    paths: rt.paths, taskFile, owner: "Fortes", workPackage: "cancel-1", breakpoint: "b", changeTypes: "docs",
+    paths: rt.paths, taskFile, owner: "Fortes", workPackage: "cancel-1", breakpoint: "b",
     rounds: 1, callTimeout: 60_000, outPath: path.join(rt.paths.queueRoot, "cancel-1.plan.json"),
   });
   const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });

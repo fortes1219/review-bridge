@@ -95,6 +95,7 @@ function resultCase(run) {
     case "success": return "success";
     case "action_required": return reason === "rounds_exhausted" ? "rounds_exhausted" : "action_required";
     case "cancelled": return reason === "cancelled" ? "cancelled" : "stopped";
+    case "timed_out": return reason === "run_timeout" ? "run_timeout" : "failure";
     case "failure":
       if (reason === "token_limit" || reason === "usage_unknown") return "token_limit";
       if (reason === "rate_limited") return "rate_limited";
@@ -146,7 +147,6 @@ export async function rebuildCommands({ paths, plan, workPackage }) {
     "--owner", plan?.owner ?? "",
     "--work-package", id,
     "--breakpoint", workPackage.breakpoint ?? "",
-    "--change-types", (workPackage.scope?.change_types || []).join(","),
     // Codex 2026-10-14: a scope the human named explicitly must survive the rebuild; without it the
     // new plan would fall back to the references or the whole project.
     ...(workPackage.scope?.source === "explicit" ? ["--allow-paths", (workPackage.scope.allowed_paths || []).join(",")] : []),
@@ -242,10 +242,9 @@ export function composeSections({ t, run, workPackage, plan, events, delta, cont
   head.push("# " + t(resultKey(t, "outcome", run)) + (subtitle.length ? "（" + subtitle.join("；") + "）" : ""));
   head.push("");
   head.push(t("result.header", { name, run_id: run.run_id, ended_at: run.closed_at || run.updated_at || "", calls }));
-  if (kind === "success") {
-    if (gate?.kind === "command") head.push(t("result.test.passed", { command: gate.command }));
-    else if (workPackage?.test?.kind === "not_applicable" || gate?.kind === "not_applicable") head.push(t("result.test.not_applicable"));
-  }
+  if (kind === "success" && gate?.kind === "command") head.push(t("result.test.passed", { command: gate.command }));
+  // A project whose rules give no test command says so in every result, whatever the outcome.
+  if (workPackage?.test?.kind === "not_configured" || gate?.kind === "not_configured") head.push(t("result.test.not_configured"));
 
   const why = [];
   let stderrTail = [];
@@ -320,6 +319,8 @@ export function composeSections({ t, run, workPackage, plan, events, delta, cont
     else why.push(t("result.why.stopped.unknown"));
   } else if (kind === "cancelled") {
     why.push(t("result.why.cancelled"));
+  } else if (kind === "run_timeout") {
+    why.push(t("result.why.run_timeout", { limit: workPackage?.budget?.run_timeout ?? run.budget?.run_timeout ?? "" }));
   } else {
     why.push(t("result.why.error", { reason: run.closed_reason || run.conclusion }));
     for (const file of [state.stderr_path, state.writer_stderr_path, state.review_error_path, failure?.record_path].filter(Boolean)) why.push(t("result.why.error.log", { path: file }));
@@ -405,7 +406,7 @@ function acceptanceSection({ t, contract, events, writer, review, gate }) {
 // V3.1: the one sentence after the title.
 function oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run }) {
   switch (kind) {
-    case "success": return gate?.kind === "command" ? t("line.delivered") : t("line.delivered.docs");
+    case "success": return gate?.kind === "command" ? t("line.delivered") : t("line.delivered.not_configured");
     case "rounds_exhausted":
       return gate?.kind === "command" && gate.passed === false && (!review || gate.sequence > review.sequence)
         ? t("line.needs_fix.gate")
@@ -416,6 +417,7 @@ function oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run
     case "stopped": return run.closed_reason === "superseded" ? t("line.stopped.superseded")
       : run.closed_reason === "database_unavailable" ? t("line.stopped.database") : t("line.stopped");
     case "cancelled": return t("line.cancelled");
+    case "run_timeout": return t("line.run_timeout");
     default: return t("line.error", { reason: run.closed_reason || run.conclusion });
   }
 }

@@ -53,7 +53,7 @@ async function install(t) {
 }
 
 const planArgs = (order, name, planArg) => ["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name,
-  "--breakpoint", "return after review", "--change-types", "code", "--rounds", "1", "--call-timeout", "120000", "--out", planArg];
+  "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000", "--out", planArg];
 
 async function planWork(rt, name, text) {
   const order = ".review-bridge/work-packages/" + name + ".md";
@@ -92,41 +92,47 @@ async function translationFile(rt, value) {
   return file;
 }
 
-const at = (start, end = start) => ({ source_refs: [{ start, end }] });
-const translation = (overrides) => ({
-  event: "contract.translation",
-  ticket: { title: at(1), type: null, source_id: null, product_version: null, people: null, schedule: null, related: null },
-  context: null, outcome: null, requested_work: at(4),
-  scope_notes: { include: null, exclude: null, must_keep: null, expected_locations: null },
-  run_plan: null, acceptance: [], verification_hints: [], reproduction: null, references: [], open_questions: [],
-  unused_lines: [{ start: 3, end: 3 }, { start: 6, end: 6 }],
-  ...overrides,
-});
-const visible = { id: "AC1", statement: "The farm is visible.", quote: "The farm is visible.", source_refs: [{ start: 7, end: 7 }], verify: [{ kind: "test", check: null }], run_refs: [] };
+// What the model writes: the conditions only; Bridge fills every other field from the blocks.
+const translation = (acceptance) => ({ event: "contract.translation", acceptance });
+const visible = { id: "AC1", statement: "The farm is visible.", quote: "The farm is visible.", source_refs: [{ start: 9, end: 9 }], verify: [{ kind: "test", check: null }] };
 
-const SINGLE = "# Work order: farm\n\n## Work\nBuild a small farm.\n\n## Acceptance\n- The farm is visible.\n";
+const SINGLE = [
+  "# Work order: farm",                // 1
+  "",                                  // 2
+  "<!-- bridge:requested_work -->",    // 3
+  "## Work",                           // 4
+  "Build a small farm.",               // 5
+  "",                                  // 6
+  "<!-- bridge:acceptance -->",        // 7
+  "## Acceptance",                     // 8
+  "- The farm is visible.",            // 9
+].join("\n") + "\n";
 
 const MULTI = [
-  "# Work order: farm",               // 1
+  "# Work order: farm",                // 1
   "",                                  // 2
-  "## Work",                           // 3
-  "Trees, then a cart.",               // 4
-  "",                                  // 5
-  "## Run plan",                       // 6
-  "- Mode: multiple runs",             // 7
-  "",                                  // 8
-  "### RUN A: trees",                  // 9
-  "- Work: plant trees",               // 10
-  "- Acceptance: trees show",          // 11
-  "- Depends on: none",                // 12
-  "",                                  // 13
-  "### RUN B: cart",                   // 14
-  "- Work: add a cart",                // 15
-  "- Acceptance: the cart drives",     // 16
-  "- Depends on: RUN A",               // 17
-  "",                                  // 18
-  "## Acceptance",                     // 19
-  "1. Trees show and the cart drives with the arrow keys.", // 20
+  "<!-- bridge:requested_work -->",    // 3
+  "## Work",                           // 4
+  "Trees, then a cart.",               // 5
+  "",                                  // 6
+  "<!-- bridge:run_plan -->",          // 7
+  "## Run plan",                       // 8
+  "### RUN A",                         // 9
+  "Plant trees.",                      // 10
+  "- effort: low",                     // 11
+  "- acceptance:",                     // 12
+  "  - Trees show.",                   // 13
+  "",                                  // 14
+  "### RUN B",                         // 15
+  "Add a cart.",                       // 16
+  "- depends_on: RUN A",               // 17
+  "- budget: { rounds: 1 }",           // 18
+  "- acceptance:",                     // 19
+  "  - The cart drives.",              // 20
+  "",                                  // 21
+  "<!-- bridge:acceptance -->",        // 22
+  "## Acceptance",                     // 23
+  "1. Trees show and the cart drives with the arrow keys.", // 24
 ].join("\n") + "\n";
 
 test("the plan names the contract calls before the work, and the human approves them with it", async (t) => {
@@ -206,19 +212,14 @@ test("an ambiguity in the work order goes to the human; a reviewer that cannot c
   assert.deepEqual((await runOf(rt, partial)).last_state.contract_problems, ["$.acceptance: must judge exactly AC1, AC2"]);
 });
 
-test("a wrong field is redone; a reviewer that leaves a field unjudged stops the run; unreadable usage stops before the writer", async (t) => {
+test("a condition the reviewer finds missing is redone; unreadable usage stops before the writer", async (t) => {
   const rt = await install(t);
-  const redone = await planWork(rt, "field", SINGLE);
-  assert.equal(start(rt, redone, { FAKE_CONTRACT_CHECK: "field_unfaithful_first" }).status, 0);
+  const redone = await planWork(rt, "missing", SINGLE);
+  assert.equal(start(rt, redone, { FAKE_CONTRACT_CHECK: "missing_first" }).status, 0);
   assert.equal((await runOf(rt, redone)).conclusion, "success");
   const checks = (await eventsOf(rt, redone)).filter((event) => event.event === "contract.check");
   assert.deepEqual(checks.map((event) => event.decision), ["retranslate", "pass"]);
-  assert.deepEqual(checks[0].feedback, ["scope_notes.include does not match the work order: an exclusion was copied as an inclusion"]);
-  const skipped = await planWork(rt, "skipped", SINGLE);
-  assert.equal(start(rt, skipped, { FAKE_CONTRACT_CHECK: "skip_field" }).status, 0);
-  const unconfirmed = await runOf(rt, skipped);
-  assert.equal(unconfirmed.closed_reason, "contract_unconfirmed");
-  assert.match(unconfirmed.last_state.contract_problems[0], /^\$\.fields: must judge exactly ticket, /);
+  assert.deepEqual(checks[0].feedback, ["missing condition at lines 1-1: fake: a stated requirement was left out"]);
   const unknown = await planWork(rt, "unknown", SINGLE);
   assert.equal(start(rt, unknown, { FAKE_CONTRACT_CHECK_USAGE: "none" }).status, 76);
   const stopped = await runOf(rt, unknown);
@@ -232,27 +233,26 @@ test("a work order with two runs keeps its run plan as data; one source line giv
   const rt = await install(t);
   const work = await planWork(rt, "multi", MULTI);
   const gate = [{ kind: "test", check: null }];
-  const file = await translationFile(rt, translation({
-    run_plan: { runs: [
-      { name: "RUN A", depends_on: [], depends_on_quote: "Depends on: none", source_refs: [{ start: 9, end: 12 }] },
-      { name: "RUN B", depends_on: ["RUN A"], depends_on_quote: "Depends on: RUN A", source_refs: [{ start: 14, end: 17 }] },
-    ] },
-    acceptance: [
-      { id: "AC1", statement: "Trees show.", quote: "Trees show", source_refs: [{ start: 20, end: 20 }], verify: [{ kind: "reviewer", check: "trees are on screen" }], run_refs: ["RUN A"] },
-      { id: "AC2", statement: "The cart drives with the arrow keys.", quote: "the cart drives with the arrow keys", source_refs: [{ start: 20, end: 20 }], verify: gate, run_refs: ["RUN B"] },
-      { id: "AC3", statement: "Both work together.", quote: "Trees show and the cart drives", source_refs: [{ start: 20, end: 20 }], verify: gate, run_refs: ["RUN A", "RUN B"] },
-    ],
-    unused_lines: [{ start: 3, end: 3 }, { start: 6, end: 7 }, { start: 19, end: 19 }],
-  }));
+  const file = await translationFile(rt, translation([
+    { id: "AC1", statement: "Trees show.", quote: "Trees show.", source_refs: [{ start: 13, end: 13 }], verify: [{ kind: "reviewer", check: "trees are on screen" }] },
+    { id: "AC2", statement: "The cart drives.", quote: "The cart drives.", source_refs: [{ start: 20, end: 20 }], verify: gate },
+    { id: "AC3", statement: "Trees show.", quote: "Trees show", source_refs: [{ start: 24, end: 24 }], verify: [{ kind: "reviewer", check: "trees are on screen" }] },
+    { id: "AC4", statement: "The cart drives with the arrow keys.", quote: "the cart drives with the arrow keys", source_refs: [{ start: 24, end: 24 }], verify: gate },
+    { id: "AC5", statement: "Both work together.", quote: "Trees show and the cart drives", source_refs: [{ start: 24, end: 24 }], verify: gate },
+  ]));
   const started = start(rt, work, { FAKE_CONTRACT_FILE: file });
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const run = await runOf(rt, work);
   assert.equal(run.conclusion, "success");
   const contract = await loadContract(rt.paths, run.contract_sha256);
-  assert.deepEqual(contract.run_plan.runs.map((entry) => [entry.name, entry.depends_on]), [["RUN A", []], ["RUN B", ["RUN A"]]]);
-  assert.equal(contract.run_plan.runs[1].text, "### RUN B: cart\n- Work: add a cart\n- Acceptance: the cart drives\n- Depends on: RUN A");
-  assert.deepEqual(contract.acceptance.map((entry) => entry.id), ["AC1", "AC2", "AC3"]);
-  assert.ok(contract.acceptance.every((entry) => entry.source_refs[0].start === 20));
+  // Bridge filled the runs from the block: names, work text, dependencies, effort and budget.
+  assert.deepEqual(contract.run_plan.runs.map((entry) => [entry.name, entry.text, entry.depends_on, entry.depends_on_quote, entry.effort, entry.budget]), [
+    ["RUN A", "Plant trees.", [], null, "low", null],
+    ["RUN B", "Add a cart.", ["RUN A"], "- depends_on: RUN A", null, { rounds: 1 }],
+  ]);
+  // A run's own conditions belong to it; the work order's acceptance block belongs to no run.
+  assert.deepEqual(contract.acceptance.map((entry) => [entry.id, entry.run_refs]), [["AC1", ["RUN A"]], ["AC2", ["RUN B"]], ["AC3", []], ["AC4", []], ["AC5", []]]);
+  assert.ok(contract.acceptance.slice(2).every((entry) => entry.source_refs[0].start === 24));
   // This step only records the human's run plan; starting one Bridge run per RUN is not built yet.
   assert.deepEqual(await fsp.readdir(rt.paths.runsDir), [work.plan.proposed_run_id + ".json"]);
 });
@@ -821,29 +821,246 @@ test("the start card names the running version it will stop, and answering no le
   await old.exit;
 });
 
-test("an open question from the translation stops the work before the writer and is shown to the human", async (t) => {
+test("an open question in the work order stops the work before any model call and is shown to the human; \"none\" starts it", async (t) => {
   const rt = await install(t);
-  const work = await planWork(rt, "asked", SINGLE);
-  const file = await translationFile(rt, translation({
-    acceptance: [visible], open_questions: [{ question: "Which page shows the farm?", source_refs: [{ start: 4, end: 4 }] }],
-  }));
-  assert.equal(start(rt, work, { FAKE_CONTRACT_FILE: file }).status, 0);
+  const work = await planWork(rt, "asked", SINGLE + "\n<!-- bridge:open_questions -->\n## Open questions\nWhich page shows the farm?\n");
+  assert.equal(start(rt, work).status, 0);
   const run = await runOf(rt, work);
   assert.equal(run.closed_reason, "needs_human");
   assert.equal(run.contract_sha256, undefined);
-  assert.equal((await eventsOf(rt, work)).some((event) => event.event === "task.input"), false);
+  // The question is the work order's own: no translation or check was paid for.
+  assert.equal((await eventsOf(rt, work)).some((event) => ["usage", "contract.translation", "task.input"].includes(event.event)), false);
   assert.match(await resultOf(rt, "asked"), /- Which page shows the farm\?/);
+  for (const none of ["無", "none"]) {
+    const answered = await planWork(rt, "answered", SINGLE + "\n<!-- bridge:open_questions -->\n## Open questions\n" + none + "\n");
+    assert.equal(start(rt, answered).status, 0);
+    assert.equal((await runOf(rt, answered)).conclusion, "success", none);
+  }
 });
 
-test("a translation that points past the text is refused, tried again, and nothing is sealed", async (t) => {
+test("a condition that points outside its acceptance block is refused, tried again, and nothing is sealed", async (t) => {
   const rt = await install(t);
   const work = await planWork(rt, "bad", SINGLE);
-  const file = await translationFile(rt, translation({ context: at(40), acceptance: [visible] }));
+  const file = await translationFile(rt, translation([{ ...visible, source_refs: [{ start: 5, end: 9 }] }]));
   assert.equal(start(rt, work, { FAKE_CONTRACT_FILE: file }).status, 79);
   const run = await runOf(rt, work);
   assert.equal(run.closed_reason, "contract_rejected");
-  assert.deepEqual(run.last_state.contract_problems, ["$.context.source_refs[0]: line 40 is past the last line 7"]);
+  assert.deepEqual(run.last_state.contract_problems, ["$.acceptance[0].source_refs: not inside one acceptance block", "line 9 belongs to no condition"]);
   assert.equal((await eventsOf(rt, work)).filter((event) => event.event === "contract.translation").length, 2);
   assert.deepEqual(await fsp.readdir(rt.paths.contractsDir).catch(() => []), []);
-  assert.match(await resultOf(rt, "bad"), /line 40 is past the last line 7/);
+  assert.match(await resultOf(rt, "bad"), /not inside one acceptance block/);
+});
+
+// The work-order format, end to end (Owner 2026-10-27): frontmatter is data, every field comes from
+// its own marked block, and the model only cuts the acceptance blocks into conditions.
+const CHINESE_ORDER = [
+  "---",
+  "priority: high",
+  "effort: high",
+  "budget:",
+  "  tokens: 2000000",
+  "  tokens_per_call: 1000000",
+  "  call_timeout: 600000",
+  "  test_timeout: 300000",
+  "  run_timeout: 7200000",
+  "  rounds: 1",
+  "source_id: SHOP-412",
+  "---",
+  "# 結帳頁套用折扣碼後總額沒有重算",
+  "",
+  "這行在任何區塊之外。",
+  "",
+  "<!-- bridge:context -->",
+  "## 背景",
+  "折扣碼輸入後 API 有回 200，但畫面上的總額還是原價。",
+  "",
+  "<!-- bridge:outcome -->",
+  "## 期待的結果",
+  "套用折扣後，使用者馬上看到正確的總額。",
+  "",
+  "<!-- bridge:requested_work -->",
+  "## 要做的事",
+  "修正 CheckoutSummary 的總額計算，折扣套用後要重新觸發。",
+  "",
+  "<!-- bridge:run_plan -->",
+  "## 執行計畫",
+  "### 計算",
+  "修正總額的計算。",
+  "- effort: medium",
+  "- acceptance:",
+  "  - 折扣後總額正確。",
+  "",
+  "### 畫面",
+  "總額變動時重新渲染。",
+  "- depends_on: 計算",
+  "- budget: { rounds: 1 }",
+  "- acceptance:",
+  "  - 總額欄位在 1 秒內更新。",
+  "",
+  "<!-- bridge:scope_notes.include -->",
+  "## 包含",
+  "結帳頁的總額欄位。",
+  "",
+  "<!-- bridge:scope_notes.exclude -->",
+  "## 不包含",
+  "折扣碼的後端驗證。",
+  "",
+  "<!-- bridge:scope_notes.must_keep -->",
+  "## 必須維持",
+  "沒有折扣時的總額不變。",
+  "",
+  "<!-- bridge:scope_notes.expected_locations -->",
+  "## 可能會動到的位置",
+  "src/checkout/CheckoutSummary.vue",
+  "",
+  "<!-- bridge:acceptance -->",
+  "## 驗收",
+  "1. 套用有效折扣碼後，總額欄位在 1 秒內顯示折扣後金額。",
+  "2. 折扣碼無效時總額不變，並顯示錯誤訊息。",
+  "",
+  "<!-- bridge:verification_hints -->",
+  "## 驗證提示",
+  "用折扣碼 SAVE10 試一次。",
+  "",
+  "<!-- bridge:reproduction.environment -->",
+  "## 環境",
+  "Chrome 130，Windows 11。",
+  "",
+  "<!-- bridge:reproduction.steps -->",
+  "## 重現步驟",
+  "1. 加一件商品到購物車。",
+  "2. 輸入折扣碼 SAVE10。",
+  "",
+  "<!-- bridge:reproduction.actual -->",
+  "## 實際結果",
+  "總額還是原價。",
+  "",
+  "<!-- bridge:reproduction.expected -->",
+  "## 預期結果",
+  "總額扣掉 10%。",
+  "",
+  "<!-- bridge:reproduction.frequency -->",
+  "## 頻率",
+  "每次都會。",
+  "",
+  "<!-- bridge:references -->",
+  "## 參考",
+  "- docs/checkout.md",
+  "",
+  "<!-- bridge:open_questions -->",
+  "## 待決問題",
+  "無",
+].join("\n") + "\n";
+
+// Each marked block's lines in a work order: from its marker to the line before the next one.
+function blockRanges(text) {
+  const lines = text.split("\n");
+  const markers = lines.map((line, index) => [/^<!-- bridge:(\S+) -->$/.exec(line)?.[1], index + 1]).filter(([key]) => key);
+  return new Map(markers.map(([key, line], index) => [key, { start: line, end: (markers[index + 1]?.[1] ?? lines.length + 1) - 1 }]));
+}
+const within = (refs, range) => refs.length > 0 && refs.every((ref) => ref.start >= range.start && ref.end <= range.end);
+
+test("a Chinese work order with frontmatter, a two-run plan and all 17 blocks: every field from its own block, the plan from the work order", async (t) => {
+  const rt = await install(t);
+  const order = ".review-bridge/work-packages/checkout.md";
+  await fsp.writeFile(path.join(rt.root, order), CHINESE_ORDER);
+  const planArg = ".review-bridge/review-queue/checkout.plan.json";
+  const planned = rt.bridge(["work-plan", order, "--breakpoint", "return after review", "--out", planArg]);
+  assert.equal(planned.status, 0, planned.stderr);
+  const plan = await readJson(path.join(rt.root, planArg));
+  // The values the run uses, each with the layer it came from.
+  assert.deepEqual([plan.priority, plan.priority_source, plan.effort, plan.effort_source], ["high", "work_order", "high", "work_order"]);
+  assert.deepEqual(plan.writer, { model: "opus", effort: "high" });
+  assert.deepEqual(plan.reviewer, { model: null, effort: "high" }, "the reviewer's effort is the priority table's, never the work order's");
+  assert.deepEqual(plan.budget, { tokens: 2_000_000, tokens_per_call: 1_000_000, call_timeout: 600_000, test_timeout: 300_000, run_timeout: 7_200_000, rounds: 1 });
+  assert.ok(Object.values(plan.budget_source).every((source) => source === "work_order"));
+  assert.equal(plan.contract_steps.call_timeout, 600_000);
+  // A flag given at the terminal comes first.
+  const flagged = rt.bridge(["work-plan", order, "--breakpoint", "return after review", "--call-timeout", "120000", "--out", ".review-bridge/review-queue/checkout-flag.plan.json"]);
+  assert.equal(flagged.status, 0, flagged.stderr);
+  const flaggedPlan = await readJson(path.join(rt.root, ".review-bridge", "review-queue", "checkout-flag.plan.json"));
+  assert.deepEqual([flaggedPlan.budget.call_timeout, flaggedPlan.budget_source.call_timeout, flaggedPlan.budget_source.rounds], [120_000, "cli", "work_order"]);
+
+  const started = start(rt, { plan, planArg });
+  assert.equal(started.status, 0, started.stderr + started.stdout);
+  const run = await readJson(path.join(rt.paths.runsDir, plan.proposed_run_id + ".json"));
+  assert.equal(run.conclusion, "success");
+  const { consumed_rounds: _consumed, ...runBudget } = run.budget;
+  assert.deepEqual(runBudget, plan.budget, "the run keeps the six settled values");
+  assert.equal(Date.parse(run.timeout_at) - Date.parse(run.created_at), 7_200_000);
+  const contract = await loadContract(rt.paths, run.contract_sha256);
+  const blocks = blockRanges(CHINESE_ORDER);
+  assert.equal(blocks.size, 17);
+  const parts = {
+    context: contract.context, outcome: contract.outcome, requested_work: contract.requested_work,
+    "scope_notes.include": contract.scope_notes.include, "scope_notes.exclude": contract.scope_notes.exclude,
+    "scope_notes.must_keep": contract.scope_notes.must_keep, "scope_notes.expected_locations": contract.scope_notes.expected_locations,
+    verification_hints: contract.verification_hints[0], references: contract.references[0],
+    "reproduction.environment": contract.reproduction.environment, "reproduction.steps": contract.reproduction.steps,
+    "reproduction.actual": contract.reproduction.actual, "reproduction.expected": contract.reproduction.expected, "reproduction.frequency": contract.reproduction.frequency,
+  };
+  for (const [key, part] of Object.entries(parts)) assert.ok(within(part.source_refs, blocks.get(key)), key + " " + JSON.stringify(part.source_refs));
+  // The text is the block's content as written; its ## heading is not part of it.
+  assert.equal(contract.context.text, "折扣碼輸入後 API 有回 200，但畫面上的總額還是原價。");
+  assert.equal(contract.reproduction.steps.text, "1. 加一件商品到購物車。\n2. 輸入折扣碼 SAVE10。");
+  for (const runPart of contract.run_plan.runs) assert.ok(within(runPart.source_refs, blocks.get("run_plan")), runPart.name);
+  assert.deepEqual(contract.run_plan.runs.map((entry) => [entry.name, entry.text, entry.depends_on, entry.effort, entry.budget]), [
+    ["計算", "修正總額的計算。", [], "medium", null],
+    ["畫面", "總額變動時重新渲染。", ["計算"], null, { rounds: 1 }],
+  ]);
+  // The work order's own conditions belong to no run; each run's list belongs to its run.
+  assert.deepEqual(contract.acceptance.map((entry) => [entry.id, entry.statement, entry.run_refs]), [
+    ["AC1", "套用有效折扣碼後，總額欄位在 1 秒內顯示折扣後金額。", []],
+    ["AC2", "折扣碼無效時總額不變，並顯示錯誤訊息。", []],
+    ["AC3", "折扣後總額正確。", ["計算"]],
+    ["AC4", "總額欄位在 1 秒內更新。", ["畫面"]],
+  ]);
+  for (const condition of contract.acceptance.slice(0, 2)) assert.ok(within(condition.source_refs, blocks.get("acceptance")), condition.id);
+  for (const condition of contract.acceptance.slice(2)) assert.ok(within(condition.source_refs, blocks.get("run_plan")), condition.id);
+  // The ticket keeps the work order's own values, not the settled ones.
+  assert.deepEqual(contract.ticket, {
+    title: { text: "# 結帳頁套用折扣碼後總額沒有重算", source_refs: [{ start: 13, end: 13 }] },
+    source_id: { text: "SHOP-412", source_refs: [{ start: 11, end: 11 }] },
+    priority: "high", effort: "high",
+    budget: { tokens: 2_000_000, tokens_per_call: 1_000_000, call_timeout: 600_000, test_timeout: 300_000, run_timeout: 7_200_000, rounds: 1 },
+  });
+  assert.deepEqual(contract.open_questions, []);
+  assert.deepEqual(contract.unused_lines, [{ text: "這行在任何區塊之外。", source_refs: [{ start: 15, end: 15 }] }]);
+});
+
+test("a work order that breaks the format, or asks for more than the policy allows, is refused with its lines and records nothing", async (t) => {
+  const rt = await install(t);
+  const body = "# Farm\n\n<!-- bridge:requested_work -->\nBuild a farm.\n\n<!-- bridge:acceptance -->\n- The farm shows.\n";
+  const cases = [
+    ["unknown-key", "---\nowner: me\n---\n" + body, /line 2: unknown key owner/],
+    ["bad-priority", "---\npriority: soon\n---\n" + body, /line 2: priority must be one of low, medium, high, urgent/],
+    ["over-limit", "---\nbudget:\n  rounds: 9\n---\n" + body, /line 3: budget\.rounds is 9, over the policy limit 2/],
+    ["repeated-block", body + "\n<!-- bridge:acceptance -->\n- Again.\n", /line 9: block acceptance is already marked at line 6/],
+    ["unknown-block", body + "\n<!-- bridge:extensions -->\nmore\n", /line 9: unknown block key extensions/],
+  ];
+  for (const [name, text, message] of cases) {
+    const order = ".review-bridge/work-packages/" + name + ".md";
+    await fsp.writeFile(path.join(rt.root, order), text);
+    const refused = rt.bridge(["start", order, "--fake-cli"]);
+    assert.notEqual(refused.status, 0, name);
+    assert.match(refused.stderr, message, name + ": " + refused.stderr);
+    assert.equal(await fsp.stat(path.join(rt.paths.queueRoot, name + ".plan.json")).catch(() => null), null, name + ": no plan");
+  }
+  assert.deepEqual((await fsp.readdir(rt.paths.runsDir).catch(() => [])).filter((entry) => entry.endsWith(".json")), [], "nothing started");
+});
+
+test("a run that reaches its run_timeout is closed as timed out; the writer call is cut at the deadline, not after its own limit", async (t) => {
+  const rt = await install(t);
+  const timed = await planWork(rt, "timed", "---\nbudget:\n  run_timeout: 5000\n---\n" + SINGLE);
+  assert.equal(timed.plan.budget.run_timeout, 5000);
+  const startedAt = Date.now();
+  const started = start(rt, timed, { FAKE_CLAUDE_SLEEP_MS: "60000" });
+  assert.ok(Date.now() - startedAt < 40_000, "the run was not cut at its deadline");
+  assert.equal(started.status, 130, started.stderr + started.stdout);
+  const run = await runOf(rt, timed);
+  assert.deepEqual([run.status, run.conclusion, run.closed_reason], ["completed", "timed_out", "run_timeout"]);
+  assert.equal(Date.parse(run.timeout_at) - Date.parse(run.created_at), 5000);
+  const result = await resultOf(rt, "timed");
+  assert.match(result, /^# Timed out/m);
+  assert.match(result, /reached its time limit \(run_timeout, 5000 ms\)/);
 });

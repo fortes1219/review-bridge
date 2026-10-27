@@ -40,12 +40,11 @@ const YES = { key: "yes", type: "boolean", help: "The person said yes to the car
 const reviewerCheckFor = (context) => ({ onStart }) => setupCheck.ensureReviewerChecked({ paths: context.paths, onStart });
 const WORK_ORDER_OPTIONS = {
   "--breakpoint": { key: "breakpoint", type: "string", value: "<text>", default: "after the review, asked at a terminal", help: "Where the work stops and comes back to you" },
-  "--change-types": { key: "changeTypes", type: "string", value: "<list>", default: "docs, asked at a terminal", help: "What the work may change, comma-separated: docs, code, tests, config, contract, schema, migration, external-behavior" },
   "--allow-paths": { key: "allowedPaths", type: "string", value: "<list>", default: "the whole project except protected files", help: "Limit the work to these paths, comma-separated" },
   "--owner": { key: "owner", type: "string", value: "<name>", default: "your OS user name", help: "Who owns the work" },
   "--work-package": { key: "workPackage", type: "string", value: "<id>", default: "the work order's file name", help: "Name of the work package" },
-  "--rounds": { key: "rounds", type: "number", value: "<n>", default: "2", help: "Writer rounds this work may use" },
-  "--call-timeout": { key: "callTimeout", type: "number", value: "<ms>", default: "480000", help: "Milliseconds each writer call may run" },
+  "--rounds": { key: "rounds", type: "number", value: "<n>", default: "the work order's budget, else the policy limit", help: "Writer rounds this work may use; comes before the work order's budget" },
+  "--call-timeout": { key: "callTimeout", type: "number", value: "<ms>", default: "the work order's budget, else the policy limit", help: "Milliseconds each writer call may run; comes before the work order's budget" },
   // The card says which work order this file is; these print another card that says otherwise.
   "--update": { key: "update", type: "string", value: "<work_order_id>", default: "what Bridge finds, shown on the card", help: "Make this a new version of that work order" },
   "--as-new": { key: "asNew", type: "boolean", help: "Make this a new work order" },

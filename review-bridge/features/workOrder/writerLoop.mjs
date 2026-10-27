@@ -60,7 +60,7 @@ import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
 import { acceptanceRows, decideAcceptance, sameVersion, workVersion } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
 import { establishContract } from "./translation.mjs";
-import { callStamp, clearProcess, killConfirmed, processFile, recordProcess, recordProcessOrKill, runMustStop, runStopped, workLockFile } from "./processRecords.mjs";
+import { callStamp, callTimeLeft, clearProcess, killConfirmed, processFile, recordProcess, recordProcessOrKill, runMustStop, runStopped, workLockFile } from "./processRecords.mjs";
 
 export { recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 
@@ -97,9 +97,11 @@ async function loadLiveControl(paths, runtimeState) {
 
 export const DEFAULT_WRITER_MODEL = "opus";
 
-// The policy snapshot pins the model through its priority table; a snapshot without one uses the
-// package default.
+// The plan settled the writer's model from the work order's priority; a run from before that uses
+// the policy's default priority, and a snapshot without a priority table the package default.
 export function writerModelFor(control) {
+  const workPackage = control?.run?.work_package;
+  if (workPackage?.priority) return workPackage.writer.model;
   const policy = control?.run?.policy_snapshot?.effective_policy;
   return policy?.priority ? priorityChoice(policy).writer.model : DEFAULT_WRITER_MODEL;
 }
@@ -223,17 +225,19 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
   return { sha256: null, exitCode: CONTRACT_EXIT_CODES[status] };
 }
 
-// T0-04 D4.1: ceilings come from the policy snapshot; missing ones use the package defaults.
-// test_timeout was missing here until RC3-BLOCKER-00, which left the tests with no time limit.
+// T0-04 D4.1: the token and test ceilings are the run's budget, which the plan settled from the
+// work order and the policy; max_turns comes from the policy snapshot. Missing ones use the package
+// defaults. test_timeout was missing here until RC3-BLOCKER-00, which left the tests with no limit.
 export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, tokens_per_call: 1_500_000, tokens: 4_000_000, max_output_chars: 4_000, test_timeout: 600_000 });
 export function effectiveLimits(control) {
   const limits = control?.run?.policy_snapshot?.effective_policy?.limits || {};
+  const budget = control?.run?.work_package?.budget || {};
   return {
     max_turns: limits.max_turns ?? DEFAULT_LIMITS.max_turns,
-    tokens_per_call: limits.tokens_per_call ?? DEFAULT_LIMITS.tokens_per_call,
-    tokens: limits.tokens ?? DEFAULT_LIMITS.tokens,
+    tokens_per_call: budget.tokens_per_call ?? limits.tokens_per_call ?? DEFAULT_LIMITS.tokens_per_call,
+    tokens: budget.tokens ?? limits.tokens ?? DEFAULT_LIMITS.tokens,
     max_output_chars: DEFAULT_LIMITS.max_output_chars,
-    test_timeout: limits.test_timeout ?? DEFAULT_LIMITS.test_timeout,
+    test_timeout: budget.test_timeout ?? limits.test_timeout ?? DEFAULT_LIMITS.test_timeout,
   };
 }
 
@@ -469,6 +473,9 @@ export async function runBoundedResume({
         "--json-schema", writerSchemaArg,
       ];
       const invocation = adapter.buildInvocation("claude", claude, claudeArgs);
+      // The call's own limit, cut to what is left of the run's time; nothing is left: no call.
+      const writerTimeout = await callTimeLeft(paths, runId, callTimeout);
+      if (writerTimeout === null) return 130;
       onStep("Writer working (call " + call + " of " + rounds + ")");
       const callStartedAt = Date.now();
       const baselinePath = currentControl.workspace_evidence?.baseline_path || null;
@@ -478,7 +485,7 @@ export async function runBoundedResume({
         input: effectivePrompt,
         stdoutPath: streamPath,
         stderrPath,
-        timeoutMs: callTimeout,
+        timeoutMs: writerTimeout,
         onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "writer", provider: "claude", call }),
       }));
       await clearProcess(paths, runId);
@@ -631,12 +638,14 @@ export async function runBoundedResume({
         // The version the tests run on is recorded with their result, so a condition proven by them can
         // be tied to the version the reviewer later reads.
         const testedVersion = await workVersion(paths.repoRoot);
-        onStep(workPackage.test.kind === "command" ? "Tests: running " + workPackage.test.command : "Tests: not needed for docs-only work");
+        const testTimeout = workPackage.test.kind === "command" ? await callTimeLeft(paths, runId, limits.test_timeout) : limits.test_timeout;
+        if (testTimeout === null) return 130;
+        onStep(workPackage.test.kind === "command" ? "Tests: running " + workPackage.test.command : "Tests: not configured for this project");
         testResult ={ ...(await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "test" }, () => runTest({
           paths, test: workPackage.test,
           stdoutPath: path.join(paths.queueRoot, stamp + "-test.stdout.log"),
           stderrPath: path.join(paths.queueRoot, stamp + "-test.stderr.log"),
-          timeoutMs: limits.test_timeout,
+          timeoutMs: testTimeout,
           onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "controller", provider: "test", call }),
         }))), work_version: testedVersion };
         await clearProcess(paths, runId);

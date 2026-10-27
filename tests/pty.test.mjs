@@ -46,7 +46,7 @@ async function project(t) {
   const init = spawnSync(process.execPath, [bridge, "init", "--yes", "--fake-cli"], { cwd: root, env: env(), encoding: "utf8", windowsHide: true });
   assert.equal(init.status, 0, init.stderr);
   const order = ".review-bridge/work-packages/hello.md";
-  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
+  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   return { root, order };
 }
 
@@ -82,8 +82,6 @@ async function card(t, answer) {
   t.after(() => start.kill());
   await start.waitFor(/Where should the work stop/);
   start.press(KEYS.enter);
-  await start.waitFor(/What will this work change/);
-  start.press(KEYS.enter);
   await start.waitFor(/Start this work\? \[y\/N\]/);
   start.press(answer + KEYS.enter);
   const code = await start.exited;
@@ -95,7 +93,7 @@ test("start at a terminal: the card, y, and the work runs on the person's own ye
   const { code, text, projectId } = await card(t, "y");
   assert.equal(code, 0, text);
   assert.match(text, /New work order "工單：新增 README"/);
-  assert.match(text, /Delivered: docs only, reviewer passed/);
+  assert.match(text, /Delivered: no tests configured, reviewer passed/);
   const rows = await queryRecords("select a.authorized_via from authorizations a join plans p using (plan_sha256) where p.project_id = $1", [projectId]);
   assert.deepEqual(rows, [{ authorized_via: "terminal" }]);
 });

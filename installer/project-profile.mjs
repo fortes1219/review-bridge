@@ -102,8 +102,8 @@ async function autoProfileMatches(target, profile) {
   return Object.values(rules).some((value) => Array.isArray(value) && value.length > 0);
 }
 
-// No project type: nothing is detected, and the tests have no rules, so only
-// docs-only work can pass them. Recorded as profile_id null; `--profile none` selects it.
+// No project type: nothing is detected, and the tests have no rules, so work runs with its tests
+// recorded as not configured. Recorded as profile_id null; `--profile none` selects it.
 export const UNBOUND_PROFILE = Object.freeze({
   schema_version: 2,
   profile_id: null,

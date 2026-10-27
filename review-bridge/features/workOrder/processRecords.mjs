@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { ensureDir, isStoppedRun, killProcessTree, readRun, writeJsonAtomic } from "../../service/index.mjs";
+import { ensureDir, isActiveRun, isStoppedRun, killProcessTree, readRun, RunEndedError, stopRunRecord, writeJsonAtomic } from "../../service/index.mjs";
 import { timestampId } from "../../utils/dates.mjs";
 
 export function processFile(paths, runId) {
@@ -39,15 +39,46 @@ export async function recordProcess(paths, runId, record) {
   await writeJsonAtomic(processFile(paths, runId), { ...record, started_at: new Date().toISOString() });
 }
 
-// Fails closed: a run that is stopped, missing, or whose record cannot be read must not keep a
-// model call or test command running.
+// The run's own time limit (run_timeout): a running run past its timeout_at is closed here, at the
+// checkpoint that finds it, as timed out. No timer of its own runs; every call is cut short at the
+// deadline (callTimeLeft), so the next checkpoint comes no later than that.
+const pastDeadline = (run) => isActiveRun(run) && Boolean(run.timeout_at) && Date.parse(run.timeout_at) <= Date.now();
+
+async function closeAtDeadline(paths, runId) {
+  try {
+    await stopRunRecord(paths, runId, { closedReason: "run_timeout" });
+  } catch (error) {
+    if (!(error instanceof RunEndedError)) throw error;
+  }
+  return isStoppedRun(await readRun(paths, runId));
+}
+
+// Fails closed: a run that is stopped, missing, past its deadline, or whose record cannot be read
+// must not keep a model call or test command running.
 export async function runMustStop(paths, runId) {
   if (!runId) return false;
   try {
-    return isStoppedRun(await readRun(paths, runId));
+    const run = await readRun(paths, runId);
+    return pastDeadline(run) ? await closeAtDeadline(paths, runId) : isStoppedRun(run);
   } catch {
     return true;
   }
+}
+
+// How long the next call of a run may take: its own limit (none for the reviewer), cut to what is
+// left before the run's deadline. Null when nothing is left; the run is then closed as timed out
+// and no call starts.
+export async function callTimeLeft(paths, runId, timeoutMs) {
+  if (!runId) return timeoutMs;
+  // A run whose record cannot be read has no deadline to cut to; the stop checks fail closed on it.
+  const run = await readRun(paths, runId).catch(() => null);
+  if (!run?.timeout_at) return timeoutMs;
+  if (pastDeadline(run)) {
+    await closeAtDeadline(paths, runId);
+    return null;
+  }
+  const left = Date.parse(run.timeout_at) - Date.now();
+  return Number.isFinite(timeoutMs) ? Math.min(timeoutMs, left) : left;
 }
 
 // A kill counts as done only when killProcessTree confirms it, or when nothing was running. A
@@ -77,8 +108,9 @@ export async function clearProcess(paths, runId) {
   await fsp.rm(processFile(paths, runId), { force: true });
 }
 
-// Whether the run was closed by a stop; false when its record cannot be read.
+// Whether the run was closed by a stop or by its deadline; false when its record cannot be read.
 export async function runStopped(paths, runId) {
   if (!runId) return false;
-  return isStoppedRun(await readRun(paths, runId).catch(() => null));
+  const run = await readRun(paths, runId).catch(() => null);
+  return pastDeadline(run) ? await closeAtDeadline(paths, runId) : isStoppedRun(run);
 }

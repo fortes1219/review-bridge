@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyNeutralInstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeRollbackPlan,
   loadInstalledServiceModules, MAINTENANCE_MARKER, planNeutralInstall, planNeutralUpgrade, planNeutralUpgradeRollback, PROOF_LOSS_LINE, TRANSIENT_FILES,
+  verifyNeutralInstall,
 } from "../installer/neutral-install.mjs";
 import { policyIdentity } from "../review-bridge/service/index.mjs";
 
@@ -180,9 +181,9 @@ async function fakeRun(root, id) {
   const planPath = path.join(privateOf(root), "review-queue", id + ".plan.json");
   const taskPath = path.join(privateOf(root), "work-packages", id + ".md");
   // A work order with something to check; one without stops at translation and asks the human.
-  await fsp.writeFile(taskPath, "# Update the README\n\nUpdate README.md only.\n\n## Acceptance\n\n- README.md says hello.\n");
+  await fsp.writeFile(taskPath, "# Update the README\n\n<!-- bridge:requested_work -->\nUpdate README.md only.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n- README.md says hello.\n");
   bootstrapRun(root, ["work-plan", "--task-file", taskPath, "--owner", "o", "--work-package", id, "--breakpoint", "b",
-    "--change-types", "docs", "--allow-paths", "README.md", "--rounds", "2", "--call-timeout", "60000", "--out", planPath]);
+    "--allow-paths", "README.md", "--rounds", "2", "--call-timeout", "60000", "--out", planPath]);
   const started = bootstrapRun(root, ["work-start", "--plan", planPath, "--yes", "--fake-cli", "--fake-scenario", "PASS", "--json"]);
   assert.equal(JSON.parse(started.stdout).latest_state.status, "pass");
 }
@@ -225,7 +226,7 @@ async function workApi(root, runtimeRoot = sourceRuntime) {
 
 async function makePlan(api, id) {
   return await api.createWorkPackagePlan({
-    paths: api.paths, task: "Update README.md only.", owner: "o", workPackage: id, breakpoint: "b", changeTypes: "docs",
+    paths: api.paths, task: "Update README.md only.", owner: "o", workPackage: id, breakpoint: "b",
     allowedPaths: "README.md", rounds: 1, callTimeout: 60_000, outPath: path.join(api.paths.queueRoot, id + ".plan.json"),
   });
 }
@@ -249,7 +250,9 @@ test("W1 upgrade merges the settings, removes the old tools/ copy, keeps every u
   assert.equal(plan.to.version, (await readJson(path.join(sourceRuntime, "templates", "PACKAGE_MANIFEST.json"))).version);
   assert.deepEqual(plan.config_added_keys, ["active_runs"]);
   assert.deepEqual(plan.config_removed_keys, ["state_contract"]);
-  assert.equal(plan.template.action, "keep_and_write_new");
+  // The edited English template is kept; the untouched Chinese one is replaced.
+  assert.equal(plan.templates["work-packages/TEMPLATE.md"].action, "keep_and_write_new");
+  assert.equal(plan.templates["work-packages/TEMPLATE.zh-TW.md"].action, "unchanged");
   assert.equal(plan.policy_changed, false);
   assert.ok(plan.legacy_runtime_file_count > 10);
   assert.match(formatUpgradePlan(plan), /會拿掉舊版留在專案裡的 tools\/（\d+ 個檔，已經不用）/);
@@ -544,7 +547,7 @@ test("W7 a new default policy invalidates unstarted authorizations, reports them
   const { snapshot } = await before.loadOrCreatePolicySnapshot(before.paths);
   const workPackage = await before.createImmutableWorkPackage(before.paths, {
     work_package_id: "wp-" + randomUUID(), task: "Unclaimed fixture.", acceptance_criteria: [],
-    scope: { change_types: ["docs"], allowed_paths: ["README.md"] }, budget: { rounds: 1, call_timeout: 1 }, breakpoint: "b",
+    scope: { allowed_paths: ["README.md"] }, budget: { rounds: 1, call_timeout: 1 }, breakpoint: "b",
   });
   const authorization = await before.createAuthorization(before.paths, {
     authorizedBy: "Human Owner", workPackageSha256: workPackage.record.content_sha256, policySha256: snapshot.effective_policy_sha256,
@@ -627,22 +630,52 @@ test("W1b TEMPLATE.new.md left by an earlier upgrade is reused only while unedit
   await fsp.writeFile(path.join(work, "TEMPLATE.new.md"), "<!-- older shipped template -->\n");
   await recordInstalled(root, "work-packages/TEMPLATE.new.md");
   const reuse = await planNeutralUpgrade({ target: root });
-  assert.equal(reuse.template.new_path, "work-packages/TEMPLATE.new.md");
+  assert.equal(reuse.templates["work-packages/TEMPLATE.md"].new_path, "work-packages/TEMPLATE.new.md");
   // Once a human edits it, the plan picks another name and seals it.
   await fsp.appendFile(path.join(work, "TEMPLATE.new.md"), "我的修改\n");
   const humanEdit = await fsp.readFile(path.join(work, "TEMPLATE.new.md"));
   const plan = await planNeutralUpgrade({ target: root });
   const version = plan.to.version.replace(/[^A-Za-z0-9._-]/g, "_");
-  assert.equal(plan.template.new_path, "work-packages/TEMPLATE.new." + version + ".md");
+  assert.equal(plan.templates["work-packages/TEMPLATE.md"].new_path, "work-packages/TEMPLATE.new." + version + ".md");
   assert.ok(formatUpgradePlan(plan).includes("新版另存成 TEMPLATE.new." + version + ".md。"));
   const result = await applyNeutralUpgrade(plan, plan.plan_sha256);
   assert.deepEqual(await fsp.readFile(path.join(work, "TEMPLATE.new.md")), humanEdit, "the human's file is untouched");
   assert.deepEqual(await fsp.readFile(path.join(work, "TEMPLATE.new." + version + ".md")), shipped);
-  assert.equal(result.template_new_path, plan.template.new_path);
+  assert.equal(result.templates["work-packages/TEMPLATE.md"].new_path, plan.templates["work-packages/TEMPLATE.md"].new_path);
   // Both names edited by a human: no plan.
   await makeOld(root);
   await fsp.appendFile(path.join(work, "TEMPLATE.new." + version + ".md"), "也改了\n");
   await assert.rejects(planNeutralUpgrade({ target: root }), /You edited both work-packages\/TEMPLATE\.new\.md and work-packages\/TEMPLATE\.new\..+\.md; the upgrade will not overwrite either/);
+});
+
+// An install made before there were two templates recorded TEMPLATE.md's hash alone and has no
+// Chinese one: the upgrade adds it, records both, and the result verifies.
+test("W1c an install from before the Chinese template gets it added, and both templates are recorded", async (t) => {
+  const root = await workspace(t);
+  await install(root);
+  await makeOld(root);
+  const work = path.join(privateOf(root), "work-packages");
+  const installFile = path.join(privateOf(root), "review-bridge-install.json");
+  const manifest = await readJson(installFile);
+  manifest.work_template_sha256 = manifest.work_template_sha256["work-packages/TEMPLATE.md"];
+  manifest.installed_files = manifest.installed_files.filter(([name]) => name !== "work-packages/TEMPLATE.zh-TW.md");
+  await writeJson(installFile, manifest);
+  await fsp.rm(path.join(work, "TEMPLATE.zh-TW.md"));
+  await verifyNeutralInstall(root);
+  const plan = await planNeutralUpgrade({ target: root });
+  assert.equal(plan.templates["work-packages/TEMPLATE.md"].action, "unchanged");
+  assert.equal(plan.templates["work-packages/TEMPLATE.zh-TW.md"].action, "add");
+  assert.ok(formatUpgradePlan(plan).includes("TEMPLATE.zh-TW.md：還沒有，加上新版。"));
+  await applyNeutralUpgrade(plan, plan.plan_sha256);
+  const shipped = await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.zh-TW.md"));
+  assert.deepEqual(await fsp.readFile(path.join(work, "TEMPLATE.zh-TW.md")), shipped);
+  const upgraded = await readJson(installFile);
+  assert.deepEqual(upgraded.work_template_sha256, {
+    ["work-packages/TEMPLATE.md"]: sha(await fsp.readFile(path.join(packageRoot, "project-templates", "work-package.md"))),
+    ["work-packages/TEMPLATE.zh-TW.md"]: sha(shipped),
+  });
+  assert.ok(upgraded.installed_files.some(([name, hash]) => name === "work-packages/TEMPLATE.zh-TW.md" && hash === sha(shipped)), "the added template is Bridge's");
+  await verifyNeutralInstall(root);
 });
 
 // RC3-LINUX-00: a restart that fails with a reason (the shape the installer's own restart returns)

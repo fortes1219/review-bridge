@@ -37,7 +37,8 @@
   "dependencies": {
     "@clack/prompts": "1.8.1",
     "embedded-postgres": "18.4.0-beta.17",
-    "pg": "8.23.1"
+    "pg": "8.23.1",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@lydell/node-pty": "1.1.0"

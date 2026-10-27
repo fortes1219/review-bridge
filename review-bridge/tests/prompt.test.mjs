@@ -41,7 +41,7 @@ function workPackage() {
     task: "# 牧場\n做一個牧場",
     task_file: ".review-bridge/work-packages/farm.md",
     breakpoint: "return after review",
-    scope: { change_types: ["code"], allowed_paths: ["src/game"], forbidden_paths: [".git/**", ".env"] },
+    scope: { allowed_paths: ["src/game"], forbidden_paths: [".git/**", ".env"] },
     rules: { path: ".review-bridge/review-bridge/rules.md", sha256: "0".repeat(64), text: "# 規則\n不 commit。" },
     references: [{ path: "src/game", files: [
       { path: "src/game/farm.js", sha256: sha("// farm\n"), bytes: 8 },

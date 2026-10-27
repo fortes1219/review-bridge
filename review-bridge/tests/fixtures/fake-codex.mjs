@@ -23,20 +23,14 @@ if (prompt.includes("[REVIEW_BRIDGE_MODE: CONTRACT_CHECK]")) {
   const mode = process.env.FAKE_CONTRACT_CHECK || "faithful";
   const attempt = Number(/Attempt: (\d+)/.exec(prompt)?.[1] || 1);
   const sha256 = /^Candidate: ([0-9a-f]{64})$/m.exec(prompt)?.[1] || "0".repeat(64);
-  const open = prompt.indexOf("=== CANDIDATE CONTRACT ===");
-  const close = prompt.indexOf("=== END CANDIDATE CONTRACT ===");
-  const candidate = JSON.parse(prompt.slice(open + "=== CANDIDATE CONTRACT ===".length, close));
+  const open = prompt.indexOf("=== CANDIDATE CONDITIONS ===");
+  const close = prompt.indexOf("=== END CANDIDATE CONDITIONS ===");
+  const conditions = JSON.parse(prompt.slice(open + "=== CANDIDATE CONDITIONS ===".length, close));
   const wrong = mode === "unfaithful_always" || (mode === "unfaithful_first" && attempt === 1);
-  const ids = candidate.acceptance.map((item) => item.id);
-  // The parts to judge are the ones the prompt lists; a wrong or skipped one is chosen by mode.
-  const fields = /exactly once: (.+?)\. A part is faithful/.exec(prompt)[1].split(", ");
-  const wrongField = mode === "field_unfaithful_first" && attempt === 1 ? "scope_notes.include" : null;
+  const ids = conditions.map((item) => item.id);
   const answer = {
     event: "contract.check",
     candidate_sha256: sha256,
-    fields: (mode === "skip_field" ? fields.slice(1) : fields).map((field) => ({
-      field, faithful: field !== wrongField, note: field === wrongField ? "an exclusion was copied as an inclusion" : null,
-    })),
     acceptance: (mode === "skip_ac" ? ids.slice(0, -1) : ids).map((id, index) => ({
       id, faithful: !(wrong && index === 0), note: wrong && index === 0 ? "says more than its lines" : null,
     })),

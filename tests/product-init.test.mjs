@@ -95,7 +95,7 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
   assert.equal(config.profile_id, "vue-frontend");
 });
 
-test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", async (t) => {
+test("R5 init keeps self-test artifacts disposable and installs both work-order templates", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-product-init-"));
   t.after(() => removeWorkspace(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({
@@ -131,7 +131,7 @@ test("R5 init keeps self-test artifacts disposable and installs TEMPLATE.md", as
     { scenario: "RATE_LIMIT", status: "rate_limited" },
   ]);
   await fsp.access(path.join(root, ".review-bridge", "review-bridge-install.json"));
-  assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "work-packages")), ["TEMPLATE.md"]);
+  assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "work-packages")), ["TEMPLATE.md", "TEMPLATE.zh-TW.md"]);
   const queueEntries = await fsp.readdir(path.join(root, ".review-bridge", "review-queue"), { withFileTypes: true });
   assert.deepEqual(queueEntries.filter((entry) => entry.isFile()).map((entry) => entry.name), []);
 
@@ -358,11 +358,11 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
 
   // D4: two lines by default; JSON only with --json.
-  const plain = run(file, "--breakpoint", "after the review", "--change-types", "docs");
+  const plain = run(file, "--breakpoint", "after the review");
   assert.equal(plain.status, 0, plain.stderr);
   const planFile = path.join(".review-bridge", "review-queue", "add-readme.plan.json");
   assert.deepEqual(plain.stdout.trimEnd().split(/\r?\n/), ["Plan written to " + planFile, "Next: review-bridge work-start --plan " + planFile]);
-  const planned = run(file, "--breakpoint", "after the review", "--change-types", "docs", "--json");
+  const planned = run(file, "--breakpoint", "after the review", "--json");
   assert.equal(planned.status, 0, planned.stderr);
   const output = JSON.parse(planned.stdout);
   assert.equal(output.work_package, "add-readme");
@@ -370,31 +370,26 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   assert.equal(output.plan_path, path.join(root, ".review-bridge", "review-queue", "add-readme.plan.json"));
   await fsp.access(output.plan_path);
 
-  // A type-none project has no test rules: docs-only work needs none; other work is refused as before.
-  assert.equal(output.test.kind, "not_applicable");
-  const code = run(file, "--breakpoint", "after the review", "--change-types", "code", "--json");
-  assert.equal(code.status, 1);
-  assert.deepEqual(JSON.parse(code.stdout), { valid: false, reason: "no_test", checked: [] });
-  const codePlain = run(file, "--breakpoint", "after the review", "--change-types", "code");
-  assert.equal(codePlain.status, 1);
-  assert.match(codePlain.stdout, /--change-types docs\n$/);
+  // A type-none project has no test rules: the work still plans, and its tests are not configured.
+  assert.deepEqual(output.test, { kind: "not_configured", command: null, label: "沒有設定測試", checked: [] });
+  // Priority, effort and budget come from the policy when the work order says nothing, each with its layer.
+  assert.equal(output.priority, "medium");
+  assert.equal(output.effort, "medium");
+  assert.deepEqual(output.budget, { tokens: 4_000_000, tokens_per_call: 1_500_000, call_timeout: 900_000, test_timeout: 600_000, run_timeout: 21_600_000, rounds: 2 });
+  assert.ok(Object.values(output.budget_source).every((source) => source === "config"));
 
-  // Without a terminal the breakpoint and the change types are still required, and the refusal
-  // says what to add (C4).
+  // Without a terminal the breakpoint is still required, and the refusal says what to add (C4).
   const bare = run(file);
   assert.equal(bare.status, 2);
   assert.match(bare.stderr, /A breakpoint is required\. Add --breakpoint "<where to stop>" or answer the prompt\./);
-  const noTypes = run(file, "--breakpoint", "after the review");
-  assert.equal(noTypes.status, 2);
-  assert.match(noTypes.stderr, /The change types are required\. Add --change-types docs/);
-  const twice = run(file, "--task-file", file, "--breakpoint", "x", "--change-types", "docs");
+  const twice = run(file, "--task-file", file, "--breakpoint", "x");
   assert.equal(twice.status, 2);
   assert.match(twice.stderr, /Give the work order once/);
 });
 
-// The Owner's case: an empty folder set up as vue-frontend. A chosen type is used as chosen;
-// the mismatch stops code work at the tests, not at setup.
-test("a chosen project type that does not fit the folder is set up and stopped at the tests", async (t) => {
+// The Owner's case: an empty folder set up as vue-frontend. A chosen type is used as chosen; its
+// rule finds no test script, so the work starts and every record says its tests are not configured.
+test("a chosen project type that does not fit the folder is set up, and its work plans with the tests not configured", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-chosen-type-"));
   t.after(() => removeWorkspace(root));
   const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--profile", "vue-frontend", "--yes"), {
@@ -409,13 +404,11 @@ test("a chosen project type that does not fit the folder is set up and stopped a
   const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ".review-bridge/work-packages/fix.md", ...args], {
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
   });
-  const code = run("--breakpoint", "after the review", "--change-types", "code", "--json");
-  assert.equal(code.status, 1);
-  const refused = JSON.parse(code.stdout);
-  assert.equal(refused.valid, false);
-  assert.equal(refused.reason, "no_test");
-  assert.deepEqual(refused.checked.map((rule) => rule.command), ["npm test"]);
-  assert.equal(run("--breakpoint", "after the review", "--change-types", "docs").status, 0);
+  const planned = run("--breakpoint", "after the review", "--json");
+  assert.equal(planned.status, 0, planned.stderr);
+  const { test: sealed } = JSON.parse(planned.stdout);
+  assert.equal(sealed.kind, "not_configured");
+  assert.deepEqual(sealed.checked.map((rule) => rule.command), ["npm test"]);
 });
 
 // B1: one command from a work order to its result. With the fake CLI the reviewer check is not
@@ -428,18 +421,19 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   });
   assert.equal(init.status, 0, init.stderr);
   const order = ".review-bridge/work-packages/hello.md";
-  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
+  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const start = (...args) => spawnSync(process.execPath, [bridge, "start", order, ...args], {
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
-  assert.equal(start("--fake-cli", "--breakpoint", "after the review", "--change-types", "docs").status, 1, "the card --yes is for");
-  const done = start("--fake-cli", "--yes", "--breakpoint", "after the review", "--change-types", "docs");
+  assert.equal(start("--fake-cli", "--breakpoint", "after the review").status, 1, "the card --yes is for");
+  const done = start("--fake-cli", "--yes", "--breakpoint", "after the review");
   assert.equal(done.status, 0, done.stderr);
   const lines = done.stdout.trimEnd().split(/\r?\n/);
   assert.equal(lines[0], "Plan from the card: " + path.join(".review-bridge", "review-queue", "hello.plan.json"));
   assert.equal(lines[1], "Reviewer read-only check: not needed with the fake CLI (no model is called)");
-  for (const line of ["Work order:   " + order, "Stops:        after the review", "Changes:      docs", "Tests:        not needed for docs-only work",
-    "Budget:       2 writer call(s), up to 8 minute(s) each", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
+  for (const line of ["Work order:   " + order, "Stops:        after the review", "Tests:        not configured (no test rule matched; the work starts without tests)",
+    "Priority:     medium (config)", "Effort:       medium (priority table), for every writer call",
+    "Budget:       tokens 4000000 (config), tokens_per_call 1500000 (config), call_timeout 900000 (config), test_timeout 600000 (config), run_timeout 21600000 (config), rounds 2 (config)", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
     assert.ok(lines.includes(line), line);
   }
   const steps = lines.filter((line) => /^ {2}[A-Z]/.test(line));
@@ -447,7 +441,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     "  Writer (claude) turns the work order into a contract; reviewer (codex) checks it",
     "  Contract sealed",
     "  Writer working (call 1 of 2)",
-    "  Tests: not needed for docs-only work",
+    "  Tests: not configured for this project",
     "  Reviewer checking the work",
   ]);
   assert.match(done.stdout, /\nDelivered: .*\nResult file: .*hello\.result\.md\nTokens: /);
@@ -465,7 +459,7 @@ async function fourActionsProject(t, prefix) {
   });
   assert.equal(init.status, 0, init.stderr);
   const order = ".review-bridge/work-packages/hello.md";
-  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
+  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const cli = (args, env = {}) => spawnSync(process.execPath, [bridge, ...args], {
     cwd: root, encoding: "utf8", env: isolatedEnv(env), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
@@ -479,8 +473,8 @@ test("an agent's start prints the card and stops; with --yes it runs and records
   const card = cli(["start", order, "--fake-cli"]);
   assert.equal(card.status, 1);
   const lines = card.stdout.trimEnd().split(/\r?\n/);
-  for (const line of ["Stops:        after the review", "Changes:      docs", "Tests:        not needed for docs-only work",
-    "Budget:       2 writer call(s), up to 8 minute(s) each", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
+  for (const line of ["Stops:        after the review", "Tests:        not configured (no test rule matched; the work starts without tests)",
+    "Budget:       tokens 4000000 (config), tokens_per_call 1500000 (config), call_timeout 900000 (config), test_timeout 600000 (config), run_timeout 21600000 (config), rounds 2 (config)", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
     assert.ok(lines.includes(line), line);
   }
   assert.ok(lines.some((line) => line.startsWith("Contract:     ")) && lines.some((line) => line.startsWith("Valid until:  ")));
@@ -501,6 +495,29 @@ test("an agent's start prints the card and stops; with --yes it runs and records
   const run = JSON.parse(await fsp.readFile(path.join(queue, "runs", runFile), "utf8"));
   assert.equal(run.authorized_via, "agent");
   assert.match(run.contract_sha256, /^[0-9a-f]{64}$/, "the contract sealed under this yes is on the run");
+});
+
+// An agent runs start without a terminal. Nothing is planned quietly as docs any more: when the
+// project's rules give a test command, the card names it and the tests run after the writer.
+test("an agent's start --yes runs the project's tests when its rules give a command", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-agent-tests-"));
+  t.after(() => removeWorkspace(root));
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "agent-tests", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(0)\"" } }) + "\n");
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  const order = ".review-bridge/work-packages/hello.md";
+  await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
+  const cli = (args) => spawnSync(process.execPath, [bridge, ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  const card = cli(["start", order, "--fake-cli"]);
+  assert.equal(card.status, 1, card.stderr);
+  assert.ok(card.stdout.split(/\r?\n/).includes("Tests:        runs npm test after each writer call"), card.stdout);
+  const yes = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(yes.status, 0, yes.stdout + yes.stderr);
+  assert.match(yes.stdout, /\n {2}Tests: running npm test\n {2}Tests passed\n/);
+  const [runFile] = (await fsp.readdir(path.join(root, ".review-bridge", "review-queue", "runs"))).filter((name) => name.endsWith(".json"));
+  assert.deepEqual(await queryRecords("select kind, passed from test_results where run_id = $1", [runFile.slice(0, -5)]), [{ kind: "command", passed: true }]);
 });
 
 // E8, E10: the yes is for the card the person saw, once. A work order edited between the card and
@@ -527,10 +544,10 @@ test("--yes is refused when the work order changed after the card, when no card 
   const card = cli(["start", order, "--fake-cli"]);
   assert.equal(card.status, 1);
   assert.match(card.stdout, /\n {2}│ # 工單：新增 READMe\n/, "the new card shows the edit");
-  const other = cli(["start", order, "--fake-cli", "--yes", "--change-types", "docs,code"]);
+  const other = cli(["start", order, "--fake-cli", "--yes", "--rounds", "1"]);
   assert.equal(other.status, 1, other.stderr);
-  assert.equal(other.stdout, "--change-types is not what the card showed. Run: review-bridge start " + order + " --fake-cli --yes without it, or review-bridge start " + order + " --fake-cli to show the person a new card.\n");
-  const yes = cli(["start", order, "--fake-cli", "--yes", "--change-types", "docs"]);
+  assert.equal(other.stdout, "--rounds is not what the card showed. Run: review-bridge start " + order + " --fake-cli --yes without it, or review-bridge start " + order + " --fake-cli to show the person a new card.\n");
+  const yes = cli(["start", order, "--fake-cli", "--yes", "--rounds", "2"]);
   assert.equal(yes.status, 0, yes.stdout + yes.stderr);
   assert.match(yes.stdout, /^Plan from the card: .*hello\.plan\.json\n/);
   assert.match(yes.stdout, /\nDelivered: .*\nResult file: /);
@@ -641,7 +658,11 @@ test("a run's events, verdicts, tests and delivery are in the database; stop and
   for (const type of ["run_started", "contract_sealed", "task.input", "test_result", "review.result", "acceptance", "run_terminal", "run_delivered"]) assert.ok(types.includes(type), type);
   assert.deepEqual(await queryRecords("select ac_id, verdict, result from acceptance_rows where run_id = $1", [runId]), [{ ac_id: "AC1", verdict: "pass", result: "proven" }]);
   assert.deepEqual(await queryRecords("select ac_id, verdict from review_verdicts where run_id = $1", [runId]), [{ ac_id: "AC1", verdict: "pass" }]);
-  assert.deepEqual(await queryRecords("select kind, passed from test_results where run_id = $1", [runId]), [{ kind: "not_applicable", passed: null }]);
+  assert.deepEqual(await queryRecords("select kind, passed from test_results where run_id = $1", [runId]), [{ kind: "not_configured", passed: null }]);
+  // The plan keeps each settled value with its layer, and the run its own deadline; both by SQL.
+  const [planned] = await queryRecords("select p.body->>'priority' as priority, p.body->>'priority_source' as priority_source, p.body->>'effort_source' as effort_source,"
+    + " p.body->'budget_source'->>'run_timeout' as run_timeout_source, (r.timeout_at - r.created_at) as timeout from runs r join plans p using (plan_sha256) where r.run_id = $1", [runId]);
+  assert.deepEqual({ ...planned, timeout: planned.timeout.hours }, { priority: "medium", priority_source: "config", effort_source: "priority", run_timeout_source: "config", timeout: 6 });
   const [delivered] = await queryRecords("select payload from run_events where run_id = $1 and type = 'run_delivered'", [runId]);
   assert.equal(delivered.payload.sha256, file.result_sha256);
 

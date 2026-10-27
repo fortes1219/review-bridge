@@ -73,8 +73,10 @@ async function runFakeScenarios(target, privateName) {
     await fsp.writeFile(taskPath, [
       "# Review Bridge self-test",
       "",
+      "<!-- bridge:requested_work -->",
       "Self-test only. Do not modify application files.",
       "",
+      "<!-- bridge:acceptance -->",
       "## Acceptance",
       "",
       "- The fake review gate is reached.",
@@ -87,7 +89,6 @@ async function runFakeScenarios(target, privateName) {
       "--owner", "Review Bridge init",
       "--work-package", id,
       "--breakpoint", "return to human after fake review gate",
-      "--change-types", "docs",
       "--allow-paths", "README.md",
       "--rounds", "2",
       "--call-timeout", "60000",

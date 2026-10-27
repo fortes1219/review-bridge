@@ -81,7 +81,6 @@ export function buildTaskInput({ workPackage, call, readList, limits, contract =
     call,
     ...workOf(workPackage, contract),
     scope: {
-      change_types: workPackage.scope.change_types,
       allowed_paths: workPackage.scope.allowed_paths,
       forbidden_paths: workPackage.scope.forbidden_paths || [],
     },
@@ -127,7 +126,6 @@ export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFin
     // The contract itself is in task.input on every call; the handoff names which one.
     ...(contract ? { contract_sha256: contract.sha256 } : { work: workPackage.task }),
     scope: {
-      change_types: workPackage.scope.change_types,
       allowed_paths: workPackage.scope.allowed_paths,
       forbidden_paths: workPackage.scope.forbidden_paths || [],
     },
@@ -157,7 +155,6 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     "Injected by the local Review Bridge controller. You are the writer only; the independent reviewer is the only reviewer.",
     "Work package: " + workPackage.work_package_id,
     "Run: " + runId + "  Call: " + call,
-    "Allowed change types: " + (scope.change_types || []).join(", "),
     "Allowed workspace paths: " + (scope.allowed_paths || []).join(", "),
     "Forbidden paths: " + (scope.forbidden_paths || []).join(", "),
     "Human breakpoint: " + String(control?.breakpoint || workPackage.breakpoint || ""),

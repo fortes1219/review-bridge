@@ -1,16 +1,16 @@
 // The work-order contract (RC3-BLOCKER-00, first part). Starting work authorizes the work-order
-// text sealed in the plan. The writer's provider translates that text into a schema-bound
-// object; this module checks what code can check, the reviewer's provider reads the result
-// against the full text, and only then is the contract sealed once under its hash. Models only
-// read it afterwards. Scope, budget, roles and the verification command stay in the work
-// package, which the controller compiled before any model saw the work order.
+// text sealed in the plan. The work order is written in marked blocks (workOrderFormat.mjs), so
+// Bridge fills every field from its own block, copying the text as written; no model decides
+// which text goes where. The one thing a model does is cut the acceptance blocks into conditions:
+// the writer's provider writes them, this module checks what code can check, the reviewer's
+// provider reads them against those blocks, and only then is the contract sealed once under its
+// hash. Models only read it afterwards. Scope, budget, roles and the verification command stay in
+// the work package, which the controller compiled before any model saw the work order.
 //
-// What code proves here: every part points at lines that exist, each condition quotes its lines
-// verbatim, every non-blank line is either used or listed as unused, a run plan has at least two
-// runs on separate lines, each dependency quotes the run's own line naming it and none loops, and
-// with a plan every condition belongs to a run. Whether each part, empty ones included, and each
-// condition say what the work order means is the reviewer's judgement; it lowers the risk of
-// drift, it is not a proof.
+// What code proves here: each condition points at lines inside one acceptance block, quotes them
+// verbatim, and every content line of those blocks belongs to a condition. Whether each condition
+// says what its lines mean is the reviewer's judgement; it lowers the risk of drift, it is not a
+// proof.
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { digest } from "../../utils/digest.mjs";
 import { ensureDir } from "../../service/index.mjs";
 import { loadSchema, validateAgainstSchema } from "./typedResults.mjs";
+import { rangesOf } from "./workOrderFormat.mjs";
 
 const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "schemas");
 
@@ -26,18 +27,12 @@ export const CONTRACT_SCHEMA = path.join(schemasDir, "contract.schema.json");
 export const CONTRACT_CHECK_SCHEMA = path.join(schemasDir, "contract.check.schema.json");
 export const CONTRACT_MODE_HEADER = "[REVIEW_BRIDGE_MODE: CONTRACT_TRANSLATION]";
 export const CHECK_MODE_HEADER = "[REVIEW_BRIDGE_MODE: CONTRACT_CHECK]";
-export const CONTRACT_SCHEMA_VERSION = 1;
+export const CONTRACT_SCHEMA_VERSION = 2;
 // A translation the reviewer finds wrong is redone at most this many times in all.
 export const MAX_TRANSLATION_ATTEMPTS = 2;
-// Every part of the contract the reviewer judges, empty ones included: an empty part is a claim
-// that the work order says nothing there. Conditions are judged by id. The check schema's enum
-// is generated from the same list.
-export const CHECKED_FIELDS = Object.freeze([
-  "ticket", "context", "outcome", "requested_work", "scope_notes.include", "scope_notes.exclude", "scope_notes.must_keep",
-  "scope_notes.expected_locations", "run_plan", "verification_hints", "reproduction", "references", "unused_lines",
-]);
 // The translation reads one text and writes one object; it needs no tools and few turns.
 export const TRANSLATION_MAX_TURNS = 3;
+const LANGUAGE_RULE = "Write every statement, note and question in the language the work order itself is written in; quotes stay in the work order's own words.";
 
 export class ContractChangedError extends Error {
   constructor(sha256, reason) {
@@ -54,15 +49,20 @@ export function numberedLines(text) {
   return lines;
 }
 
-function numbered(lines) {
-  const width = String(lines.length).length;
-  return lines.map((line, index) => String(index + 1).padStart(width, " ") + "| " + line);
-}
-
 const flat = (text) => String(text).replace(/\s+/g, " ").trim();
 const linesOf = (lines, refs) => refs.flatMap((ref) => lines.slice(ref.start - 1, ref.end));
 
-export function composeTranslationPrompt({ workPackageId, lines, test, locale, attempt = 1, feedback = [] }) {
+// The acceptance blocks as the models see them: each one named, with the work order's own line
+// numbers, so a condition points at the lines it came from.
+function acceptanceBlocks(lines, format) {
+  const width = String(lines.length).length;
+  return format.acceptance.flatMap((block) => [
+    "--- " + (block.run ? "acceptance of run " + block.run : "acceptance") + " ---",
+    ...block.lines.map((number) => String(number).padStart(width, " ") + "| " + lines[number - 1]),
+  ]);
+}
+
+export function composeTranslationPrompt({ workPackageId, lines, format, test, attempt = 1, feedback = [] }) {
   const gateLine = test?.kind === "command"
     ? "Bridge will run this verification after the work: " + test.command + ". A condition it can show may use {\"kind\": \"test\", \"check\": null}."
     : "Bridge runs no verification command for this work; every condition uses {\"kind\": \"reviewer\", \"check\": \"<what the reviewer checks>\"}.";
@@ -70,137 +70,50 @@ export function composeTranslationPrompt({ workPackageId, lines, test, locale, a
     CONTRACT_MODE_HEADER,
     "",
     "Injected by the local Review Bridge controller. Work package: " + workPackageId + "  Attempt: " + attempt,
-    "Turn the human work order below into one contract.translation object that matches the JSON schema given to the CLI.",
+    "Cut the acceptance blocks of a human work order, given below, into conditions: one contract.translation object that matches the JSON schema given to the CLI.",
     "",
     "Rules:",
-    "- Record only what the work order says. A part the work order does not fill stays null or empty; never invent one.",
-    "- Parts of the work order are given as source_refs only (inclusive line ranges); Bridge copies the text itself.",
-    "- acceptance: each item is one complete, checkable condition, numbered AC1, AC2, ... in order. quote is a verbatim excerpt of its source_refs lines. One line may give several conditions and one condition may span several lines; line numbers locate, they are not condition numbers.",
-    "- Every non-blank line is either referenced somewhere or listed in unused_lines (headings, instructions, comments, template hints). A line is never both.",
-    "- run_plan stays null unless the work order explicitly lays the work out as two or more runs; then each run's name appears in its own lines, which no other run shares. A dependency is recorded only when the run's own lines state it: depends_on_quote is that line, verbatim, and it names every run in depends_on; with no stated dependency, depends_on is empty. Sub-agents are not runs, and the number of conditions is not the number of runs.",
-    "- run_refs names the runs a condition belongs to: at least one when run_plan exists, none when it is null.",
-    "- Paths, test hints and references in the work order are context, not permission. You do not choose files, commands, budgets or roles; Bridge already did.",
+    "- Bridge has already placed every other part of the work order; you only write conditions.",
+    "- Each condition is one complete, checkable result, numbered AC1, AC2, ... in the order given. statement says it in one sentence; quote is a verbatim excerpt of its source_refs lines.",
+    "- source_refs are inclusive line ranges, using the line numbers shown, all inside one block. One line may give several conditions and one condition may span several lines, an explanation or example beside it included.",
+    "- Every line shown belongs to at least one condition.",
+    "- Paths and test hints are context, not permission. You do not choose files, commands, budgets or roles; Bridge already did.",
     "- " + gateLine,
-    "- If something that affects the work is genuinely ambiguous or missing in the work order, add it to open_questions instead of guessing. Bridge stops and the human edits the work order.",
-    "- Write every statement and question in the language with the BCP 47 tag \"" + locale + "\"; quotes stay in the work order's own words.",
+    "- " + LANGUAGE_RULE,
     "- Do not read or change any file; everything you need is below.",
     ...(feedback.length ? ["", "Your previous translation was refused for these reasons; fix them and translate again:", ...feedback.map((line) => "- " + line)] : []),
     "",
-    "=== WORK ORDER (line-numbered) ===",
-    ...numbered(lines),
-    "=== END WORK ORDER ===",
+    "=== ACCEPTANCE BLOCKS (line-numbered) ===",
+    ...acceptanceBlocks(lines, format),
+    "=== END ACCEPTANCE BLOCKS ===",
   ].join("\n");
-}
-
-function refProblems(refs, lineCount, at) {
-  return (refs || []).flatMap((ref, index) => {
-    if (ref.start > ref.end) return [at + "[" + index + "]: start is after end"];
-    if (ref.end > lineCount) return [at + "[" + index + "]: line " + ref.end + " is past the last line " + lineCount];
-    return [];
-  });
-}
-
-// Every source_refs array in the object except unused_lines, with its location for messages.
-// Walked with a stack; children are pushed last first, so the list keeps document order.
-function everyRefList(value, at = "$", found = []) {
-  const stack = [{ value, at }];
-  while (stack.length) {
-    const { value: item, at: where, refs } = stack.pop();
-    if (refs) {
-      found.push({ refs: item, at: where });
-    } else if (Array.isArray(item)) {
-      for (let index = item.length - 1; index >= 0; index -= 1) stack.push({ value: item[index], at: where + "[" + index + "]" });
-    } else if (item && typeof item === "object") {
-      const children = Object.entries(item).filter(([key]) => key !== "unused_lines");
-      for (const [key, child] of children.reverse()) stack.push({ value: child, at: where + "." + key, refs: key === "source_refs" });
-    }
-  }
-  return found;
-}
-
-function coverageProblems(lines, refLists, unused) {
-  const used = new Set(refLists.flatMap(({ refs }) => refs.flatMap((ref) => range(ref))));
-  const spare = new Set(unused.flatMap((ref) => range(ref)));
-  const problems = [];
-  for (const [index, line] of lines.entries()) {
-    const number = index + 1;
-    if (used.has(number) && spare.has(number)) problems.push("line " + number + " is both used and listed in unused_lines");
-    else if (line.trim() && !used.has(number) && !spare.has(number)) problems.push("line " + number + " is neither used nor listed in unused_lines");
-  }
-  return problems;
 }
 
 function range(ref) {
   return Array.from({ length: Math.max(0, ref.end - ref.start + 1) }, (_, offset) => ref.start + offset);
 }
 
-// Depth first with a stack: trail holds the runs still open and next the dependency each goes to
-// next. A run is done once all its dependencies are.
-function cycleProblems(runs) {
-  const byName = new Map(runs.map((run) => [run.name, run]));
-  const done = new Set();
-  const cycles = [];
-  for (const run of runs) {
-    const trail = [];
-    const next = [];
-    const enter = (name) => {
-      if (trail.includes(name)) cycles.push(trail.slice(trail.indexOf(name)).concat(name).join(" -> "));
-      else if (!done.has(name) && byName.has(name)) { trail.push(name); next.push(0); }
-    };
-    enter(run.name);
-    while (trail.length) {
-      const top = trail.length - 1;
-      const dependsOn = byName.get(trail[top]).depends_on;
-      if (next[top] < dependsOn.length) {
-        next[top] += 1;
-        enter(dependsOn[next[top] - 1]);
-      } else {
-        done.add(trail.pop());
-        next.pop();
-      }
-    }
-  }
-  return [...new Set(cycles)].map((cycle) => "$.run_plan: dependency cycle " + cycle);
+// The block a condition's lines lie in, or null when they lie outside every acceptance block or
+// across two.
+function blockOf(item, format) {
+  const lines = item.source_refs.flatMap((ref) => range(ref));
+  return format.acceptance.find((block) => {
+    const first = block.lines[0];
+    const last = block.lines[block.lines.length - 1];
+    return lines.every((line) => line >= first && line <= last);
+  }) || null;
 }
 
-// A dependency must be stated in the run's own lines: its quote is verbatim there and names
-// every run it depends on. A run with no stated dependency may still quote "none".
-function dependencyProblems(run, at, lines, names) {
-  const problems = run.depends_on.filter((dependency) => !names.has(dependency)).map((dependency) => at + ".depends_on: unknown run " + dependency);
-  if (run.depends_on_quote === null) return run.depends_on.length ? [...problems, at + ".depends_on_quote: a dependency needs the line that states it"] : problems;
-  if (!flat(linesOf(lines, run.source_refs).join(" ")).includes(flat(run.depends_on_quote))) return [...problems, at + ".depends_on_quote: not found verbatim in the run's own lines"];
-  const unnamed = run.depends_on.filter((dependency) => !flat(run.depends_on_quote).includes(flat(dependency)));
-  return [...problems, ...unnamed.map((dependency) => at + ".depends_on_quote: does not name " + dependency)];
-}
-
-function runPlanProblems(runPlan, lines) {
-  if (!runPlan) return [];
+function acceptanceProblems(acceptance, { lines, format, test }) {
   const problems = [];
-  const names = new Set(runPlan.runs.map((run) => run.name));
-  const seen = new Set();
-  const owner = new Map();
-  for (const [index, run] of runPlan.runs.entries()) {
-    const at = "$.run_plan.runs[" + index + "]";
-    if (seen.has(run.name)) problems.push(at + ".name: duplicate " + run.name);
-    seen.add(run.name);
-    if (!flat(linesOf(lines, run.source_refs).join(" ")).includes(flat(run.name))) problems.push(at + ".name: \"" + run.name + "\" does not appear in its lines");
-    for (const line of run.source_refs.flatMap((ref) => range(ref))) {
-      if (owner.has(line) && owner.get(line) !== run.name) problems.push(at + ".source_refs: line " + line + " also belongs to " + owner.get(line));
-      owner.set(line, run.name);
-    }
-    problems.push(...dependencyProblems(run, at, lines, names));
-  }
-  return [...problems, ...cycleProblems(runPlan.runs)];
-}
-
-function acceptanceProblems(acceptance, { lines, test, runNames }) {
-  const problems = [];
-  const ids = new Set();
+  const covered = new Set();
   for (const [index, item] of acceptance.entries()) {
     const at = "$.acceptance[" + index + "]";
-    if (ids.has(item.id)) problems.push(at + ".id: duplicate " + item.id);
-    ids.add(item.id);
     if (item.id !== "AC" + (index + 1)) problems.push(at + ".id: expected AC" + (index + 1));
+    const backwards = item.source_refs.findIndex((ref) => ref.start > ref.end);
+    if (backwards !== -1) { problems.push(at + ".source_refs[" + backwards + "]: start is after end"); continue; }
+    if (!blockOf(item, format)) { problems.push(at + ".source_refs: not inside one acceptance block"); continue; }
+    for (const ref of item.source_refs) for (const line of range(ref)) covered.add(line);
     if (!flat(linesOf(lines, item.source_refs).join(" ")).includes(flat(item.quote))) problems.push(at + ".quote: not found verbatim in its source lines");
     for (const [verifyIndex, verify] of item.verify.entries()) {
       const where = at + ".verify[" + verifyIndex + "]";
@@ -208,62 +121,53 @@ function acceptanceProblems(acceptance, { lines, test, runNames }) {
       if (verify.kind === "test" && verify.check !== null) problems.push(where + ".check: must be null for test");
       if (verify.kind === "reviewer" && !verify.check) problems.push(where + ".check: say what the reviewer checks");
     }
-    if (!runNames && item.run_refs.length) problems.push(at + ".run_refs: there is no run_plan");
-    if (runNames && !item.run_refs.length) problems.push(at + ".run_refs: name the runs this condition belongs to");
-    for (const name of item.run_refs) if (runNames && !runNames.has(name)) problems.push(at + ".run_refs: unknown run " + name);
+  }
+  for (const block of format.acceptance) {
+    for (const line of block.lines) if (!covered.has(line)) problems.push("line " + line + " belongs to no condition");
   }
   return problems;
 }
 
+// What stops the work before any model call: the work order states no result to check, or it
+// lists open questions. Both are the human's to answer.
+export function workOrderQuestions(format) {
+  const questions = format.open_questions.map((entry) => entry.question);
+  if (!format.acceptance.length) questions.push("The work order states no result that can be checked.");
+  return questions;
+}
+
 // Shape first, then the rules only code can check. `problems` refuse the translation (the model
-// erred and may try again); `questions` mean the work order itself needs the human.
-export async function checkTranslation(value, { lines, test }) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, problems: ["$: not an object"], questions: [] };
+// erred and may try again).
+export async function checkTranslation(value, { lines, format, test }) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, problems: ["$: not an object"] };
   const problems = validateAgainstSchema(value, await loadSchema(CONTRACT_TRANSLATION_SCHEMA));
-  if (problems.length) return { ok: false, problems, questions: [] };
-  const refLists = everyRefList(value);
-  for (const { refs, at } of refLists) problems.push(...refProblems(refs, lines.length, at));
-  problems.push(...refProblems(value.unused_lines, lines.length, "$.unused_lines"));
-  if (problems.length) return { ok: false, problems, questions: [] };
-  problems.push(...coverageProblems(lines, refLists, value.unused_lines));
-  problems.push(...runPlanProblems(value.run_plan, lines));
-  const runNames = value.run_plan ? new Set(value.run_plan.runs.map((run) => run.name)) : null;
-  problems.push(...acceptanceProblems(value.acceptance, { lines, test, runNames }));
-  const questions = value.open_questions.map((entry) => entry.question);
-  if (!value.acceptance.length && !questions.length) questions.push("The work order states no result that can be checked.");
-  return { ok: problems.length === 0, problems, questions };
+  if (problems.length) return { ok: false, problems };
+  problems.push(...acceptanceProblems(value.acceptance, { lines, format, test }));
+  return { ok: problems.length === 0, problems };
 }
 
-// Bridge copies the referenced lines into every part; the model wrote only conditions and questions.
-// Walked with a stack, as canonical is: each open array or object closes once its children are
-// copied. source_refs is kept as it is.
-function copyText(value, lines) {
-  const isTree = (item) => Boolean(item) && typeof item === "object";
-  const open = (source) => ({ source, keys: Array.isArray(source) ? [...source.keys()] : Object.keys(source), values: [] });
-  const close = ({ source, keys, values }) => {
-    if (Array.isArray(source)) return values;
-    const isPart = keys.length === 1 && Array.isArray(source.source_refs);
-    return isPart ? { text: linesOf(lines, source.source_refs).join("\n"), source_refs: source.source_refs } : Object.fromEntries(keys.map((key, index) => [key, values[index]]));
-  };
-  if (!isTree(value)) return value;
-  const stack = [open(value)];
-  for (;;) {
-    const top = stack[stack.length - 1];
-    if (top.values.length < top.keys.length) {
-      const key = top.keys[top.values.length];
-      const child = top.source[key];
-      if (isTree(child) && key !== "source_refs") stack.push(open(child));
-      else top.values.push(child);
-      continue;
-    }
-    stack.pop();
-    if (!stack.length) return close(top);
-    stack[stack.length - 1].values.push(close(top));
-  }
+// One block as a contract part: its content lines, as written.
+function partOf(lines, numbers) {
+  if (!numbers?.length) return null;
+  const sourceRefs = rangesOf(numbers, lines);
+  return { text: linesOf(lines, sourceRefs).join("\n"), source_refs: sourceRefs };
 }
 
-export function buildContract({ workPackage, lines, translation, translator, checker }) {
-  const { event: _event, unused_lines: unused, run_plan: runPlan, ...parts } = translation;
+function frontmatterPart(format) {
+  const { source_id: sourceId, lines: at } = format.frontmatter;
+  return sourceId === null ? null : { text: sourceId, source_refs: [{ start: at.source_id, end: at.source_id }] };
+}
+
+// Every field from its block; the conditions from the translation, each belonging to the run whose
+// list it was cut from (none for the work order's own acceptance block).
+export function buildContract({ workPackage, lines, format, translation, translator, checker }) {
+  const block = (key) => format.blocks.get(key)?.content;
+  const part = (key) => partOf(lines, block(key));
+  const listOf = (key) => (block(key)?.length ? [part(key)] : []);
+  const reproductionKeys = ["environment", "steps", "actual", "expected", "frequency"];
+  const reproduction = reproductionKeys.some((key) => block("reproduction." + key)?.length)
+    ? Object.fromEntries(reproductionKeys.map((key) => [key, part("reproduction." + key)]))
+    : null;
   return {
     schema: "review-bridge.contract",
     schema_version: CONTRACT_SCHEMA_VERSION,
@@ -271,37 +175,71 @@ export function buildContract({ workPackage, lines, translation, translator, che
     source: { path: workPackage.task_file || null, sha256: digest(workPackage.task), lines },
     translated_by: translator,
     checked_by: checker,
-    ...copyText(parts, lines),
-    run_plan: runPlan ? { runs: runPlan.runs.map((run) => ({ ...run, text: linesOf(lines, run.source_refs).join("\n") })) } : null,
-    unused_lines: unused.map((ref) => ({ text: linesOf(lines, [ref]).join("\n"), source_refs: [ref] })),
+    ticket: {
+      title: { text: format.title.text, source_refs: [{ start: format.title.line, end: format.title.line }] },
+      source_id: frontmatterPart(format),
+      priority: format.frontmatter.priority,
+      effort: format.frontmatter.effort,
+      budget: format.frontmatter.budget,
+    },
+    context: part("context"),
+    outcome: part("outcome"),
+    requested_work: part("requested_work"),
+    scope_notes: {
+      include: part("scope_notes.include"),
+      exclude: part("scope_notes.exclude"),
+      must_keep: part("scope_notes.must_keep"),
+      expected_locations: part("scope_notes.expected_locations"),
+    },
+    run_plan: format.runs ? {
+      runs: format.runs.map((run) => {
+        const sourceRefs = rangesOf(run.work, lines);
+        return {
+          name: run.name,
+          text: linesOf(lines, sourceRefs).join("\n"),
+          depends_on: run.depends_on,
+          depends_on_quote: run.depends_on_line ? lines[run.depends_on_line - 1].trim() : null,
+          source_refs: sourceRefs,
+          effort: run.effort,
+          budget: run.budget,
+        };
+      }),
+    } : null,
+    acceptance: translation.acceptance.map((item) => {
+      const run = blockOf(item, format)?.run;
+      return { ...item, run_refs: run ? [run] : [] };
+    }),
+    verification_hints: listOf("verification_hints"),
+    reproduction,
+    references: listOf("references"),
+    open_questions: format.open_questions,
+    unused_lines: rangesOf(format.unused, lines).map((ref) => ({ text: linesOf(lines, [ref]).join("\n"), source_refs: [ref] })),
   };
 }
 
-export function composeCheckPrompt({ workPackageId, lines, candidate, sha256, locale, attempt }) {
+export function composeCheckPrompt({ workPackageId, lines, format, candidate, sha256, attempt }) {
   return [
     CHECK_MODE_HEADER,
     "",
     "Injected by the local Review Bridge controller. Work package: " + workPackageId + "  Attempt: " + attempt,
     "Candidate: " + sha256,
-    "You are the independent reviewer. A writer translated the human work order below into the candidate contract. Read both and answer with one contract.check object matching the JSON schema given to the CLI.",
+    "You are the independent reviewer. A writer cut the acceptance blocks of a human work order, given below, into the candidate conditions. Read both and answer with one contract.check object matching the JSON schema given to the CLI.",
     "",
     "Check:",
-    "- Judge every part in fields, empty ones too, exactly once: " + CHECKED_FIELDS.join(", ") + ". A part is faithful only if it holds what the work order puts there and nothing else: an exclusion copied as an inclusion, a constraint left out, a hint treated as a requirement, or an empty part the work order does fill is not faithful.",
-    "- run_plan: is the work really laid out as several runs in the work order, and does each dependency match what the work order states, no added and no dropped ones?",
-    "- For every condition in acceptance: does its statement say what its source lines mean, no more and no less; does its verify fit (test only where the sealed test can show it); do its run_refs match the runs the work order gives it? Answer faithful true or false for each id, with a short note when false.",
-    "- Is any requirement the work order states clearly missing from the conditions? Look especially at unused_lines and at parts copied as context. List each under missing with its lines.",
-    "- Is anything genuinely ambiguous in the work order itself, so that only the human can decide? List it under ambiguities. A translation mistake is not an ambiguity.",
+    "- For every condition: does its statement say what its source lines mean, no more and no less, and does its verify fit (test only where the sealed test can show it)? Answer faithful true or false for each id, with a short note when false.",
+    "- Is any result the blocks state missing from the conditions? List each under missing with its lines.",
+    "- Is anything genuinely ambiguous in the work order itself, so that only the human can decide? List it under ambiguities. A mistake in the conditions is not an ambiguity.",
     "- If you cannot judge, set cannot_confirm true and say why. Do not guess a pass.",
-    "- Echo the candidate hash in candidate_sha256. Write notes and questions in the language with the BCP 47 tag \"" + locale + "\".",
+    "- Echo the candidate hash in candidate_sha256. " + LANGUAGE_RULE,
     "- Do not change any file.",
     "",
-    "=== WORK ORDER (line-numbered) ===",
-    ...numbered(lines),
-    "=== END WORK ORDER ===",
+    "=== ACCEPTANCE BLOCKS (line-numbered) ===",
+    ...acceptanceBlocks(lines, format),
+    "=== END ACCEPTANCE BLOCKS ===",
     "",
-    "=== CANDIDATE CONTRACT ===",
-    JSON.stringify(candidate, null, 2),
-    "=== END CANDIDATE CONTRACT ===",
+    "=== CANDIDATE CONDITIONS ===",
+    JSON.stringify(candidate.acceptance, null, 2),
+    "=== END CANDIDATE CONDITIONS ===",
   ].join("\n");
 }
 
@@ -314,10 +252,6 @@ export async function decideCheck(value, { candidate, sha256 }) {
     : ["$: not an object"];
   if (problems.length) return { decision: "unconfirmed", problems, feedback: [], questions: [] };
   if (value.candidate_sha256 !== sha256) problems.push("$.candidate_sha256: expected " + sha256);
-  const fields = value.fields.map((item) => item.field);
-  if (fields.length !== new Set(fields).size || fields.length !== CHECKED_FIELDS.length || CHECKED_FIELDS.some((field) => !fields.includes(field))) {
-    problems.push("$.fields: must judge exactly " + CHECKED_FIELDS.join(", "));
-  }
   const expected = candidate.acceptance.map((item) => item.id);
   const judged = value.acceptance.map((item) => item.id);
   if (judged.length !== new Set(judged).size || judged.length !== expected.length || expected.some((id) => !judged.includes(id))) {
@@ -327,9 +261,8 @@ export async function decideCheck(value, { candidate, sha256 }) {
   if (value.ambiguities.length) return { decision: "needs_human", problems: [], feedback: [], questions: value.ambiguities.map((entry) => entry.question) };
   if (value.cannot_confirm) return { decision: "unconfirmed", problems: [value.cannot_confirm_reason || "the reviewer could not confirm the translation"], feedback: [], questions: [] };
   const feedback = [
-    ...value.fields.filter((item) => !item.faithful).map((item) => item.field + " does not match the work order" + (item.note ? ": " + item.note : "")),
     ...value.acceptance.filter((item) => !item.faithful).map((item) => item.id + " does not match its lines" + (item.note ? ": " + item.note : "")),
-    ...value.missing.map((entry) => "missing requirement at lines " + entry.source_refs.map((ref) => ref.start + "-" + ref.end).join(", ") + ": " + entry.note),
+    ...value.missing.map((entry) => "missing condition at lines " + entry.source_refs.map((ref) => ref.start + "-" + ref.end).join(", ") + ": " + entry.note),
   ];
   if (feedback.length) return { decision: "retranslate", problems: [], feedback, questions: [] };
   return { decision: "pass", problems: [], feedback: [], questions: [] };
@@ -362,13 +295,15 @@ export async function sealContract(paths, contract) {
 }
 
 // Every read goes through here: the file must still hash to the name the run recorded and
-// still match the formal schema.
+// still match the formal schema. A contract an older Bridge sealed (schema version 1) belongs to
+// an old run and is not read again.
 export async function loadContract(paths, sha256) {
   const text = await fsp.readFile(contractPath(paths, sha256), "utf8").catch(() => null);
   if (text === null) throw new ContractChangedError(sha256, "is missing");
   let contract;
   try { contract = JSON.parse(text); } catch { throw new ContractChangedError(sha256, "is not valid JSON"); }
   if (digest(contract) !== sha256) throw new ContractChangedError(sha256, "was changed after it was sealed");
+  if (contract?.schema_version === 1) throw new ContractChangedError(sha256, "was made by an older Bridge and is not read again; run: review-bridge clean");
   if ((await schemaProblems(contract)).length) throw new ContractChangedError(sha256, "does not match the contract schema");
   return contract;
 }

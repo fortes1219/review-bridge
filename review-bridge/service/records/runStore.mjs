@@ -26,10 +26,11 @@ export const CLOSED_REASONS = Object.freeze([
   "rate_limited", "cancelled", "policy_failure",
   "rounds_exhausted", "writer_timeout", "writer_failed", "reviewer_failed", "controller_failure",
   "token_limit", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
-  "needs_human", "malformed_writer_result", "malformed_review_result",
+  "needs_human", "malformed_writer_result", "malformed_review_result", "run_timeout",
 ]);
-// Closed by the stop command, by a start of a newer version, or because the database went away.
-export const STOP_REASONS = Object.freeze(["stopped", "superseded", "database_unavailable"]);
+// Closed by the stop command, by a start of a newer version, because the database went away, or
+// because the run reached its own time limit (run_timeout).
+export const STOP_REASONS = Object.freeze(["stopped", "superseded", "database_unavailable", "run_timeout"]);
 // A reviewer PASS, a hard stop or a quota stop is recorded on the run's last state before the run
 // closes; from then on the run is settled, and a stop cannot take it over.
 const SETTLING_STATES = new Set(["pass", "hard_stop", "rate_limited"]);
@@ -57,8 +58,8 @@ function conclusionOf(run, reason, gate) {
       : gate?.hard_stop_required ? "hard_stop"
         : CLOSED_REASONS.includes(reason) ? reason : "policy_failure");
   if (settled === "pass") return "success";
+  if (settled === "writer_timeout" || settled === "run_timeout") return "timed_out";
   if (settled === "cancelled" || STOP_REASONS.includes(settled)) return "cancelled";
-  if (settled === "writer_timeout") return "timed_out";
   if (ACTION_REQUIRED.has(settled)) return "action_required";
   return "failure";
 }
@@ -349,6 +350,8 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     ...(input.test !== undefined ? { test: structuredClone(input.test) } : {}),
     ...(input.task_file !== undefined ? { task_file: input.task_file } : {}),
     ...(input.contract_steps ? { contract_steps: structuredClone(input.contract_steps) } : {}),
+    // The priority this work runs at, and each role's model and effort, as the plan settled them.
+    ...(input.priority ? { priority: input.priority, writer: structuredClone(input.writer), reviewer: structuredClone(input.reviewer) } : {}),
     created_at: nowIso(clock),
   };
   if (!record.task.trim() || !record.breakpoint.trim()) throw new Error("Work package task and breakpoint are required.");
@@ -520,13 +523,11 @@ export async function claimStartAuthorization(paths, authorizationId, {
     transition_sequence: 0,
     iteration: 0,
     execution_mode: executionMode,
-    budget: {
-      rounds: workPackage.budget.rounds,
-      call_timeout: workPackage.budget.call_timeout,
-      consumed_rounds: 0,
-    },
+    budget: { ...structuredClone(workPackage.budget), consumed_rounds: 0 },
     recovery_window: snapshot.effective_policy.limits.recovery_window,
     run_deadline_at: plusMs(nowIso(clock), snapshot.effective_policy.limits.recovery_window),
+    // The run's own time limit, counted from its start; checked where the run already checks for a stop.
+    timeout_at: workPackage.budget.run_timeout ? plusMs(nowIso(clock), workPackage.budget.run_timeout) : null,
     workspace_evidence: workspaceEvidence,
     last_state: null,
     created_at: nowIso(clock),
@@ -648,7 +649,7 @@ export async function stopRunRecord(paths, runId, { closedReason = "stopped", su
   return await mutateRun(paths, runId, "run_terminal", details, (run) => {
     if (run.closed_at || run.status === "completed" || settledState(run)) throw new RunEndedError(run.closed_reason || settledState(run));
     run.status = "completed";
-    run.conclusion = "cancelled";
+    run.conclusion = closedReason === "run_timeout" ? "timed_out" : "cancelled";
     run.closed_reason = closedReason;
     if (supersededBy) run.superseded_by = supersededBy;
     run.closed_at = nowIso(options.clock || Date.now);
@@ -776,11 +777,14 @@ export async function loadControlView(paths, runId) {
     iteration: run.iteration,
     dispatch_transport: "writer_cli_resume_same_session",
     hard_stops: structuredClone(policy.hard_stops),
-    reviewer_policy: reviewerPolicyFromSnapshot(snapshot),
+    // The plan settled the priority and each role's model and effort for this work order.
+    reviewer_policy: workPackage.priority
+      ? { priority: workPackage.priority, model: workPackage.reviewer.model, effort: workPackage.reviewer.effort }
+      : reviewerPolicyFromSnapshot(snapshot),
     token_policy: {
       writer_disallowed_tools: structuredClone(policy.writer.disallowed_tools),
       writer_mode: policy.writer.mode,
-      writer_effort: priorityChoice(policy).writer.effort,
+      writer_effort: workPackage.priority ? workPackage.writer.effort : priorityChoice(policy).writer.effort,
       writer_self_review: policy.writer.self_review,
       full_reconstruction_on_correction: false,
       full_reconstruction_requires_human: true,

@@ -11,7 +11,7 @@ D1-D7 and the acceptance matrix were approved by the human owner on 2026-08-28. 
 
 The controller must keep these lifecycles separate:
 
-1. Work package: immutable definition of task, scope, allowed paths, change types, budget, and breakpoint.
+1. Work package: immutable definition of task, scope, allowed paths, budget, priority, and breakpoint.
 2. Authorization: immutable human approval of one exact work-package checksum under one exact effective-policy checksum.
 3. Run: mutable execution projection for one attempt, including session, usage, status, and evidence pointers.
 4. Event log: append-only audit history of run transitions. A current run file must never replace historical evidence.
@@ -53,7 +53,7 @@ Required fields:
 - `work_package_id`
 - normalized work-item source fields when present
 - task and acceptance criteria
-- change types and allowed paths
+- allowed paths
 - budget
 - breakpoint
 - content checksum

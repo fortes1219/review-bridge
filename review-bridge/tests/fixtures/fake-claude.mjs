@@ -37,42 +37,26 @@ const cacheRead = Number(process.env.FAKE_CLAUDE_TOKENS || 150_346);
 const streamMode = process.argv.includes("stream-json");
 const typed = process.argv.includes("--json-schema");
 
-const at = (line) => ({ source_refs: [{ start: line, end: line }] });
 const attempt = Number(/Attempt: (\d+)/.exec(prompt)?.[1] || 1);
 
-// A translation read off the numbered work order: the first "# " line is the title, each list
-// item under a heading that names acceptance becomes one condition quoting its line, and every
-// other non-blank line is listed as unused. FAKE_CONTRACT_FILE replaces it with a prepared
-// answer, or with an array of answers, one per attempt, so a test can hand the harness anything.
+// Conditions read off the numbered acceptance blocks in the prompt: every line becomes one condition
+// quoting its text, a list marker left out. FAKE_CONTRACT_FILE replaces it with a prepared answer,
+// or with an array of answers, one per attempt, so a test can hand the harness anything.
 function translationOutput() {
   if (process.env.FAKE_CONTRACT_FILE) {
     const prepared = JSON.parse(fs.readFileSync(process.env.FAKE_CONTRACT_FILE, "utf8"));
     return Array.isArray(prepared) ? prepared[Math.min(attempt, prepared.length) - 1] : prepared;
   }
   const numbered = [...prompt.matchAll(/^ *(\d+)\| (.*)$/gm)].map((match) => ({ line: Number(match[1]), text: match[2] }));
-  const title = numbered.find((entry) => /^#\s+/.test(entry.text));
   const gate = prompt.includes("Bridge will run this verification");
-  const acceptance = [];
-  const used = new Set([title ? title.line : 1]);
-  let inAcceptance = false;
-  for (const entry of numbered) {
-    if (/^#{1,6}\s+/.test(entry.text)) { inAcceptance = /acceptance|驗收/i.test(entry.text); continue; }
-    const item = inAcceptance ? /^\s*(?:\d+\.|[-*])\s+(.+)$/.exec(entry.text) : null;
-    if (!item) continue;
-    used.add(entry.line);
-    acceptance.push({
-      id: "AC" + (acceptance.length + 1), statement: item[1], quote: item[1], source_refs: [{ start: entry.line, end: entry.line }],
-      verify: [gate ? { kind: "test", check: null } : { kind: "reviewer", check: "fake: the reviewer reads the change" }], run_refs: [],
-    });
-  }
-  const unused = numbered.filter((entry) => entry.text.trim() && !used.has(entry.line)).map((entry) => ({ start: entry.line, end: entry.line }));
-  return {
-    event: "contract.translation",
-    ticket: { title: at(title ? title.line : 1), type: null, source_id: null, product_version: null, people: null, schedule: null, related: null },
-    context: null, outcome: null, requested_work: null,
-    scope_notes: { include: null, exclude: null, must_keep: null, expected_locations: null },
-    run_plan: null, acceptance, verification_hints: [], reproduction: null, references: [], open_questions: [], unused_lines: unused,
-  };
+  const acceptance = numbered.map((entry, index) => {
+    const text = /^\s*(?:\d+[.)]|[-*])\s+(.+)$/.exec(entry.text)?.[1] ?? entry.text.trim();
+    return {
+      id: "AC" + (index + 1), statement: text, quote: text, source_refs: [{ start: entry.line, end: entry.line }],
+      verify: [gate ? { kind: "test", check: null } : { kind: "reviewer", check: "fake: the reviewer reads the change" }],
+    };
+  });
+  return { event: "contract.translation", acceptance };
 }
 
 // FAKE_CONTRACT_TAMPER=1 makes the writer rewrite the sealed contract file, as a model trying to

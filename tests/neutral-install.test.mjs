@@ -149,10 +149,23 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   // T0-02 R3.1: retention ships with the 15-day default and is owner-editable.
   assert.deepEqual(plan.retention, { days: 15 });
   assert.deepEqual(config.retention, { days: 15 });
-  // The work-order template is the packaged one, for people to fill in; rules.md is installed and owner-editable.
+  // The work-order templates are the packaged ones, in English and Chinese, for people to fill in;
+  // the install records each one's hash. rules.md is installed and owner-editable.
   const template = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), "utf8");
   assert.equal(template, await fsp.readFile(new URL("../project-templates/work-package.md", import.meta.url), "utf8"));
-  assert.match(template, /^## Acceptance$/m);
+  assert.match(template, /^<!-- bridge:acceptance -->\n## Acceptance$/m);
+  const chinese = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.zh-TW.md"), "utf8");
+  assert.equal(chinese, await fsp.readFile(new URL("../project-templates/work-package.zh-TW.md", import.meta.url), "utf8"));
+  assert.match(chinese, /^<!-- bridge:acceptance -->\n## 驗收$/m);
+  const { createHash } = await import("node:crypto");
+  const hashOf = (text) => createHash("sha256").update(text).digest("hex");
+  assert.deepEqual(JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge-install.json"), "utf8")).work_template_sha256, {
+    "work-packages/TEMPLATE.md": hashOf(template), "work-packages/TEMPLATE.zh-TW.md": hashOf(chinese),
+  });
+  // Each template the install recorded has to exist.
+  await fsp.rm(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.zh-TW.md"));
+  await assert.rejects(verifyNeutralInstall(root), /Neutral work template is missing or empty \(\.review-bridge\/work-packages\/TEMPLATE\.zh-TW\.md\)/);
+  await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.zh-TW.md"), chinese);
   const rulesPath = path.join(root, ".review-bridge", "review-bridge", "rules.md");
   assert.ok((await fsp.readFile(rulesPath, "utf8")).length > 0);
   await fsp.writeFile(rulesPath, "# 我的規則\n不要動測試。\n");

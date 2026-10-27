@@ -32,18 +32,19 @@ import { recheckTest, selectTest } from "./test.mjs";
 import { MAX_TRANSLATION_ATTEMPTS } from "./contract.mjs";
 import { processFile, startLockFile, workLockFile } from "./processRecords.mjs";
 import { priorityChoice } from "../../policy/policyRules.mjs";
+import { BUDGET_KEYS, budgetProblems, MIN_CALL_TIMEOUT, parseWorkOrder, WorkOrderFormatError } from "./workOrderFormat.mjs";
 import { stopRun } from "./writerLoop.mjs";
 
 // The model calls that turn a work order into a contract run before any work, so the plan names
 // them for the human to approve: who translates, who checks, how often, and for how long. The
 // providers are the configured roles as they are; a native run refuses one it cannot call yet.
-async function contractSteps(paths, snapshot, budget) {
+async function contractSteps(paths, writerModel, budget) {
   const config = await readJson(paths.bridgeConfigPath).catch(() => ({}));
   const writer = config?.roles?.writer?.provider_id;
   const reviewer = config?.roles?.reviewer?.provider_id;
   if (!writer || !reviewer) throw new Error("The writer and reviewer roles are not set in bridge.json; a work order cannot be planned.");
   return {
-    translate: { role: "writer", provider: writer, model: priorityChoice(snapshot.effective_policy).writer.model },
+    translate: { role: "writer", provider: writer, model: writerModel },
     check: { role: "reviewer", provider: reviewer },
     max_attempts: MAX_TRANSLATION_ATTEMPTS,
     call_timeout: budget.call_timeout,
@@ -97,11 +98,6 @@ export async function snapshotRules(paths) {
   return { path: relative, sha256: sha256Of(text), text };
 }
 
-export const CHANGE_TYPES = Object.freeze([
-  "docs", "code", "tests", "config", "contract", "schema", "migration", "external-behavior",
-]);
-const allowedChangeTypes = new Set(CHANGE_TYPES);
-
 function planDigest(plan) {
   const copy = structuredClone(plan);
   delete copy.plan_sha256;
@@ -115,13 +111,6 @@ function requiredText(value, label, maximum) {
   const unsupportedControls = text.replace(/[\n\r\t]/g, "");
   if (/\p{Cc}/u.test(unsupportedControls)) throw new Error(label + " contains control characters.");
   return text;
-}
-
-function parseChangeTypes(value) {
-  const values = [...new Set(String(value || "").split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
-  if (!values.length) throw new Error("At least one change type is required.");
-  for (const entry of values) if (!allowedChangeTypes.has(entry)) throw new Error("Unsupported change type: " + entry);
-  return values.sort();
 }
 
 function parseAllowedPaths(value) {
@@ -141,25 +130,61 @@ function parseAllowedPaths(value) {
 }
 
 // A plan is content-addressed, as a policy snapshot is, so one made by an older Bridge (its budget in
-// calls and minutes) is never rewritten; it is refused where it is read, and a new card is made.
-export const PLAN_SCHEMA_VERSION = 5;
+// calls and minutes, or its change types) is never rewritten; it is refused where it is read, and a
+// new card is made.
+export const PLAN_SCHEMA_VERSION = 6;
 
 export function assertCurrentPlan(plan) {
   if (plan?.operation !== "start_work_package") throw new Error("Unsupported work plan.");
-  if (plan.schema_version === 4) throw new Error("This plan was made by an older Bridge and is not read again. Run: review-bridge start <file> to make a new card");
+  if (plan.schema_version === 4 || plan.schema_version === 5) throw new Error("This plan was made by an older Bridge and is not read again. Run: review-bridge start <file> to make a new card");
   if (plan.schema_version !== PLAN_SCHEMA_VERSION) throw new Error("Unsupported work plan.");
 }
 
-function validateBudget(policy, rounds, callTimeout) {
-  const calls = Number(rounds);
-  const timeout = Number(callTimeout);
-  if (!Number.isInteger(calls) || calls < 1 || calls > policy.limits.rounds) {
-    throw new Error("Writer rounds exceed policy.");
+// Every budget value a plan settled, wherever it came from, within the policy: a positive whole
+// number no larger than the limit of the same name; a call gets at least a minute.
+function validateBudget(policy, budget) {
+  for (const key of BUDGET_KEYS) {
+    const value = budget[key];
+    if (!Number.isInteger(value) || value < 1) throw new Error("The budget's " + key + " must be a positive whole number; it is " + value + ".");
+    if (value > policy.limits[key]) throw new Error("The budget's " + key + " is " + value + ", over the policy limit " + policy.limits[key] + ".");
   }
-  if (!Number.isInteger(timeout) || timeout < 60_000 || timeout > policy.limits.call_timeout) {
-    throw new Error("Writer call timeout exceeds policy.");
+  if (budget.call_timeout < MIN_CALL_TIMEOUT) throw new Error("The budget's call_timeout must be at least " + MIN_CALL_TIMEOUT + " ms.");
+  return Object.fromEntries(BUDGET_KEYS.map((key) => [key, budget[key]]));
+}
+
+// Each value the work runs with and the layer it came from, in a fixed order: a flag given at the
+// terminal, then the work order's frontmatter, then the policy's priority table, then the config.
+// The work order may only go below the config's limits; each refusal names its line.
+function settleWorkOrder(policy, format, { rounds, callTimeout }) {
+  const frontmatter = format?.frontmatter || { priority: null, effort: null, budget: null, lines: {}, budget_lines: {} };
+  const problems = [
+    ...budgetProblems(frontmatter.budget, policy.limits, (key) => frontmatter.budget_lines[key]),
+    ...(format?.runs || []).flatMap((run) => budgetProblems(run.budget, policy.limits, () => run.line, "run " + run.name + " budget")),
+  ];
+  if (problems.length) throw new WorkOrderFormatError(problems);
+  const priority = frontmatter.priority ?? policy.priority.default;
+  const choice = priorityChoice(policy, priority);
+  const effort = frontmatter.effort ?? choice.writer.effort;
+  const flags = { rounds, call_timeout: callTimeout };
+  const budget = {};
+  const budgetSource = {};
+  for (const key of BUDGET_KEYS) {
+    if (flags[key] !== undefined) { budget[key] = Number(flags[key]); budgetSource[key] = "cli"; }
+    else if (frontmatter.budget?.[key] !== undefined) { budget[key] = frontmatter.budget[key]; budgetSource[key] = "work_order"; }
+    else { budget[key] = policy.limits[key]; budgetSource[key] = "config"; }
   }
-  return { rounds: calls, call_timeout: timeout };
+  return {
+    priority,
+    priority_source: frontmatter.priority ? "work_order" : "config",
+    // The work order's effort is the writer's, for every writer call (the work, each fix, the
+    // translation); the reviewer's always comes from the priority table.
+    effort,
+    effort_source: frontmatter.effort ? "work_order" : "priority",
+    writer: { model: choice.writer.model, effort },
+    reviewer: choice.reviewer,
+    budget: validateBudget(policy, budget),
+    budget_source: budgetSource,
+  };
 }
 
 export async function createWorkPackagePlan({
@@ -169,10 +194,9 @@ export async function createWorkPackagePlan({
   owner,
   workPackage,
   breakpoint,
-  changeTypes,
   allowedPaths,
-  rounds = 2,
-  callTimeout = 480_000,
+  rounds,
+  callTimeout,
   outPath,
   // Which work order this file is (Q13), as the card shows it; sealed with the plan, so the yes
   // approves it too.
@@ -192,15 +216,16 @@ export async function createWorkPackagePlan({
   // A work-order file is sealed as text here and turned into a contract by the model only after
   // the human starts the work; inline --task text is the legacy/test path and needs --allow-paths.
   const workOrderFile = Boolean(taskFile);
+  // The work order's own format is read before anything else; a work order Bridge cannot split
+  // starts nothing, and the refusal names the lines.
+  const format = workOrderFile ? parseWorkOrder(taskText) : null;
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
-  const budget = validateBudget(snapshot.effective_policy, rounds, callTimeout);
-  const choice = priorityChoice(snapshot.effective_policy);
+  const settled = settleWorkOrder(snapshot.effective_policy, format, { rounds, callTimeout });
   const scope = await resolveScope({ paths, workOrderFile, allowedPaths });
   const rules = workOrderFile ? await snapshotRules(paths) : null;
-  const contract = workOrderFile ? await contractSteps(paths, snapshot, budget) : null;
-  const changeTypeList = parseChangeTypes(changeTypes);
+  const contract = workOrderFile ? await contractSteps(paths, settled.writer.model, settled.budget) : null;
   // T0-06 G2: the verification is decided here, from the installed rules, and sealed for approval.
-  const test = await selectTest({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})), changeTypes: changeTypeList });
+  const test = await selectTest({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})) });
   const plan = {
     schema_version: PLAN_SCHEMA_VERSION,
     operation: "start_work_package",
@@ -217,16 +242,10 @@ export async function createWorkPackagePlan({
     ...(workOrder ? { work_order: workOrder } : {}),
     rules,
     ...(contract ? { contract_steps: contract } : {}),
-    scope: {
-      change_types: changeTypeList,
-      ...scope,
-    },
+    scope,
     test,
-    budget,
-    // What every call of this run will use, as the policy's priority table gives it.
-    priority: choice.priority,
-    writer: choice.writer,
-    reviewer: choice.reviewer,
+    // What every call of this run will use, each with the layer it came from (settleWorkOrder).
+    ...settled,
     effective_policy_sha256: snapshot.effective_policy_sha256,
     authorization_expires_at: new Date(
       Date.now() + snapshot.effective_policy.limits.authorization_ttl,
@@ -251,7 +270,6 @@ export function optionAgainstCard(plan, options) {
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const scope = plan.scope || {};
   if (options.breakpoint !== undefined && String(options.breakpoint).trim() !== plan.breakpoint) return "--breakpoint";
-  if (options.changeTypes !== undefined && !same(list(String(options.changeTypes).toLowerCase()), scope.change_types)) return "--change-types";
   if (options.allowedPaths !== undefined && !(scope.source === "explicit" && same(list(String(options.allowedPaths).replaceAll("\\", "/")), scope.allowed_paths))) return "--allow-paths";
   if (options.owner !== undefined && String(options.owner).trim() !== plan.owner) return "--owner";
   if (options.rounds !== undefined && Number(options.rounds) !== plan.budget?.rounds) return "--rounds";
@@ -416,7 +434,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
   if (snapshot.effective_policy_sha256 !== plan.effective_policy_sha256) {
     throw new Error("Work plan is stale because effective policy changed: Bridge was upgraded or its policy changed. Make a new plan with work-plan.");
   }
-  validateBudget(snapshot.effective_policy, plan.budget.rounds, plan.budget.call_timeout);
+  validateBudget(snapshot.effective_policy, plan.budget);
   // C3.7: what the model will be shown must still be what the Owner approved.
   if (plan.rules) {
     const current = await snapshotRules(paths);
@@ -496,6 +514,9 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
       contract_steps: plan.contract_steps || null,
       test: plan.test || null,
       task_file: plan.task_file || null,
+      priority: plan.priority,
+      writer: plan.writer,
+      reviewer: plan.reviewer,
     }, () => Date.parse(plan.created_at));
     const authorization = await createAuthorization(paths, {
       authorizationId: "plan-" + plan.plan_sha256,

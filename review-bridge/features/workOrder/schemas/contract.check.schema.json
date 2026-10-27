@@ -1,13 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "contract.check",
-  "description": "The independent reviewer's reading of one translation against the full work order. It lowers the risk of a translation that drifts from the work order; it does not prove the translation faithful.",
+  "description": "The independent reviewer's reading of the conditions a writer cut from the work order's acceptance blocks. It lowers the risk of a condition that drifts from its lines or one that is missing; it does not prove the conditions faithful.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "event",
     "candidate_sha256",
-    "fields",
     "acceptance",
     "missing",
     "ambiguities",
@@ -21,47 +20,6 @@
     "candidate_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
-    },
-    "fields": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "field",
-          "faithful",
-          "note"
-        ],
-        "properties": {
-          "field": {
-            "enum": [
-              "ticket",
-              "context",
-              "outcome",
-              "requested_work",
-              "scope_notes.include",
-              "scope_notes.exclude",
-              "scope_notes.must_keep",
-              "scope_notes.expected_locations",
-              "run_plan",
-              "verification_hints",
-              "reproduction",
-              "references",
-              "unused_lines"
-            ]
-          },
-          "faithful": {
-            "type": "boolean"
-          },
-          "note": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "maxLength": 300
-          }
-        }
-      }
     },
     "acceptance": {
       "type": "array",

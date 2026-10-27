@@ -1,79 +1,84 @@
-# Work order: [one sentence describing this work]
+---
+# Every key is optional; delete what you do not need. Any other key is refused.
+# priority: medium        # low / medium / high / urgent; picks the models and effort from the policy's table
+# effort: medium          # low / medium / high; the writer's effort for every writer call
+# budget:                 # each key optional; each may only be lower than the policy's limit
+#   tokens: 2000000
+#   tokens_per_call: 150000
+#   call_timeout: 1200000 # milliseconds
+#   test_timeout: 600000  # milliseconds
+#   run_timeout: 7200000  # milliseconds
+#   rounds: 2
+# source_id: SHOP-412     # your own tracker's id; Bridge stores it and never reads it
+---
+# [One sentence describing this work]
 
-> Copy this file and fill it in; optional fields without a value can be left empty or deleted. Keep the original wording that matters to the requirement; one acceptance result does not have to be forced onto one line. Running the start-work command authorizes the work order as it is at that moment; there is no second approval after translation.
+> Copy this file and fill in the blocks you need; delete the ones you do not. Each block runs from its `<!-- bridge:... -->` line to the next one, and Bridge copies it into the contract field of that name as written. The `##` headings are for you, in any language; Bridge does not read them. Running the start-work command authorizes the work order as it is at that moment.
 
-## Basics
-
-- Work type: [feature / defect / documentation / maintenance / other]
-- Source ID: [for example a Jira key or the original link; optional]
-- Product / version: [optional]
-- Reporter / owner: [optional]
-- Priority / due date / iteration: [optional; this is scheduling information, not a Bridge execution budget]
-- Related work orders / parent work: [optional]
-
+<!-- bridge:context -->
 ## Background and current state
+[What is happening now? Why does it need handling this time?]
 
-[What is happening now? Why does it need handling this time? What is known about the current state?]
-
+<!-- bridge:outcome -->
 ## Expected outcome
+[When the work is done, what will users see or be able to do?]
 
-[When the work is done, what will users see or be able to do? What behavior should the system show?]
-
+<!-- bridge:requested_work -->
 ## Work
-
 [Which changes or deliverables are required this time? Paragraphs, lists, image links or tables are all fine.]
 
-<!--
-A single piece of work needs no "Run plan" and no "RUN A".
-Only when one work order starts several independent runs, copy the example below into the
-work order body and fill it in.
+<!-- bridge:run_plan -->
+## Run plan (only for two or more runs; leave this block empty for one piece of work)
 
-## Run plan
-- Mode: multiple runs
+<!-- bridge:scope_notes.include -->
+## Includes
+[Situations or work this covers]
 
-### RUN A: [name]
-- Work: [the part this run is responsible for]
-- Acceptance: [the result this run must reach; no need to number AC in advance]
-- Depends on: [none / the name of another run]
+<!-- bridge:scope_notes.exclude -->
+## Excludes
+[Things this explicitly does not handle]
 
-### RUN B: [name; add more runs the same way when needed]
-- Work: [the part this run is responsible for]
-- Acceptance: [the result this run must reach]
-- Depends on: [none / the name of another run]
--->
+<!-- bridge:scope_notes.must_keep -->
+## Must keep
+[Existing behavior, compatibility, permissions or data rules that must not break]
 
-## Scope and constraints
+<!-- bridge:scope_notes.expected_locations -->
+## Expected locations (context only; this does not authorize changing them)
+[Files or modules likely to be touched, if known]
 
-- Includes: [situations or work this covers; optional]
-- Excludes: [things this explicitly does not handle; optional]
-- Must keep: [existing behavior, compatibility, permissions or data rules that must not break; optional]
-- Expected locations: [files or modules likely to be touched, if known; optional. This does not authorize changing them]
-
+<!-- bridge:acceptance -->
 ## Acceptance
-
-[Write the observable results when the whole work order is done. With multiple runs, put the cross-run overall results here and each run's own results in its run. Lists, paragraphs, tables or Given/When/Then are all fine; explanations and examples may sit next to the conditions. Translation numbers the semantically complete conditions AC1, AC2, ...]
-
 1. [Result one, with the situations or limits it applies to]
 2. [Result two, with the situations or limits it applies to]
 
-## Verification hints (optional)
+<!-- bridge:verification_hints -->
+## Verification hints (the test command itself is chosen by Bridge from the installed rules)
+[A user flow to try, test data, the expected screen or existing test names]
 
-[For example a user flow to try, test data, the expected screen or existing test names. These are hints for people to check against; the actual test command is chosen by Bridge from the installed rules.]
+<!-- bridge:reproduction.environment -->
+## Defect: environment
+[Device, operating system, browser, product version]
 
-## Defect reproduction (defect work orders only)
+<!-- bridge:reproduction.steps -->
+## Defect: steps to reproduce
+1. [Step one]
 
-- Environment: [device, operating system, browser, product version, etc.]
-- Steps to reproduce: [step by step]
-- Actual result: [what is observed now]
-- Expected result: [what should happen]
-- Frequency / impact: [optional]
+<!-- bridge:reproduction.actual -->
+## Defect: actual result
+[What is observed now]
 
-## References, attachments and dependencies (optional)
+<!-- bridge:reproduction.expected -->
+## Defect: expected result
+[What should happen]
 
-- Reference documents / designs / code: [links or paths]
-- Attachments / screenshots / samples: [links or file names]
-- Dependencies / related work: [related work orders or notes]
+<!-- bridge:reproduction.frequency -->
+## Defect: frequency and impact
+[How often, and who is affected]
 
-## Open questions (optional)
+<!-- bridge:references -->
+## References, attachments and dependencies
+- [Links, paths, designs, related work orders]
 
-[Known questions a human needs to decide. Write "none" if there are none. If translation finds an ambiguity that affects the work, Bridge stops and reports it; edit the work order and run the start-work command again.]
+<!-- bridge:open_questions -->
+## Open questions (write "none" if there are none; every other line is a question that stops the work for you)
+none

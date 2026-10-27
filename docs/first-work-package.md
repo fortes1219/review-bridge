@@ -5,29 +5,14 @@ This document defines the human-facing lifecycle after installation. No user nee
 ## Lifecycle
 
 1. The human writes a task file under the ignored `.review-bridge/` boundary.
-2. `work-plan` records the task, owner, breakpoint, allowed change types, allowed paths, and correction budget.
+2. `work-plan` records the task, owner, breakpoint, allowed paths, priority, effort and budget (from the work order's frontmatter or the policy), and the test command, or that the project has none configured.
 3. The plan receives a SHA-256 over its canonical content and immutable effective-policy snapshot.
 4. `work-start` requires that exact SHA-256, creates an immutable authorization, exclusively claims it for one run, and creates a new Claude UUID.
 5. Claude runs in writer-only mode. The first call uses `--session-id`; a bounded correction uses `--resume` with the same UUID.
 6. Codex runs independently with `exec --ephemeral --sandbox read-only` and reviews the job authorization snapshot.
 7. PASS, hard stop, timeout, rate limit, malformed gate, cancellation, or exhausted budget terminates the run. Authorization, claim, events, and evidence remain immutable audit records.
 
-## Allowed Change Types
-
-`--change-types` accepts a comma-separated subset of:
-
-```text
-docs
-code
-tests
-config
-contract
-schema
-migration
-external-behavior
-```
-
-Anything not explicitly selected remains a hard stop. Commit, push, deploy, release, adapter activation, and history rewrite always remain hard stops.
+Commit, push, deploy, release, adapter activation, and history rewrite always remain hard stops.
 
 ## Allowed Paths
 
@@ -51,7 +36,6 @@ node .review-bridge/tools/review-bridge/bootstrap.mjs work-plan `
   --owner "Human Owner" `
   --work-package trial-001 `
   --breakpoint "return after Codex review" `
-  --change-types docs `
   --allow-paths "README.md" `
   --rounds 2 `
   --call-timeout 480000 `

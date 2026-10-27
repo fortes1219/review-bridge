@@ -40,6 +40,7 @@ export function validateDefaultPolicy(policy) {
     "tokens_per_call",
     "tokens",
     "test_timeout",
+    "run_timeout",
     "authorization_ttl",
     "recovery_window",
     "heartbeat_interval",
@@ -99,8 +100,7 @@ export function mergePolicy(defaultPolicy, override = {}) {
   return merged;
 }
 
-// The model and effort each role uses at one priority. Every run uses the default priority until
-// work orders carry their own.
+// The model and effort each role uses at one priority: the work order's, else the policy default.
 export function priorityChoice(policy, priority = policy.priority.default) {
   return {
     priority,

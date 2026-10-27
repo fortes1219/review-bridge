@@ -54,14 +54,14 @@ async function install(t, { withGit = false } = {}) {
   return { root, bridge, git, paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }) };
 }
 
-const ORDER = "# Work order: greeting\n\n## Work\nPrint a greeting.\n\n## Acceptance\n- The greeting is printed.\n- The output ends with a newline.\n";
+const ORDER = "# Work order: greeting\n\n<!-- bridge:requested_work -->\n## Work\nPrint a greeting.\n\n<!-- bridge:acceptance -->\n## Acceptance\n- The greeting is printed.\n- The output ends with a newline.\n";
 
-async function run(rt, name, { env = {}, changeTypes = "code", allowPaths = null, scenario = "PASS", maxCalls = 1 } = {}) {
+async function run(rt, name, { env = {}, allowPaths = null, scenario = "PASS", maxCalls = 1 } = {}) {
   const order = ".review-bridge/work-packages/" + name + ".md";
   await fsp.writeFile(path.join(rt.root, order), ORDER);
   const planArg = ".review-bridge/review-queue/" + name + ".plan.json";
   const planned = rt.bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
-    "--change-types", changeTypes, ...(allowPaths ? ["--allow-paths", allowPaths] : []), "--rounds", String(maxCalls), "--call-timeout", "120000", "--out", planArg]);
+    ...(allowPaths ? ["--allow-paths", allowPaths] : []), "--rounds", String(maxCalls), "--call-timeout", "120000", "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(rt.root, planArg));
   const started = rt.bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli", "--fake-scenario", scenario, "--json"], env);
@@ -148,14 +148,16 @@ test("usage Bridge cannot read stops the run at the writer and at the reviewer, 
   assert.equal(reviewer.events.some((event) => event.event === "acceptance"), false);
 });
 
-test("docs-only work runs no tests: the tests are not applicable and each condition rests on the reviewer", async (t) => {
+test("a project whose rules give no test command still runs: its tests are not configured and each condition rests on the reviewer", async (t) => {
   const rt = await install(t);
-  const { exit, record, events, result } = await run(rt, "docs", { changeTypes: "docs" });
+  // The profile's rule needs a test script; without one no rule gives a command.
+  await fsp.writeFile(path.join(rt.root, "package.json"), JSON.stringify({ name: "acceptance-demo", dependencies: { express: "4.0.0" } }));
+  const { exit, record, events, result } = await run(rt, "untested");
   assert.equal(exit, 0, JSON.stringify(record.last_state));
   assert.equal(record.conclusion, "success");
-  assert.equal(events.find((event) => event.event === "test_result").kind, "not_applicable");
+  assert.equal(events.find((event) => event.event === "test_result").kind, "not_configured");
   assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => [row.test, row.result]), [["not_used", "proven"], ["not_used", "proven"]]);
-  assert.match(result, /No tests run \(docs only\)/);
+  assert.match(result, /Tests: not configured for this project/);
   assert.match(result, /tests: not used/);
 });
 
@@ -234,7 +236,7 @@ test("two work orders started at the same time both run, side by side, and neith
     await fsp.writeFile(path.join(rt.root, order), ORDER);
     const planArg = ".review-bridge/review-queue/" + name + ".plan.json";
     const planned = rt.bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
-      "--change-types", "code", "--rounds", "1", "--call-timeout", "120000", "--out", planArg]);
+      "--rounds", "1", "--call-timeout", "120000", "--out", planArg]);
     assert.equal(planned.status, 0, planned.stderr);
     plans.push({ name, planArg, plan: await readJson(path.join(rt.root, planArg)) });
   }

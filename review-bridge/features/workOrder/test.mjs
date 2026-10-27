@@ -7,27 +7,12 @@ import path from "node:path";
 
 import { runProcess } from "../../service/index.mjs";
 
-export const NOT_APPLICABLE_LABEL = "不跑測試（純文件）";
+export const NOT_CONFIGURED_LABEL = "沒有設定測試";
 export const TEST_TAIL_BYTES = 4 * 1024;
 export const NPM_PLACEHOLDER = /no test specified/i;
 
 export function testLabel(command) {
   return "跑現有測試：" + command;
-}
-
-export class TestError extends Error {
-  constructor(checked) {
-    super("這張卡沒有機械驗收：專案裡沒找到 profile 核准的測試入口");
-    this.name = "TestError";
-    this.reason = "no_test";
-    this.checked = checked;
-  }
-  plain() {
-    const lines = [this.message + "（看過：" + (this.checked.length ? "" : "清單是空的") + "）"];
-    for (const entry of this.checked) lines.push("  " + entry.command + "：" + entry.reasons.join("；"));
-    lines.push("加上測試入口，或把類型改成純文件（docs）。");
-    return lines.join("\n");
-  }
 }
 
 async function exists(root, relative) {
@@ -76,14 +61,10 @@ export async function evaluateRule(repoRoot, rule, platform = process.platform) 
   return { ok: reasons.length === 0, evidence, reasons };
 }
 
-export function isDocsOnly(changeTypes) {
-  return Array.isArray(changeTypes) && changeTypes.length > 0 && changeTypes.every((type) => type === "docs");
-}
-
-// G2.1–G2.3: the first rule whose conditions hold is the test command; docs-only work runs nothing;
-// anything else without a match is refused with the list of what was checked.
-export async function selectTest({ repoRoot, bridgeConfig, changeTypes, platform = process.platform }) {
-  if (isDocsOnly(changeTypes)) return { kind: "not_applicable", command: null, label: NOT_APPLICABLE_LABEL };
+// G2.1–G2.3: the first rule whose conditions hold is the test command, run after every writer call
+// whatever the work changes. A project whose rules give none still starts, and every record says
+// its tests are not configured, with what was checked; nothing is skipped silently.
+export async function selectTest({ repoRoot, bridgeConfig, platform = process.platform }) {
   const rules = Array.isArray(bridgeConfig?.test?.rules) ? bridgeConfig.test.rules : [];
   const checked = [];
   for (const rule of rules) {
@@ -101,7 +82,7 @@ export async function selectTest({ repoRoot, bridgeConfig, changeTypes, platform
     }
     checked.push({ command: rule.command, reasons: result.reasons });
   }
-  throw new TestError(checked);
+  return { kind: "not_configured", command: null, label: NOT_CONFIGURED_LABEL, checked };
 }
 
 // G2.5: the sealed rule must still hold when the human approves.
@@ -138,7 +119,7 @@ async function tail(file) {
 // with the sealed timeout; the result is an event, never a finding.
 export async function runTest({ paths, test, stdoutPath, stderrPath, timeoutMs, onSpawn = null }) {
   if (!test || test.kind !== "command") {
-    return { event: "test_result", kind: "not_applicable", command: null, label: NOT_APPLICABLE_LABEL, passed: null };
+    return { event: "test_result", kind: "not_configured", command: null, label: NOT_CONFIGURED_LABEL, passed: null };
   }
   // A missing or broken limit must not mean "no limit".
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("The tests have no valid time limit: " + timeoutMs);

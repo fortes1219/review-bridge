@@ -75,7 +75,7 @@ async function startFixture(runtime, {
     work_package_id: workPackageId,
     task: "Change one disposable fixture.",
     acceptance_criteria: ["fixture passes"],
-    scope: { change_types: ["tests"], allowed_paths: ["fixture.txt"] },
+    scope: { allowed_paths: ["fixture.txt"] },
     budget: { rounds: calls, call_timeout: 1 },
     breakpoint: "return to human owner",
   }, clock);
@@ -104,7 +104,7 @@ async function createUnclaimed(runtime, { calls = 1, clock = Date.now, ttl = nul
     work_package_id: "wp-" + randomUUID(),
     task: "Unclaimed fixture.",
     acceptance_criteria: [],
-    scope: { change_types: ["tests"], allowed_paths: ["fixture.txt"] },
+    scope: { allowed_paths: ["fixture.txt"] },
     budget: { rounds: calls, call_timeout: 1 },
     breakpoint: "return to owner",
   }, clock);
@@ -401,14 +401,13 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     const bootstrap = path.join(sourceBridgeRoot, "bootstrap.mjs");
     const taskPath = path.join(target, ".review-bridge", "work-packages", "ac20.md");
     const planPath = path.join(target, ".review-bridge", "review-queue", "ac20.plan.json");
-    await writeText(taskPath, "Update `README.md`.\n\tKeep the task multiline.\n");
+    await writeText(taskPath, "# AC-20\n\n<!-- bridge:requested_work -->\nUpdate `README.md`.\n\tKeep the task multiline.\n\n<!-- bridge:acceptance -->\n- README.md is updated.\n");
     const planned = spawnSync(process.execPath, [
       bootstrap, "work-plan",
       "--task-file", taskPath,
       "--owner", "AC-20 Owner",
       "--work-package", "ac20-plan-replay",
       "--breakpoint", "return after fake review",
-      "--change-types", "docs",
       "--allow-paths", "README.md",
       "--rounds", "1",
       "--call-timeout", "60000",

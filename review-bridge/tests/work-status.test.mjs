@@ -53,7 +53,7 @@ async function startRun(runtime, { workPackageId, runId, timestamp }) {
     work_package_id: workPackageId,
     task: "Exercise status ordering.",
     acceptance_criteria: ["status is observable"],
-    scope: { change_types: ["tests"], allowed_paths: ["fixture.txt"] },
+    scope: { allowed_paths: ["fixture.txt"] },
     budget: { rounds: 1, call_timeout: 1 },
     breakpoint: "return to owner",
   }, clock);
@@ -93,7 +93,6 @@ test("R1 multiline task files allow newline, tab, and backticks", async () => {
     owner: "RC2 Test Owner",
     workPackage: "r1-multiline",
     breakpoint: "return after review",
-    changeTypes: "docs",
     allowedPaths: "README.md",
     rounds: 1,
     callTimeout: 60_000,

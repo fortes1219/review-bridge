@@ -17,14 +17,14 @@ Review Bridge runs your work orders with two separate agents: a writer that does
 
 Then it sets the current folder up and prints the next commands:
 
-- creates `.review-bridge/` with the project settings, the work-order template and the queue; in a Git repository it is kept out of Git through `.git/info/exclude` (tracked `.gitignore` is never edited);
+- creates `.review-bridge/` with the project settings, the work-order templates (`TEMPLATE.md` in English, `TEMPLATE.zh-TW.md` in Chinese) and the queue; in a Git repository it is kept out of Git through `.git/info/exclude` (tracked `.gitignore` is never edited);
 - runs four fake self-tests (`PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, `RATE_LIMIT`) that call no model;
 - starts the local page on `127.0.0.1`;
 - adds a `/review-bridge` command for Claude Code (`.claude/commands/review-bridge.md`, only if there is none) and the same steps for any agent to `AGENTS.md` (appended, never overwritten). `uninstall` removes both again unless you edited them.
 
 It changes no application file and nothing else in `.claude/` or `.codex/`. Options answer the questions instead (`--writer`, `--reviewer`, `--profile <type|none>`, `--target <folder>`); without a terminal, or with `--yes`, nothing is asked and the defaults are used.
 
-The project type only picks the verification command Bridge runs after the work (for example `npm test`). With `none`, Bridge has no verification command, so only documentation-only work can pass.
+The project type only picks the verification command Bridge runs after every writer call (for example `npm test`). With `none`, or when the project has no such command, the work still starts; the card, the run's records and the result all say the tests are not configured.
 
 ## Requirements
 
@@ -40,7 +40,7 @@ cp .review-bridge/work-packages/TEMPLATE.md .review-bridge/work-packages/add-rea
 review-bridge start .review-bridge/work-packages/add-readme.md
 ```
 
-`start` seals the work order with its scope, budget and verification into a plan (asking where the work should stop for you and what it will change), checks once per page session that the reviewer cannot write files, shows what you are authorizing, and asks `Start this work? [y/N]`. Your answer is the only authorization. It then prints one line per step and ends with the result file. Bridge never commits, pushes or deploys.
+`start` seals the work order with its scope, budget and verification into a plan (asking where the work should stop for you), checks once per page session that the reviewer cannot write files, shows what you are authorizing, and asks `Start this work? [y/N]`. Your answer is the only authorization. It then prints one line per step and ends with the result file. Bridge never commits, pushes or deploys.
 
 The same four actions work for you or through an agent:
 
@@ -54,6 +54,85 @@ The same four actions work for you or through an agent:
 `review-bridge status` shows what is running and the run ids.
 
 **Through an agent.** In Claude Code type `/review-bridge start <file>` (or `stop`, `resume`, `clean`); Codex reads the same steps from `AGENTS.md`. Without a terminal, `start` and `resume` print the card and stop with `Needs authorization`; the agent shows you the card word for word and runs the command again with `--yes` only after you say yes. The authorization records that the yes came through an agent.
+
+## Work order format
+
+A work order is a Markdown file: optional frontmatter, a title, and blocks marked for the contract fields. Bridge reads only this format; it splits the file itself and fills every contract field from its block, copying the text as written. A model only cuts the acceptance blocks into numbered conditions. If you generate work orders from another tool, this section is the whole interface.
+
+### Frontmatter
+
+The frontmatter is data, read as YAML when the work is planned (the way Astro reads content collections): the first line is `---`, and it ends at the next line that is only `---`. Every key is optional, and a file without frontmatter is valid.
+
+```yaml
+---
+priority: high              # low / medium / high / urgent; default: the policy's priority.default
+effort: high                # low / medium / high; default: the policy's priority table
+budget:                     # each key optional; default: the policy's limit of the same name
+  tokens: 2000000           # limits.tokens
+  tokens_per_call: 150000   # limits.tokens_per_call
+  call_timeout: 1200000     # limits.call_timeout, milliseconds
+  test_timeout: 600000      # limits.test_timeout, milliseconds
+  run_timeout: 7200000      # limits.run_timeout, milliseconds
+  rounds: 2                 # limits.rounds
+source_id: SHOP-412         # your own tracker's id; Bridge stores it and never reads it
+---
+```
+
+- Any other key is refused, with its line. So is a value out of range: a priority or effort that is not one of the values above, a budget value that is not a positive whole number, or one above the policy's limit (the refusal names the limit).
+- `effort` is the writer's effort for every writer call: the work, each fix and the contract translation. The reviewer's effort always comes from the policy's priority table.
+- Each value is settled in a fixed order: a flag given at the terminal (`--rounds`, `--call-timeout`), then the work order, then the policy's priority table (effort and model), then the policy's limits. The plan records each value with the layer it came from (`cli`, `work_order`, `priority`, `config`), and the card shows both.
+- `run_timeout` is the run's own time limit, like a GitHub Actions job's `timeout-minutes` (default 6 hours). A run that reaches it is closed as `timed_out` with the reason `run_timeout`; every call is cut to the time left.
+
+### Body
+
+```markdown
+# Checkout total is not recalculated after a discount code
+
+<!-- bridge:context -->
+## Background
+The API answers 200 after a discount code is entered, but the total still shows the full price.
+
+<!-- bridge:requested_work -->
+## Work
+Fix the total in CheckoutSummary so it is recalculated once a discount is applied.
+
+<!-- bridge:acceptance -->
+## Acceptance
+1. After a valid discount code, the total shows the discounted amount within one second.
+2. After an invalid code, the total is unchanged and an error message is shown.
+```
+
+- The first line starting with `# ` is the title.
+- A block runs from its `<!-- bridge:<key> -->` line to the next marker or the end of the file. The `##` headings are for people, in any language; Bridge does not read them.
+- The keys are exactly the 17 contract fields: `context`, `outcome`, `requested_work`, `run_plan`, `scope_notes.include`, `scope_notes.exclude`, `scope_notes.must_keep`, `scope_notes.expected_locations`, `acceptance`, `verification_hints`, `reproduction.environment`, `reproduction.steps`, `reproduction.actual`, `reproduction.expected`, `reproduction.frequency`, `references`, `open_questions`. An unknown key, or a key used twice, is refused with its line.
+- The smallest work order is a title, a `requested_work` block and an `acceptance` block. Without any acceptance, the work stops before any model call and asks you for a result that can be checked.
+- `open_questions`: a block holding only `none` (or `無`), or nothing, means there are none. Any other line is one question, and the work stops before any model call until you answer it in the work order.
+- Frontmatter, the title, markers, `##` and `###` headings and blank lines are structure. Any other line outside every block is kept in the contract as an unused line.
+
+### Run plan
+
+Only for work laid out as two or more runs. Each `### ` line opens a run named by its text. Inside a run, four lines carry fixed keys, read as YAML; every other line is the run's work:
+
+```markdown
+<!-- bridge:run_plan -->
+## Run plan
+### RUN A
+Plant the trees.
+- effort: low
+- acceptance:
+  - Trees show on the map.
+
+### RUN B
+Add the cart.
+- depends_on: RUN A
+- budget: { rounds: 1, call_timeout: 600000 }
+- acceptance:
+  - The cart drives with the arrow keys.
+```
+
+- `effort` and `budget` take the same values as in the frontmatter. `depends_on` is one run name or a list such as `[RUN A, RUN B]`; a name that is no run here, or a loop, is refused.
+- `acceptance` takes the indented lines after it as that run's own conditions. The work order's `acceptance` block holds the results across runs. A run plan with only one run is refused.
+- Bridge records the run plan in the contract; it still starts one run for the whole work order.
 
 ## Commands
 
@@ -123,8 +202,6 @@ Run a work order: plan it, check the reviewer can only read, show what you autho
 Options:
   --breakpoint <text>
       Where the work stops and comes back to you (string; default: after the review, asked at a terminal)
-  --change-types <list>
-      What the work may change, comma-separated: docs, code, tests, config, contract, schema, migration, external-behavior (string; default: docs, asked at a terminal)
   --allow-paths <list>
       Limit the work to these paths, comma-separated (string; default: the whole project except protected files)
   --owner <name>
@@ -132,9 +209,9 @@ Options:
   --work-package <id>
       Name of the work package (string; default: the work order's file name)
   --rounds <n>
-      Writer rounds this work may use (number; default: 2)
+      Writer rounds this work may use; comes before the work order's budget (number; default: the work order's budget, else the policy limit)
   --call-timeout <ms>
-      Milliseconds each writer call may run (number; default: 480000)
+      Milliseconds each writer call may run; comes before the work order's budget (number; default: the work order's budget, else the policy limit)
   --update <work_order_id>
       Make this a new version of that work order (string; default: what Bridge finds, shown on the card)
   --as-new
@@ -339,8 +416,6 @@ Seal a work order into a plan without starting it (start does this for you)
 Options:
   --breakpoint <text>
       Where the work stops and comes back to you (string; default: after the review, asked at a terminal)
-  --change-types <list>
-      What the work may change, comma-separated: docs, code, tests, config, contract, schema, migration, external-behavior (string; default: docs, asked at a terminal)
   --allow-paths <list>
       Limit the work to these paths, comma-separated (string; default: the whole project except protected files)
   --owner <name>
@@ -348,9 +423,9 @@ Options:
   --work-package <id>
       Name of the work package (string; default: the work order's file name)
   --rounds <n>
-      Writer rounds this work may use (number; default: 2)
+      Writer rounds this work may use; comes before the work order's budget (number; default: the work order's budget, else the policy limit)
   --call-timeout <ms>
-      Milliseconds each writer call may run (number; default: 480000)
+      Milliseconds each writer call may run; comes before the work order's budget (number; default: the work order's budget, else the policy limit)
   --update <work_order_id>
       Make this a new version of that work order (string; default: what Bridge finds, shown on the card)
   --as-new

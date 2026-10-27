@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "review-bridge.contract",
-  "description": "A sealed work-order contract: the work-order text as authorized, the checked translation with the referenced lines copied in by Bridge, and who translated and checked it. Read-only after sealing.",
+  "description": "A sealed work-order contract: the work-order text as authorized, every field Bridge copied from the work order's marked blocks, the conditions a writer cut from its acceptance blocks and a reviewer checked, and who did both. Read-only after sealing.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -29,7 +29,7 @@
       "const": "review-bridge.contract"
     },
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "work_package_id": {
       "type": "string",
@@ -111,54 +111,14 @@
       "additionalProperties": false,
       "required": [
         "title",
-        "type",
         "source_id",
-        "product_version",
-        "people",
-        "schedule",
-        "related"
+        "priority",
+        "effort",
+        "budget"
       ],
       "properties": {
         "title": {
           "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "text",
-            "source_refs"
-          ],
-          "properties": {
-            "text": {
-              "type": "string"
-            },
-            "source_refs": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "start",
-                  "end"
-                ],
-                "properties": {
-                  "start": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "end": {
-                    "type": "integer",
-                    "minimum": 1
-                  }
-                }
-              }
-            }
-          }
-        },
-        "type": {
-          "type": [
-            "object",
-            "null"
-          ],
           "additionalProperties": false,
           "required": [
             "text",
@@ -230,155 +190,53 @@
             }
           }
         },
-        "product_version": {
-          "type": [
-            "object",
-            "null"
-          ],
-          "additionalProperties": false,
-          "required": [
-            "text",
-            "source_refs"
-          ],
-          "properties": {
-            "text": {
-              "type": "string"
-            },
-            "source_refs": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "start",
-                  "end"
-                ],
-                "properties": {
-                  "start": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "end": {
-                    "type": "integer",
-                    "minimum": 1
-                  }
-                }
-              }
-            }
-          }
+        "priority": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "urgent",
+            null
+          ]
         },
-        "people": {
-          "type": [
-            "object",
-            "null"
-          ],
-          "additionalProperties": false,
-          "required": [
-            "text",
-            "source_refs"
-          ],
-          "properties": {
-            "text": {
-              "type": "string"
-            },
-            "source_refs": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "start",
-                  "end"
-                ],
-                "properties": {
-                  "start": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "end": {
-                    "type": "integer",
-                    "minimum": 1
-                  }
-                }
-              }
-            }
-          }
+        "effort": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            null
+          ]
         },
-        "schedule": {
+        "budget": {
           "type": [
             "object",
             "null"
           ],
           "additionalProperties": false,
-          "required": [
-            "text",
-            "source_refs"
-          ],
           "properties": {
-            "text": {
-              "type": "string"
+            "tokens": {
+              "type": "integer",
+              "minimum": 1
             },
-            "source_refs": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "start",
-                  "end"
-                ],
-                "properties": {
-                  "start": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "end": {
-                    "type": "integer",
-                    "minimum": 1
-                  }
-                }
-              }
-            }
-          }
-        },
-        "related": {
-          "type": [
-            "object",
-            "null"
-          ],
-          "additionalProperties": false,
-          "required": [
-            "text",
-            "source_refs"
-          ],
-          "properties": {
-            "text": {
-              "type": "string"
+            "tokens_per_call": {
+              "type": "integer",
+              "minimum": 1
             },
-            "source_refs": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "start",
-                  "end"
-                ],
-                "properties": {
-                  "start": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "end": {
-                    "type": "integer",
-                    "minimum": 1
-                  }
-                }
-              }
+            "call_timeout": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "test_timeout": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "run_timeout": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "rounds": {
+              "type": "integer",
+              "minimum": 1
             }
           }
         }
@@ -683,7 +541,9 @@
               "text",
               "depends_on",
               "depends_on_quote",
-              "source_refs"
+              "source_refs",
+              "effort",
+              "budget"
             ],
             "properties": {
               "name": {
@@ -729,6 +589,47 @@
                       "type": "integer",
                       "minimum": 1
                     }
+                  }
+                }
+              },
+              "effort": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  null
+                ]
+              },
+              "budget": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "tokens": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "tokens_per_call": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "call_timeout": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "test_timeout": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "run_timeout": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "rounds": {
+                    "type": "integer",
+                    "minimum": 1
                   }
                 }
               }

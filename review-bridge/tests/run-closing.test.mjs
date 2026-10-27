@@ -32,7 +32,7 @@ async function project(t) {
 async function planFor(paths, name) {
   return await createWorkPackagePlan({
     paths, task: "Update README.md only.", owner: "Fortes", workPackage: name, breakpoint: "return after review",
-    changeTypes: "docs", allowedPaths: "README.md", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.queueRoot, name + ".plan.json"),
+    allowedPaths: "README.md", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.queueRoot, name + ".plan.json"),
   });
 }
 

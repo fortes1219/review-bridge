@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { evaluateRule, TestError, NOT_APPLICABLE_LABEL, recheckTest, runTest, sameDelta, selectTest } from "../features/workOrder/test.mjs";
+import { evaluateRule, NOT_CONFIGURED_LABEL, recheckTest, runTest, sameDelta, selectTest } from "../features/workOrder/test.mjs";
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import { mergePolicy } from "../policy/policyRules.mjs";
@@ -33,14 +33,14 @@ async function workspace(t, { bridge = { test: { profile_id: "node-backend", rul
 }
 
 function order() {
-  return "# Work order: farm\n\n## Work\nBuild a small farm.\n\n## Acceptance\n- The farm is visible.\n\n## References\n- src/a.js\n";
+  return "# Work order: farm\n\n<!-- bridge:requested_work -->\n## Work\nBuild a small farm.\n\n<!-- bridge:acceptance -->\n## Acceptance\n- The farm is visible.\n\n<!-- bridge:references -->\n## References\n- src/a.js\n";
 }
 
-async function plan({ paths, repoRoot }, { changeTypes = "code", id = "gate-" + Math.random().toString(16).slice(2, 8) } = {}) {
+async function plan({ paths, repoRoot }, { id = "gate-" + Math.random().toString(16).slice(2, 8) } = {}) {
   const taskFile = path.join(paths.privateRoot, id + ".md");
   await fsp.writeFile(taskFile, order());
   return await createWorkPackagePlan({
-    paths, taskFile, owner: "Fortes", workPackage: id, breakpoint: "return after review", changeTypes,
+    paths, taskFile, owner: "Fortes", workPackage: id, breakpoint: "return after review",
     rounds: 1, callTimeout: 300_000, outPath: path.join(paths.privateRoot, id + ".plan.json"),
   });
 }
@@ -73,29 +73,20 @@ test("R1 the plan seals the first matching rule and the plain summary names it",
   assert.deepEqual(stored.test, planned.test);
 });
 
-test("R2 docs-only work seals not_applicable even when a rule would match", async (t) => {
-  const ws = await workspace(t);
-  const planned = await plan(ws, { changeTypes: "docs" });
-  assert.deepEqual(planned.test, { kind: "not_applicable", command: null, label: NOT_APPLICABLE_LABEL });
-  assert.equal(planned.test.label, "不跑測試（純文件）");
-});
-
-test("R3 code work without any matching rule is refused and nothing is written", async (t) => {
+test("R3 work without any matching rule still plans: its tests are not configured, with what was checked", async (t) => {
   const ws = await workspace(t, { manifest: { name: "x" } });
-  await assert.rejects(plan(ws, { id: "refused" }), (error) => {
-    assert.ok(error instanceof TestError);
-    assert.equal(error.reason, "no_test");
-    assert.deepEqual(error.checked, [{ command: "npm test", reasons: ["package.json 沒有 scripts.test"] }]);
-    assert.match(error.plain(), /沒找到 profile 核准的測試入口/);
-    assert.match(error.plain(), /npm test：package\.json 沒有 scripts\.test/);
-    return true;
+  const planned = await plan(ws, { id: "untested" });
+  assert.deepEqual(planned.test, {
+    kind: "not_configured", command: null, label: NOT_CONFIGURED_LABEL,
+    checked: [{ command: "npm test", reasons: ["package.json 沒有 scripts.test"] }],
   });
-  assert.equal(await fsp.stat(path.join(ws.paths.privateRoot, "refused.plan.json")).catch(() => null), null);
-  // tests, config and the rest are not docs either.
-  await assert.rejects(plan(ws, { changeTypes: "docs,tests" }), TestError);
-  // An install without any rules is the same refusal.
+  assert.equal(planned.test.label, "沒有設定測試");
+  assert.deepEqual((await readJson(planned.plan_path)).test, planned.test);
+  // An install without any rules is the same: nothing to check, nothing configured.
   const bare = await workspace(t, { bridge: {} });
-  await assert.rejects(plan(bare), (error) => error instanceof TestError && error.checked.length === 0);
+  assert.deepEqual((await plan(bare)).test, { kind: "not_configured", command: null, label: NOT_CONFIGURED_LABEL, checked: [] });
+  // Approval has no entry point to re-check.
+  assert.deepEqual(await recheckTest(ws.repoRoot, planned.test), { ok: true, reasons: [] });
 });
 
 test("R4 approval re-checks the sealed entry point; removing it refuses the start", async (t) => {
@@ -122,8 +113,8 @@ test("R8 the sealed command runs through the shell with a timeout; over time is 
   const late = await runTest({ paths: ws.paths, test: slow, stdoutPath: path.join(ws.paths.queueRoot, "slow.out"), stderrPath: path.join(ws.paths.queueRoot, "slow.err"), timeoutMs: 500 });
   assert.equal(late.timed_out, true);
   assert.equal(late.passed, false);
-  const none = await runTest({ paths: ws.paths, test: { kind: "not_applicable" }, stdoutPath: "", stderrPath: "", timeoutMs: 1 });
-  assert.equal(none.kind, "not_applicable");
+  const none = await runTest({ paths: ws.paths, test: { kind: "not_configured" }, stdoutPath: "", stderrPath: "", timeoutMs: 1 });
+  assert.equal(none.kind, "not_configured");
   const defaults = await readJson(path.join(bridgeRoot, "config", "default-policy.json"));
   assert.equal(defaults.limits.test_timeout, 600_000);
   assert.equal(mergePolicy(defaults, { schema_version: 5, limits: { test_timeout: 120_000 } }).limits.test_timeout, 120_000);
@@ -144,15 +135,14 @@ test("selectTest honours rule order and reports every rule it passed over", asyn
   ] } } });
   await fsp.writeFile(path.join(ws.repoRoot, "pom.xml"), "<project/>");
   const bridgeConfig = await readJson(ws.paths.bridgeConfigPath);
-  const picked = await selectTest({ repoRoot: ws.repoRoot, bridgeConfig, changeTypes: ["code"], platform: "linux" });
+  const picked = await selectTest({ repoRoot: ws.repoRoot, bridgeConfig, platform: "linux" });
   assert.equal(picked.command, "mvn test");
   await fsp.writeFile(path.join(ws.repoRoot, "mvnw.cmd"), "");
-  const wrapper = await selectTest({ repoRoot: ws.repoRoot, bridgeConfig, changeTypes: ["code"], platform: "win32" });
+  const wrapper = await selectTest({ repoRoot: ws.repoRoot, bridgeConfig, platform: "win32" });
   assert.equal(wrapper.command, ".\\mvnw.cmd test");
-  await assert.rejects(selectTest({ repoRoot: ws.repoRoot, bridgeConfig, changeTypes: ["code"], platform: "linux" }), (error) => {
-    assert.deepEqual(error.checked.map((entry) => entry.command), [".\\mvnw.cmd test", "mvn test"]);
-    return true;
-  });
+  const none = await selectTest({ repoRoot: ws.repoRoot, bridgeConfig, platform: "linux" });
+  assert.equal(none.kind, "not_configured");
+  assert.deepEqual(none.checked.map((entry) => entry.command), [".\\mvnw.cmd test", "mvn test"]);
 });
 
 test("R8b a timeout terminates the whole tree while the shell is alive: a delayed grandchild never writes its file", async (t) => {
