@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { runBoundedResume } from "../features/workOrder/writerLoop.mjs";
+import { deliverOutcome } from "../features/workOrder/delivery.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { fileExists, readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
@@ -65,6 +66,11 @@ if (mode === "stream") {
 }
 if (mode === "stdout_limit") {
   process.stdout.write(JSON.stringify({ session_id: session, is_error: true, result: "Claude AI usage limit reached|1760000000" }));
+  process.exit(1);
+}
+if (mode === "model_text_limit") {
+  // The model's own words mention a limit; the CLI did not mark an error and stderr is clean.
+  process.stdout.write(JSON.stringify({ session_id: session, is_error: false, result: "The API answered 429 Too Many Requests, rate limit exceeded, so I stopped." }));
   process.exit(1);
 }
 if (mode === "stderr_limit") {
@@ -152,7 +158,7 @@ async function makeRuntime(t, override = { schema_version: 5 }, { git = false, w
   return { repoRoot, toolsRoot, paths, claude, codex };
 }
 
-async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, withTests = false, gateExit = 0, reviewPrompt = null, git = false, beforeResume = null } = {}) {
+async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, withTests = false, gateExit = 0, reviewPrompt = null, git = false, beforeResume = null, beforeReview = null } = {}) {
   const runtime = await makeRuntime(t, override, { git, withTests });
   if (reviewPrompt !== null) {
     await fsp.mkdir(path.dirname(runtime.paths.reviewPromptOverridePath), { recursive: true });
@@ -175,7 +181,11 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     paths: runtime.paths, planPath, approval: plan.plan_sha256, executionMode: "fake_cli",
   });
   const adapter = {
-    async resolveExecutable() { return process.execPath; },
+    // The review resolves its CLI after the job and its change list are queued, before it reads them.
+    async resolveExecutable(kind) {
+      if (kind === "codex" && beforeReview) await beforeReview(runtime);
+      return process.execPath;
+    },
     buildInvocation(kind, executable, args) {
       return {
         command: executable,
@@ -224,6 +234,44 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
   const claudeArgs = await fileExists(argsOut) ? JSON.parse(await fsp.readFile(argsOut, "utf8")) : null;
   return { runtime, exitCode, error, status, claudeArgs, run: await readRun(runtime.paths, runId) };
 }
+
+// The change list the review is queued with, as Bridge wrote it.
+async function deltaFiles(paths) {
+  const found = [];
+  for (const dir of await fsp.readdir(paths.evidenceRoot)) {
+    for (const name of await fsp.readdir(path.join(paths.evidenceRoot, dir))) {
+      if (/^delta-.*\.json$/.test(name)) found.push(path.join(paths.evidenceRoot, dir, name));
+    }
+  }
+  return found;
+}
+
+test("a change list that is deleted or broken before the review stops the run as evidence_unavailable; nothing is reviewed", async (t) => {
+  for (const [label, spoil] of [
+    ["deleted", (file) => fsp.rm(file)],
+    ["not JSON", (file) => fsp.writeFile(file, "{not json", "utf8")],
+  ]) {
+    for (const git of [true, false]) {
+      let spoiled = [];
+      const { exitCode, error, run, runtime } = await start(t, { git, beforeReview: async ({ paths }) => {
+        spoiled = await deltaFiles(paths);
+        for (const file of spoiled) await spoil(file);
+      } });
+      const at = label + (git ? " with Git" : " without Git");
+      assert.equal(error, null, at);
+      assert.equal(spoiled.length, 1, at);
+      assert.equal(exitCode, 69, at);
+      assert.deepEqual([run.status, run.conclusion, run.closed_reason], ["completed", "failure", "evidence_unavailable"], at);
+      const events = await readIoEvents(runtime.paths, run.run_id);
+      assert.ok(events.some((event) => event.event === "stop" && event.status === "evidence_unavailable" && event.detail_ref === "delta"), at);
+      assert.equal(events.some((event) => event.event === "review.input" || event.event === "review.result"), false, at);
+      const delivery = await deliverOutcome({ paths: runtime.paths, runId: run.run_id, notify: false });
+      assert.equal(delivery.closed_reason, "evidence_unavailable", at);
+      const result = await fsp.readFile(path.join(runtime.paths.queueRoot, run.run_id + ".result.md"), "utf8");
+      assert.match(result, /The change evidence could not be read|改動證據讀不到/, at);
+    }
+  }
+});
 
 test("reviewer usage limit ends rate_limited as reviewer provider_usage_limit, not controller_failure", async (t) => {
   const { exitCode, error, status, run } = await start(t, { codexMode: "limit" });
@@ -297,6 +345,14 @@ test("Claude stdout quota is writer provider_usage_limit without guessed reset",
   assert.equal(status.stop_reason.reason, "provider_usage_limit");
   assert.equal(status.stop_reason.reset_hint, null);
   assert.equal(JSON.stringify(status).includes("Claude AI usage limit"), false);
+});
+
+test("a writer whose own result text talks about a rate limit, with clean stderr and a failed exit, is provider_error, not a quota stop", async (t) => {
+  const { exitCode, status } = await start(t, { claudeMode: "model_text_limit" });
+  assert.equal(exitCode, 1);
+  assert.equal(status.latest_state.status, "writer_failed");
+  assert.equal(status.stop_reason.reason, "provider_error");
+  assert.equal(status.closed_reason, "writer_failed");
 });
 
 test("Claude stderr quota with absent JSON stdout is still writer provider_usage_limit", async (t) => {

@@ -92,6 +92,13 @@ test("T6 default scope is everything minus the fixed forbidden list", async (t) 
   }
 });
 
+test("T6b the forbidden list ignores case, as Git does on Windows: .ENV and dockerfile are forbidden", () => {
+  for (const forbidden of [".ENV", ".Env.Local", "Dockerfile", "dockerfile", "DOCKERFILE.dev", "deploy/KEY.PEM", ".GitHub/workflows/ci.yml"]) {
+    assert.equal(matchesForbiddenPath(forbidden, FORBIDDEN_PATHS), true, forbidden);
+  }
+  assert.equal(matchesForbiddenPath("docs/ENV.md", FORBIDDEN_PATHS), false);
+});
+
 test("T7 paths written in a work order are context: they neither narrow the scope nor get sealed", async (t) => {
   const r = await runtime(t);
   const created = await plan(r, { task: order({ references: "- src/game/\n- 照首頁的做法\nREADME.md" }) });

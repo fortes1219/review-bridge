@@ -110,7 +110,8 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
   if (processResult.timedOut || !stream.result || stream.result.is_error === true || processResult.exitCode !== 0) {
     return { usage, stop: await providerStop({
       paths, stamp, role: "translator", provider: "claude", phase: "translate", processResult,
-      texts: [String(stream.result?.result || ""), await readEvidenceTail(stderrPath)], evidence: { stdout_path: streamPath, stderr_path: stderrPath },
+      // `result` is the CLI's own message only when it marks the error (is_error); else the model's text.
+      texts: [stream.result?.is_error === true ? String(stream.result.result || "") : "", await readEvidenceTail(stderrPath)], evidence: { stdout_path: streamPath, stderr_path: stderrPath },
     }) };
   }
   const translation = writerResultFromClaudeResult(stream.result);

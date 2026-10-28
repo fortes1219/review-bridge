@@ -258,6 +258,13 @@ describe("AC-08 tighten-only policy merge rejects protected weakening", () => {
       schema_version: 5, priority: { reviewer: { urgent: { effort: "low" } } },
     }), /cannot lower reviewer effort for urgent/);
   });
+
+  it("refuses an override key it does not know, hard_stops included, and keeps the installer's profile_id", async () => {
+    const defaults = JSON.parse(await fsp.readFile(path.join(sourceBridgeRoot, "config", "default-policy.json"), "utf8"));
+    assert.equal(mergePolicy(defaults, { schema_version: 5, profile_id: "node-backend" }).limits.rounds, defaults.limits.rounds);
+    assert.throws(() => mergePolicy(defaults, { schema_version: 5, hard_stops: ["Stop on red."] }), /Unknown project policy override key: hard_stops/);
+    assert.throws(() => mergePolicy(defaults, { schema_version: 5, reviewer: { effort: "high" } }), /Unknown project policy override key: reviewer/);
+  });
 });
 
 describe("AC-10 historical evidence uses its snapshot but old active run cannot execute", () => {

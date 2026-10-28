@@ -93,14 +93,16 @@ async function serviceRunning(root) {
 
 async function tree(root) {
   const files = new Map();
-  async function visit(directory, prefix = "") {
-    for (const entry of await fsp.readdir(directory, { withFileTypes: true }).catch(() => [])) {
-      const name = prefix ? prefix + "/" + entry.name : entry.name;
-      if (entry.isDirectory()) await visit(path.join(directory, entry.name), name);
-      else files.set(name, sha(await fsp.readFile(path.join(directory, entry.name))));
-    }
+  // A stack of entries, not recursion; each folder is pushed reversed, so the files come out in
+  // the same depth-first order a recursive walk lists them.
+  const entries = async (directory, prefix) => (await fsp.readdir(directory, { withFileTypes: true }).catch(() => []))
+    .map((entry) => [path.join(directory, entry.name), prefix ? prefix + "/" + entry.name : entry.name, entry.isDirectory()]).reverse();
+  const stack = await entries(root, "");
+  while (stack.length) {
+    const [full, name, isDirectory] = stack.pop();
+    if (isDirectory) stack.push(...await entries(full, name));
+    else files.set(name, sha(await fsp.readFile(full)));
   }
-  await visit(root);
   return files;
 }
 

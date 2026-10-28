@@ -17,6 +17,7 @@ import {
   writeText,
 } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
+import { EvidenceUnavailableError } from "./workspaceEvidence.mjs";
 import { validateJobPolicy } from "../../policy/policyChecks.mjs";
 import { buildReadList } from "./writerPrompt.mjs";
 import { loadContract } from "./contract.mjs";
@@ -72,13 +73,17 @@ export async function buildReviewInput({ paths, job, control }) {
   const work = contractSha256
     ? { contract_sha256: contractSha256, contract: await loadContract(paths, contractSha256) }
     : { contract_sha256: null, work: workPackage.task };
-  const delta = job.workspace_evidence?.delta_path ? await readJson(job.workspace_evidence.delta_path).catch(() => null) : null;
-  const changed = (delta?.changed_files || []).map((entry) => ({
+  // Every job is queued with its change list (reviewQueue.mjs), a project without Git too (mode
+  // none). One that is gone or not JSON stops the run; nothing is reviewed without it.
+  const deltaPath = job.workspace_evidence?.delta_path || null;
+  const delta = deltaPath ? await readJson(deltaPath).catch(() => null) : null;
+  if (!delta) throw new EvidenceUnavailableError(deltaPath);
+  const changed = delta.changed_files.map((entry) => ({
     path: entry.path, change: entry.change, before_sha256: entry.before_sha256 ?? null, after_sha256: entry.after_sha256 ?? null,
     attribution: entry.attribution ?? null,
   }));
   // Without Git there is no delta: the writer's claims are the only list, and they stay untrusted.
-  const proofless = delta?.mode === "none";
+  const proofless = delta.mode === "none";
   const claimed = (job.writer_result?.changed || []).map((entry) => entry.path);
   const openFindings = Array.isArray(job.open_findings) ? job.open_findings : [];
   return {
@@ -95,11 +100,11 @@ export async function buildReviewInput({ paths, job, control }) {
     delta: changed,
     scope_violations: job.workspace_evidence?.scope_violations || [],
     work_proof: {
-      mode: delta?.mode || "unknown",
-      start_point: delta?.start_point || "unknown",
-      scope_status: delta?.scope_status || "unverified",
-      commits_since_start: delta?.commits_since_start || [],
-      scope_unverified: delta?.scope_unverified || [],
+      mode: delta.mode,
+      start_point: delta.start_point,
+      scope_status: delta.scope_status,
+      commits_since_start: delta.commits_since_start,
+      scope_unverified: delta.scope_unverified,
     },
     writer_claim_mismatch: writerClaimMismatch(job.writer_result, changed),
     // T0-06 G3.4: the controller's own test run, as evidence; the reviewer does not rerun it.
@@ -344,6 +349,8 @@ export async function runReviewWorker({
             // Keep the running job and error artifact for manual recovery.
           }
         }
+        // The run stops on it (writerLoop.mjs); the job is kept as failed above.
+        if (error instanceof EvidenceUnavailableError) throw error;
         outcomes.push({
           job_id: jobId,
           status: "failed",

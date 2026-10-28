@@ -1019,7 +1019,7 @@ test("a Chinese work order with frontmatter, a two-run plan and all 17 blocks: e
   for (const condition of contract.acceptance.slice(2)) assert.ok(within(condition.source_refs, blocks.get("run_plan")), condition.id);
   // The ticket keeps the work order's own values, not the settled ones.
   assert.deepEqual(contract.ticket, {
-    title: { text: "# 結帳頁套用折扣碼後總額沒有重算", source_refs: [{ start: 13, end: 13 }] },
+    title: { text: "結帳頁套用折扣碼後總額沒有重算", source_refs: [{ start: 13, end: 13 }] },
     source_id: { text: "SHOP-412", source_refs: [{ start: 11, end: 11 }] },
     priority: "high", effort: "high",
     budget: { tokens: 2_000_000, tokens_per_call: 1_000_000, call_timeout: 600_000, test_timeout: 300_000, run_timeout: 7_200_000, rounds: 1 },

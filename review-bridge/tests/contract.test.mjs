@@ -73,7 +73,7 @@ test("Bridge fills every field from its block, as written; headings and markers 
   const contract = build();
   assert.deepEqual(contract.requested_work, { text: "Build a small farm.\n\nKeep it green.", source_refs: [{ start: 7, end: 9 }] });
   assert.deepEqual(contract.scope_notes, { include: null, exclude: { text: "- Payment work.", source_refs: [{ start: 13, end: 13 }] }, must_keep: null, expected_locations: null });
-  assert.deepEqual(contract.ticket, { title: { text: "# Work order: farm", source_refs: [{ start: 1, end: 1 }] }, source_id: null, priority: null, effort: null, budget: null });
+  assert.deepEqual(contract.ticket, { title: { text: "Work order: farm", source_refs: [{ start: 1, end: 1 }] }, source_id: null, priority: null, effort: null, budget: null });
   assert.deepEqual(contract.unused_lines, [{ text: "A note before any block.", source_refs: [{ start: 3, end: 3 }] }]);
   assert.deepEqual([contract.context, contract.run_plan, contract.reproduction, contract.verification_hints, contract.references, contract.open_questions], [null, null, null, [], [], []]);
   assert.equal(contract.schema_version, 2);

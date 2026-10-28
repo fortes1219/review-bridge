@@ -23,7 +23,8 @@ Rules of evidence (fixed):
 4. `test_result` is the controller's own run of the project's existing tests, made after the
    writer finished; it is test evidence. Do not rerun the whole suite. Run only the smallest
    command that decides one finding.
-5. Without evidence there is no FAIL. A finding must land on a line of code; a contradiction
+5. Without evidence there is no FAIL. A finding must land on a line of code; its `path` is
+   relative to the workspace and uses `/`, never `\`. A contradiction
    between the contract (or `work` when there is no contract) and the delta is itself a finding
    on the contradicting line.
 6. On a recheck (`open_findings` non-empty): report an open id again only if it is still

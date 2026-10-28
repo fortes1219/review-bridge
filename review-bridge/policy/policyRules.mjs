@@ -6,6 +6,8 @@ const effortRank = new Map([["low", 1], ["medium", 2], ["high", 3]]);
 // Jira's priorities: a field the person sets, never read from the work order's words.
 export const PRIORITIES = Object.freeze(["low", "medium", "high", "urgent"]);
 const ROLES = Object.freeze(["writer", "reviewer"]);
+// What a project override may carry; profile_id is the installer's record of the project type.
+const OVERRIDE_KEYS = Object.freeze(["schema_version", "profile_id", "limits", "writer", "priority", "release_actions_require_human"]);
 
 function union(left = [], right = []) {
   return [...new Set([...left, ...right])].sort();
@@ -63,6 +65,9 @@ export function mergePolicy(defaultPolicy, override = {}) {
   if (override.schema_version !== undefined && override.schema_version !== 5) {
     throw new Error("Project policy override has an unsupported schema.");
   }
+  for (const key of Object.keys(override)) {
+    if (!OVERRIDE_KEYS.includes(key)) throw new Error("Unknown project policy override key: " + key);
+  }
   const merged = structuredClone(defaultPolicy);
   for (const [key, value] of Object.entries(override.limits || {})) {
     if (!(key in merged.limits)) throw new Error("Unknown override limit: " + key);
@@ -71,7 +76,6 @@ export function mergePolicy(defaultPolicy, override = {}) {
     }
     merged.limits[key] = value;
   }
-  merged.hard_stops = union(merged.hard_stops, override.hard_stops);
   merged.writer.disallowed_tools = union(
     merged.writer.disallowed_tools,
     override.writer?.disallowed_tools,

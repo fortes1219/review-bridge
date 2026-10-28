@@ -124,10 +124,11 @@ export function unknownAddressedFindings(writerResult, openFindings) {
 
 // A finding must name a file inside the workspace: relative, no `..`, no drive or root,
 // and an existing regular file (Codex finding 2026-10-13: `..` used to pass the stat).
+// The path arrives with `/` already (validateReviewResult turns `\` into `/` first).
 export async function workspaceFileProblem(repoRoot, relative) {
   const raw = String(relative || "");
   // Checked on the raw string, before normalization strips a leading `./`.
-  if (raw.includes("\\") || /(^|\/)\.(\/|$)/.test(raw)) return "path escapes or is not normalized";
+  if (/(^|\/)\.(\/|$)/.test(raw)) return "path escapes or is not normalized";
   const candidate = normalizePath(raw);
   if (!candidate || path.isAbsolute(candidate) || /^[A-Za-z]:/.test(candidate) || candidate.startsWith("/")) return "not a relative path";
   const segments = candidate.split("/");
@@ -161,6 +162,9 @@ export async function validateReviewResult(value, { workOrder, call, repoRoot, p
   const previousIds = new Set(previousFindings.map((finding) => finding.id));
   const delta = deltaPaths ? new Set(deltaPaths.map(normalizePath)) : null;
   for (const [index, finding] of value.findings.entries()) {
+    // A reviewer on Windows writes `src\a.ts`. Paths use `/`, as in Git's output and SARIF's
+    // artifactLocation.uri, so the finding is kept with `/` and then checked like any other.
+    finding.path = finding.path.replaceAll("\\", "/");
     const at = "$.findings[" + index + "]";
     if (ids.has(finding.id)) errors.push(at + ".id: duplicate " + finding.id);
     ids.add(finding.id);

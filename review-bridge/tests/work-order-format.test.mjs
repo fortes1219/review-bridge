@@ -68,7 +68,9 @@ test("headings, markers, blank lines and the title are structure; other lines ou
   const read = parseWorkOrder("intro\n# Farm\nnote\n\n<!-- bridge:context -->\n## Background\nIt rains.\n### More\nOften.\n\n<!-- bridge:acceptance -->\n- Dry.\n");
   assert.deepEqual(read.unused, [1, 3]);
   assert.deepEqual(read.blocks.get("context").content, [7, 9]);
-  assert.deepEqual(read.title, { line: 2, text: "# Farm" });
+  assert.deepEqual(read.title, { line: 2, text: "Farm" });
+  // The # and the spaces around the words are not part of the title.
+  assert.deepEqual(parseWorkOrder("# 商品分類 管理  \t\n").title, { line: 1, text: "商品分類 管理" });
 });
 
 test("a run plan: each ### line opens a run; effort, budget and depends_on are YAML; acceptance takes the indented lines under it", () => {

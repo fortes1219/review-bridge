@@ -260,7 +260,8 @@ export function parseWorkOrder(text) {
       if (current) blocks.set(key, current);
       continue;
     }
-    if (!title && TITLE.test(line)) { title = { line: number, text: line }; continue; }
+    // The title is the heading's words: the leading # and the spaces around them are Markdown, not title.
+    if (!title && TITLE.test(line)) { title = { line: number, text: line.slice(1).trim() }; continue; }
     if (current) current.all.push(number);
     if (HEADING.test(line)) continue;
     if (current) current.content.push(number);

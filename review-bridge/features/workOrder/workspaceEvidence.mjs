@@ -65,6 +65,15 @@ export class EvidenceChangedError extends Error {
   }
 }
 
+// The change list Bridge wrote for a review cannot be read back: the run stops instead of
+// reviewing work it has no list of (the work proof comes from Git, never from a fallback).
+export class EvidenceUnavailableError extends Error {
+  constructor(deltaPath) {
+    super("The list of changes for the review cannot be read" + (deltaPath ? ": " + deltaPath : "") + ".");
+    this.name = "EvidenceUnavailableError";
+  }
+}
+
 function normalizeRelative(value) {
   return path.posix.normalize(String(value).replaceAll("\\", "/")).replace(/^\.\//, "").replace(/\/$/, "");
 }
@@ -85,6 +94,7 @@ export function matchesAllowedPath(relative, allowedPaths) {
 
 // Glob subset for the fixed forbidden list (T0-03 C2.1): "**/" any depth, "**" any run,
 // "*" within one segment, "?" one character. A pattern without "/" matches a file name at any depth.
+// Case is ignored, as Git does on Windows (core.ignorecase), so `.ENV` is `.env`.
 function globToRegExp(pattern) {
   let out = "";
   for (let index = 0; index < pattern.length; index += 1) {
@@ -101,7 +111,7 @@ function globToRegExp(pattern) {
       out += char.replace(/[.+^${}()|[\]\\]/, "\\$&");
     }
   }
-  return new RegExp("^" + (pattern.includes("/") ? "" : "(?:.*/)?") + out + "$");
+  return new RegExp("^" + (pattern.includes("/") ? "" : "(?:.*/)?") + out + "$", "i");
 }
 
 export function matchesForbiddenPath(relative, forbiddenPaths) {

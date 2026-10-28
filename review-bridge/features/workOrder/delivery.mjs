@@ -322,6 +322,7 @@ export function composeSections({ t, run, workPackage, plan, events, delta, cont
   } else if (kind === "run_timeout") {
     why.push(t("result.why.run_timeout", { limit: workPackage?.budget?.run_timeout ?? run.budget?.run_timeout ?? "" }));
   } else {
+    if (run.closed_reason === "evidence_unavailable") why.push(t("result.why.evidence_unavailable"));
     why.push(t("result.why.error", { reason: run.closed_reason || run.conclusion }));
     for (const file of [state.stderr_path, state.writer_stderr_path, state.review_error_path, failure?.record_path].filter(Boolean)) why.push(t("result.why.error.log", { path: file }));
     if (state.error) why.push(String(state.error));

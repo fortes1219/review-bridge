@@ -26,7 +26,7 @@ export const CLOSED_REASONS = Object.freeze([
   "rate_limited", "cancelled", "policy_failure",
   "rounds_exhausted", "writer_timeout", "writer_failed", "reviewer_failed", "controller_failure",
   "token_limit", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
-  "needs_human", "malformed_writer_result", "malformed_review_result", "run_timeout",
+  "needs_human", "malformed_writer_result", "malformed_review_result", "run_timeout", "evidence_unavailable",
 ]);
 // Closed by the stop command, by a start of a newer version, because the database went away, or
 // because the run reached its own time limit (run_timeout).
@@ -776,7 +776,6 @@ export async function loadControlView(paths, runId) {
     active_writer_session: run.writer_session_id,
     iteration: run.iteration,
     dispatch_transport: "writer_cli_resume_same_session",
-    hard_stops: structuredClone(policy.hard_stops),
     // The plan settled the priority and each role's model and effort for this work order.
     reviewer_policy: workPackage.priority
       ? { priority: workPackage.priority, model: workPackage.reviewer.model, effort: workPackage.reviewer.effort }

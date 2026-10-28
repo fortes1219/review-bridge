@@ -60,14 +60,16 @@ async function asCall(p, baseline, runId, edit) {
 
 async function filesUnder(dir) {
   const found = [];
-  const walk = async (current) => {
-    for (const entry of await fsp.readdir(current, { withFileTypes: true }).catch(() => [])) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else found.push(full);
-    }
-  };
-  await walk(dir);
+  // A stack of entries, not recursion; each folder is pushed reversed, so the order is the
+  // depth-first one a recursive walk gives.
+  const entries = async (current) => (await fsp.readdir(current, { withFileTypes: true }).catch(() => []))
+    .map((entry) => [path.join(current, entry.name), entry.isDirectory()]).reverse();
+  const stack = await entries(dir);
+  while (stack.length) {
+    const [full, isDirectory] = stack.pop();
+    if (isDirectory) stack.push(...await entries(full));
+    else found.push(full);
+  }
   return found;
 }
 

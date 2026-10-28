@@ -157,11 +157,19 @@ test("review worker preserves the failed job and links a private typed failure r
       reviewer_policy: { priority: "medium", model: null, effort: "medium" },
     };
     await fsp.mkdir(paths.pendingDir, { recursive: true });
+    // Every queued job carries its change list; this one is from a project without Git.
+    const deltaPath = path.join(paths.evidenceRoot, "e1", "delta-1.json");
+    await fsp.mkdir(path.dirname(deltaPath), { recursive: true });
+    await writeJson(deltaPath, {
+      schema_version: 2, mode: "none", start_point: "unknown", scope_status: "unverified",
+      commits_since_start: [], changed_files: [], scope_violations: [], scope_unverified: [],
+    });
     await writeJson(path.join(paths.pendingDir, "job-1.json"), {
       priority: "medium",
       reasoning_effort: "medium",
       session_id: "session-1",
       authorization: { plan_sha256: "a".repeat(64) },
+      workspace_evidence: { mode: "none", delta_path: deltaPath, scope_violations: [] },
       last_assistant_message: "Claude report\nCODEX_REVIEW_REQUIRED: true",
     });
     const adapter = {

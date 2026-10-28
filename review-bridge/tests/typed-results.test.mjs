@@ -105,7 +105,9 @@ test("Q5 review.result: schema, FAIL needs a finding, PASS carries no HIGH, path
   const escaped = path.basename(repoRoot) + "/../" + path.basename(repoRoot) + "/src/a.js";
   for (const [bad, reason] of [
     ["../" + escaped, /escapes/], [repoRoot.replaceAll("\\", "/") + "/src/a.js", /not a relative path/], ["src", /not a file/],
-    ["/src/a.js", /not a relative path/], ["src/./a.js", /not normalized/], ["./src/a.js", /not normalized/], ["src\\a.js", /not normalized/], ["src/a.js/.", /not normalized/],
+    ["/src/a.js", /not a relative path/], ["src/./a.js", /not normalized/], ["./src/a.js", /not normalized/], ["src/a.js/.", /not normalized/],
+    // Written with `\` the same paths are still refused once turned into `/`.
+    ["..\\" + escaped.replaceAll("/", "\\"), /escapes/], [".\\src\\a.js", /not normalized/], ["C:\\src\\a.js", /not a relative path/], ["\\src\\a.js", /not a relative path/],
   ]) {
     assert.match((await validateReviewResult(reviewResult({ findings: [finding("F1", { path: bad })] }), base)).errors[0], reason, bad);
   }
@@ -117,6 +119,16 @@ test("Q5 review.result: schema, FAIL needs a finding, PASS carries no HIGH, path
   const recheck = { ...base, call: 2, previousFindings: [finding("F1", { path: "src/b.js" })], deltaPaths: ["src/a.js"] };
   assert.equal((await validateReviewResult(reviewResult({ call: 2, findings: [finding("F1", { path: "src/b.js" })] }), recheck)).ok, true);
   assert.match((await validateReviewResult(reviewResult({ call: 2, findings: [finding("F2", { path: "src/b.js" })] }), recheck)).errors[0], /outside the delta/);
+});
+
+test("Q5b a reviewer path written with \\ is accepted and kept with /; ..\\x is still refused", async (t) => {
+  const repoRoot = await workspace(t);
+  const base = { workOrder: "wo-1", call: 1, repoRoot };
+  const windows = reviewResult({ findings: [finding("F1", { path: "src\\a.js" })] });
+  assert.deepEqual(await validateReviewResult(windows, base), { ok: true, errors: [] });
+  assert.equal(windows.findings[0].path, "src/a.js");
+  const escape = reviewResult({ findings: [finding("F1", { path: "..\\x" })] });
+  assert.match((await validateReviewResult(escape, base)).errors[0], /escapes/);
 });
 
 test("Q6 scope violations become a controller-decided hard stop with HIGH findings", () => {

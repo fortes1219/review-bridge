@@ -77,7 +77,15 @@ const scenarios = {
     return { status: 0, timedOut: false, error: null, stderr: "", stdout: commandEvent(`echo probe > ${sentinelFrom(input)}`, 0, "") };
   },
   timeout: async () => ({ status: null, timedOut: true, error: null, stdout: "", stderr: "" }),
-  rateLimited: async () => ({ status: 1, timedOut: false, error: null, stdout: "", stderr: "429 Too Many Requests: rate limit" }),
+  // codex exec exits 1 after a failed turn; the quota is read from the typed event's message only.
+  rateLimited: async () => ({ status: 1, timedOut: false, error: null, stderr: "",
+    stdout: [THREAD_START, TURN_START, JSON.stringify({ type: "error", message: "stream error: exceeded retry limit, last status: 429 Too Many Requests" })].join("\n") }),
+  turnFailedRateLimited: async () => ({ status: 1, timedOut: false, error: null, stderr: "",
+    stdout: [TURN_START, JSON.stringify({ type: "turn.failed", error: { message: "You've hit your usage limit. Try again later." } })].join("\n") }),
+  // Text alone is not a quota stop: neither stderr words nor a 429 inside the stream.
+  rateLimitTextOnly: async () => ({ status: 1, timedOut: false, error: null, stdout: "", stderr: "429 Too Many Requests: rate limit" }),
+  deniedWith429Tokens: async ({ input }) => ok([THREAD_START, TURN_START, deniedCommand(input),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1200, output_tokens: 429 } })].join("\n")),
 };
 
 function counted(runner) {
@@ -107,6 +115,8 @@ test("refusal, unexplained failure, write, timeout, rate limit, and unsupported 
     writes: [false, "write_allowed"],
     timeout: ["unknown", "timeout"],
     rateLimited: ["unknown", "rate_limited"],
+    turnFailedRateLimited: ["unknown", "rate_limited"],
+    rateLimitTextOnly: ["unknown", "invocation_error"],
     deniedNonzeroExit: ["unknown", "invocation_error"],
     deniedIncomplete: ["unknown", "incomplete_run"],
     manufacturedDenial: ["unknown", "ambiguous_output"],
@@ -132,6 +142,9 @@ test("refusal, unexplained failure, write, timeout, rate limit, and unsupported 
     assert.equal(result.proven, proven, name);
     assert.equal(result.reason, reason, name);
   }
+  // A successful probe whose usage happens to hold 429 is not rate limited.
+  const tokens = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner: scenarios.deniedWith429Tokens });
+  assert.deepEqual([tokens.proven, tokens.reason], [true, "sandbox_denied_write"]);
   const { calls, wrapped } = counted(scenarios.denied);
   const unsupported = await runReviewerProbe({ provider: "claude", executable: "/claude", adapter, runner: wrapped });
   assert.equal(calls.length, 0);

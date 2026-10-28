@@ -13,7 +13,7 @@
 
 - 不 commit、不 push、不部署、不發布、不改 Git 設定。
 - 不碰禁改清單：.git、Bridge 自己的狀態、環境變數檔、金鑰、lockfile、CI 和部署設定。
-- 不呼叫其他 agent、不開子工作、不自己當 reviewer。
+- 不呼叫其他 agent 當 reviewer、不自己當 reviewer。
 - 不把工單沒寫的功能加進去，也不把工單寫了的刪掉。
 
 ## 遇到這些就停

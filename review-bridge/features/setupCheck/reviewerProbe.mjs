@@ -29,7 +29,8 @@ const DENIAL_PATTERNS = Object.freeze([
   ["access_denied", /\bUnauthorizedAccessException\b/],
   ["operation_not_permitted", /operation not permitted|EPERM/i],
 ]);
-const RATE_LIMIT = /rate.?limit|usage limit|too many requests|\b429\b/i;
+// Codex's own wording in a failed turn's message; nothing else in the stream is read for it.
+const QUOTA_PHRASES = Object.freeze(["usage limit", "rate limit", "too many requests"]);
 const PROBE_SOURCE = fileURLToPath(import.meta.url);
 
 function sha256(value) {
@@ -210,6 +211,7 @@ function codexEvents(stdout) {
   let disordered = false;
   let threadStarted = false;
   let failed = false;
+  let rateLimited = false;
   let unknown = 0;
   for (const line of String(stdout).split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -230,7 +232,12 @@ function codexEvents(stdout) {
       if (phase === "turn") phase = "done"; else disordered = true;
       continue;
     }
-    if (event.type === "turn.failed" || event.type === "error") { failed = true; continue; }
+    if (event.type === "turn.failed" || event.type === "error") {
+      failed = true;
+      const message = String((event.type === "error" ? event.message : event.error?.message) ?? "").toLowerCase();
+      if (QUOTA_PHRASES.some((phrase) => message.includes(phrase))) rateLimited = true;
+      continue;
+    }
     if (phase !== "turn") disordered = true;
     const item = event.item;
     if (!item || typeof item.type !== "string" || !KNOWN_ITEMS.has(item.type)) { unknown += 1; continue; }
@@ -247,7 +254,7 @@ function codexEvents(stdout) {
   }
   unknown += open.size;
   if (disordered) unknown += 1;
-  return { commands, fileChanges, completed: phase === "done" && !disordered, failed, unknown };
+  return { commands, fileChanges, completed: phase === "done" && !disordered, failed, rateLimited, unknown };
 }
 
 // Positive proof needs: a zero CLI exit with one complete ordered turn, exactly one command
@@ -268,9 +275,9 @@ export function evaluateProbe({ provider, result, sentinelName, probeDir, sentin
   if (events.fileChanges.some((item) => item.status === "completed")) {
     return { ...base, proven: false, reason: "write_allowed" };
   }
-  if (RATE_LIMIT.test(String(result.stderr) + String(result.stdout))) return { ...base, reason: "rate_limited" };
-  if (result.status !== 0) return { ...base, reason: "invocation_error" };
-  if (!events.completed || events.failed) return { ...base, reason: "incomplete_run" };
+  // codex exec exits 1 once a turn fails, so a quota stop is a failed exit whose failed turn says so.
+  if (result.status !== 0) return { ...base, reason: events.rateLimited ? "rate_limited" : "invocation_error" };
+  if (!events.completed || events.failed) return { ...base, reason: events.rateLimited ? "rate_limited" : "incomplete_run" };
   const attempts = events.commands.filter((item) => isFixedWriteAttempt(item.command, sentinelName));
   if (attempts.length === 0) {
     return { ...base, reason: events.commands.length > 0 || events.unknown > 0 ? "ambiguous_output" : "no_write_attempt" };

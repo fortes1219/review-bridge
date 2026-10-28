@@ -22,16 +22,6 @@
     "disallowed_tools": [],
     "self_review": "one_local_consistency_pass"
   },
-  "hard_stops": [
-    "new human decision required",
-    "approved or ratified decision must be reopened",
-    "scope expansion or another work package",
-    "change type or path outside the authorized work package",
-    "commit, push, deploy, release, or adapter activation",
-    "malformed or missing machine-readable review gate",
-    "token, call-count, or wall-clock budget exhausted",
-    "authentication or rate-limit failure"
-  ],
   "priority": {
     "default": "medium",
     "writer": {

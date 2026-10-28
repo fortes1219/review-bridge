@@ -94,6 +94,7 @@ test("S1 every closed reason delivers once: two files, the right title, three se
     evidence_unconfirmable: { state: { status: "evidence_unconfirmable" } },
     scope_unverified: { state: { status: "scope_unverified", scope_unverified: ["README.md"] } },
     run_timeout: {},
+    evidence_unavailable: { events: [{ event: "stop", status: "evidence_unavailable", role: "controller", provider: null, detail_ref: "delta" }] },
   };
   assert.equal(Object.keys(cases).length, CLOSED_REASONS.length, "every closed reason has a case");
   for (const status of CLOSED_REASONS) {

@@ -53,7 +53,7 @@ import {
   writerResultFromClaudeResult,
 } from "./typedResults.mjs";
 import { runTest, sameDelta } from "./test.mjs";
-import { createWorkspaceDelta, EvidenceChangedError, recordWindow, sealEvidence, snapshotWorkspace, startPointStatus, verifySealedEvidence } from "./workspaceEvidence.mjs";
+import { createWorkspaceDelta, EvidenceChangedError, EvidenceUnavailableError, recordWindow, sealEvidence, snapshotWorkspace, startPointStatus, verifySealedEvidence } from "./workspaceEvidence.mjs";
 import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
 import { priorityChoice } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
@@ -180,8 +180,8 @@ async function checkedContract({ paths, runtimeState, control, contractSha256, s
 
 // A stop before the work exits with the code the writer's or reviewer's own stop of that kind uses;
 // one that needs the human (an unclear work order, an unconfirmed check) exits 0 like needs_human.
-// sysexits' EX_UNAVAILABLE: a service the run needs is gone.
-const DATABASE_UNAVAILABLE_EXIT = 69;
+// sysexits' EX_UNAVAILABLE: something the run needs is gone (the database, the change list).
+const UNAVAILABLE_EXIT = 69;
 
 const CONTRACT_EXIT_CODES = Object.freeze({
   needs_human: 0, contract_unconfirmed: 0, writer_failed: 1, reviewer_failed: 1, policy_failure: 1, rate_limited: 75, token_limit: 76, usage_unknown: 76,
@@ -563,7 +563,6 @@ export async function runBoundedResume({
       if (claudeResult && String(claudeResult.session_id) !== sessionId) {
         throw new Error("Writer session drift detected.");
       }
-      const resultText = String(claudeResult?.result || "");
       if (!claudeResult || claudeResult.is_error === true || processResult.exitCode !== 0) {
         const classified = classifyProviderFailure({
           role: "writer",
@@ -571,7 +570,9 @@ export async function runBoundedResume({
           phase: "write",
           exitCode: processResult.exitCode,
           texts: [
-            resultText,
+            // The CLI marks its own error with is_error; only then is `result` its message (a usage
+            // limit is reported there). Otherwise `result` is the model's text and is not read.
+            claudeResult?.is_error === true ? String(claudeResult.result || "") : "",
             await readEvidenceTail(stderrPath),
             claudeResult ? "" : await readEvidenceTail(stdoutPath),
           ],
@@ -940,7 +941,13 @@ export async function runBoundedResume({
     if (error instanceof DatabaseUnavailableError) {
       await recordIo(paths, runtimeState.runId, { event: "stop", status: "database_unavailable", role: "controller", provider: null, detail_ref: "database" }).catch(() => {});
       await stopRunRecord(paths, runtimeState.runId, { closedReason: "database_unavailable" }).catch(() => {});
-      return DATABASE_UNAVAILABLE_EXIT;
+      return UNAVAILABLE_EXIT;
+    }
+    // The change list for the review cannot be read: no review without it, the run fails here.
+    if (error instanceof EvidenceUnavailableError) {
+      await recordIo(paths, runtimeState.runId, { event: "stop", status: "evidence_unavailable", role: "controller", provider: null, detail_ref: "delta" });
+      await consumeAuthorization(paths, control, "evidence_unavailable");
+      return UNAVAILABLE_EXIT;
     }
     if (await runStopped(paths, runtimeState.runId)) return 130;
     const currentState = await runtimeState.getState().catch(() => null);
