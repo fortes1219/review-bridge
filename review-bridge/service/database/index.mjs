@@ -4,8 +4,9 @@
 // it is idle, so a command never has to close it.
 import pg from "pg";
 
+import { BackupRefusedError, backupDatabase, runLines } from "./backup.mjs";
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
-import { applyMigrations } from "./migrate.mjs";
+import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
 import { clusterPaths, connect, connectionSettings, ensureCluster, postgresBinaries, startServer } from "./postgresServer.mjs";
 
@@ -24,18 +25,43 @@ async function ensureDatabase(root) {
   }
 }
 
-async function open(dataHome) {
+// An upgraded Bridge backs up the database before its first new migration (Owner 2026-10-29): a
+// database that has had migrations and is about to get more. A new database has nothing to keep,
+// and a running run refuses it, so no table changes before the copy exists. Returns the backup's
+// folder, or null when there was nothing to back up.
+export async function backUpBeforeMigrating(root, { dataHome, dir = MIGRATIONS_DIR } = {}) {
+  const client = await connect(root, { database: DATABASE_NAME });
+  let state;
+  try {
+    state = await migrationState(client, { dir });
+  } finally {
+    await client.end();
+  }
+  if (!state.applied || !state.pending.length) return null;
+  try {
+    return (await backupDatabase({ dataHome })).path;
+  } catch (error) {
+    if (!(error instanceof BackupRefusedError) || !error.runs.length) throw error;
+    throw new BackupRefusedError("Bridge backs up the database before it applies " + state.pending.length + " new migration(s), and a run is running."
+      + " Let it end, or stop it with review-bridge stop <run_id> in its project, then run the command again.\n" + runLines(error.runs), error.runs);
+  }
+}
+
+async function open(dataHome, dir) {
   const root = databaseRoot(dataHome);
   const binaries = await postgresBinaries();
   await ensureCluster(root, { binaries });
   await startServer(root, { binaries });
   await ensureDatabase(root);
+  const backup = await backUpBeforeMigrating(root, { dataHome, dir });
+  // stderr: a command's stdout may be JSON.
+  if (backup) process.stderr.write("Backed up the database to " + backup + " before upgrading it.\n");
   const pool = new pg.Pool({ ...(await connectionSettings(root, { database: DATABASE_NAME })), max: 4, allowExitOnIdle: true, idleTimeoutMillis: 1000 });
   // A connection the server ends between queries is reported here; the next query reports it again.
   pool.on("error", () => {});
   const client = await pool.connect();
   try {
-    await applyMigrations(client);
+    await applyMigrations(client, { dir });
   } finally {
     client.release();
   }
@@ -72,11 +98,13 @@ function unavailable(error) {
   return gone && !(error instanceof DatabaseUnavailableError) ? new DatabaseUnavailableError(error) : error;
 }
 
-// Fails closed: without the database no work order is planned or started.
-export async function openDatabase({ dataHome = bridgeDataHome() } = {}) {
+// Fails closed: without the database no work order is planned or started. `migrationsDir` is for tests.
+export async function openDatabase({ dataHome = bridgeDataHome(), migrationsDir = MIGRATIONS_DIR } = {}) {
   if (!opened.has(dataHome)) {
-    opened.set(dataHome, open(dataHome).catch((error) => {
+    opened.set(dataHome, open(dataHome, migrationsDir).catch((error) => {
       opened.delete(dataHome);
+      // A refusal to upgrade while a run is running is said as it is, not as a database gone away.
+      if (error instanceof BackupRefusedError) throw error;
       throw new DatabaseUnavailableError(error, databaseRoot(dataHome));
     }));
   }

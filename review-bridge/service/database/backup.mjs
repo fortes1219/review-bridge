@@ -17,12 +17,16 @@ export function databaseBackupsRoot(dataHome = bridgeDataHome()) {
   return path.join(dataHome, "backups", "database");
 }
 
+// `runs` holds the running runs that refused it, if that was the reason.
 export class BackupRefusedError extends Error {
-  constructor(message) {
+  constructor(message, runs = []) {
     super(message);
     this.name = "BackupRefusedError";
+    this.runs = runs;
   }
 }
+
+export const runLines = (runs) => runs.map((run) => "  " + run.run_id + "  " + run.root_path).join("\n");
 
 // The runs still running in any project: the server they write to is about to stop.
 async function runningRuns(root) {
@@ -61,7 +65,7 @@ export async function backupDatabase({ dataHome = bridgeDataHome(), now = new Da
   const running = await runningRuns(root);
   if (running.length) {
     throw new BackupRefusedError("Not backed up: a run is running. Stop it with review-bridge stop <run_id> in its project, or let it end, then back up again.\n"
-      + running.map((run) => "  " + run.run_id + "  " + run.root_path).join("\n"));
+      + runLines(running), running);
   }
   const backupsRoot = databaseBackupsRoot(dataHome);
   const target = path.join(backupsRoot, now.toISOString().replace(/[:.]/g, "-"));

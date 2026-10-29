@@ -28,7 +28,8 @@ review-bridge/
 │   ├── workOrder/         plan → authorize → writer → test → review → deliver; status, cancel, stop
 │   ├── setupCheck/        the setup page, the resident page service, the reviewer read-only check
 │   ├── records/           prune and rm: fold finished runs into day files
-│   └── doctor/            read-only diagnostics
+│   ├── doctor/            read-only diagnostics
+│   └── backup/            backup: a stopped copy of the person's database
 ├── service/               boundaries shared by more than one feature
 │   ├── index.mjs          the only way in
 │   ├── agentCli/          child processes and the writer/reviewer CLIs
@@ -59,6 +60,7 @@ Each feature exposes only what its `index.mjs` exports. Everything else in the f
 | `setupCheck` | `startWatch`, `upService`, `downService`, `showService`, `checkService` | `watchServer`, `pageService`, `reviewerProbe` |
 | `records` | `runPrune`, `removeRecord` | `retention` |
 | `doctor` | `inspectDoctor` | — |
+| `backup` | `backupDatabase` | — |
 
 **Work-order contract.** A work order is a Markdown file under `.review-bridge/work-packages/`, in any language and any heading layout. `work-plan` seals its text and records the contract steps the human approves with the plan: the configured writer translates, the configured reviewer checks, at most two attempts, each call held to the plan's `call_timeout`. Starting the work authorizes that sealed text; there is no second human approval.
 
@@ -127,6 +129,7 @@ Features never import each other. When one flow needs another feature's capabili
 | `database/postgresServer` | The person's embedded PostgreSQL server: create, start, stop, connect. Owns no table |
 | `database/migrate`, `database/migrations/` | Dated migration files, each applied once in its own transaction; a changed applied file stops everything |
 | `database/index` | `openDatabase()`: the cluster on first use, the server started, the `bridge` database and the migrations; one pool per process. Imported only by the commands that keep records, not re-exported |
+| `database/backup` | PostgreSQL's file system level backup into `<data home>/backups/database/<time>/`: refused while a run is running, the server stopped, the cluster folder copied whole and the server started again; a copy made while another command started the server is discarded. `openDatabase()` makes one before the first new migration of an upgraded Bridge, and refuses that upgrade while a run is running |
 
 The work order's records (RC3-BLOCKER-01 step 2) are `workOrder/workOrderRecords`: projects, work orders and their versions, plans (one per card), authorizations and claims, contracts. `start`, `resume` and `work-plan` decide which work order a file is (same file name; otherwise a renamed file whose old file is gone and whose text is close) and record the plan; `--yes` finds its card there; the start writes the work order, its version, the authorization and its claim in one transaction around the file authorization. Runs, their events, test results, verdicts, findings, acceptance and delivery go to the database through `records/runRecords` (step 3): `appendProjectionEvent` and `appendIoEvent` hand each event to the recorder the router installs for a project with an id, one transaction per event (the run's row locked, the next sequence, the event and its fact rows, the state columns). Step 4 reads from the database too: `status` and `work-status` (the project's runs, newest first, ten at a time with `--after` for the next page, and its running runs), `doctor`'s running runs, the delivery pass before a prune, `clean --all`'s check, and the running runs a start replaces (by work order id). A process that keeps no records (a unit test of the files, a project without an id) reads its files. A run whose database goes away stops as `database_unavailable`; the events it kept meanwhile (`review-queue/unrecorded/`) are written by the next process that opens the database.
 

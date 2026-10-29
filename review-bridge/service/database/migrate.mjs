@@ -23,6 +23,15 @@ export async function migrationFiles(dir = MIGRATIONS_DIR) {
   return files;
 }
 
+// The migration files this database has not had yet, and how many it has had: one that has had none
+// is new, so an upgrade is a database with some applied and some still to apply.
+export async function migrationState(client, { dir = MIGRATIONS_DIR } = {}) {
+  const files = await migrationFiles(dir);
+  const table = (await client.query("select to_regclass('public.schema_migrations') as name")).rows[0].name;
+  const applied = new Set(table ? (await client.query("select name from schema_migrations")).rows.map((row) => row.name) : []);
+  return { applied: applied.size, pending: files.filter((file) => !applied.has(file.name)).map((file) => file.name) };
+}
+
 // Returns the names applied by this call.
 export async function applyMigrations(client, { dir = MIGRATIONS_DIR } = {}) {
   const files = await migrationFiles(dir);

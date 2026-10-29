@@ -9,7 +9,9 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { backupDatabase, databaseBackupsRoot } from "../service/database/backup.mjs";
+import { BackupRefusedError, backupDatabase, databaseBackupsRoot } from "../service/database/backup.mjs";
+import { backUpBeforeMigrating, openDatabase } from "../service/database/index.mjs";
+import { migrationFiles } from "../service/database/migrate.mjs";
 import { connect, postgresBinaries, serverRunning, startServer } from "../service/database/postgresServer.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 
@@ -154,4 +156,72 @@ test("backup with no database yet says so and makes nothing", { timeout: 60_000 
   t.after(() => fsp.rm(empty, { recursive: true, force: true }));
   await assert.rejects(backupDatabase({ dataHome: empty }), /There is no database at .* yet; nothing to back up\./);
   assert.deepEqual(await fsp.readdir(empty), []);
+});
+
+// The package's migrations plus the ones a newer Bridge would bring.
+async function migrationsWith(t, extra) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-upgrade-migrations-"));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  for (const file of await migrationFiles()) await fsp.writeFile(path.join(dir, file.name), file.sql);
+  for (const [name, sql] of Object.entries(extra)) await fsp.writeFile(path.join(dir, name), sql);
+  return dir;
+}
+
+test("a new database, or one with every migration applied, is not backed up when it is opened", { timeout: 120_000 }, async (t) => {
+  await projectWithRun();
+  assert.equal(await backUpBeforeMigrating(databaseRoot, { dataHome }), null);
+  const fresh = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-fresh-home-"));
+  t.after(async () => {
+    stopServerIn(fresh);
+    await fsp.rm(fresh, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  });
+  const db = await openDatabase({ dataHome: fresh });
+  await db.close();
+  assert.equal(await fsp.stat(path.join(fresh, "backups")).catch(() => null), null);
+});
+
+test("an upgrade is refused while a run is running: no copy is made and no new migration is applied", { timeout: 120_000 }, async (t) => {
+  const { runId } = await projectWithRun();
+  const dir = await migrationsWith(t, { "2099-01-01-0001-refused.sql": "create table upgrade_refused (id int);\n" });
+  const before = await backupFolders();
+  await queryRecords("update runs set status = 'in_progress' where run_id = $1", [runId]);
+  try {
+    await assert.rejects(backUpBeforeMigrating(databaseRoot, { dataHome, dir }), (error) => error instanceof BackupRefusedError
+      && /^Bridge backs up the database before it applies 1 new migration\(s\), and a run is running\. Let it end/.test(error.message)
+      && error.message.includes(runId));
+  } finally {
+    await queryRecords("update runs set status = 'completed' where run_id = $1", [runId]);
+  }
+  assert.deepEqual(await backupFolders(), before);
+  assert.deepEqual(await queryRecords("select name from schema_migrations where name like '2099%'"), []);
+});
+
+// Last: it leaves one more migration applied to this file's database.
+test("an upgraded Bridge backs up the database before its first new migration, and the copy is the database before it", { timeout: 300_000 }, async (t) => {
+  await projectWithRun();
+  const dir = await migrationsWith(t, { "2099-01-01-0000-upgrade.sql": "create table upgrade_check (id int);\n" });
+  const before = await backupFolders();
+  const db = await openDatabase({ dataHome, migrationsDir: dir });
+  try {
+    assert.deepEqual((await db.query("select name from schema_migrations where name like '2099%'")).rows, [{ name: "2099-01-01-0000-upgrade.sql" }]);
+  } finally {
+    await db.close();
+  }
+  const made = (await backupFolders()).filter((name) => !before.includes(name));
+  assert.equal(made.length, 1);
+  const copyHome = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-before-upgrade-"));
+  t.after(async () => {
+    stopServerIn(copyHome);
+    await fsp.rm(copyHome, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  });
+  await fsp.cp(path.join(backups, made[0], "postgres"), path.join(copyHome, "postgres"), { recursive: true });
+  await startServer(path.join(copyHome, "postgres"), { binaries });
+  const copy = await connect(path.join(copyHome, "postgres"), { database: "bridge" });
+  try {
+    assert.deepEqual((await copy.query("select name from schema_migrations where name like '2099%'")).rows, []);
+    assert.equal((await copy.query("select to_regclass('public.upgrade_check') as name")).rows[0].name, null);
+    assert.ok((await copy.query("select count(*)::int as n from runs")).rows[0].n >= 1);
+  } finally {
+    await copy.end();
+  }
 });
