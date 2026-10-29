@@ -156,6 +156,7 @@ Commands:
   upgrade           Move this folder's setup to the installed Review Bridge version, with a backup
   uninstall         Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
   doctor            Check which platform adapter this machine uses, without running any work
+  backup            Copy your database, for all your projects, with the database stopped (refused while a run is running)
 
 Options:
   -v, --version   Print the version
@@ -402,6 +403,18 @@ Options:
 1 more option(s) for tests and agents: review-bridge doctor --help --all
 ```
 
+### backup
+
+```text
+Usage: review-bridge backup [options]
+
+Copy your database, for all your projects, with the database stopped (refused while a run is running)
+
+Options:
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
 ### For agents and scripts
 
 Shown by `review-bridge --help --all`. `start` does what `work-plan` and `work-start` do in one command.
@@ -600,7 +613,9 @@ Options:
 
 - In the project: `.review-bridge/`.
 - For you, shared by all your projects: your settings (`settings.json`, the default roles) and the database, in `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS and `~/.local/share/review-bridge` on Linux. `REVIEW_BRIDGE_DATA_HOME` moves it.
-- Backups made by `upgrade` and `uninstall`: `%LOCALAPPDATA%\ReviewBridge\backups` on Windows, or `--backup-root <folder>`. They can hold private work data; do not publish them.
+- Backups, in `backups` under that folder: `backups/database` holds the copies `review-bridge backup` makes of the database; `backups/installer` holds what `upgrade` and `uninstall` keep (or `--backup-root <folder>`). They can hold private work data; do not publish them.
+
+`review-bridge backup` is PostgreSQL's file system level backup: it refuses while a run is running, stops the database, copies its whole folder (the data, its password file and its port) and starts it again. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
 
 The database is the record; the files under `.review-bridge/` are the running copy. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. `review-bridge status` ends with how to reach it:
 

@@ -5,6 +5,7 @@
 // the start gate; the order of steps is the features'.
 import { parseOptions } from "./args.mjs";
 import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mjs";
+import * as backup from "../features/backup/index.mjs";
 import * as records from "../features/records/index.mjs";
 import * as setupCheck from "../features/setupCheck/index.mjs";
 import * as workOrder from "../features/workOrder/index.mjs";
@@ -183,6 +184,13 @@ export const COMMANDS = {
     configFree: true,
     summary: "Check which platform adapter this machine uses, without running any work",
     options: { "--fake-cli": FAKE_CLI },
+  },
+  backup: {
+    audience: "human",
+    configFree: true,
+    summary: "Copy your database, for all your projects, with the database stopped (refused while a run is running)",
+    options: {},
+    run: () => backup.backupDatabase(),
   },
   "work-plan": {
     audience: "agent",

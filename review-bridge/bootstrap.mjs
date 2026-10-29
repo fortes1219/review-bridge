@@ -75,7 +75,7 @@ async function main() {
   if (gate.mode === "native" && !["start", "resume"].includes(command)) await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "up", "down", "ps", "prune", "rm", "clean", "stop"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "wait", "up", "down", "ps", "prune", "rm", "clean", "stop", "backup"]);
   // Native start and resume take this machine's adapter only after the reviewer check and the yes,
   // so without the proof they are refused the same way on every platform, adapter or not.
   const checksFirst = !fakeRequested && ["start", "resume"].includes(command);

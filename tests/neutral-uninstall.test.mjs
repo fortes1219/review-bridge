@@ -15,6 +15,8 @@ import {
   applyNeutralInstall, applyNeutralUninstall, defaultBackupRoot, loadInstalledServiceModules, MAINTENANCE_MARKER,
   planNeutralInstall, planNeutralUninstall,
 } from "../installer/neutral-install.mjs";
+import { databaseBackupsRoot } from "../review-bridge/service/database/backup.mjs";
+import { bridgeDataHome } from "../review-bridge/service/database/dataHome.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bridge = path.join(packageRoot, "bridge.mjs");
@@ -504,13 +506,16 @@ test("V10 install, uninstall, install, uninstall gives the same clean project", 
   }
 });
 
-test("V11 the default backup root follows each platform's convention", () => {
+test("V11 the default backup root is backups/installer under the person's data home, beside backups/database", () => {
   const home = path.join("H", "user");
-  assert.equal(defaultBackupRoot({ platform: "win32", env: { LOCALAPPDATA: path.join("C", "AppData", "Local") }, home }), path.join("C", "AppData", "Local", "ReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "win32", env: {}, home }), path.join(home, "AppData", "Local", "ReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "darwin", env: {}, home }), path.join(home, "Library", "Application Support", "ReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "linux", env: {}, home }), path.join(home, ".local", "share", "ReviewBridge", "backups"));
-  assert.equal(defaultBackupRoot({ platform: "linux", env: { XDG_DATA_HOME: path.join("X", "data") }, home }), path.join("X", "data", "ReviewBridge", "backups"));
+  assert.equal(defaultBackupRoot({ platform: "win32", env: { LOCALAPPDATA: path.join("C", "AppData", "Local") }, home }), path.join("C", "AppData", "Local", "ReviewBridge", "backups", "installer"));
+  assert.equal(defaultBackupRoot({ platform: "win32", env: {}, home }), path.join(home, "AppData", "Local", "ReviewBridge", "backups", "installer"));
+  assert.equal(defaultBackupRoot({ platform: "darwin", env: {}, home }), path.join(home, "Library", "Application Support", "ReviewBridge", "backups", "installer"));
+  // XDG's names are lower case: the same folder as the data home, not a second ReviewBridge beside it.
+  assert.equal(defaultBackupRoot({ platform: "linux", env: {}, home }), path.join(home, ".local", "share", "review-bridge", "backups", "installer"));
+  assert.equal(defaultBackupRoot({ platform: "linux", env: { XDG_DATA_HOME: path.join("X", "data") }, home }), path.join("X", "data", "review-bridge", "backups", "installer"));
+  assert.equal(defaultBackupRoot({ platform: "linux", env: { REVIEW_BRIDGE_DATA_HOME: path.resolve("D") }, home }), path.join(path.resolve("D"), "backups", "installer"));
+  assert.equal(path.dirname(defaultBackupRoot({ platform: "linux", env: {}, home })), path.dirname(databaseBackupsRoot(bridgeDataHome({ platform: "linux", env: {}, home }))));
 });
 
 test("L1 two processes racing to take over a stale install lock: exactly one enters", async (t) => {

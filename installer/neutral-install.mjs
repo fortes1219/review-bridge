@@ -15,6 +15,7 @@ import {
   planUpgradeInvalidations,
   policyIdentity,
 } from "../review-bridge/service/index.mjs";
+import { bridgeDataHome } from "../review-bridge/service/database/dataHome.mjs";
 import { AGENT_COMMAND_RELATIVE, agentFilesState, planAgentFiles, undoAgentFiles, writeAgentFiles } from "./agent-files.mjs";
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
@@ -505,11 +506,10 @@ export const TRANSIENT_FILES = Object.freeze([
 // Codex 2026-10-14: what counts as running or closed comes from the state machine, never a second copy.
 const JOURNAL_SCHEMA = 1;
 
-// B1: the persistent backup root for this platform; --backup-root overrides it.
+// B1: the persistent backup root, under the person's data home beside the database's backups
+// (backups/database); --backup-root overrides it.
 export function defaultBackupRoot({ platform = process.platform, env = process.env, home = os.homedir() } = {}) {
-  if (platform === "win32") return path.join(env.LOCALAPPDATA || path.join(home, "AppData", "Local"), "ReviewBridge", "backups");
-  if (platform === "darwin") return path.join(home, "Library", "Application Support", "ReviewBridge", "backups");
-  return path.join(env.XDG_DATA_HOME || path.join(home, ".local", "share"), "ReviewBridge", "backups");
+  return path.join(bridgeDataHome({ platform, env, home }), "backups", "installer");
 }
 
 async function realpathExisting(target) {

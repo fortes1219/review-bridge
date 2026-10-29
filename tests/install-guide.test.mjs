@@ -280,7 +280,7 @@ test("every command's --help exits 0 and lists each option with its type, defaul
 test("--help lists the commands for people; --help --all adds the ones for agents and scripts", () => {
   const run = (...args) => spawnSync(process.execPath, [bridge, ...args], { cwd: packageRoot, encoding: "utf8", windowsHide: true });
   const listed = (text) => text.split("\n").filter((line) => /^  [a-z]/.test(line)).map((line) => line.trim().split(/\s/)[0]);
-  const human = ["init", "start", "stop", "resume", "clean", "status", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor"];
+  const human = ["init", "start", "stop", "resume", "clean", "status", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor", "backup"];
   const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "roles-check"];
   assert.deepEqual(listed(run("--help").stdout), human);
   assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());

@@ -19,7 +19,8 @@
     "ps",
     "prune",
     "rm",
-    "stop"
+    "stop",
+    "backup"
   ],
   "adapters": {
     "win32-x64": {
