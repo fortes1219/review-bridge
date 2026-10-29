@@ -411,6 +411,23 @@ test("a chosen project type that does not fit the folder is set up, and its work
   assert.deepEqual(sealed.checked.map((rule) => rule.command), ["npm test"]);
 });
 
+test("init with a project type whose test rule fits passes its four self-tests: they check Bridge's paths, not the project's tests", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-tested-type-"));
+  t.after(() => removeWorkspace(root));
+  // The test script needs the project's dependencies, which the self-tests' copy does not have.
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({
+    name: "tested-vue-app", private: true, scripts: { test: "vitest run" }, dependencies: { vue: "latest" }, devDependencies: { vitest: "latest" },
+  }, null, 2) + "\n", "utf8");
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--profile", "vue-frontend", "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stdout + init.stderr);
+  assert.deepEqual(JSON.parse(init.stdout).fake_self_tests.map((entry) => entry.status), ["pass", "pass", "hard_stop", "rate_limited"]);
+  // The project keeps its test rule; only the self-tests' copy runs without one.
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  assert.deepEqual(config.test.rules, [{ command: "npm test", package_script: "test" }]);
+});
+
 // B1: one command from a work order to its result. With the fake CLI the reviewer check is not
 // needed and --yes, after the card, stands in for the person's answer.
 test("start plans a Chinese work order, shows the card, runs one line per step and ends with the result file", async (t) => {

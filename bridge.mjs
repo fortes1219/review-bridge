@@ -53,6 +53,19 @@ function jsonOutput(result, label) {
   }
 }
 
+// A failed self-test is said in one line: the scenario, why its run closed, and where the details
+// are. The run's result file is the details when it was written; otherwise the command's output is.
+class SelfTestError extends Error {}
+
+async function selfTestFailure(name, result, completed, resultFile) {
+  let details = resultFile;
+  if (!(await fsp.stat(resultFile).catch(() => null))) {
+    details = path.join(path.dirname(resultFile), "self-test-" + name.toLowerCase().replaceAll("_", "-") + ".log");
+    await fsp.writeFile(details, [result.stdout, result.stderr].filter(Boolean).join("\n"), "utf8");
+  }
+  return new SelfTestError(name + " self-test failed: " + (completed?.closed_reason || "exit " + result.status) + ". Details: " + details);
+}
+
 async function runFakeScenarios(target, privateName) {
   const bootstrap = bootstrapPath;
   const workRoot = path.join(target, privateName, "work-packages");
@@ -95,7 +108,7 @@ async function runFakeScenarios(target, privateName) {
       "--out", planPath,
       "--json",
     ], { cwd: target }), scenario.name + " work plan");
-    const completed = jsonOutput(run(process.execPath, [
+    const started = spawnSync(process.execPath, [
       bootstrap,
       "work-start",
       "--plan", planPath,
@@ -103,9 +116,14 @@ async function runFakeScenarios(target, privateName) {
       "--fake-cli",
       "--fake-scenario", scenario.name,
       "--json",
-    ], { cwd: target, expected: scenario.expectedExit }), scenario.name + " self-test");
-    if (completed.latest_state?.status !== scenario.status) {
-      throw new Error(scenario.name + " self-test returned unexpected status.");
+    ], { cwd: target, encoding: "utf8", env: process.env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    if (started.error) throw started.error;
+    let completed = null;
+    try {
+      completed = JSON.parse(started.stdout);
+    } catch {}
+    if (!scenario.expectedExit.includes(started.status) || completed?.latest_state?.status !== scenario.status) {
+      throw await selfTestFailure(scenario.name, started, completed, path.join(workRoot, id + ".result.md"));
     }
     results.push({ scenario: scenario.name, status: completed.latest_state.status });
   }
@@ -114,6 +132,7 @@ async function runFakeScenarios(target, privateName) {
 
 async function runDisposableFakeScenarios(target, privateName = ".claude") {
   const disposable = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-self-test-"));
+  let keep = false;
   try {
     await fsp.cp(path.join(target, privateName), path.join(disposable, privateName), { recursive: true });
     for (const relative of ["README.md", "AGENTS.md", "package.json"]) {
@@ -124,16 +143,22 @@ async function runDisposableFakeScenarios(target, privateName = ".claude") {
       await fsp.writeFile(path.join(disposable, "README.md"), "# Review Bridge self-test workspace\n", "utf8");
     }
     // The copy is its own project in the person's database, never the real one, and its records go
-    // when the self-tests end.
+    // when the self-tests end. It has no test rules: the self-tests check Bridge's own four paths, not
+    // the project's tests (the copy has none of its dependencies), so its runs record not_configured.
     const config = path.join(disposable, privateName, "review-bridge", "bridge.json");
-    await fsp.writeFile(config, JSON.stringify({ ...JSON.parse(await fsp.readFile(config, "utf8")), project_id: randomUUID() }, null, 2) + "\n", "utf8");
+    const settings = JSON.parse(await fsp.readFile(config, "utf8"));
+    await fsp.writeFile(config, JSON.stringify({ ...settings, project_id: randomUUID(), test: { ...settings.test, rules: [] } }, null, 2) + "\n", "utf8");
     try {
       return await runFakeScenarios(disposable, privateName);
     } finally {
       run(process.execPath, [bootstrapPath, "clean", "--all"], { cwd: disposable, expected: [0, 1, 2] });
     }
+  } catch (error) {
+    // A failed self-test keeps the copy, so the file its message names is still there.
+    if (error instanceof SelfTestError) keep = true;
+    throw error;
   } finally {
-    await fsp.rm(disposable, { recursive: true, force: true });
+    if (!keep) await fsp.rm(disposable, { recursive: true, force: true });
   }
 }
 
