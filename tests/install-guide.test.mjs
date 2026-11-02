@@ -105,7 +105,7 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
     { start: "Checking the setup" }, { done: "Checking the setup" },
     { start: "Running the four fake self-tests" }, { done: "Running the four fake self-tests" },
     { start: "Starting the local page" }, { done: "Starting the local page" },
-    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/\n  review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" },
+    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (Codex reads the same steps from AGENTS.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" },
   ]);
   assert.deepEqual(run.setup.seen.map(({ target, roles, profileId }) => ({ target, roles, profileId })),
     [{ target: run.project, roles: { writer: "claude", reviewer: "codex" }, profileId: "node-backend" }]);
@@ -212,10 +212,10 @@ test("an option the Guide does not know is refused", async (t) => {
   await assert.rejects(run.run, /Unknown option for init: --install-location/);
 });
 
-test("Done names cd when the project is not the current folder, then start and the page", () => {
+test("Done names cd when the project is not the current folder, then the agent's start, the terminal's start and the page", () => {
   const cwd = path.join(os.tmpdir(), "work");
   assert.equal(doneMessage(path.join(cwd, "my app"), cwd, "http://localhost:8081/"),
-    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/\n  review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/");
+    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (Codex reads the same steps from AGENTS.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/");
   assert.match(doneMessage(cwd, cwd, null), /\n  page: not running; start it with review-bridge up$/);
 });
 
@@ -284,6 +284,7 @@ test("--help lists the commands for people; --help --all adds the ones for agent
   const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "roles-check"];
   assert.deepEqual(listed(run("--help").stdout), human);
   assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());
+  assert.match(run("init", "--help").stdout, /\n\nAfterwards you start work through your agent: in Claude Code type \/review-bridge start <file>; Codex reads the same steps from AGENTS\.md\. review-bridge start <file> at a terminal is for advanced use and CI\.\n/);
   assert.match(run("status", "--help").stdout, /Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database/);
   assert.match(run("prune", "--help").stdout, /Same as clean without a run id/);
   assert.match(run("rm", "--help").stdout, /Same as clean <run_id>/);

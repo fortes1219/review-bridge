@@ -86,8 +86,11 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     "Starting the local page...",
     "Done. Now:",
     "",
-    "  put a work order .md in .review-bridge/work-packages/",
-    "  review-bridge start .review-bridge/work-packages/<file>.md",
+    "  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:",
+    "    /review-bridge start .review-bridge/work-packages/<file>.md",
+    "    (Codex reads the same steps from AGENTS.md)",
+    "  at a terminal, for advanced use and CI:",
+    "    review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: http://localhost:" + port + "/",
   ]);
   assert.doesNotMatch(result.stdout, /SHA-?256|plan_sha256|[0-9a-f]{64}|\[y\/N\]/i);
@@ -303,12 +306,15 @@ test("init starts the resident service and ends with cd, the work folder, the st
   ], { cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(result.status, 0, result.stderr);
   const workFolder = path.join(root, ".review-bridge", "work-packages");
-  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/).slice(-6), [
+  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/).slice(-9), [
     "Done. Now:",
     "",
     "  cd " + path.relative(packageRoot, root),
-    "  put a work order .md in .review-bridge/work-packages/",
-    "  review-bridge start .review-bridge/work-packages/<file>.md",
+    "  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:",
+    "    /review-bridge start .review-bridge/work-packages/<file>.md",
+    "    (Codex reads the same steps from AGENTS.md)",
+    "  at a terminal, for advanced use and CI:",
+    "    review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: " + url,
   ]);
   await fsp.access(workFolder);

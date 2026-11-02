@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native work no longer requires an interactive terminal (T0-08's terminal rule is withdrawn); the reviewer read-only proof is still required before any model call.
 - `status` shows what Bridge is doing now: the page, the runs and the review queue (`--json` for all of it).
 - `start` without a terminal takes the default breakpoint and change types instead of refusing.
-- `init` ends with `review-bridge start …` and the page address.
+- The main way in is your agent: `init`, its `--help` and README start a work order with `/review-bridge start <file>` in Claude Code (Codex reads the same steps from `AGENTS.md`); `review-bridge start <file>` at a terminal is for advanced use and CI.
 - `work-plan` prints two lines (the plan and the next command); `--json` prints the JSON.
 - Refusals end with the command to run next.
 - Review Bridge is distributed on npm: `npx review-bridge init` or `npm i -g review-bridge`. Upgrading and removing Bridge are `npm i -g review-bridge@latest` and `npm uninstall -g review-bridge`.

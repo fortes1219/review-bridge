@@ -35,8 +35,11 @@ export function doneMessage(target, cwd, url) {
   const lines = ["Done. Now:", ""];
   const relative = path.relative(cwd, target);
   if (relative) lines.push("  cd " + (relative.includes(" ") ? "\"" + relative + "\"" : relative));
-  lines.push("  put a work order .md in .review-bridge/work-packages/");
-  lines.push("  review-bridge start .review-bridge/work-packages/<file>.md");
+  lines.push("  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:");
+  lines.push("    /review-bridge start .review-bridge/work-packages/<file>.md");
+  lines.push("    (Codex reads the same steps from AGENTS.md)");
+  lines.push("  at a terminal, for advanced use and CI:");
+  lines.push("    review-bridge start .review-bridge/work-packages/<file>.md");
   lines.push("  page: " + (url || "not running; start it with review-bridge up"));
   return lines.join("\n");
 }

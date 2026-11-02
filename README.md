@@ -1,9 +1,12 @@
 # Review Bridge
 
 ```sh
+npm i -g review-bridge
 cd your-project
-npx review-bridge init
+review-bridge init
 ```
+
+Release candidates are on the next tag: `npm i -g review-bridge@next`.
 
 Review Bridge runs your work orders with two separate agents: a writer that does the work and an independent, read-only reviewer that checks it. Bridge itself decides the scope, the budget, the verification command and when to stop and hand back to you; the agents cannot change those.
 
@@ -34,15 +37,25 @@ The project type only picks the verification command Bridge runs after every wri
 
 ## Your first work order
 
+Copy the template and describe the work and its acceptance results, in any language:
+
 ```sh
 cp .review-bridge/work-packages/TEMPLATE.md .review-bridge/work-packages/add-readme.md
-# describe the work and its acceptance results, in any language
-review-bridge start .review-bridge/work-packages/add-readme.md
 ```
 
-`start` seals the work order with its scope, budget and verification into a plan (asking where the work should stop for you), checks once per page session that the reviewer cannot write files, shows what you are authorizing, and asks `Start this work? [y/N]`. Your answer is the only authorization. It then prints one line per step and ends with the result file. Bridge never commits, pushes or deploys.
+Then, in Claude Code, type:
 
-The same four actions work for you or through an agent:
+```text
+/review-bridge start .review-bridge/work-packages/add-readme.md
+```
+
+Codex reads the same steps from `AGENTS.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, checks once per page session that the reviewer cannot write files, prints a card with what you are authorizing and stops with `Needs authorization`. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. Your yes is the only authorization, and the authorization records that it came through an agent. The work then prints one line per step and ends with the result file. Bridge never commits, pushes or deploys.
+
+`/review-bridge` takes the same four actions as the commands below: `start <file>`, `stop <run_id>`, `resume <run_id>` and `clean [<run_id>]`.
+
+### At a terminal (advanced use and CI)
+
+The four actions are also commands. At a terminal, `start` asks where the work should stop for you, shows the card and asks `Start this work? [y/N]` itself.
 
 | You want to | Command |
 |---|---|
@@ -52,8 +65,6 @@ The same four actions work for you or through an agent:
 | clear finished records | `review-bridge clean [<run_id>]` |
 
 `review-bridge status` shows what is running and the run ids.
-
-**Through an agent.** In Claude Code type `/review-bridge start <file>` (or `stop`, `resume`, `clean`); Codex reads the same steps from `AGENTS.md`. Without a terminal, `start` and `resume` print the card and stop with `Needs authorization`; the agent shows you the card word for word and runs the command again with `--yes` only after you say yes. The authorization records that the yes came through an agent.
 
 ## Work order format
 
@@ -173,6 +184,8 @@ Remove Review Bridge: npm uninstall -g review-bridge
 Usage: review-bridge init [options]
 
 Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
+
+Afterwards you start work through your agent: in Claude Code type /review-bridge start <file>; Codex reads the same steps from AGENTS.md. review-bridge start <file> at a terminal is for advanced use and CI.
 
 Options:
   --target <folder>

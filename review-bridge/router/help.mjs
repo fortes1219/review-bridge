@@ -54,6 +54,7 @@ export function renderCommandHelp(name, { all = false } = {}) {
     "",
     entry.summary,
   ];
+  if (entry.note) lines.push("", entry.note);
   if (options.length) {
     lines.push("", "Options:");
     for (const [flag, option] of options) {
