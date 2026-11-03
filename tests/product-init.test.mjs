@@ -703,8 +703,10 @@ test("a run's events, verdicts, tests and delivery are in the database; stop and
   const [planned] = await queryRecords("select p.body->>'priority' as priority, p.body->>'priority_source' as priority_source, p.body->>'effort_source' as effort_source,"
     + " p.body->'budget_source'->>'run_timeout' as run_timeout_source, (r.timeout_at - r.created_at) as timeout from runs r join plans p using (plan_sha256) where r.run_id = $1", [runId]);
   assert.deepEqual({ ...planned, timeout: planned.timeout.hours }, { priority: "medium", priority_source: "config", effort_source: "priority", run_timeout_source: "config", timeout: 6 });
-  const [delivered] = await queryRecords("select payload from run_events where run_id = $1 and type = 'run_delivered'", [runId]);
-  assert.equal(delivered.payload.sha256, file.result_sha256);
+  // A state event keeps its details with the run it left, in its record; its payload is null.
+  const [delivered] = await queryRecords("select payload, record->'details' as details from run_events where run_id = $1 and type = 'run_delivered'", [runId]);
+  assert.equal(delivered.details.sha256, file.result_sha256);
+  assert.equal(delivered.payload, null);
 
   // A run stopped from another process is recorded as stopped there too.
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
@@ -787,6 +789,243 @@ test("a run whose database goes away stops as database_unavailable; reads withou
     assert.equal(read.status, 2, command + ": " + read.stdout);
     assert.match(read.stderr, /^Review bridge failed closed: Bridge's database at .*postgres is not available: The folder .* holds files but no PostgreSQL cluster; Bridge will not touch it\. Run the command again; if it fails the same way, look at that folder \(the server's log is in .*log\)\n$/, command);
   }
+});
+
+// A Bridge command's view of a project, in this process: its records go to the same database the
+// commands use. The recorder is taken out again when the test ends.
+async function inProcess(t, root) {
+  const { getBridgePaths } = await import("../review-bridge/utils/paths.mjs");
+  const service = await import("../review-bridge/service/index.mjs");
+  const { openDatabase } = await import("../review-bridge/service/database/index.mjs");
+  const { deliverOutcome } = await import("../review-bridge/features/workOrder/delivery.mjs");
+  const database = () => openDatabase();
+  service.installRunRecorder(service.createRunRecorder(database), database);
+  t.after(() => service.installRunRecorder(null));
+  const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" });
+  return {
+    readRun: (runId) => service.readRun(paths, runId),
+    readIoEvents: (runId) => service.readIoEvents(paths, runId),
+    deliver: (runId) => deliverOutcome({ paths, runId, notify: false }),
+    replay: async () => {
+      const db = await database();
+      return await service.replayUnrecorded(db, paths, { rebuild: (runId) => service.rebuildRunFiles(paths, runId, db) });
+    },
+    RunFilesAheadError: service.RunFilesAheadError,
+  };
+}
+
+// The writer of a run started in the background, once it is running.
+async function runningWriter(queue) {
+  for (const until = Date.now() + 30_000; Date.now() < until;) {
+    for (const name of await fsp.readdir(path.join(queue, "run-locks")).catch(() => [])) {
+      if (!name.endsWith(".process.json")) continue;
+      const record = JSON.parse(await fsp.readFile(path.join(queue, "run-locks", name), "utf8").catch(() => "{}"));
+      if (record.role === "writer") return name.replace(".process.json", "");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.fail("the writer never started");
+}
+
+// The lines of an event file, each as its value.
+const eventValues = (text) => (text === null ? null : text.split("\n").filter(Boolean).map((line) => JSON.parse(line)));
+
+// DECISIONS 2026-11-03 (B): the database is a run's record; its run.json and event file are the copy.
+// Missing or behind, they are written again from the database with the same values (the database
+// keeps each line as jsonb, so not the same bytes); ahead of it, refused.
+test("a run's files are written again from the database when they are missing or behind, and refused when they are ahead", async (t) => {
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-files-copy-");
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  const [name] = (await fsp.readdir(path.join(queue, "runs"))).filter((entry) => entry.endsWith(".json"));
+  const runId = name.slice(0, -5);
+  const runFile = path.join(queue, "runs", name);
+  const eventFile = path.join(queue, "events", runId + ".jsonl");
+  const texts = async () => ({ run: await fsp.readFile(runFile, "utf8").catch(() => null), events: await fsp.readFile(eventFile, "utf8").catch(() => null) });
+  const valuesOf = ({ run, events }) => ({ run: run === null ? null : JSON.parse(run), events: eventValues(events) });
+  const originalText = await texts();
+  const original = valuesOf(originalText);
+  const files = async () => valuesOf(await texts());
+  const remove = () => Promise.all([fsp.rm(runFile), fsp.rm(eventFile)]);
+  const bridgeHere = await inProcess(t, root);
+
+  // Missing: status and work-status read the database; stop finds the run, and its files come back.
+  await remove();
+  const status = cli(["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, new RegExp("\\n  " + runId + "  completed +  success +  review_pass +  \\.review-bridge/work-packages/hello\\.md  "));
+  const workStatus = cli(["work-status"]);
+  assert.equal(workStatus.status, 0, workStatus.stderr);
+  assert.equal(JSON.parse(workStatus.stdout).latest_run.run_id, runId);
+  const stop = cli(["stop", runId]);
+  assert.equal(stop.status, 1, stop.stderr);
+  assert.equal(stop.stdout, "已經結束：review_pass\n");
+  assert.deepEqual(await files(), original);
+  // A delivery finds the run delivered, and writes its files again the same way.
+  await remove();
+  const delivered = await bridgeHere.deliver(runId);
+  assert.equal(delivered.already, true);
+  assert.equal(delivered.closed_reason, "review_pass");
+  assert.deepEqual(await files(), original);
+
+  // One event behind: the read gets the database's run (delivered), and only the missing line is appended.
+  const lines = originalText.events.split("\n").filter(Boolean);
+  await fsp.writeFile(eventFile, lines.slice(0, -1).map((line) => line + "\n").join(""));
+  await fsp.writeFile(runFile, JSON.stringify(JSON.parse(lines.at(-2)).projection, null, 2) + "\n");
+  assert.equal(JSON.parse(await fsp.readFile(runFile, "utf8")).result_sha256, undefined, "the file is one event short of the delivery");
+  assert.deepEqual(await bridgeHere.readRun(runId), original.run);
+  assert.deepEqual(await files(), original);
+  assert.equal((await fsp.readFile(eventFile, "utf8")).startsWith(lines.slice(0, -1).join("\n") + "\n"), true, "the lines it had are left as they were");
+
+  // Numbered by the database: one sequence for the run's state and I/O events, so the state event
+  // file has gaps, and its last line is not always the run's last event.
+  const [{ last_event_sequence: last }] = await queryRecords("select last_event_sequence from runs where run_id = $1", [runId]);
+  const sequences = original.events.map((event) => event.sequence);
+  assert.deepEqual(sequences, [...sequences].sort((a, b) => a - b));
+  assert.ok(sequences.at(-1) <= last && sequences.length < last, "state events " + sequences + ", run at " + last);
+
+  // Kept while the database was gone under a number the database has already given to another event
+  // (the files were behind it then): not written, the run's files are written again from the
+  // database, and the kept event stays beside them, said on stderr.
+  const ioFile = path.join(queue, "events", runId + ".io.jsonl");
+  const originalIo = eventValues(await fsp.readFile(ioFile, "utf8"));
+  const kept = { ...original.events.at(-1), type: "state_recorded", substantive: false, details: {} };
+  delete kept.sequence;
+  await fsp.mkdir(path.join(queue, "unrecorded"), { recursive: true });
+  await fsp.writeFile(path.join(queue, "unrecorded", runId + ".jsonl"),
+    JSON.stringify({ runId, type: kept.type, occurredAt: kept.occurred_at, line: kept, sequence: last }) + "\n");
+  await fsp.appendFile(eventFile, JSON.stringify({ ...kept, sequence: last }) + "\n");
+  await fsp.writeFile(ioFile, "");
+  assert.equal(await bridgeHere.replay(), 1);
+  assert.deepEqual(await files(), original);
+  assert.deepEqual(eventValues(await fsp.readFile(ioFile, "utf8")), originalIo);
+  const aside = await fsp.readdir(path.join(queue, "unrecorded"));
+  assert.equal(aside.length, 1);
+  assert.match(aside[0], new RegExp("^" + runId + "\\.jsonl\\.refused-\\d+$"));
+  assert.deepEqual(await queryRecords("select last_event_sequence, (select count(*)::int from run_events where run_id = $1 and recorded_late) as late from runs where run_id = $1", [runId]),
+    [{ last_event_sequence: last, late: 0 }]);
+
+  // One event ahead: an event the database never took is refused, by its number, and not used.
+  const extra = { ...original.events.at(-1), sequence: last + 1 };
+  extra.projection = { ...extra.projection, last_event_sequence: extra.sequence, conclusion: "failure" };
+  await fsp.appendFile(eventFile, JSON.stringify(extra) + "\n");
+  const ahead = await fsp.readFile(eventFile, "utf8");
+  const message = new RegExp("its files are at state event " + extra.sequence + " but Bridge's database is at " + last + "; event " + extra.sequence + " is only in the files");
+  await assert.rejects(bridgeHere.readRun(runId), (error) => error instanceof bridgeHere.RunFilesAheadError && message.test(error.message));
+  const refused = cli(["stop", runId]);
+  assert.equal(refused.status, 2, refused.stdout);
+  assert.match(refused.stderr, message);
+  assert.equal(await fsp.readFile(eventFile, "utf8"), ahead, "the refused files are left as they are");
+});
+
+// The I/O event file is the database's copy too: an ended run that was never delivered on this
+// machine is delivered in full from the database's lines, and its file comes back as it was.
+test("an ended, undelivered run without its I/O event file is delivered in full from the database, and a file with a line more is refused", async (t) => {
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-io-copy-");
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  const [name] = (await fsp.readdir(path.join(queue, "runs"))).filter((entry) => entry.endsWith(".json"));
+  const runId = name.slice(0, -5);
+  const runFile = path.join(queue, "runs", name);
+  const eventFile = path.join(queue, "events", runId + ".jsonl");
+  const ioFile = path.join(queue, "events", runId + ".io.jsonl");
+  const originalIo = await fsp.readFile(ioFile, "utf8");
+  const bridgeHere = await inProcess(t, root);
+  // As if the run ended and its delivery never happened: neither the database nor the files have it.
+  const undeliver = async () => {
+    await queryRecords("delete from run_events where run_id = $1 and type = 'run_delivered'", [runId]);
+    await queryRecords("update runs set delivered_at = null where run_id = $1", [runId]);
+    const lines = (await fsp.readFile(eventFile, "utf8")).split("\n").filter(Boolean).filter((line) => JSON.parse(line).type !== "run_delivered");
+    await fsp.writeFile(eventFile, lines.map((line) => line + "\n").join(""));
+    await fsp.writeFile(runFile, JSON.stringify(JSON.parse(lines.at(-1)).projection, null, 2) + "\n");
+    await fsp.rm(path.join(queue, runId + ".result.md"), { force: true });
+  };
+  // The time of the delivery is the one thing two deliveries of one run differ in.
+  const untimed = (text) => text.replace(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z/g, "<time>");
+
+  await undeliver();
+  const withFile = await bridgeHere.deliver(runId);
+  assert.equal(withFile.already, false);
+  const expected = await fsp.readFile(withFile.result_path, "utf8");
+  for (const part of [/reviewer passed|審查通過|PASS/i, /AC1/, /Tokens|token/i]) assert.match(expected, part);
+
+  await undeliver();
+  await fsp.rm(ioFile);
+  const withoutFile = await bridgeHere.deliver(runId);
+  assert.equal(withoutFile.already, false);
+  assert.equal(untimed(await fsp.readFile(withoutFile.result_path, "utf8")), untimed(expected));
+  assert.deepEqual(withoutFile.tokens, withFile.tokens);
+  assert.deepEqual(eventValues(await fsp.readFile(ioFile, "utf8")), eventValues(originalIo), "the I/O event file came back with the same lines");
+
+  // Behind: only the lines after its last one are asked for and appended; the ones it had stay as they were.
+  const lines = originalIo.split("\n").filter(Boolean);
+  await fsp.writeFile(ioFile, lines.slice(0, -2).map((line) => line + "\n").join(""));
+  assert.deepEqual(await bridgeHere.readIoEvents(runId), eventValues(originalIo));
+  const caughtUp = await fsp.readFile(ioFile, "utf8");
+  assert.equal(caughtUp.startsWith(lines.slice(0, -2).join("\n") + "\n"), true);
+  assert.deepEqual(eventValues(caughtUp), eventValues(originalIo));
+
+  // One line more than the database: refused by its number, and the file is left as it is.
+  const [{ last_event_sequence: last }] = await queryRecords("select last_event_sequence from runs where run_id = $1", [runId]);
+  const extra = { ...JSON.parse(lines.at(-1)), sequence: last + 1 };
+  await fsp.appendFile(ioFile, JSON.stringify(extra) + "\n");
+  const ahead = await fsp.readFile(ioFile, "utf8");
+  const message = new RegExp("its files are at I/O event " + (last + 1) + " but Bridge's database is at " + last + "; event " + (last + 1) + " is only in the files");
+  await assert.rejects(bridgeHere.readIoEvents(runId), (error) => error instanceof bridgeHere.RunFilesAheadError && message.test(error.message));
+  assert.equal(await fsp.readFile(ioFile, "utf8"), ahead);
+});
+
+// Without the database a run can only be closed and delivered (from its files; the events wait
+// beside them and are written once the database is back); nothing starts or carries a run on.
+test("without the database a running run is stopped and delivered from its files, start and resume are refused, and the stop is recorded once the database is back", async (t) => {
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-no-database-");
+  const broken = path.join(root, "..", path.basename(root) + "-broken-home");
+  await fsp.mkdir(path.join(broken, "postgres"), { recursive: true });
+  await fsp.writeFile(path.join(broken, "postgres", "notes.txt"), "not a cluster\n");
+  t.after(() => fsp.rm(broken, { recursive: true, force: true }));
+  const unavailable = /^Review bridge failed closed: Bridge's database at .*postgres is not available: /;
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const { spawn } = await import("node:child_process");
+  // The runtime's bootstrap itself, not bridge.mjs: that is a launcher that hands start to it
+  // (bridge.mjs spawnSync), and killing the launcher leaves the start's loop running on Linux.
+  const child = spawn(process.execPath, [path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "start", order, "--fake-cli", "--yes"],
+    { cwd: root, env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "30000" }), windowsHide: true, stdio: "ignore" });
+  const exited = new Promise((resolve) => child.once("close", resolve));
+  t.after(() => { try { process.kill(child.pid, "SIGKILL"); } catch {} });
+  const runId = await runningWriter(queue);
+  // The start's own process goes down first, as in a crash: only the stop command can close and
+  // deliver the run now, on every platform, from its files.
+  child.kill("SIGKILL");
+  await exited;
+  assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" }, "the start's process is gone");
+
+  const stop = cli(["stop", runId], { REVIEW_BRIDGE_DATA_HOME: broken });
+  assert.equal(stop.status, 0, stop.stdout + stop.stderr);
+  assert.match(stop.stdout, new RegExp("^已停止 " + runId + "\\n.*\\n.*\\n.*\\n$"));
+  const file = JSON.parse(await fsp.readFile(path.join(queue, "runs", runId + ".json"), "utf8"));
+  assert.deepEqual([file.status, file.conclusion, file.closed_reason, Boolean(file.result_sha256)], ["completed", "cancelled", "stopped", true]);
+  const start = cli(["start", order, "--fake-cli", "--yes"], { REVIEW_BRIDGE_DATA_HOME: broken });
+  assert.equal(start.status, 2, start.stdout);
+  assert.match(start.stderr, unavailable);
+  const resume = cli(["resume", runId, "--fake-cli", "--yes"], { REVIEW_BRIDGE_DATA_HOME: broken });
+  assert.equal(resume.status, 2, resume.stdout);
+  assert.match(resume.stderr, unavailable);
+  assert.deepEqual((await fsp.readdir(path.join(queue, "runs"))).filter((entry) => entry.endsWith(".json")), [runId + ".json"], "nothing started");
+
+  // The database back: the stop and the delivery the stop command kept are written to it, after the fact.
+  const status = cli(["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, new RegExp("\\n  " + runId + "  completed +  cancelled +  stopped +  "));
+  const [row] = await queryRecords("select status, conclusion, closed_reason, delivered_at is not null as delivered from runs where run_id = $1", [runId]);
+  assert.deepEqual(row, { status: "completed", conclusion: "cancelled", closed_reason: "stopped", delivered: true });
+  const late = (await queryRecords("select type from run_events where run_id = $1 and recorded_late order by sequence", [runId])).map((event) => event.type);
+  assert.deepEqual(late, ["run_terminal", "stop", "run_delivered"]);
+  // From then on the database and the files are the same run.
+  const eventFile = path.join(queue, "events", runId + ".jsonl");
+  const before = await fsp.readFile(eventFile, "utf8");
+  await fsp.rm(eventFile);
+  assert.deepEqual(await (await inProcess(t, root)).readRun(runId), file);
+  assert.equal(await fsp.readFile(eventFile, "utf8"), before);
 });
 
 // E10: a card never shown because the reviewer check did not pass is withdrawn in the records, so no

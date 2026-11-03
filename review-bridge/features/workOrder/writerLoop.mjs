@@ -17,6 +17,7 @@ import {
   readJson,
   readRun,
   RunEndedError,
+  RunFilesAheadError,
   runProcess,
   STOP_REASONS,
   stopRunRecord,
@@ -270,7 +271,8 @@ async function unresolvedProcess(paths, runId) {
 // T0-04 D5.2: mark the run stopped first so the writer loop sees it, then kill the process tree.
 // `supersededBy` is the run of a new version of the same work order that this stop makes room for.
 export async function stopRun(paths, runId, { kill = killProcessTree, supersededBy = null } = {}) {
-  const run = await readRun(paths, runId).catch(() => null);
+  // Files further on than the database are said as they are, not as a run that is not there.
+  const run = await readRun(paths, runId).catch((error) => { if (error instanceof RunFilesAheadError) throw error; return null; });
   if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
   // A stopped run that still has a pid record is a stop whose kill was not confirmed: retry the
   // kill without writing the stop again.

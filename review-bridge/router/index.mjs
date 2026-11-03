@@ -9,7 +9,9 @@ import * as backup from "../features/backup/index.mjs";
 import * as records from "../features/records/index.mjs";
 import * as setupCheck from "../features/setupCheck/index.mjs";
 import * as workOrder from "../features/workOrder/index.mjs";
-import { createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, recordsDatabase, replayUnrecorded } from "../service/index.mjs";
+import {
+  createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, rebuildRunFiles, recordsDatabase, replayUnrecorded,
+} from "../service/index.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 
 // clean <run_id> also removes the run from the person's database: one delete, and every row it owns
@@ -334,7 +336,7 @@ async function recordRunsOf(paths) {
   let ready = null;
   const database = async () => {
     const db = await (await import("../service/database/index.mjs")).openDatabase();
-    ready ??= replayUnrecorded(db, paths).catch((error) => { ready = null; throw error; });
+    ready ??= replayUnrecorded(db, paths, { rebuild: (runId) => rebuildRunFiles(paths, runId, db) }).catch((error) => { ready = null; throw error; });
     await ready;
     return db;
   };

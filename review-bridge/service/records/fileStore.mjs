@@ -66,11 +66,16 @@ export async function writeJsonExclusiveDurable(file, value) {
 }
 
 export async function writeJsonAtomicDurable(file, value) {
+  await writeTextAtomicDurable(file, JSON.stringify(value, null, 2) + "\n");
+}
+
+// The whole file at once: a reader sees the old text or the new, never part of it.
+export async function writeTextAtomicDurable(file, text) {
   await ensureDir(path.dirname(file));
   const temp = path.join(path.dirname(file), "." + path.basename(file) + "." + randomUUID() + ".tmp");
   assertUnder(temp, path.dirname(file), "Durable JSON temp path");
   try {
-    await writeTextDurable(temp, JSON.stringify(value, null, 2) + "\n", { exclusive: true });
+    await writeTextDurable(temp, text, { exclusive: true });
     await fsp.rename(temp, file);
     await syncDirectory(path.dirname(file));
   } catch (error) {
@@ -80,15 +85,51 @@ export async function writeJsonAtomicDurable(file, value) {
 }
 
 export async function appendJsonLineDurable(file, value) {
+  await appendTextDurable(file, JSON.stringify(value) + "\n");
+}
+
+export async function appendTextDurable(file, text) {
   await ensureDir(path.dirname(file));
   const handle = await fsp.open(file, "a");
   try {
-    await handle.writeFile(JSON.stringify(value) + "\n", "utf8");
+    await handle.writeFile(text, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
   await syncDirectory(path.dirname(file));
+}
+
+// The last line of a file that only grows at its end, read back from the end: as much of the file
+// as that line takes, never the whole history before it. null when the file is missing or empty;
+// `torn` when the file does not end with a newline (the line is a part of one).
+export async function readLastLine(file) {
+  let handle;
+  try {
+    handle = await fsp.open(file, "r");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    if (!size) return null;
+    const chunks = [];
+    for (let end = size; ;) {
+      const start = Math.max(0, end - 65536);
+      const chunk = Buffer.alloc(end - start);
+      await handle.read(chunk, 0, chunk.length, start);
+      chunks.unshift(chunk);
+      const text = Buffer.concat(chunks).toString("utf8");
+      const torn = !text.endsWith("\n");
+      const body = torn ? text : text.slice(0, -1);
+      const cut = body.lastIndexOf("\n");
+      if (cut >= 0 || start === 0) return { line: body.slice(cut + 1), torn };
+      end = start;
+    }
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function listJson(directory) {

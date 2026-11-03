@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -342,6 +342,9 @@ test("S1c the prune command delivers a run whose delivery was lost, then folds i
   const started = bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli", "--json"]);
   assert.equal(started.status, 0, started.stderr);
   // Simulate a crash before delivery: drop the run_delivered event, roll the projection back, remove the files.
+  // The database is the run's record, so the crash left it without the delivery too.
+  await queryRecords("delete from run_events where run_id = $1 and type = 'run_delivered'", [runId]);
+  await queryRecords("update runs set delivered_at = null where run_id = $1", [runId]);
   const eventsFile = path.join(paths.eventsDir, runId + ".jsonl");
   const kept = (await fsp.readFile(eventsFile, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((event) => event.type !== "run_delivered");
   await fsp.writeFile(eventsFile, kept.map((event) => JSON.stringify(event)).join("\n") + "\n");

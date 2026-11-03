@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -377,6 +377,13 @@ test("starting an edited work order again stops the running version first, and n
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, new RegExp("could not be stopped: run " + first.plan.proposed_run_id));
   assert.equal(await fsp.stat(path.join(rt.paths.runsDir, second.plan.proposed_run_id + ".json")).then(() => true, () => false), false);
+  // The old version stopped is stopped, though the new one did not start (GitHub Actions'
+  // cancel-in-progress); its kill is not confirmed, so the next start tries it again.
+  const stoppedOld = await runOf(rt, first);
+  assert.deepEqual([stoppedOld.status, stoppedOld.closed_reason], ["completed", "superseded"]);
+  // Recorded when it happened; the link to a run that does not exist is not.
+  const oldRow = async () => (await queryRecords("select status, closed_reason, superseded_by from runs where run_id = $1", [first.plan.proposed_run_id]))[0];
+  assert.deepEqual(await oldRow(), { status: "completed", closed_reason: "superseded", superseded_by: null });
 
   // Starting again retries the stop; the new version runs only once the old one is gone.
   await fsp.writeFile(old.recordPath, JSON.stringify(old.record));
@@ -389,6 +396,8 @@ test("starting an edited work order again stops the running version first, and n
   assert.equal(oldRun.closed_reason, "superseded");
   const oldStop = (await eventsOf(rt, first)).find((event) => event.event === "stop" && event.status === "stopped");
   assert.equal(oldStop.superseded_by, second.plan.proposed_run_id);
+  // The start that happened links it, in its own transaction.
+  assert.deepEqual(await oldRow(), { status: "completed", closed_reason: "superseded", superseded_by: second.plan.proposed_run_id });
   const newEvents = await eventsOf(rt, second);
   assert.ok(oldStop.occurred_at <= newEvents[0].occurred_at, "the new version started before the old one was stopped");
   // The new version has its own contract and verdicts; the old run left none of its records in it.

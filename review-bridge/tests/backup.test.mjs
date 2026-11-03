@@ -138,6 +138,37 @@ test("backup stops the database, copies it whole and starts it again; a restore 
   } finally {
     await restored.end();
   }
+
+  // On another machine the project's run files may be gone: the restored database still lists the
+  // run, and the first command that reads it writes its files again, as they were.
+  const { root } = await projectWithRun();
+  const queue = path.join(root, ".review-bridge", "review-queue");
+  const kept = path.join(root, "..", path.basename(root) + "-files-elsewhere");
+  await fsp.mkdir(kept, { recursive: true });
+  t.after(async () => {
+    for (const folder of ["runs", "events"]) {
+      await fsp.rm(path.join(queue, folder), { recursive: true, force: true });
+      await fsp.rename(path.join(kept, folder), path.join(queue, folder));
+    }
+    await fsp.rm(kept, { recursive: true, force: true });
+  });
+  for (const folder of ["runs", "events"]) await fsp.rename(path.join(queue, folder), path.join(kept, folder));
+  const there = (args) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], {
+    cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: newHome },
+  });
+  const status = there(["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, new RegExp("\\n  " + runId + "  completed +  success +  review_pass +  "));
+  const stop = there(["stop", runId]);
+  assert.equal(stop.stdout, "已經結束：review_pass\n", stop.stderr);
+  // The same values, not the same bytes: the database keeps each line as jsonb (DECISIONS 2026-11-03).
+  const parsed = async (file) => {
+    const text = await fsp.readFile(file, "utf8");
+    return file.endsWith(".json") ? JSON.parse(text) : text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  };
+  for (const file of ["runs/" + runId + ".json", "events/" + runId + ".jsonl"]) {
+    assert.deepEqual(await parsed(path.join(queue, file)), await parsed(path.join(kept, file)), file);
+  }
 });
 
 test("a server started while the copy was made discards the copy; the server is left running", { timeout: 300_000 }, async () => {

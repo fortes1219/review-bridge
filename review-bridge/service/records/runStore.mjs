@@ -4,18 +4,23 @@ import path from "node:path";
 import process from "node:process";
 
 import {
-  appendJsonLineDurable,
+  appendTextDurable,
   ensureDir,
   fileExists,
   listJson,
   readJson,
+  readLastLine,
   writeJsonAtomicDurable,
   writeJsonExclusiveDurable,
+  writeTextAtomicDurable,
 } from "./fileStore.mjs";
 import { priorityChoice, reviewerPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { loadOrCreatePolicySnapshot } from "./policySnapshots.mjs";
-import { DatabaseUnavailableError, runRecorder } from "./runRecords.mjs";
+import {
+  activeRuns, DatabaseUnavailableError, eventLine, eventRecordsAfter, lastEventSequence, numberedLine, projectRuns, recordsDatabase,
+  replayUnrecorded, runRecorder,
+} from "./runRecords.mjs";
 
 // A run's status and conclusion, as GitHub Actions has them for a workflow run; why it closed is
 // its closed_reason. The one list of closed reasons; retention and the CLI read it from here so a
@@ -289,12 +294,12 @@ export async function withRunLock(paths, runId, policy, callback, options) {
   }
 }
 
-async function appendProjectionEvent(paths, previous, next, type, details, clock, substantive = true) {
-  const sequence = Number(previous?.last_event_sequence || 0) + 1;
+// `closing`: a step that closes or delivers the run, which goes on without the database (its event
+// waits in unrecorded); any other step is told the database is gone, and the run stops.
+async function appendProjectionEvent(paths, previous, next, type, details, clock, substantive = true, { closing = false } = {}) {
   const occurredAt = nowIso(clock);
   const projected = {
     ...next,
-    last_event_sequence: sequence,
     updated_at: occurredAt,
   };
   if (substantive && isActiveRun(projected)) {
@@ -303,28 +308,18 @@ async function appendProjectionEvent(paths, previous, next, type, details, clock
       projected.recovery_window,
     );
   }
-  // The database first (RC3-BLOCKER-01 step 3): the event and the state it sets, in one transaction.
-  // When the database is gone the file is still written, then the run is told (it stops).
-  let gone = null;
-  try {
-    await runRecorder()?.projection({ paths, run: projected, type, details, occurredAt, substantive });
-  } catch (error) {
-    if (!(error instanceof DatabaseUnavailableError)) throw error;
-    gone = error;
-  }
-  await appendJsonLineDurable(eventFile(paths, projected.run_id), {
-    schema_version: 4,
-    run_id: projected.run_id,
-    sequence,
-    type,
-    occurred_at: occurredAt,
-    substantive,
-    details,
-    projection: projected,
-  });
-  await writeJsonAtomicDurable(runFile(paths, projected.run_id), projected);
-  if (gone) throw gone;
-  return projected;
+  // The database first (RC3-BLOCKER-01 step 3): it numbers the event and records it with the state it
+  // sets, in one transaction; the file takes the numbered line. A run the database does not know, and
+  // a process that keeps no records, number it from the run's own files. When the database is gone the
+  // line is numbered provisionally and still written, then the run is told (it stops), unless this
+  // step closes or delivers it.
+  const line = { schema_version: 4, run_id: projected.run_id, type, occurred_at: occurredAt, substantive, details, projection: projected };
+  const recorded = await runRecorder()?.record(paths, line);
+  const record = recorded?.record ?? numberedLine(line, Number(previous?.last_event_sequence || 0) + 1);
+  await appendTextDurable(eventFile(paths, projected.run_id), eventLine(record) + "\n");
+  await writeJsonAtomicDurable(runFile(paths, projected.run_id), record.projection);
+  if (recorded?.gone && !closing) throw recorded.gone;
+  return record.projection;
 }
 
 // T0-10 W4: during an upgrade or uninstall a new start writes nothing into the project, not even
@@ -548,32 +543,50 @@ export async function claimStartAuthorization(paths, authorizationId, {
   return { authorization, claim, run: projected, workPackage, snapshot };
 }
 
-export async function readRun(paths, runId) {
-  return await readJson(runFile(paths, runId));
+// `databaseGone`, `locked`: as reconcileRunProjection.
+export async function readRun(paths, runId, options) {
+  return await reconcileRunProjection(paths, runId, options);
 }
 
-export async function listRuns(paths, { activeOnly = false } = {}) {
+// With records, the project's runs come from the database: one page of them, newest first
+// (projectRuns; `limit` and `after` as there), or every running one (activeRuns). Each is its row
+// there (its id, status and what that query selects), not its run.json. When the database cannot be
+// reached, and in a process that keeps no records, every run.json, as before.
+export async function listRuns(paths, { activeOnly = false, limit = 10, after = null } = {}) {
+  const database = recordsDatabase();
+  const projectId = database ? (await readOptional(paths.bridgeConfigPath))?.project_id : null;
+  if (projectId) {
+    try {
+      const db = await database();
+      return activeOnly ? await activeRuns(db, projectId) : (await projectRuns(db, projectId, { limit, after })).runs;
+    } catch (error) {
+      if (!(error instanceof DatabaseUnavailableError)) throw error;
+    }
+  }
   const files = await listJson(paths.runsDir);
   const runs = await Promise.all(files.map((file) => readJson(file)));
   return activeOnly ? runs.filter(isActiveRun) : runs;
 }
 
-export async function reconcileRunProjection(paths, runId) {
-  // An archived terminal run has had its event log folded into the day file (T0-02);
-  // its projection is final and is served as-is.
+// The run's files say they are further on than the database: events the database never took. The
+// database is the record (DECISIONS 2026-11-03, B), so they are not used. `kind` is the event file's:
+// "state event", or "I/O event" for the I/O event file.
+export class RunFilesAheadError extends Error {
+  constructor(runId, fileSequence, recordedSequence, file, kind = "state event") {
+    super("Run " + runId + ": its files are at " + kind + " " + fileSequence + " but Bridge's database is at " + recordedSequence
+      + "; event" + (fileSequence - recordedSequence > 1 ? "s " + (recordedSequence + 1) + " to " + fileSequence + " are" : " " + fileSequence + " is")
+      + " only in the files (" + file + "). The database is the record, so Bridge does not use them.");
+    this.name = "RunFilesAheadError";
+  }
+}
+
+// The run as its files have it, checked against each other: the event file's last line, with
+// run.json brought up to it. An archived terminal run has had its event log folded into the day file
+// (T0-02); its projection is final and is served as-is.
+async function fileProjection(paths, runId) {
   const archived = await readOptional(runFile(paths, runId));
   if (archived?.archived_at && !(await fileExists(eventFile(paths, runId)))) return archived;
-  const source = await fsp.readFile(eventFile(paths, runId), "utf8");
-  const lines = source.split("\n");
-  if (lines.at(-1) !== "") throw new Error("Event log has a partial tail.");
-  const events = lines.slice(0, -1).map((line, index) => {
-    try { return JSON.parse(line); } catch { throw new Error("Event log is malformed at sequence " + (index + 1) + "."); }
-  });
-  for (const [index, event] of events.entries()) {
-    if (event.sequence !== index + 1 || event.run_id !== runId) throw new Error("Event sequence is invalid.");
-  }
-  if (!events.length) throw new Error("Run has no event history.");
-  const latest = events.at(-1).projection;
+  const latest = (await fileEvents(paths, runId)).at(-1).projection;
   const current = await readOptional(runFile(paths, runId));
   if (!current || current.last_event_sequence < latest.last_event_sequence) {
     await writeJsonAtomicDurable(runFile(paths, runId), latest);
@@ -583,16 +596,151 @@ export async function reconcileRunProjection(paths, runId) {
   return latest;
 }
 
-// A mutator that returns null leaves the run as it is: no event, no new projection.
-async function mutateRun(paths, runId, type, details, mutator, { substantive = true, clock = Date.now, duringMaintenance = false } = {}) {
+// Sequences only grow: the database numbers a run's state events and I/O events in one sequence, so
+// a state event file has gaps where the I/O events are.
+async function fileEvents(paths, runId) {
+  const source = await fsp.readFile(eventFile(paths, runId), "utf8");
+  const lines = source.split("\n");
+  if (lines.at(-1) !== "") throw new Error("Event log has a partial tail.");
+  const events = lines.slice(0, -1).map((line, index) => {
+    try { return JSON.parse(line); } catch { throw new Error("Event log is malformed at line " + (index + 1) + "."); }
+  });
+  for (const [index, event] of events.entries()) {
+    if (!Number.isInteger(event.sequence) || event.sequence <= (events[index - 1]?.sequence ?? 0) || event.run_id !== runId) throw new Error("Event sequence is invalid.");
+  }
+  if (!events.length) throw new Error("Run has no event history.");
+  return events;
+}
+
+// The run lock, for a write of the run's files by a caller that does not hold it; null when another
+// process holds it.
+export async function tryRunLock(paths, runId) {
+  try {
+    const { snapshot } = await loadOrCreatePolicySnapshot(paths);
+    return await acquireRunLock(paths, runId, snapshot.effective_policy, { allowReconcile: false });
+  } catch {
+    return null;
+  }
+}
+
+// `write` under the run lock (`locked`: the caller holds it). Without it nothing is written: the
+// next step that holds the lock brings the files up.
+export async function writeUnderRunLock(paths, runId, locked, write) {
+  if (locked) return await write();
+  const lease = await tryRunLock(paths, runId);
+  if (!lease) return;
+  try {
+    await write();
+  } finally {
+    await lease.release();
+  }
+}
+
+const eventText = (records) => records.map((record) => eventLine(record) + "\n").join("");
+
+// Where the state event file stands: the sequence of its last line, read from the file's end, and the
+// run that line left; null when the file is missing or its last line is torn or unreadable. An
+// archived run's event file was folded away on purpose; its run.json stands for it.
+async function stateFilePosition(paths, runId) {
+  const run = await readOptional(runFile(paths, runId)).catch(() => null);
+  const tail = await readLastLine(eventFile(paths, runId));
+  if (!tail && run?.archived_at) return { run, position: run.last_event_sequence, latest: run, archived: true };
+  let line = null;
+  try { line = tail && !tail.torn ? JSON.parse(tail.line) : null; } catch { /* unreadable: written again */ }
+  if (!line || line.run_id !== runId || !Number.isInteger(line.sequence) || !line.projection) return { run, position: null, latest: null };
+  return { run, position: line.sequence, latest: line.projection };
+}
+
+// DECISIONS 2026-11-03 (B): the database is the run's record; run.json and the event file are its
+// copy, kept by position the way a Temporal worker keeps its sticky history and a Kafka consumer its
+// offset. A read asks the database for the run's last sequence (one query by primary key) and reads
+// the event file's last line:
+// - the same sequence: the file is used as it is;
+// - behind: only the state events after the file's last line are asked for and appended (none means
+//   the events since are I/O events, and the file is used);
+// - missing, torn or unreadable: every state event is asked for and the file written again whole;
+// - ahead: the events kept while the database was gone are written to it first; still ahead is
+//   refused.
+// run.json follows the event file's last line.
+//
+// `databaseGone` is what a read does when the database cannot be reached: "files" uses them
+// unchecked, for closing a run (stop, a terminal state) and delivering it; "refuse" throws, for
+// anything that would carry the run on (resume, a new state). `locked`: the caller holds the run lock;
+// otherwise the files are written only when the lock can be taken, and the database's run is returned
+// either way. A process that keeps no records, a run the database does not know, and one with state
+// events from before they kept their line are read from their files, as before.
+export async function reconcileRunProjection(paths, runId, { databaseGone = "files", locked = false } = {}) {
+  const database = recordsDatabase();
+  if (!database) return await fileProjection(paths, runId);
+  let db;
+  let last;
+  try {
+    db = await database();
+    last = await lastEventSequence(db, runId);
+  } catch (error) {
+    if (!(error instanceof DatabaseUnavailableError) || databaseGone === "refuse") throw error;
+    return await fileProjection(paths, runId);
+  }
+  if (last === null) return await fileProjection(paths, runId);
+  let files = await stateFilePosition(paths, runId);
+  const fileSequence = () => Math.max(files.run?.last_event_sequence ?? 0, files.position ?? 0);
+  if (fileSequence() > last && await replayUnrecorded(db, paths, { rebuild: (id) => rebuildRunFiles(paths, id, db) })) {
+    last = await lastEventSequence(db, runId);
+    files = await stateFilePosition(paths, runId);
+  }
+  if (fileSequence() > last) {
+    throw new RunFilesAheadError(runId, fileSequence(), last, files.position === fileSequence() ? eventFile(paths, runId) : runFile(paths, runId));
+  }
+  let records = files.position === last ? [] : await eventRecordsAfter(db, runId, files.position ?? 0, true);
+  if (records === null) return await fileProjection(paths, runId);
+  if (files.position !== null && !records.length) {
+    if (files.archived) return files.run;
+    if (files.run?.last_event_sequence !== files.position) await writeUnderRunLock(paths, runId, locked, () => writeJsonAtomicDurable(runFile(paths, runId), files.latest));
+    return files.latest;
+  }
+  // An archived run whose folded events were followed by more is written again whole.
+  if (files.archived) records = await eventRecordsAfter(db, runId, 0, true);
+  if (!records?.length) throw new Error("Run " + runId + ": Bridge's database holds none of its state events, so its files cannot be written again.");
+  const latest = records.at(-1).projection;
+  await writeUnderRunLock(paths, runId, locked, async () => {
+    if (files.position === null || files.archived) await writeTextAtomicDurable(eventFile(paths, runId), eventText(records));
+    else await appendTextDurable(eventFile(paths, runId), eventText(records));
+    await writeJsonAtomicDurable(runFile(paths, runId), latest);
+  });
+  return latest;
+}
+
+// Every file of a run written again whole from the database: the events this machine kept while the
+// database was gone did not follow it (replayUnrecorded), so the lines numbered then are not the
+// database's. Under the run lock; when another process holds it this throws, and the next command
+// that opens the database tries again.
+export async function rebuildRunFiles(paths, runId, db) {
+  const { ioEventFile } = await import("./ioEvents.mjs");
+  const lease = await tryRunLock(paths, runId);
+  if (!lease) throw new Error("Run " + runId + " is held by another process; its files are written again from Bridge's database by the next command.");
+  try {
+    const states = await eventRecordsAfter(db, runId, 0, true);
+    const io = await eventRecordsAfter(db, runId, 0, false);
+    if (!states?.length || io === null) throw new Error("Run " + runId + ": Bridge's database does not hold every line of it, so its files cannot be written again.");
+    await writeTextAtomicDurable(eventFile(paths, runId), eventText(states));
+    await writeJsonAtomicDurable(runFile(paths, runId), states.at(-1).projection);
+    await writeTextAtomicDurable(ioEventFile(paths, runId), eventText(io));
+  } finally {
+    await lease.release();
+  }
+}
+
+// A mutator that returns null leaves the run as it is: no event, no new projection. Without the
+// database only a step that closes the run (databaseGone: "files") goes on, from the files.
+async function mutateRun(paths, runId, type, details, mutator, { substantive = true, clock = Date.now, duringMaintenance = false, databaseGone = "refuse" } = {}) {
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   return await withRunLock(paths, runId, snapshot.effective_policy, async (lease) => {
     await lease.assertOwner();
-    const current = await reconcileRunProjection(paths, runId);
+    const current = await reconcileRunProjection(paths, runId, { databaseGone, locked: true });
     const next = await mutator(structuredClone(current));
     if (next === null) return current;
     await lease.assertOwner();
-    return await appendProjectionEvent(paths, current, next, type, details, clock, substantive);
+    return await appendProjectionEvent(paths, current, next, type, details, clock, substantive, { closing: databaseGone === "files" });
   }, { duringMaintenance });
 }
 
@@ -603,7 +751,7 @@ export async function deliverRun(paths, runId, build, { clock = Date.now } = {})
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   return await withRunLock(paths, runId, snapshot.effective_policy, async (lease) => {
     await lease.assertOwner();
-    const current = await reconcileRunProjection(paths, runId);
+    const current = await reconcileRunProjection(paths, runId, { databaseGone: "files", locked: true });
     if (current.result_sha256) return { already: true, run: current };
     if (current.status !== "completed") throw new Error("Run is still active: " + runId);
     const written = await build(structuredClone(current));
@@ -617,7 +765,7 @@ export async function deliverRun(paths, runId, build, { clock = Date.now } = {})
     };
     const projected = await appendProjectionEvent(paths, current, next, "run_delivered", {
       result_path: written.result_path, sha256: written.sha256,
-    }, clock, false);
+    }, clock, false, { closing: true });
     return { already: false, run: projected };
   });
 }
@@ -655,7 +803,7 @@ export async function stopRunRecord(paths, runId, { closedReason = "stopped", su
     run.closed_at = nowIso(options.clock || Date.now);
     run.review_gate = null;
     return run;
-  }, options);
+  }, { databaseGone: "files", ...options });
 }
 
 export async function recordRunState(paths, runId, state, options = {}) {
@@ -678,7 +826,7 @@ export async function consumeRun(paths, runId, reason, gate = null, options = {}
     run.closed_at = nowIso(options.clock || Date.now);
     run.review_gate = gate || null;
     return run;
-  }, options);
+  }, { databaseGone: "files", ...options });
 }
 
 // The run's contract is fixed once; a second, different hash for the same run is refused.
@@ -715,7 +863,7 @@ export async function applyBudgetExtension(paths, authorizationId, options = {})
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   return await withRunLock(paths, authorization.run_id, snapshot.effective_policy, async (lease) => {
     await lease.assertOwner();
-    const run = await reconcileRunProjection(paths, authorization.run_id);
+    const run = await reconcileRunProjection(paths, authorization.run_id, { databaseGone: "refuse", locked: true });
     if (!isActiveRun(run)) throw new Error("Budget extension requires an active run.");
     if (run.work_package_sha256 !== authorization.work_package_sha256
         || run.effective_policy_sha256 !== authorization.effective_policy_sha256) {
@@ -748,15 +896,15 @@ export async function applyBudgetExtension(paths, authorizationId, options = {})
     await lease.assertOwner();
     run.authorization_ids.push(authorization.authorization_id);
     run.budget.rounds = nextCalls;
-    return await appendProjectionEvent(paths, await readRun(paths, run.run_id), run, "budget_extended", {
+    return await appendProjectionEvent(paths, await readRun(paths, run.run_id, { databaseGone: "refuse", locked: true }), run, "budget_extended", {
       authorization_id: authorization.authorization_id,
       added_calls: addedCalls,
     }, clock);
   }, options);
 }
 
-export async function loadControlView(paths, runId) {
-  const run = await reconcileRunProjection(paths, runId);
+export async function loadControlView(paths, runId, options) {
+  const run = await reconcileRunProjection(paths, runId, options);
   const workPackage = await findWorkPackageBySha(paths, run.work_package_sha256);
   const authorization = await readJson(authorizationFile(paths, run.authorization_ids[0]));
   const snapshot = await readJson(path.join(paths.policySnapshotsDir, run.effective_policy_sha256 + ".json"));
@@ -802,7 +950,7 @@ export async function loadSingleActiveControlView(paths) {
 
 export async function assertRunResumable(paths, runId, { clock = Date.now } = {}) {
   if (await fileExists(paths.upgradeMarkerPath)) throw new Error("Runtime upgrade is in progress.");
-  const run = await reconcileRunProjection(paths, runId);
+  const run = await reconcileRunProjection(paths, runId, { databaseGone: "refuse" });
   if (!isActiveRun(run)) throw new Error("Terminal run cannot resume.");
   assertCurrentPolicy(run.policy_schema_version, runId);
   if (Date.parse(run.run_deadline_at) <= clock()) throw new Error("Run recovery deadline is expired.");

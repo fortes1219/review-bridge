@@ -158,10 +158,12 @@ export async function cardUsed(db, planSha256) {
 // The start, in one transaction with the file authorization `authorize` makes: the card is locked,
 // a used one is refused, then the work order (new, or the card's) and its version, the
 // authorization and its claim are written. Two --yes to one card queue on the lock; the second
-// finds the claim and is refused, and `authorize` never runs for it. The run's events made while
-// authorizing (its start, an earlier version closed as superseded) are held and written here, after
-// the run's row (step 3). Anything that fails rolls the whole start back; `authorize`'s own run is
-// closed by the caller.
+// finds the claim and is refused, and `authorize` never runs for it. The new run's own events made
+// while authorizing (its start) are held and written here, after the run's row (step 3), each only
+// under the number it was given. Anything that fails rolls the whole start back; `authorize`'s own
+// run is closed by the caller. An earlier version it stopped stays stopped, as GitHub Actions cancels
+// a run in progress for a newer one of its concurrency group (DECISIONS 2026-11-03): that stop was
+// recorded when it happened, and only its link to this run, which did not exist then, is written here.
 export async function recordStart(db, { planSha256, authorize }) {
   const recorder = runRecorder();
   if (!recorder) throw new Error("This process keeps no run records; a start is refused.");
@@ -187,14 +189,8 @@ export async function recordStart(db, { planSha256, authorize }) {
       const owner = await workOrderOfFile(tx, { projectId, fileName: file });
       if (owner) throw new Error("This card was made before " + file + " became work order " + owner + "; nothing was created. Run: review-bridge start " + file + " again to see the card as it is now");
     }
-    recorder.hold();
-    let started;
-    try {
-      started = await authorize();
-    } catch (error) {
-      recorder.drop();
-      throw error;
-    }
+    recorder.hold(plan.proposed_run_id);
+    const started = await authorize();
     const now = new Date().toISOString();
     const workOrder = plan.work_order || { decision: "new", title: titleOf(plan.task, plan.task_file) };
     let workOrderId = workOrder.work_order_id;
@@ -230,11 +226,10 @@ export async function recordStart(db, { planSha256, authorize }) {
       ["plan-" + planSha256, authorization.authorization_id, started.run.run_id, started.run.created_at],
     );
     await tx.query("update projects set last_activity_at = $2 where project_id = $1", [projectId, now]);
-    try {
-      await insertRun(tx, { run: started.run, projectId, workOrderId, contentSha256: plan.task_sha256, planSha256, repoRoot: plan.repo_root });
-      await recorder.flush(tx);
-    } finally {
-      recorder.drop();
+    await insertRun(tx, { run: started.run, projectId, workOrderId, contentSha256: plan.task_sha256, planSha256, repoRoot: plan.repo_root });
+    await recorder.flush(tx);
+    if (started.superseded?.length) {
+      await tx.query("update runs set superseded_by = $1 where run_id = any($2::uuid[])", [started.run.run_id, started.superseded]);
     }
     return { ...started, workOrderId, versionNo: version.rows[0].version_no };
   }).catch((error) => {

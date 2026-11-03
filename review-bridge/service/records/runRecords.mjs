@@ -1,8 +1,10 @@
 // Every fact a run writes also goes into the person's database (RC3-BLOCKER-01 step 3): the run, its
 // one ordered timeline (state events and I/O events in one sequence), the tests, the review's verdicts
 // and findings, Bridge's acceptance decision, the delivery. appendProjectionEvent and appendIoEvent
-// hand each event to the recorder a command installed; the files stay the running copy. The reads a
-// person and an agent use (status, work-status, doctor) come from here too (step 4).
+// hand each event to the recorder a command installed. The database is the run's record (DECISIONS
+// 2026-11-03, B): every event keeps its file line there, numbered by the database, and the files are
+// its copy, brought up to it by position (reconcileRunProjection, readIoEvents). The reads a person
+// and an agent use (status, work-status, doctor) come from here too (step 4).
 //
 // One event is one transaction: the run's row is locked, the next sequence taken, the event and its
 // facts written, and the run's state columns set from the same event, so they never disagree. A run
@@ -10,7 +12,8 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { appendJsonLineDurable } from "./fileStore.mjs";
+import { canonical } from "../../utils/digest.mjs";
+import { appendJsonLineDurable, readLastLine } from "./fileStore.mjs";
 
 // The person's database could not be reached: not started, gone mid-run, or refused at the door. A
 // read says so and exits; a run stops with database_unavailable and calls no model after it.
@@ -86,29 +89,74 @@ async function acceptanceFacts(client, runId, sequence, event) {
 
 const FACTS = { test_result: testFacts, "review.result": reviewFacts, acceptance: acceptanceFacts };
 
-// The run's state columns, from the projection the state event wrote.
-const STATE = (run) => [run.status, orNull(run.closed_reason), orNull(run.closed_at), orNull(run.superseded_by), orNull(run.conclusion),
+// The run's state columns, from the run a state event left. superseded_by is not among them: a stop
+// is recorded before the version that replaces it exists, and that start links it (recordStart).
+const STATE = (run) => [run.status, orNull(run.closed_reason), orNull(run.closed_at), orNull(run.conclusion),
   orNull(run.run_deadline_at), orNull(run.contract_sha256)];
 
-// `late`: written after the fact (replayUnrecorded), marked so on the event. A run_delivered event
-// sets the run's delivered_at in the same update.
+// The state events; every other type is an I/O event.
+export const STATE_EVENT_TYPES = Object.freeze([
+  "run_started", "state_recorded", "run_terminal", "contract_sealed", "session_rotated", "iteration_incremented", "run_delivered", "budget_extended",
+]);
+
+// One line of a run's event file, as the file and the database's record both hold it. Keys are
+// sorted, so a file written again from the database holds the same value (DECISIONS 2026-11-03).
+export function eventLine(record) {
+  return JSON.stringify(canonical(record));
+}
+
+// A line with its sequence; a state event's run is at that sequence too.
+export function numberedLine(line, sequence) {
+  return line.projection
+    ? { ...line, sequence, projection: { ...line.projection, last_event_sequence: sequence } }
+    : { ...line, sequence };
+}
+
+// The database numbered an event other than the sequence it came with (a start's own events, or
+// ones kept while the database was gone): nothing of it is written, and its transaction rolls back.
+export class SequenceConflictError extends Error {
+  constructor(runId, expected, assigned) {
+    super("Run " + runId + ": an event numbered " + expected + " is event " + assigned + " in Bridge's database, so it was not written.");
+    this.name = "SequenceConflictError";
+  }
+}
+
+// The database numbers every event, as Temporal's server gives each history event its id: the
+// run's row is locked, its last_event_sequence taken one further, and that is the event's sequence
+// in the record and in the file line. An entry that already carries a sequence is written only when
+// the database gives it the same one (Kafka's idempotent producer: the client sends its sequence,
+// the broker checks it). Returns the numbered line, and for an I/O event the sequence of the run's
+// I/O event before it (0 for none), so the file can tell whether it holds that one; null when the
+// database does not know the run. `late`: written after the fact (replayUnrecorded), marked so on
+// the event. A run_delivered event sets the run's delivered_at in the same update.
 async function append(client, entry, { late = false } = {}) {
-  const sets = (entry.state
-    ? ", status = $3, closed_reason = $4, closed_at = $5, superseded_by = $6, conclusion = $7, run_deadline_at = $8, contract_sha256 = $9"
+  const state = STATE_EVENT_TYPES.includes(entry.type);
+  const sets = (state
+    ? ", status = $3, closed_reason = $4, closed_at = $5, conclusion = $6, run_deadline_at = $7, contract_sha256 = $8"
     : "") + (entry.type === "run_delivered" ? ", delivered_at = $2" : "");
   const { rows } = await client.query(
     "update runs set last_event_sequence = last_event_sequence + 1, updated_at = $2" + sets + " where run_id = $1 returning last_event_sequence",
-    [entry.runId, entry.occurredAt, ...(entry.state ? STATE(entry.state) : [])],
+    [entry.runId, entry.occurredAt, ...(state ? STATE(entry.line.projection) : [])],
   );
-  if (!rows.length) return false;
+  if (!rows.length) return null;
   const sequence = rows[0].last_event_sequence;
-  await client.query("insert into run_events (run_id, sequence, type, occurred_at, payload, recorded_late) values ($1, $2, $3, $4, null, $5)",
-    [entry.runId, sequence, entry.type, entry.occurredAt, late]);
+  if (entry.sequence !== undefined && entry.sequence !== sequence) throw new SequenceConflictError(entry.runId, entry.sequence, sequence);
+  const record = numberedLine(entry.line, sequence);
+  await client.query("insert into run_events (run_id, sequence, type, occurred_at, payload, recorded_late, record) values ($1, $2, $3, $4, null, $5, $6)",
+    [entry.runId, sequence, entry.type, entry.occurredAt, late, record]);
+  // A state event is written to its file under the run lock, right after the file was brought up to
+  // the database, so it needs no previous one; its line is all it keeps.
+  if (state) return { record };
+  const body = without(record, ENVELOPE);
   const facts = FACTS[entry.type];
-  const payload = facts ? await facts(client, entry.runId, sequence, entry.body) : entry.body;
+  const payload = facts ? await facts(client, entry.runId, sequence, body) : body;
   await client.query("update run_events set payload = $3 where run_id = $1 and sequence = $2",
     [entry.runId, sequence, Object.keys(payload).length ? payload : null]);
-  return true;
+  const before = await client.query(
+    "select sequence from run_events where run_id = $1 and sequence < $2 and not (type = any($3)) order by sequence desc limit 1",
+    [entry.runId, sequence, STATE_EVENT_TYPES],
+  );
+  return { record, previous: before.rows.length ? before.rows[0].sequence : 0 };
 }
 
 // Events the database could not take while it was gone, kept beside the run's files until the next
@@ -116,47 +164,77 @@ async function append(client, entry, { late = false } = {}) {
 const unrecordedDir = (paths) => path.join(paths.queueRoot, "unrecorded");
 const unrecordedFile = (paths, runId) => path.join(unrecordedDir(paths), runId + ".jsonl");
 
-// The recorder a command installs; `database` opens the person's database on the first event. While a
-// start is being recorded (hold), events are kept and written inside the start's own transaction
-// once the new run's row exists (flush): an earlier version's run is closed as superseded by it in
-// the same transaction. When the database is gone, the event that found it gone is kept as
-// unrecorded and the error is thrown (the run stops); every event after it is kept the same way
-// without trying again, so the run's stop and delivery are not lost.
+// The last sequence a run's two event files hold (runStore's eventFile, ioEvents' ioEventFile): every
+// line was numbered by the database, so it is the database's last one this machine knows.
+async function lastFileSequence(paths, runId) {
+  let last = 0;
+  for (const file of [path.join(paths.eventsDir, runId + ".jsonl"), path.join(paths.eventsDir, runId + ".io.jsonl")]) {
+    const tail = await readLastLine(file);
+    let sequence = NaN;
+    try { sequence = tail && !tail.torn ? Number(JSON.parse(tail.line).sequence) : NaN; } catch { /* a broken file numbers nothing */ }
+    if (Number.isInteger(sequence) && sequence > last) last = sequence;
+  }
+  return last;
+}
+
+// The recorder a command installs; `database` opens the person's database on the first event.
+//
+// Each event is handed over as its file line without a sequence; the database numbers it and the
+// caller writes the numbered line to the file. While a start is being recorded (hold), the new run's
+// own events wait for its row, which the start writes: until then nothing else can write to that
+// run, so they are numbered from 1 here and written inside the start's transaction (flush), each only
+// when the database gives it the same number. A start that does not happen lets them go (drop); its
+// run never was in the database, and its files are its record.
+//
+// When the database is gone (only a run's closing and its delivery go on then), the event that found
+// it gone, and every one after it, is numbered one past the last sequence this machine knows from the
+// database and kept as unrecorded; the next command that opens the database writes them there, each
+// only under the same number (replayUnrecorded). The first one returns `gone`: a step that does not
+// close the run stops on it.
 export function createRunRecorder(database) {
   let held = null;
   let gone = false;
+  const known = new Map();
   const keep = async (paths, entry) => {
     await fsp.mkdir(unrecordedDir(paths), { recursive: true });
     await appendJsonLineDurable(unrecordedFile(paths, entry.runId), entry);
   };
   const write = async (paths, entry) => {
-    if (held) {
-      held.push(entry);
-      return;
+    if (held?.runId === entry.runId) {
+      entry.sequence = held.entries.length + 1;
+      held.entries.push(entry);
+      return { record: numberedLine(entry.line, entry.sequence) };
     }
-    if (gone) {
-      await keep(paths, entry);
-      return;
+    let found = null;
+    if (!gone) {
+      try {
+        const appended = await (await database()).transaction((tx) => append(tx, entry));
+        if (appended) known.set(entry.runId, appended.record.sequence);
+        return appended;
+      } catch (error) {
+        if (!(error instanceof DatabaseUnavailableError)) throw error;
+        gone = true;
+        found = error;
+      }
     }
-    try {
-      await (await database()).transaction((tx) => append(tx, entry));
-    } catch (error) {
-      if (!(error instanceof DatabaseUnavailableError)) throw error;
-      gone = true;
-      await keep(paths, entry);
-      throw error;
-    }
+    const sequence = (known.has(entry.runId) ? known.get(entry.runId) : await lastFileSequence(paths, entry.runId)) + 1;
+    known.set(entry.runId, sequence);
+    entry.sequence = sequence;
+    await keep(paths, entry);
+    return { record: numberedLine(entry.line, sequence), gone: found };
   };
   return {
-    projection: ({ paths, run, type, details, occurredAt, substantive }) => write(paths, {
-      runId: run.run_id, type, occurredAt, state: run, body: { ...(details || {}), ...(substantive ? {} : { substantive: false }) },
-    }),
-    io: (paths, record) => write(paths, { runId: record.run_id, type: record.event, occurredAt: record.occurred_at, state: null, body: without(record, ENVELOPE) }),
-    hold() { held = []; },
+    // `line`: the event file's line without its sequence. Resolves to { record } (the numbered line),
+    // with `previous` for an I/O event the database wrote and `gone` as said above; to null when the
+    // database does not know the run, whose files number it.
+    record: (paths, line) => write(paths, { runId: line.run_id, type: line.type ?? line.event, occurredAt: line.occurred_at, line }),
+    hold(runId) { held = { runId, entries: [] }; },
     async flush(tx) {
-      const entries = held || [];
+      const entries = held?.entries || [];
       held = null;
-      for (const entry of entries) await append(tx, entry);
+      for (const entry of entries) {
+        if (!(await append(tx, entry))) throw new Error("Run " + entry.runId + " has no row in Bridge's database; its start is refused.");
+      }
     },
     drop() { held = null; },
   };
@@ -176,7 +254,8 @@ export function recordsDatabase() { return installedDatabase; }
 // Q12: a project's runs, newest first, one page; `after` is the last run id of the page before.
 export async function projectRuns(db, projectId, { limit = 10, after = null } = {}) {
   const { rows } = await db.query(
-    "select r.run_id, r.status, r.conclusion, r.closed_reason, r.created_at, r.closed_at, p.source_file, a.authorized_via"
+    "select r.run_id, r.status, r.conclusion, r.closed_reason, r.created_at, r.closed_at, r.updated_at, p.source_file,"
+    + " p.body->>'work_package_id' as work_package_id, a.authorized_via"
     + " from runs r join plans p using (plan_sha256) left join authorizations a on a.plan_sha256 = r.plan_sha256 and a.kind = 'start'"
     + " where r.project_id = $1 and ($3::uuid is null or (r.created_at, r.run_id) < (select created_at, run_id from runs where run_id = $3::uuid))"
     + " order by r.created_at desc, r.run_id desc limit $2",
@@ -218,10 +297,45 @@ export async function runDetail(db, runId) {
   return rows[0] || null;
 }
 
-// The events a run kept while the database was gone, written now in their order. Each file is
-// moved aside before it is read, so a run still keeping events starts a new one that the next pass
-// writes. A run the database does not know is left to its files.
-export async function replayUnrecorded(db, paths) {
+// The run's last sequence, by its primary key: the position its event files are compared with, as a
+// Kafka consumer compares its offset with the log's end. null when the database does not know the run.
+export async function lastEventSequence(db, runId) {
+  const { rows } = await db.query("select last_event_sequence from runs where run_id = $1", [runId]);
+  return rows.length ? rows[0].last_event_sequence : null;
+}
+
+// The lines one of a run's event files lacks after `after` (0: all of them), in order: its state
+// events (`state`) or its I/O events. A file behind takes these; a missing or broken one is written
+// again from all of them. null when one of them was written before events kept their line.
+export async function eventRecordsAfter(db, runId, after, state) {
+  const { rows } = await db.query(
+    "select record from run_events where run_id = $1 and sequence > $2 and (type = any($3)) = $4 order by sequence",
+    [runId, after, STATE_EVENT_TYPES, state],
+  );
+  return rows.every((row) => row.record !== null) ? rows.map((row) => row.record) : null;
+}
+
+// An entry kept before entries carried their file line (an older unrecorded file): the line made
+// from what it kept, numbered by the database as it is written.
+function keptEntry(entry) {
+  if (entry.line) return entry;
+  const { substantive, ...details } = entry.body || {};
+  const line = entry.state
+    ? { schema_version: 4, run_id: entry.runId, type: entry.type, occurred_at: entry.occurredAt, substantive: substantive !== false, details, projection: entry.state }
+    : { schema_version: 1, run_id: entry.runId, occurred_at: entry.occurredAt, event: entry.type, ...(entry.body || {}) };
+  return { runId: entry.runId, type: entry.type, occurredAt: entry.occurredAt, line };
+}
+
+// The events a run kept while the database was gone, written now in their order, each under the
+// number it was kept with (Kafka's idempotent producer). Each file is moved aside before it is read,
+// so a run still keeping events starts a new one that the next pass writes. A run the database does
+// not know is left to its files.
+//
+// When the database numbers one of them otherwise (the files were behind it when it went), none of
+// that run's events are written: the run's files are written again from the database (`rebuild`)
+// and the events stay beside them as <run>.jsonl.refused-<time>, said on stderr. Returns how many
+// events were written and runs refused, so a caller knows to read again.
+export async function replayUnrecorded(db, paths, { rebuild = null } = {}) {
   let names;
   try {
     names = (await fsp.readdir(unrecordedDir(paths))).filter((name) => name.endsWith(".jsonl"));
@@ -229,20 +343,44 @@ export async function replayUnrecorded(db, paths) {
     if (error.code === "ENOENT") return 0;
     throw error;
   }
-  let written = 0;
+  let changed = 0;
   for (const name of names) {
-    const taken = path.join(unrecordedDir(paths), name + ".replaying-" + process.pid);
+    const original = path.join(unrecordedDir(paths), name);
+    const taken = original + ".replaying-" + process.pid;
     try {
-      await fsp.rename(path.join(unrecordedDir(paths), name), taken);
+      await fsp.rename(original, taken);
     } catch (error) {
       if (error.code === "ENOENT") continue;
       throw error;
     }
-    const entries = (await fsp.readFile(taken, "utf8")).split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
-    await db.transaction(async (tx) => { for (const entry of entries) if (await append(tx, entry, { late: true })) written += 1; });
+    const entries = (await fsp.readFile(taken, "utf8")).split("\n").filter((line) => line.trim()).map((line) => keptEntry(JSON.parse(line)));
+    let written = 0;
+    try {
+      await db.transaction(async (tx) => {
+        written = 0;
+        for (const entry of entries) if (await append(tx, entry, { late: true })) written += 1;
+      });
+    } catch (error) {
+      if (!(error instanceof SequenceConflictError)) throw error;
+      const runId = name.slice(0, -".jsonl".length);
+      try {
+        await rebuild?.(runId);
+      } catch (rebuildError) {
+        // Tried again by the next command that opens the database, unless the run kept new events meanwhile.
+        if (!(await fsp.access(original).then(() => true, () => false))) await fsp.rename(taken, original);
+        throw rebuildError;
+      }
+      const refused = original + ".refused-" + Date.now();
+      await fsp.rename(taken, refused);
+      process.stderr.write(error.message + " The events this machine kept while Bridge's database was gone do not follow it; they were not"
+        + " written, the run's files were written again from the database, and the events are kept in " + refused + "\n");
+      changed += 1;
+      continue;
+    }
+    changed += written;
     await fsp.rm(taken, { force: true });
   }
-  return written;
+  return changed;
 }
 
 // clean <run_id>: the run and every row it owns, in one delete; its authorization and claim stay.

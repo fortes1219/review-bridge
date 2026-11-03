@@ -589,14 +589,17 @@ export async function cancelWorkPackage({ paths, runId = null, reason = "cancell
   return { ...(await readRun(paths, selected.run_id)), cancel_reason: requiredText(reason, "Cancel reason", 160) };
 }
 
+// The run asked for, or the newest one, in detail, with one page of the project's runs (listRuns)
+// and how many are running.
 export async function workPackageStatus(paths, runId = null) {
   const runs = await listRuns(paths);
   const ordered = [...runs].sort((left, right) => {
-    const byTime = Date.parse(right.updated_at || right.created_at || 0)
-      - Date.parse(left.updated_at || left.created_at || 0);
+    const byTime = new Date(right.updated_at || right.created_at || 0).getTime()
+      - new Date(left.updated_at || left.created_at || 0).getTime();
     return byTime || left.run_id.localeCompare(right.run_id);
   });
-  const selected = runId ? runs.find((run) => run.run_id === runId) : ordered[0] || null;
+  const chosen = runId || ordered[0]?.run_id;
+  const selected = chosen ? await readRun(paths, chosen).catch(() => null) : null;
   if (!selected) return { active_runs: 0, latest_run: null };
   const control = await loadControlView(paths, selected.run_id);
   return {
@@ -613,7 +616,7 @@ export async function workPackageStatus(paths, runId = null) {
     closed_reason: selected.closed_reason || null,
     latest_state: selected.last_state,
     stop_reason: selected.last_state?.failure || null,
-    active_runs: runs.filter(isActiveRun).length,
+    active_runs: (await listRuns(paths, { activeOnly: true })).length,
     runs: ordered.map((run) => ({
       run_id: run.run_id,
       work_package: run.work_package_id || null,
