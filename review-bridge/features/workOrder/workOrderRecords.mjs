@@ -9,6 +9,7 @@ import path from "node:path";
 import { insertRun, runRecorder } from "../../service/index.mjs";
 import { canonical, digest } from "../../utils/digest.mjs";
 import { workOrderChange } from "./delivery.mjs";
+import { parseWorkOrder } from "./workOrderFormat.mjs";
 
 // "Content close enough" for a renamed file (spec 2026-10-24, numbers set by Opus and kept by Fable
 // 2026-10-25): the unchanged lines are more than half of the longer version, among at most 50 work
@@ -34,6 +35,23 @@ export async function workOrderOfFile(db, { projectId, fileName }) {
   const { rows } = await db.query(
     "select work_order_id from work_orders where project_id = $1 and last_file_name = $2 order by last_activity_at desc limit 1", [projectId, fileName]);
   return rows[0]?.work_order_id || null;
+}
+
+// Who a run's result is about, for the head of the result (RC3-FIX-01 round 2), in one statement by
+// primary key: the sealed version the run worked on and the file it was started from (the plan's,
+// which is this run's; work_orders.last_file_name moves with later starts), the contract and the
+// version of the work the last acceptance decision rested on. Null when the run is not in the database.
+export async function resultIdentity(db, runId) {
+  const { rows } = await db.query(
+    "select r.run_id, r.conclusion, r.closed_at, r.contract_sha256, v.version_no, v.title, v.source_text, p.source_file,"
+    + " (select d.review_version from acceptance_decisions d where d.run_id = r.run_id order by d.sequence desc limit 1) as review_version"
+    + " from runs r join work_order_versions v on v.work_order_id = r.work_order_id and v.content_sha256 = r.content_sha256"
+    + " join plans p on p.plan_sha256 = r.plan_sha256 where r.run_id = $1",
+    [runId],
+  );
+  if (!rows[0]) return null;
+  const { source_text: sourceText, ...row } = rows[0];
+  return { ...row, source_id: parseWorkOrder(sourceText).frontmatter.source_id };
 }
 
 // The work order's title: its first Markdown heading, else the file name.

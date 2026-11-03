@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
+import { afterIdentity, latestResultCopy, resultCopies } from "./fixtures/resultCopies.mjs";
 
 const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(runtimeSource, "..");
@@ -214,7 +215,7 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   assert.equal((await readJson(path.join(paths.runsDir, plan.proposed_run_id + ".json"))).conclusion, "success");
 });
 
-test("S7 / S5 live: work-start prints three plain lines, writes the result beside the work order, and the fake notification is captured", async (t) => {
+test("S7 / S5 live: work-start prints three plain lines, writes the result in results/, and the fake notification is captured", async (t) => {
   const { root, bridge, paths } = await install(t);
   const { plan, planArg } = await planFakeWork(root, bridge);
   const notifyFile = path.join(root, ".review-bridge", "review-queue", "notifications.jsonl");
@@ -224,11 +225,12 @@ test("S7 / S5 live: work-start prints three plain lines, writes the result besid
   assert.equal(lines.length, 3, started.stdout);
   assert.doesNotMatch(started.stdout, /^\s*[{[]/);
   assert.match(lines[0], /^已交付：現有測試通過，reviewer 通過$/);
-  assert.match(lines[1], /^結果檔：.*stop\.result\.md$/);
+  assert.match(lines[1], /^結果檔：.*[\\/]\.review-bridge[\\/]results[\\/]stop \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md$/);
   assert.match(lines[2], /^token：writer \d+，reviewer \d+$/);
-  const latest = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "stop.result.md"), "utf8");
-  assert.match(latest, /^<!-- rb:latest run=\S+ closed_at=\S+ -->\n這是 run /);
-  assert.match(latest, /\n# 已交付\n/);
+  const latest = await latestResultCopy(root, "stop");
+  // The person's copy is the run's result as it is (no "latest copy" header: every run has its own).
+  assert.equal(latest, await fsp.readFile(path.join(root, ".review-bridge", "review-queue", plan.proposed_run_id + ".result.md"), "utf8"));
+  assert.match(afterIdentity(latest), /^# 已交付\n/);
   assert.match(latest, /現有測試通過：npm test/);
   assert.doesNotMatch(latest, /功能驗過|全部驗過/);
   for (const heading of ["## 為什麼", "## 下一步", "## 改了哪些檔", "## token"]) assert.ok(latest.includes(heading), heading);
@@ -252,7 +254,7 @@ test("S7b a failing notification never touches the result or the exit code", asy
   const { plan, planArg } = await planFakeWork(root, bridge, "stop-notify");
   const started = bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli"], { FAKE_NOTIFY_FAIL: "1" });
   assert.equal(started.status, 0, started.stderr + started.stdout);
-  assert.ok(await fsp.stat(path.join(root, ".review-bridge", "work-packages", "stop-notify.result.md")));
+  assert.equal((await resultCopies(root, "stop-notify")).length, 1);
   const notified = (await readIoEvents(paths, plan.proposed_run_id)).find((event) => event.event === "notified");
   assert.equal(notified.ok, false);
   assert.match(notified.error, /fake notification failure/);
@@ -272,7 +274,7 @@ test("S4b the rebuild commands in a needs-fix result run as written in sh and in
   const started = bridge(["work-start", "--plan", ".review-bridge/review-queue/quote-1.plan.json", "--approve", plan.plan_sha256, "--fake-cli"], { FAKE_GATE_EXIT: "2" });
   assert.equal(started.status, 76, started.stderr + started.stdout);
   assert.match(started.stdout, /^需修正：現有測試沒過/m);
-  const result = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "quote.result.md"), "utf8");
+  const result = await latestResultCopy(root, "quote");
   assert.match(result, /重新 work-plan 建新 plan/);
   const sh = /sh：\n\n```\n(.+)\n```/.exec(result)?.[1];
   const ps = /PowerShell：\n\n```\n(.+)\n```/.exec(result)?.[1];
@@ -350,14 +352,14 @@ test("S1c the prune command delivers a run whose delivery was lost, then folds i
   await fsp.writeFile(eventsFile, kept.map((event) => JSON.stringify(event)).join("\n") + "\n");
   await fsp.writeFile(path.join(paths.runsDir, runId + ".json"), JSON.stringify(kept.at(-1).projection));
   await fsp.rm(path.join(paths.queueRoot, runId + ".result.md"), { force: true });
-  await fsp.rm(path.join(root, ".review-bridge", "work-packages", "stop-lost.result.md"), { force: true });
+  for (const copy of await resultCopies(root, "stop-lost")) await fsp.rm(copy, { force: true });
   const pruned = bridge(["prune"]);
   assert.equal(pruned.status, 0, pruned.stderr + pruned.stdout);
   const run = JSON.parse(await fsp.readFile(path.join(paths.runsDir, runId + ".json"), "utf8"));
   assert.equal(run.conclusion, "success");
   assert.equal(run.result_sha256.length, 64);
   assert.ok(run.archived_at);
-  assert.match(await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "stop-lost.result.md"), "utf8"), /\n# 已交付\n/);
+  assert.match(afterIdentity(await latestResultCopy(root, "stop-lost")), /^# 已交付\n/);
   const day = (await fsp.readFile(run.archive_file, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
   assert.ok(day.some((line) => line.type === "artifact" && line.kind === "result" && line.run_id === runId));
 });

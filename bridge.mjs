@@ -12,7 +12,7 @@ import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
-import { runGuide } from "./installer/install-guide.mjs";
+import { databaseLines, runGuide } from "./installer/install-guide.mjs";
 import { renderCommandHelp, renderMainHelp } from "./review-bridge/router/help.mjs";
 import { COMMANDS, parseCommandLine } from "./review-bridge/router/index.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
@@ -350,6 +350,16 @@ async function databaseConnection() {
   }
 }
 
+// After an upgrade the database is opened (and its new migrations applied) to say how to reach it;
+// one that cannot be opened is said as it is, since the upgrade itself is done.
+async function upgradeDatabaseLines() {
+  try {
+    return databaseLines(await databaseConnection());
+  } catch (error) {
+    return ["  database: could not be opened: " + String(error?.message || error)];
+  }
+}
+
 // T0-09 U1: what the human approves. Every line comes from the sealed plan.
 function formatUninstallPlan(plan) {
   if (plan.kind === "cancel") {
@@ -487,8 +497,10 @@ async function main() {
   if (command === "upgrade") {
     const { options } = parseCommandLine(command, rest);
     const result = await upgrade(options);
-    process.stdout.write(options.json || result.plan_written ? JSON.stringify(result, null, 2) + "\n"
-      : result.operation === "upgrade_rollback" ? formatUpgradeRollbackResult(result) : formatUpgradeResult(result));
+    if (options.json || result.plan_written) process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    else if (result.operation === "upgrade_rollback") process.stdout.write(formatUpgradeRollbackResult(result));
+    // An upgrade ends the way init does: how to reach the database, from the same lines.
+    else process.stdout.write(formatUpgradeResult(result) + "\n" + (await upgradeDatabaseLines()).join("\n") + "\n");
     return 0;
   }
   const { options } = parseCommandLine(command, rest);

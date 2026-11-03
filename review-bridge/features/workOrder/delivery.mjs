@@ -1,9 +1,10 @@
 // Delivery (T0-07): when a run reaches a terminal state, write one plain-language result
-// file beside the work order, a per-run copy for the archive, one best-effort desktop
+// file in review-queue/ and the person's copy in results/, one best-effort desktop
 // notification, and three lines on stdout. Everything is composed from typed records; no
 // model writes any of it.
 import { createHash, randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import {
@@ -24,7 +25,10 @@ import { digest } from "../../utils/digest.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
 import { loadContract } from "./contract.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
+import { resultIdentity } from "./workOrderRecords.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
+
+const require = createRequire(import.meta.url);
 
 export const RESULT_MAX_BYTES = 64 * 1024;
 export const RESULT_MAX_FINDINGS = 20;
@@ -426,13 +430,11 @@ function oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run
 // V2.1b: render within 64 KB. Trim stderr, then findings, then the changed and out-of-scope
 // lists; the last step keeps only the title, a few why lines, the next step and the tokens.
 // Codex 2026-10-14: the out-of-scope list was never capped and the last step was never checked.
-export const LATEST_MARK = /^<!-- rb:latest run=(\S+) closed_at=(\S+) -->/;
-
 function clipLine(line, max) {
   return max === Infinity || line.length <= max ? line : line.slice(0, max - 1) + "…";
 }
 
-export function renderResult({ t, sections, commands, runId, latest, closedAt = "" }) {
+export function renderResult({ t, sections, commands, identity = [] }) {
   const build = ({ stderr, findings, changed, whyMax = Infinity, clip = Infinity, withCommands = true, trimmed = false }) => {
     let why = [...sections.why];
     if (!stderr && sections.stderrTail.length) {
@@ -456,7 +458,7 @@ export function renderResult({ t, sections, commands, runId, latest, closedAt = 
     const changedLines = sections.changed.slice(0, changed).map((line) => clipLine(line, clip));
     const violationLines = sections.violations.slice(0, changed).map((line) => clipLine(line, clip));
     const lines = [
-      ...(latest ? ["<!-- rb:latest run=" + runId + " closed_at=" + (closedAt || "unknown") + " -->", t("result.latest_of_run", { run_id: runId }), ""] : []),
+      ...identity,
       ...sections.head.map((line) => clipLine(line, clip)),
       "",
       ...((sections.acceptance || []).length ? ["## " + t("result.section.acceptance"), ...sections.acceptance.map((line) => clipLine(line, clip)), ""] : []),
@@ -504,13 +506,83 @@ export function renderResult({ t, sections, commands, runId, latest, closedAt = 
   return bytes.toString("utf8").replace(/\uFFFD+$/, "") + "\n" + t("result.content_trimmed") + "\n";
 }
 
-function latestPathFor(paths, workPackage, plan) {
-  const taskFile = plan?.task_file || workPackage?.task_file || null;
-  if (taskFile) {
-    const absolute = path.resolve(paths.repoRoot, ...taskFile.split("/"));
-    return absolute.replace(/\.md$/i, "") + ".result.md";
+// Who the result is about (RC3-FIX-01 round 2), read from the database by run id; { unavailable }
+// when there is no database to read or the run is not in it, so the result says so instead of
+// filling the values from files.
+async function readIdentity(runId) {
+  const database = recordsDatabase();
+  if (!database) return { unavailable: "none" };
+  try {
+    return (await resultIdentity(await database(), runId)) || { unavailable: "not_recorded" };
+  } catch (error) {
+    return { unavailable: "error", reason: String(error?.message || error).split(/\r?\n/)[0].slice(0, 200) };
   }
-  return path.join(paths.privateRoot, "work-packages", workPackage.work_package_id + ".result.md");
+}
+
+const yamlScalar = (value) => require("yaml").stringify(value, { lineWidth: 0 }).trimEnd();
+
+// The head of both copies, before the title: YAML frontmatter, the way a work order carries its
+// source_id, one line per value, each the database's. A line's comment says what its value means.
+function identityLines(t, identity) {
+  const known = !identity.unavailable;
+  const value = (key) => (known ? identity[key] ?? null : null);
+  const line = (key, item, note = null) => key + ": " + yamlScalar(item) + (note ? "  # " + note : "");
+  const version = known ? identity.review_version : null;
+  const commit = version?.kind === "git" ? version.head || null : null;
+  const commitNote = !known ? null
+    : version?.kind === "git" ? (version.dirty ? t("result.identity.commit.dirty") : null)
+      : version ? t("result.identity.commit.no_git") : t("result.identity.commit.none");
+  return [
+    "---",
+    ...(known ? [] : ["# " + t("result.identity.unavailable." + identity.unavailable, { reason: identity.reason || "" })]),
+    line("source_id", value("source_id")),
+    line("title", value("title")),
+    line("source_file", value("source_file")),
+    line("version_no", value("version_no"), known ? t("result.identity.version_no") : null),
+    line("contract_sha256", value("contract_sha256"), known && !identity.contract_sha256 ? t("result.identity.contract.none") : null),
+    line("run_id", value("run_id")),
+    line("commit", commit, commitNote),
+    "---",
+    "",
+  ];
+}
+
+const two = (number) => String(number).padStart(2, "0");
+// A file name holds no \ / : * ? " < > | or control characters on Windows, nor a trailing dot or space.
+const fileNamePart = (text) => String(text).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+
+// The person's copy of a run's result (DECISIONS 2026-11-03, RC3-FIX-01 round 2): one file per run in
+// .review-bridge/results/, never in work-packages/, named so an auditor holding a ticket number or a
+// date finds it: "<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md". Without the
+// database the work order's file name comes from the run's plan. The person may delete these; the
+// record is the database and review-queue/<run_id>.result.md.
+function resultCopyPath(paths, { identity, run, workPackage, plan }) {
+  const known = !identity.unavailable;
+  const taskFile = known ? identity.source_file : plan?.task_file || workPackage?.task_file || null;
+  const name = taskFile ? path.basename(taskFile).replace(/\.md$/i, "") : workPackage.work_package_id;
+  const closed = new Date(known ? identity.closed_at : run.closed_at || run.updated_at);
+  const parts = [
+    ...(known && identity.source_id !== null ? [identity.source_id] : []),
+    name,
+    closed.getFullYear() + "-" + two(closed.getMonth() + 1) + "-" + two(closed.getDate()),
+    two(closed.getHours()) + "-" + two(closed.getMinutes()) + "-" + two(closed.getSeconds()),
+    known ? identity.conclusion : run.conclusion,
+  ];
+  return path.join(paths.resultsDir, parts.map(fileNamePart).join(" ") + ".md");
+}
+
+// The copy is created, never overwritten (exclusive create). A file of that name with this very text
+// is this delivery tried again and is kept as the copy; one with other text is another run's, and
+// the delivery stops rather than write over it.
+async function writeNewCopy(file, text) {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  try {
+    await fsp.writeFile(file, text, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    if (await fsp.readFile(file, "utf8") !== text) throw new Error("The result file " + file + " is already another run's result; it was not written over.");
+  }
+  return file;
 }
 
 async function writeAtomic(file, text) {
@@ -518,48 +590,6 @@ async function writeAtomic(file, text) {
   const tmp = file + "." + randomUUID().slice(0, 8) + ".tmp";
   await fsp.writeFile(tmp, text, "utf8");
   await fsp.rename(tmp, file);
-}
-
-// A plain exclusive lock file beside the shared latest copy. Different runs hold different run
-// locks, so the run lock cannot protect this file; this lock is always the innermost one.
-async function withFileLock(file, callback, { attempts = 200, delayMs = 50, staleMs = 30_000 } = {}) {
-  const lock = file + ".lock";
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    let handle = null;
-    try {
-      handle = await fsp.open(lock, "wx");
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      const stat = await fsp.stat(lock).catch(() => null);
-      if (stat && Date.now() - stat.mtimeMs > staleMs) await fsp.rm(lock, { force: true });
-      else await new Promise((resolve) => setTimeout(resolve, delayMs));
-      continue;
-    }
-    await handle.close();
-    try {
-      return await callback();
-    } finally {
-      await fsp.rm(lock, { force: true });
-    }
-  }
-  return null;
-}
-
-// Codex 2026-10-14: an older run delivered late must not overwrite a newer run's latest copy.
-// Order is by the run's end time, then run id; returns whether this run's copy is now the latest.
-export async function writeLatestIfNewer(latestPath, body, { runId, closedAt }) {
-  const written = await withFileLock(latestPath, async () => {
-    const current = await fsp.readFile(latestPath, "utf8").catch(() => null);
-    const mark = current ? LATEST_MARK.exec(current) : null;
-    if (mark && mark[1] !== runId) {
-      const newer = closedAt > mark[2] || (closedAt === mark[2] && runId > mark[1]);
-      if (!newer) return false;
-    }
-    await writeAtomic(latestPath, body);
-    return true;
-  });
-  return written === true;
 }
 
 function isLockError(error) {
@@ -604,10 +634,9 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   const sections = composeSections({ t, run, workPackage, plan, events, delta, contract, orderChange, successorExists, limits: control.run.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
   const commands = run.conclusion === "success" ? null : await rebuildCommands({ paths, plan, workPackage });
   const runPath = path.join(paths.queueRoot, runId + ".result.md");
-  const latestPath = latestPathFor(paths, workPackage, plan);
-  const closedAt = run.closed_at || run.updated_at || "";
-  const body = renderResult({ t, sections, commands, runId, latest: false, closedAt });
-  const latestBody = renderResult({ t, sections, commands, runId, latest: true, closedAt });
+  const identity = await readIdentity(runId);
+  const copyPath = resultCopyPath(paths, { identity, run, workPackage, plan });
+  const body = renderResult({ t, sections, commands, identity: identityLines(t, identity) });
   const sha256 = createHash("sha256").update(body).digest("hex");
 
   let delivered = null;
@@ -615,8 +644,8 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
     try {
       delivered = await deliverRun(paths, runId, async () => {
         await writeAtomic(runPath, body);
-        const latestWritten = await writeLatestIfNewer(latestPath, latestBody, { runId, closedAt });
-        return { result_path: runPath, latest_path: latestPath, latest_written: latestWritten, sha256 };
+        const copy = await writeNewCopy(copyPath, body);
+        return { result_path: runPath, latest_path: copy, latest_written: true, sha256 };
       });
       break;
     } catch (error) {
@@ -681,7 +710,7 @@ export function stdoutLines(result) {
   const count = (row) => (row?.complete ? String(row.total) : t("result.tokens.unknown"));
   return [
     t("stdout.result", { title: result.title, line: result.line }),
-    // An older run whose latest copy was kept by a newer run points at its own per-run file.
+    // A run delivered when copies were shared, and kept from one by a newer run, points at its own file.
     t("stdout.file", { path: result.latest_written === false ? result.result_path : result.latest_path }),
     t("stdout.tokens", { writer: count(result.tokens?.writer), reviewer: count(result.tokens?.reviewer) }),
   ];

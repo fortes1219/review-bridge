@@ -24,13 +24,23 @@ export function runGit(repoRoot, args) {
   return result.status === 0 ? result.stdout : null;
 }
 
+// Git's own words for a call that failed (its stderr, such as "detected dubious ownership"), or why
+// it never answered (a timeout, git not found), so the person sees the cause, not only that it failed.
+function gitSaid(result) {
+  const said = result.stderr?.length ? result.stderr.toString("utf8").trim() : "";
+  if (said) return said;
+  if (result.error) return String(result.error.message || result.error);
+  if (result.status === 0) return JSON.stringify(text(result.stdout));
+  return "git exited with " + (result.status ?? result.signal);
+}
+
 // For questions whose "no" answer is exit 1 (no branch, not an ancestor, no HEAD yet): any other
 // outcome, such as a timeout or a broken repository, is a failure and is never read as "no".
 function yesNoGit(repoRoot, args, what) {
   const result = gitCall(repoRoot, args);
   if (result.status === 0) return result.stdout;
   if (result.status === 1) return null;
-  throw new Error("Git could not tell " + what + ".");
+  throw new Error("Git could not tell " + what + ". Git said: " + gitSaid(result));
 }
 
 const text = (buffer) => (buffer === null ? null : buffer.toString("utf8").trim());
@@ -49,8 +59,9 @@ function gitExpected(repoRoot) {
 
 export function isGitWorkTree(repoRoot) {
   if (!gitExpected(repoRoot)) return false;
-  if (text(runGit(repoRoot, ["rev-parse", "--is-inside-work-tree"])) === "true") return true;
-  throw new Error("Git could not tell whether " + repoRoot + " is a Git work tree.");
+  const result = gitCall(repoRoot, ["rev-parse", "--is-inside-work-tree"]);
+  if (result.status === 0 && text(result.stdout) === "true") return true;
+  throw new Error("Git could not tell whether " + repoRoot + " is a Git work tree. Git said: " + gitSaid(result));
 }
 
 export function headCommit(repoRoot) {

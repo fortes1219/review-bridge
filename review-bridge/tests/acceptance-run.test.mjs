@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
+import { latestResultCopy } from "./fixtures/resultCopies.mjs";
 
 const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(runtimeSource, "..");
@@ -67,7 +68,7 @@ async function run(rt, name, { env = {}, allowPaths = null, scenario = "PASS", m
   const started = rt.bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli", "--fake-scenario", scenario, "--json"], env);
   const record = await readJson(path.join(rt.paths.runsDir, plan.proposed_run_id + ".json"));
   const events = await readIoEvents(rt.paths, plan.proposed_run_id);
-  const result = await fsp.readFile(path.join(rt.root, ".review-bridge", "work-packages", name + ".result.md"), "utf8").catch(() => "");
+  const result = await latestResultCopy(rt.root, name);
   return { exit: started.status, record, events, result };
 }
 
@@ -265,7 +266,7 @@ test("two work orders started at the same time both run, side by side, and neith
   const active = (await Promise.all((await fsp.readdir(rt.paths.runsDir)).filter((file) => file.endsWith(".json"))
     .map((file) => readJson(path.join(rt.paths.runsDir, file))))).filter((run) => ["running", "review_pending", "correction_pending", "interrupted"].includes(run.status));
   assert.deepEqual(active, []);
-  for (const { name } of plans) assert.match(await fsp.readFile(path.join(rt.root, ".review-bridge", "work-packages", name + ".result.md"), "utf8"), /# Delivered/);
+  for (const { name } of plans) assert.match(await latestResultCopy(rt.root, name), /# Delivered/);
 });
 
 test("work that changes while the reviewer reads it stops the run; the verdicts are not counted", async (t) => {

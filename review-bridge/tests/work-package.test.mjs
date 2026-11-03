@@ -16,6 +16,7 @@ import { isPidAlive } from "../service/agentCli/process.mjs";
 import { recordProcessOrKill, runMustStop } from "../features/workOrder/writerLoop.mjs";
 import { authorizeWorkPackage, createWorkPackagePlan, FORBIDDEN_PATHS } from "../features/workOrder/workPackage.mjs";
 import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath, recordWindow, snapshotWorkspace } from "../features/workOrder/workspaceEvidence.mjs";
+import { headCommit, isGitWorkTree } from "../features/workOrder/gitWorkspace.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(bridgeRoot, "..");
@@ -235,4 +236,18 @@ test("a process whose run record cannot be read is killed; the stop check never 
   await recordProcessOrKill(r.paths, live.run.run_id, { pid: child.pid, role: "writer", provider: "claude", call: 1 });
   await exited;
   assert.equal(isPidAlive(child.pid), false);
+});
+
+// RC3-FIX-01: a Git call that fails says what Git said (dubious ownership, a broken .git), not only
+// that Git could not tell.
+test("a failing Git call carries Git's own error text", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-git-said-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const nowhere = path.join(root, "nowhere");
+  await fsp.writeFile(path.join(root, ".git"), "gitdir: " + nowhere + "\n");
+  const said = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8" }).stderr.trim();
+  assert.match(said, /^fatal: /);
+  assert.throws(() => isGitWorkTree(root), (error) => error.message.startsWith("Git could not tell whether " + root + " is a Git work tree. Git said: ")
+    && error.message.endsWith(said));
+  assert.throws(() => headCommit(root), (error) => /^Git could not tell the current commit\. Git said: fatal: /.test(error.message));
 });

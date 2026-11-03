@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -17,6 +17,7 @@ import {
   verifyNeutralInstall,
 } from "../installer/neutral-install.mjs";
 import { policyIdentity } from "../review-bridge/service/index.mjs";
+import { localDateKey } from "../review-bridge/utils/dates.mjs";
 
 // Bridge itself is upgraded in its own folder by the install Guide; every project already runs that
 // runtime. These tests cover what is left per project: its settings, its template, authorizations
@@ -160,7 +161,8 @@ async function addUserData(root) {
   await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "# Work order: farm\n");
   await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.result.md"), "# 已交付\n");
   await fsp.mkdir(path.join(privateRoot, "archive"), { recursive: true });
-  await fsp.writeFile(path.join(privateRoot, "archive", "2026-10-14.jsonl"), "{\"type\":\"run\"}\n");
+  // A day file five days old: well inside the retention set below, whatever day the tests run.
+  await fsp.writeFile(path.join(privateRoot, "archive", localDateKey(Date.now() - 5 * 86_400_000) + ".jsonl"), "{\"type\":\"run\"}\n");
   await fsp.appendFile(path.join(privateRoot, "review-bridge", "rules.md"), "\n不要動測試。\n");
   await fsp.appendFile(path.join(privateRoot, "work-packages", "TEMPLATE.md"), "\n<!-- 我的欄位 -->\n");
   const configPath = path.join(privateRoot, "review-bridge", "bridge.json");
@@ -591,13 +593,20 @@ test("W10 / W11 the CLI has no --yes and needs a terminal; the plan route works;
   assert.match(wrongKind.stderr, /That is not an upgrade rollback plan/);
   const applied = cli(["upgrade", "--target", root, "--plan", planFile, "--approve", approval]);
   assert.equal(applied.status, 0, applied.stderr);
-  assert.match(applied.stdout, /^這個專案的設定已升級到 .+\n保留了你的 \d+ 個檔；備份在 .+\nreviewer 唯讀實測要在網頁上重做一次，才能做原生工作\n$/);
+  // It ends as init does: the four boxes VS Code asks for and where the password is, never the password.
+  const [upgraded, database] = applied.stdout.split("\n\n");
+  assert.match(upgraded + "\n", /^這個專案的設定已升級到 .+\n保留了你的 \d+ 個檔；備份在 .+\nreviewer 唯讀實測要在網頁上重做一次，才能做原生工作\n$/);
+  const secret = path.join(dataHome, "postgres", "secret");
+  assert.match(database, new RegExp("^  database in VS Code: install Microsoft's PostgreSQL extension and add a connection with\n"
+    + "    Server 127\\.0\\.0\\.1  Port \\d+  User bridge  Database bridge\n"
+    + "    Password: copy it from " + secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\n$"));
+  assert.equal(applied.stdout.includes((await fsp.readFile(secret, "utf8")).trim()), false, "the password is not printed");
   const service = await serviceCheck(root);
   assert.equal(service.running, true);
   assert.equal(service.status.reviewer_readonly.state, "not_run");
   const current = cli(["upgrade", "--target", root]);
   assert.equal(current.status, 0, current.stderr);
-  assert.match(current.stdout, /^已是這一版（.+），沒有動任何檔。\n$/);
+  assert.match(current.stdout, /^已是這一版（.+），沒有動任何檔。\n\n  database in VS Code: /);
   // upgrade --rollback takes only the plan route or a terminal, too.
   await makeOld(root);
   crashAt(root, "afterServiceStop");

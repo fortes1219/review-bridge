@@ -167,7 +167,7 @@ function shownPath(file) {
 // start is one database transaction around the file authorization (recordStart): the work order and
 // its version, the authorization and its claim. When that transaction fails after the run was made,
 // the run is closed before any model call.
-async function runAuthorized({ paths, options, adapter, approval, authorizedVia, onStep }) {
+async function runAuthorized({ paths, options, adapter, approval, authorizedVia, onStep, endSteps = () => {} }) {
   const plan = await readJson(path.resolve(options.planPath));
   const records = plan.task_file ? await openRecords(paths) : null;
   let started = null;
@@ -215,6 +215,7 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
       onContractSealed,
     });
   } finally {
+    endSteps();
     // T0-07 V2.8 (a): every way out of a run delivers once; a failure here never masks the run's own exit.
     try {
       const delivery = await deliverOutcome({ paths, runId: authorization.run.run_id, adapter, notify: true });
@@ -274,6 +275,30 @@ function checkFailureLines(check, again) {
 
 const write = (line) => process.stdout.write(line + "\n");
 
+// How a run's steps are shown. At a terminal each step is a clack spinner until the next one starts,
+// as init shows its steps (install-guide's spinnerStep), so the wait for a model call is visible; an
+// agent, or output that is not a terminal, gets one line per step. `end` stops the last spinner
+// before the result is printed.
+async function runSteps() {
+  if (!interactive()) return { step: (label) => write("  " + label), end: () => {} };
+  const { spinner } = await import("@clack/prompts");
+  let spin = null;
+  let current = null;
+  const end = () => {
+    spin?.stop(current);
+    spin = null;
+  };
+  return {
+    step: (label) => {
+      end();
+      spin = spinner();
+      spin.start(label);
+      current = label;
+    },
+    end,
+  };
+}
+
 // After the plan, start and resume go the same way: the reviewer read-only check (once per page
 // session; `reviewerCheck` is the router's, run in the page service), the card, the person's yes,
 // the run. The yes is the only authorization. At a terminal it is asked; an agent shows the person
@@ -322,10 +347,12 @@ async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerC
     }
   }
   write("");
+  const steps = await runSteps();
   return await runAuthorized({
     paths, options: { ...options, planPath: plan.plan_path }, adapter: runAdapter, approval: plan.plan_sha256,
     authorizedVia: options.yes ? "agent" : "terminal",
-    onStep: (step) => write("  " + step),
+    onStep: steps.step,
+    endSteps: steps.end,
   });
 }
 

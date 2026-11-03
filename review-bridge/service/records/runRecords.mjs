@@ -128,15 +128,17 @@ export class SequenceConflictError extends Error {
 // the broker checks it). Returns the numbered line, and for an I/O event the sequence of the run's
 // I/O event before it (0 for none), so the file can tell whether it holds that one; null when the
 // database does not know the run. `late`: written after the fact (replayUnrecorded), marked so on
-// the event. A run_delivered event sets the run's delivered_at in the same update.
+// the event. A run_delivered event sets the run's delivered_at in the same update; a usage event adds
+// its tokens to the run's tokens_used (runUsageTotal).
 async function append(client, entry, { late = false } = {}) {
   const state = STATE_EVENT_TYPES.includes(entry.type);
   const sets = (state
     ? ", status = $3, closed_reason = $4, closed_at = $5, conclusion = $6, run_deadline_at = $7, contract_sha256 = $8"
-    : "") + (entry.type === "run_delivered" ? ", delivered_at = $2" : "");
+    : "") + (entry.type === "run_delivered" ? ", delivered_at = $2" : "")
+    + (entry.type === "usage" ? ", tokens_used = tokens_used + $3" : "");
   const { rows } = await client.query(
     "update runs set last_event_sequence = last_event_sequence + 1, updated_at = $2" + sets + " where run_id = $1 returning last_event_sequence",
-    [entry.runId, entry.occurredAt, ...(state ? STATE(entry.line.projection) : [])],
+    [entry.runId, entry.occurredAt, ...(state ? STATE(entry.line.projection) : []), ...(entry.type === "usage" ? [tokenTotal(entry.line.tokens)] : [])],
   );
   if (!rows.length) return null;
   const sequence = rows[0].last_event_sequence;
@@ -295,6 +297,20 @@ export async function runDetail(db, runId) {
     [runId],
   );
   return rows[0] || null;
+}
+
+// Token total the ceilings are measured against (D4.1).
+export function tokenTotal(tokens) {
+  return ["input", "cache_write", "cache_read", "output"]
+    .map((key) => (Number.isFinite(tokens?.[key]) ? tokens[key] : 0))
+    .reduce((sum, value) => sum + value, 0);
+}
+
+// The tokens a run has used so far, by its primary key (the usage events added them as they were
+// written); null when the database does not know the run.
+export async function runUsageTotal(db, runId) {
+  const { rows } = await db.query("select tokens_used from runs where run_id = $1", [runId]);
+  return rows.length ? Number(rows[0].tokens_used) : null;
 }
 
 // The run's last sequence, by its primary key: the position its event files are compared with, as a

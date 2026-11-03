@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
+import { createRequire } from "node:module";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +33,7 @@ function isolatedEnv(overrides = {}) {
     CLAUDE_REVIEW_CLI: path.join(isolatedHome, "absent", "claude"),
     CODEX_REVIEW_CLI: path.join(isolatedHome, "absent", "codex"),
     REVIEW_BRIDGE_DATA_HOME: dataHome,
+    ...(process.env.TZ ? { TZ: process.env.TZ } : {}),
     ...overrides,
   };
   if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
@@ -484,7 +486,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     "  Tests: not configured for this project",
     "  Reviewer checking the work",
   ]);
-  assert.match(done.stdout, /\nDelivered: .*\nResult file: .*hello\.result\.md\nTokens: /);
+  assert.match(done.stdout, /\nDelivered: .*\nResult file: .*[\\/]\.review-bridge[\\/]results[\\/]hello \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md\nTokens: /);
 });
 
 // E: four actions for people (start, stop, resume, clean) on three routes: a person at a terminal
@@ -1259,3 +1261,98 @@ for (const [label, change, adapterStatus] of [
     assert.equal(roles.native_ready, false);
   });
 }
+
+// The local date and time a result file is named by: 2026-11-03 23-48-12.
+function localName(at) {
+  const date = new Date(at);
+  const two = (number) => String(number).padStart(2, "0");
+  return date.getFullYear() + "-" + two(date.getMonth() + 1) + "-" + two(date.getDate()) + " "
+    + two(date.getHours()) + "-" + two(date.getMinutes()) + "-" + two(date.getSeconds());
+}
+
+// RC3-FIX-01 (DECISIONS 2026-11-03): a run's result is a file of its own in .review-bridge/results/,
+// named after the work order and the time the run closed, never in work-packages/; clean leaves the
+// results alone, and folds away the events the database refused to take late.
+test("each run's result is its own file in .review-bridge/results/, never in work-packages/; clean keeps them and takes refused events", async (t) => {
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-results-");
+  const { resultCopies } = await import("../review-bridge/tests/fixtures/resultCopies.mjs");
+  const runOnce = () => {
+    assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+    const started = cli(["start", order, "--fake-cli", "--yes"]);
+    assert.equal(started.status, 0, started.stderr);
+    return started;
+  };
+  const first = runOnce();
+  const second = runOnce();
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const runs = await queryRecords("select run_id, closed_at, conclusion from runs where project_id = $1 order by closed_at", [projectId]);
+  assert.equal(runs.length, 2);
+  const expected = runs.map((run) => path.join(root, ".review-bridge", "results", "hello " + localName(run.closed_at) + " " + run.conclusion + ".md"));
+  assert.deepEqual(await resultCopies(root, "hello"), expected);
+  assert.deepEqual((await fsp.readdir(path.join(root, ".review-bridge", "work-packages"))).filter((name) => name.endsWith(".result.md")), []);
+  for (const [started, copy] of [[first, expected[0]], [second, expected[1]]]) assert.ok(started.stdout.includes(copy), "the run says where its result is: " + copy);
+
+  const refused = path.join(queue, "unrecorded", runs[0].run_id + ".jsonl.refused-1762156800000");
+  await fsp.mkdir(path.dirname(refused), { recursive: true });
+  await fsp.writeFile(refused, "{}\n");
+  const clean = cli(["clean"]);
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.deepEqual(await resultCopies(root, "hello"), expected, "clean leaves the results");
+  assert.deepEqual((await fsp.readdir(path.join(queue, "unrecorded"))).filter((name) => name.includes(".refused-")), []);
+  const archive = path.join(root, ".review-bridge", "archive");
+  const dayLines = (await Promise.all((await fsp.readdir(archive)).map((name) => fsp.readFile(path.join(archive, name), "utf8")))).join("");
+  assert.match(dayLines, new RegExp("\"run_id\":\"" + runs[0].run_id + "\"[^\n]*\"type\":\"refused_unrecorded\""));
+});
+
+// RC3-FIX-01 round 2: an auditor holding the ticket number finds the result by its file name, and the
+// head of the result names the sealed version, the contract, the run and the commit as the database
+// holds them; the person's copy and review-queue/<run_id>.result.md are the same text.
+test("a result is named by its source_id and opens with who it is about, as the database has it", async (t) => {
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-result-identity-");
+  await fsp.writeFile(path.join(root, order), "---\nsource_id: CANARY-1\n---\n" + await fsp.readFile(path.join(root, order), "utf8"));
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  const started = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(started.status, 0, started.stderr);
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const [row] = await queryRecords("select r.run_id, r.closed_at, r.conclusion, r.contract_sha256, v.version_no, v.title, p.source_file,"
+    + " (select d.review_version->>'head' from acceptance_decisions d where d.run_id = r.run_id order by d.sequence desc limit 1) as commit"
+    + " from runs r join work_order_versions v using (work_order_id, content_sha256) join plans p using (plan_sha256) where r.project_id = $1", [projectId]);
+  const copy = path.join(root, ".review-bridge", "results", "CANARY-1 hello " + localName(row.closed_at) + " " + row.conclusion + ".md");
+  assert.ok(started.stdout.includes("Result file: " + copy), started.stdout);
+  const result = await fsp.readFile(copy, "utf8");
+  assert.equal(result, await fsp.readFile(path.join(queue, row.run_id + ".result.md"), "utf8"), "both copies are the same text");
+  const [, front, rest] = /^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(result);
+  const { parse } = createRequire(import.meta.url)("yaml");
+  assert.deepEqual(parse(front), {
+    source_id: "CANARY-1", title: row.title, source_file: row.source_file, version_no: row.version_no,
+    contract_sha256: row.contract_sha256, run_id: row.run_id, commit: row.commit,
+  });
+  assert.deepEqual(front.split("\n").map((line) => line.split(":")[0]), ["source_id", "title", "source_file", "version_no", "contract_sha256", "run_id", "commit"]);
+  assert.match(front, /\nversion_no: 1 {2}# the sealed version this result is about, not the \.md on disk now\n/);
+  assert.match(row.contract_sha256, /^[0-9a-f]{64}$/);
+  assert.match(rest, /^# Delivered\n/);
+});
+
+// RC3-FIX-01: the budget check reads the run's running total by primary key; it never fetches the
+// run's usage events, and the total is what they add up to.
+test("the budget check asks the database for one number by primary key, equal to the sum of the run's usage events", async (t) => {
+  const { root, order, cli } = await fourActionsProject(t, "review-bridge-usage-total-");
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  const [{ run_id: runId }] = await queryRecords("select run_id from runs order by created_at desc limit 1");
+  const { getBridgePaths } = await import("../review-bridge/utils/paths.mjs");
+  const service = await import("../review-bridge/service/index.mjs");
+  const { openDatabase } = await import("../review-bridge/service/database/index.mjs");
+  const db = await openDatabase();
+  const asked = [];
+  const watched = Object.create(db, { query: { value: (sql, values) => { asked.push(sql); return db.query(sql, values); } } });
+  service.installRunRecorder(service.createRunRecorder(async () => watched), async () => watched);
+  t.after(() => service.installRunRecorder(null));
+  const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" });
+  const total = await service.usageTotalForRun(paths, runId);
+  assert.deepEqual(asked, ["select tokens_used from runs where run_id = $1"]);
+  const usage = (await queryRecords("select payload from run_events where run_id = $1 and type = 'usage' order by sequence", [runId])).map((row) => row.payload);
+  assert.ok(usage.length >= 2, "the writer and the reviewer each used tokens");
+  assert.equal(total, usage.reduce((sum, event) => sum + service.tokenTotal(event.tokens), 0));
+  assert.ok(total > 0);
+});

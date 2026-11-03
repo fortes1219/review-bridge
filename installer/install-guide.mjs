@@ -33,6 +33,15 @@ export function runningAsRoot() {
 
 // `database` is how to reach Bridge's database (host, port, user, database, passwordFile); it is
 // shown the way VS Code's PostgreSQL extension asks for it, and the password stays in its file.
+// init's and upgrade's last lines both come from here.
+export function databaseLines(database) {
+  return [
+    "  database in VS Code: install Microsoft's PostgreSQL extension and add a connection with",
+    "    Server " + database.host + "  Port " + database.port + "  User " + database.user + "  Database " + database.database,
+    "    Password: copy it from " + database.passwordFile,
+  ];
+}
+
 export function doneMessage(target, cwd, url, database) {
   const lines = ["Done. Now:", ""];
   const relative = path.relative(cwd, target);
@@ -43,10 +52,7 @@ export function doneMessage(target, cwd, url, database) {
   lines.push("  at a terminal, for advanced use and CI:");
   lines.push("    review-bridge start .review-bridge/work-packages/<file>.md");
   lines.push("  page: " + (url || "not running; start it with review-bridge up"));
-  lines.push("");
-  lines.push("  database in VS Code: install Microsoft's PostgreSQL extension and add a connection with");
-  lines.push("    Server " + database.host + "  Port " + database.port + "  User " + database.user + "  Database " + database.database);
-  lines.push("    Password: copy it from " + database.passwordFile);
+  lines.push("", ...databaseLines(database));
   return lines.join("\n");
 }
 

@@ -17,6 +17,7 @@ import { unsupportedContractStep } from "../features/workOrder/translation.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
+import { latestResultCopy } from "./fixtures/resultCopies.mjs";
 
 const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = path.resolve(runtimeSource, "..");
@@ -83,7 +84,7 @@ function start(rt, { plan, planArg }, env = {}) {
 
 const runOf = async (rt, work) => await readJson(path.join(rt.paths.runsDir, work.plan.proposed_run_id + ".json"));
 const eventsOf = async (rt, work) => await readIoEvents(rt.paths, work.plan.proposed_run_id);
-const resultOf = async (rt, name) => await fsp.readFile(path.join(rt.root, ".review-bridge", "work-packages", name + ".result.md"), "utf8");
+const resultOf = async (rt, name) => await latestResultCopy(rt.root, name);
 
 // A prepared translation (or one per attempt) for the fake CLI to return, as if the model wrote it.
 async function translationFile(rt, value) {

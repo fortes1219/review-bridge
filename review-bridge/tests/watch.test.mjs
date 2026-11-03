@@ -204,10 +204,34 @@ test("occupied port bumps to the next free one unless strict", async (t) => {
   t.after(() => watch.close());
   assert.equal(watch.bumped, true);
   assert.equal(watch.requestedPort, port);
-  assert.ok(watch.port > port && watch.port <= port + 20);
+  assert.ok(watch.port > port);
   assert.equal(watch.url, `http://localhost:${watch.port}/`);
   await assert.rejects(startWatchServer({ service: fakeService(), uiRoot, port, strictPort: true }),
     (error) => error.code === "port_in_use" && /strict_port/.test(error.message));
+});
+
+// No limit of its own, as Vite and the database: past the 20 it used to give up after.
+test("with the start port and the 20 above it taken, the page takes the 22nd", async (t) => {
+  let start;
+  let blockers;
+  // A run of 22 free ports in a row, found by taking them; the last one is let go again.
+  for (let attempt = 0; attempt < 20 && !blockers; attempt += 1) {
+    start = 20000 + Math.floor(Math.random() * 40000);
+    const taken = [];
+    try {
+      for (let offset = 0; offset < 22; offset += 1) taken.push(await occupy(start + offset));
+      await new Promise((resolve) => taken.pop().close(resolve));
+      blockers = taken;
+    } catch {
+      await Promise.all(taken.map((blocker) => new Promise((resolve) => blocker.close(resolve))));
+    }
+  }
+  assert.ok(blockers, "no run of 22 free ports was found");
+  t.after(() => Promise.all(blockers.map((blocker) => new Promise((resolve) => blocker.close(resolve)))));
+  const watch = await startWatchServer({ service: fakeService(), uiRoot, port: start });
+  t.after(() => watch.close());
+  assert.equal(watch.port, start + 21);
+  assert.equal(watch.bumped, true);
 });
 
 test("Host localhost and 127.0.0.1 are both accepted; the probe origin must match the Host used", async (t) => {

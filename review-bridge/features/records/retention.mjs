@@ -289,6 +289,7 @@ export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000,
     authorizations_deleted: 0,
     job_files_deleted: 0,
     orphans_archived: 0,
+    refused_archived: 0,
     undelivered: [],
     undelivered_archived: 0,
   };
@@ -403,6 +404,23 @@ export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000,
       summary.orphans_archived += 1;
     }
   }
+
+  // 6. Events a run kept while the database was gone that the database refused when they were
+  // written late (replayUnrecorded leaves them as <run>.jsonl.refused-<time>): folded into today's
+  // day file like an orphan, then removed.
+  for (const file of await listFiles(path.join(paths.queueRoot, "unrecorded"))) {
+    if (!/\.jsonl\.refused-\d+$/.test(path.basename(file))) continue;
+    const line = await artifactLine("refused_unrecorded", file);
+    await appendArchiveLines(archiveFileForDate(paths, new Date(now)), [{
+      schema_version: ARCHIVE_SCHEMA_VERSION,
+      archived_at: new Date(now).toISOString(),
+      run_id: path.basename(file).replace(/\.jsonl\.refused-\d+$/, ""),
+      ...line,
+      type: "refused_unrecorded",
+    }]);
+    await fsp.rm(file, { force: true });
+    summary.refused_archived += 1;
+  }
   return summary;
 }
 
@@ -415,6 +433,7 @@ export function formatPruneSummary(summary) {
   if (summary.authorizations_deleted) parts.push(summary.authorizations_deleted + " 個過期授權");
   if (summary.job_files_deleted) parts.push(summary.job_files_deleted + " 個過期審查檔");
   if (summary.orphans_archived) parts.push(summary.orphans_archived + " 個殘留檔");
+  if (summary.refused_archived) parts.push(summary.refused_archived + " 個資料庫拒絕補寫的事件檔");
   if (summary.undelivered_archived) parts.push(summary.undelivered_archived + " 條超過保留天數仍沒交付，已歸檔並標記");
   const line = parts.length ? parts.join("、") : "沒有要清的";
   const errors = summary.merge_errors.map((entry) => "合併失敗 " + entry.run_id + "：" + entry.error);

@@ -8,6 +8,7 @@ import path from "node:path";
 import { appendTextDurable, readLastLine, writeTextAtomicDurable } from "./fileStore.mjs";
 import {
   DatabaseUnavailableError, eventLine, eventRecordsAfter, lastEventSequence, numberedLine, recordsDatabase, replayUnrecorded, runRecorder,
+  runUsageTotal, tokenTotal,
 } from "./runRecords.mjs";
 import { rebuildRunFiles, RunFilesAheadError, writeUnderRunLock } from "./runStore.mjs";
 
@@ -124,17 +125,19 @@ export async function appendIoEvent(paths, runId, event, clock = Date.now) {
   return record;
 }
 
-// Token total the ceilings are measured against (D4.1).
-export function tokenTotal(tokens) {
-  return ["input", "cache_write", "cache_read", "output"]
-    .map((key) => (Number.isFinite(tokens?.[key]) ? tokens[key] : 0))
-    .reduce((sum, value) => sum + value, 0);
-}
-
-// T0-05 D5.3: the per-run ceiling counts writer and reviewer together unless a role is given.
-export async function usageTotalForRun(paths, runId, role = null) {
-  const events = await readIoEvents(paths, runId);
-  return events
-    .filter((event) => event.event === "usage" && (role === null || event.role === role))
-    .reduce((sum, event) => sum + tokenTotal(event.tokens), 0);
+// T0-05 D5.3: the per-run ceiling counts writer and reviewer together. With records it is the run's
+// running total, read by primary key (RC3-FIX-01); a process that keeps no records, a run the database
+// does not know, and a database that cannot be reached sum the file's usage events, as before.
+export async function usageTotalForRun(paths, runId) {
+  const database = recordsDatabase();
+  if (database) {
+    try {
+      const total = await runUsageTotal(await database(), runId);
+      if (total !== null) return total;
+    } catch (error) {
+      if (!(error instanceof DatabaseUnavailableError)) throw error;
+    }
+  }
+  const events = parseFile(await fileText(paths, runId)).events;
+  return events.filter((event) => event.event === "usage").reduce((sum, event) => sum + tokenTotal(event.tokens), 0);
 }

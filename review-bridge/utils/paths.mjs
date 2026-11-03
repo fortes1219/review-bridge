@@ -42,6 +42,8 @@ export function getBridgePaths(repoRoot, bridgeRoot, { privateRootName } = {}) {
     upgradeMarkerPath: path.join(queueRoot, "upgrade-in-progress.json"),
     upgradeReportsDir: path.join(queueRoot, "upgrade-reports"),
     archiveDir: path.join(privateRoot, "archive"),
+    // The person's copies of run results, one per run (DECISIONS 2026-11-03).
+    resultsDir: path.join(privateRoot, "results"),
     latestPath: path.join(reviewsRoot, "LATEST.txt"),
     reviewPromptOverridePath: path.join(privateRoot, "review-bridge", "review-prompt.md"),
     reviewPromptPath: path.join(path.resolve(bridgeRoot), "review-prompt.md"),

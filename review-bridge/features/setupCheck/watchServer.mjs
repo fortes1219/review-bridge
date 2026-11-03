@@ -8,7 +8,6 @@ export const LOOPBACK_HOST = "127.0.0.1";
 export const PUBLIC_HOST = "localhost";
 export const TOKEN_HEADER = "x-review-bridge-token";
 export const DEFAULT_WATCH_PORT = 8080;
-export const PORT_BUMP_LIMIT = 20;
 const MAX_BODY = 1024;
 const STATIC = Object.freeze({
   "/": ["watch.html", "text/html; charset=utf-8"],
@@ -160,7 +159,8 @@ export async function startWatchServer({
     }
   });
 
-  const lastPort = port === 0 || strictPort ? port : Math.min(65535, port + PORT_BUMP_LIMIT);
+  // Taken: the next one up, as far as 65535, as Vite and the database do (no other limit).
+  const lastPort = port === 0 || strictPort ? port : 65535;
   for (let candidate = port; ; candidate += 1) {
     try {
       await listenOnce(server, candidate, host);
