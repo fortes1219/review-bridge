@@ -7,7 +7,7 @@
 // can be fooled by the postmaster.pid a killed server left behind (measured on Windows: it reported
 // the server ready while the new one was still recovering). Stopping is pg_ctl's fast shutdown and
 // waits for it; the server is never killed. While a server runs, its own postmaster.pid is the truth
-// for where it listens.
+// for where it listens; nothing else records the port.
 //
 // Not exported from service/index.mjs: every command imports that index, and only the commands that
 // keep records load pg and the server binaries (through database/index.mjs).
@@ -20,6 +20,7 @@ import pg from "pg";
 
 export { bridgeDataHome } from "./dataHome.mjs";
 import { postgresPackageName } from "./platformPackages.mjs";
+import { readDatabasePort } from "./personalSettings.mjs";
 
 export const SERVER_USER = "bridge";
 const LISTEN_HOST = "127.0.0.1";
@@ -37,15 +38,14 @@ export async function postgresBinaries({ platform = process.platform, arch = pro
   return Object.freeze({ initdb: binaries.initdb, pg_ctl: binaries.pg_ctl, postgres: binaries.postgres });
 }
 
-// One server's files: the cluster itself, its password, its last chosen port, the server's own daily
-// logs (written by PostgreSQL inside the cluster) and the words of the last pg_ctl call.
+// One server's files: the cluster itself, its password, the server's own daily logs (written by
+// PostgreSQL inside the cluster) and the words of the last pg_ctl call.
 export function clusterPaths(root) {
   const data = path.join(root, "data");
   return {
     root,
     data,
     secret: path.join(root, "secret"),
-    settings: path.join(root, "server.json"),
     logs: path.join(data, "log"),
     control: path.join(root, "pg_ctl.out"),
   };
@@ -107,14 +107,6 @@ async function runDetaching(file, args, { timeoutMs, outputFile, cwd }) {
   }
 }
 
-async function freePort() {
-  const probe = net.createServer();
-  await new Promise((resolve, reject) => probe.once("error", reject).listen(0, LISTEN_HOST, resolve));
-  const { port } = probe.address();
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
-
 async function portFree(port) {
   const probe = net.createServer();
   const free = await new Promise((resolve) => {
@@ -125,14 +117,17 @@ async function portFree(port) {
   return free;
 }
 
-async function readSettings(paths) {
-  return JSON.parse(await fsp.readFile(paths.settings, "utf8"));
-}
+// The port follows PostgreSQL's own default, the way the local page and Vite pick theirs: every start
+// looks from 5432 (or the person's `database.port` in settings.json) and takes the first free port up,
+// as far as 65535, with no other limit.
+export const DEFAULT_PORT = 5432;
 
-async function writeSettings(paths, settings) {
-  const temporary = paths.settings + ".tmp-" + process.pid;
-  await fsp.writeFile(temporary, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
-  await fsp.rename(temporary, paths.settings);
+// The first free port from `from` up to 65535, or null when every one is taken.
+async function firstFreePort(from) {
+  for (let port = from; port <= 65535; port += 1) {
+    if (await portFree(port)) return port;
+  }
+  return null;
 }
 
 const lastLines = (text, count = 5) => String(text || "").trim().split(/\r?\n/).slice(-count).join(" | ");
@@ -179,7 +174,6 @@ async function buildCluster(building, { binaries }) {
   }
   await fsp.appendFile(path.join(paths.data, "postgresql.conf"), SERVER_SETTINGS);
   await fsp.writeFile(paths.secret, password + "\n", { mode: 0o600 });
-  await writeSettings(paths, { port: await freePort() });
 }
 
 // Creates the cluster once. A missing or empty root is built; a root that holds anything but a
@@ -292,8 +286,8 @@ async function waitUntilReady(root, deadline) {
 }
 
 // Starts the server, or finds it already running (another Bridge command may have started it, or
-// won a race to start it). The last port is reused when free; otherwise a free one is taken and
-// remembered. Either way the start counts only once a SQL round trip answers, within the timeout.
+// won a race to start it). The server takes the first free port from the start port up. Either way
+// the start counts only once a SQL round trip answers, within the timeout.
 export async function startServer(root, { binaries, timeoutSeconds = 60 }) {
   const paths = clusterPaths(root);
   const deadline = Date.now() + timeoutSeconds * 1000;
@@ -305,22 +299,23 @@ export async function startServer(root, { binaries, timeoutSeconds = 60 }) {
   // Whether this call is the one that launched the server is not reported: when several start at
   // once, every pg_ctl that waited sees the winner's server ready and exits 0 (measured on Windows).
   // A port found free can be taken by another process before the server binds it; the server then
-  // stops at once with "could not create any TCP/IP sockets", and another free port is tried.
-  for (let attempt = 1; !(await serverRunning(root, { binaries })); attempt += 1) {
-    let settings = await readSettings(paths);
-    if (!(await portFree(settings.port))) {
-      settings = { ...settings, port: await freePort() };
-      await writeSettings(paths, settings);
-    }
+  // stops at once with "could not create any TCP/IP sockets", and the search goes on from the next
+  // port up, as many times as that happens. The cluster's root is the postgres folder of the data
+  // home, beside the person's settings.json.
+  const start = (await readDatabasePort({ dataHome: path.dirname(root) })) ?? DEFAULT_PORT;
+  let from = start;
+  while (!(await serverRunning(root, { binaries }))) {
+    const port = await firstFreePort(from);
+    if (port === null) throw new Error("PostgreSQL's ports from " + start + " up to 65535 are all taken.");
     const result = await runDetaching(binaries.pg_ctl, [
       "start", "-D", paths.data, "-w", "-t", String(timeoutSeconds),
-      "-o", "-h " + LISTEN_HOST + " -p " + settings.port,
+      "-o", "-h " + LISTEN_HOST + " -p " + port,
     ], { timeoutMs: (timeoutSeconds + 30) * 1000, outputFile: paths.control, cwd: paths.root });
     if (result.code === 0 || (await serverRunning(root, { binaries }))) break;
     const latest = (await serverLogFiles(root)).at(-1);
     const log = latest ? await fsp.readFile(latest, "utf8").catch(() => "") : "";
-    if (attempt < 3 && /could not create any TCP\/IP sockets/.test(log.split(/\r?\n/).slice(-5).join("\n"))) {
-      await writeSettings(paths, { ...settings, port: await freePort() });
+    if (/could not create any TCP\/IP sockets/.test(log.split(/\r?\n/).slice(-5).join("\n"))) {
+      from = port + 1;
       continue;
     }
     throw new Error("PostgreSQL did not start within " + timeoutSeconds + "s: " + lastLines(result.stderr || result.stdout) + " | log: " + lastLines(log, 3));

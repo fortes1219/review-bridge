@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { CANCELLED, doneMessage, ROOT_REFUSAL, runGuide } from "../installer/install-guide.mjs";
 import { readDefaultRoles, saveDefaultRoles, settingsFile } from "../installer/personal-settings.mjs";
+import { readDatabasePort } from "../review-bridge/service/database/personalSettings.mjs";
 import { listProfiles } from "../installer/project-profile.mjs";
 import { COMMANDS, PROJECT_OPTION } from "../review-bridge/router/index.mjs";
 import { nodeTooOld } from "../review-bridge/utils/nodeVersion.mjs";
@@ -56,6 +57,10 @@ function recordingUi(answers = []) {
   };
 }
 
+// How the stand-in setup reaches the database: what openDatabase's connection holds (no password).
+const DATABASE = Object.freeze({ host: "127.0.0.1", port: 5433, database: "bridge", user: "bridge", passwordFile: path.join(os.tmpdir(), "home", "postgres", "secret") });
+const DATABASE_LINES = "\n\n  database in VS Code: install Microsoft's PostgreSQL extension and add a connection with\n    Server 127.0.0.1  Port 5433  User bridge  Database bridge\n    Password: copy it from " + DATABASE.passwordFile;
+
 // The project setup is a stand-in that runs four named steps; `fail` names one that throws.
 function stubSetup({ fail = null } = {}) {
   const seen = [];
@@ -66,7 +71,7 @@ function stubSetup({ fail = null } = {}) {
         if (label === fail) throw new Error(label + " broke");
       });
     }
-    return { ok: true, target: settings.target, roles: settings.roles, profile: settings.profileId === "none" ? null : settings.profileId, url: "http://localhost:8080/" };
+    return { ok: true, target: settings.target, roles: settings.roles, profile: settings.profileId === "none" ? null : settings.profileId, url: "http://localhost:8080/", database: DATABASE };
   };
   return { seen, setUpProject };
 }
@@ -105,7 +110,7 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
     { start: "Checking the setup" }, { done: "Checking the setup" },
     { start: "Running the four fake self-tests" }, { done: "Running the four fake self-tests" },
     { start: "Starting the local page" }, { done: "Starting the local page" },
-    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (Codex reads the same steps from AGENTS.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" },
+    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (Codex reads the same steps from AGENTS.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" + DATABASE_LINES },
   ]);
   assert.deepEqual(run.setup.seen.map(({ target, roles, profileId }) => ({ target, roles, profileId })),
     [{ target: run.project, roles: { writer: "claude", reviewer: "codex" }, profileId: "node-backend" }]);
@@ -212,11 +217,11 @@ test("an option the Guide does not know is refused", async (t) => {
   await assert.rejects(run.run, /Unknown option for init: --install-location/);
 });
 
-test("Done names cd when the project is not the current folder, then the agent's start, the terminal's start and the page", () => {
+test("Done names cd when the project is not the current folder, then the agent's start, the terminal's start, the page and the database for VS Code", () => {
   const cwd = path.join(os.tmpdir(), "work");
-  assert.equal(doneMessage(path.join(cwd, "my app"), cwd, "http://localhost:8081/"),
-    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (Codex reads the same steps from AGENTS.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/");
-  assert.match(doneMessage(cwd, cwd, null), /\n  page: not running; start it with review-bridge up$/);
+  assert.equal(doneMessage(path.join(cwd, "my app"), cwd, "http://localhost:8081/", DATABASE),
+    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (Codex reads the same steps from AGENTS.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/" + DATABASE_LINES);
+  assert.match(doneMessage(cwd, cwd, null, DATABASE), /\n  page: not running; start it with review-bridge up\n/);
 });
 
 test("--version prints the package version and --help describes the npm command", () => {
@@ -250,6 +255,22 @@ test("an unreadable settings file is refused, never taken as nothing saved", asy
   await fsp.mkdir(dataHome, { recursive: true });
   await fsp.writeFile(settingsFile(dataHome), "{ not json");
   await assert.rejects(readDefaultRoles({ dataHome }), /Your Review Bridge settings are not readable/);
+  await assert.rejects(readDatabasePort({ dataHome }), /Your Review Bridge settings are not readable/);
+});
+
+test("the database's start port is read from settings.json, and saving the roles keeps it", async (t) => {
+  const dataHome = await tempDir(t, "review-bridge-guide-home-");
+  await fsp.mkdir(dataHome, { recursive: true });
+  assert.equal(await readDatabasePort({ dataHome }), null, "no file");
+  await saveDefaultRoles({ writer: "claude", reviewer: "codex" }, { dataHome });
+  assert.equal(await readDatabasePort({ dataHome }), null, "a file without the field");
+  const settings = JSON.parse(await fsp.readFile(settingsFile(dataHome), "utf8"));
+  await fsp.writeFile(settingsFile(dataHome), JSON.stringify({ ...settings, database: { port: 5440 } }, null, 2) + "\n");
+  assert.equal(await readDatabasePort({ dataHome }), 5440);
+  await saveDefaultRoles({ writer: "codex", reviewer: "claude" }, { dataHome });
+  assert.equal(await readDatabasePort({ dataHome }), 5440);
+  assert.deepEqual(await readDefaultRoles({ dataHome }), { writer: "codex", reviewer: "claude" });
+  assert.equal(JSON.parse(await fsp.readFile(settingsFile(dataHome), "utf8")).schema_version, 1);
 });
 
 // C1 / C3: every command's help comes from the command table, exits 0 and lists every option.

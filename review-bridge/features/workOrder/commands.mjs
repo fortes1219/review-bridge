@@ -461,9 +461,11 @@ export async function statusOverview({ paths, options, page }) {
   }
   write("Review queue: pending " + queue.pending + ", running " + queue.running + ", done " + queue.done + ", failed " + queue.failed);
   if (queue.latest_review) write("Latest review: " + queue.latest_review);
+  // What VS Code's PostgreSQL extension asks for; the password stays in its owner-only file.
   const { host, port, database, user, passwordFile } = db.connection;
-  write("Database: host " + host + "  port " + port + "  database " + database + "  user " + user);
-  write("          password file: " + passwordFile);
+  write("Database in VS Code: install Microsoft's PostgreSQL extension and add a connection with");
+  write("  Server " + host + "  Port " + port + "  User " + user + "  Database " + database);
+  write("  Password: copy it from " + passwordFile);
   return 0;
 }
 

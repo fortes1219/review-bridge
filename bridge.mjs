@@ -291,6 +291,7 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
   }
   const realMode = await inspectNativeReadiness(roles);
   const service = await step("Starting the local page", () => startService(target, fakeCli));
+  const database = await databaseConnection();
   return {
     ok: true,
     target,
@@ -307,6 +308,7 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
     real_mode: realMode,
     work_folder: path.join(target, ".review-bridge", "work-packages"),
     url: service.url,
+    database,
     service_started: service.started,
     service_reason: service.reason,
     service_notice: service.notice,
@@ -334,6 +336,18 @@ async function startService(target, fakeCli) {
   const stdoutLog = await fsp.readFile(serviceFiles(paths).stdoutPath, "utf8").catch(() => "");
   const notice = stdoutLog.split(/\r?\n/).find((line) => line.includes("占用，改用")) || null;
   return { started: check.running, url: check.running ? check.url : null, reason: check.reason, notice };
+}
+
+// How to reach the person's database, for init's last lines: the same connection `status` prints.
+// Opening it starts the server if it is not running.
+async function databaseConnection() {
+  const { openDatabase } = await import("./review-bridge/service/database/index.mjs");
+  const db = await openDatabase();
+  try {
+    return db.connection;
+  } finally {
+    await db.close();
+  }
 }
 
 // T0-09 U1: what the human approves. Every line comes from the sealed plan.

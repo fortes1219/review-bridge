@@ -628,16 +628,27 @@ Options:
 - For you, shared by all your projects: your settings (`settings.json`, the default roles) and the database, in `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS and `~/.local/share/review-bridge` on Linux. `REVIEW_BRIDGE_DATA_HOME` moves it.
 - Backups, in `backups` under that folder: `backups/database` holds the copies `review-bridge backup` makes of the database; `backups/installer` holds what `upgrade` and `uninstall` keep (or `--backup-root <folder>`). They can hold private work data; do not publish them.
 
-`review-bridge backup` is PostgreSQL's file system level backup: it refuses while a run is running, stops the database, copies its whole folder (the data, its password file and its port) and starts it again. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
+`review-bridge backup` is PostgreSQL's file system level backup: it refuses while a run is running, stops the database, copies its whole folder (the data and its password file) and starts it again. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
 
-The database is the record; the files under `.review-bridge/` are the running copy. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. `review-bridge status` ends with how to reach it:
+To look at every table in VS Code, install Microsoft's PostgreSQL extension (or SQLTools with its PostgreSQL driver) and add a connection with:
+
+- Server: `127.0.0.1`
+- Port: `5432`, PostgreSQL's default; when it is taken, the next free port up, looked for again at each start
+- User: `bridge`
+- Database: `bridge`
+- Password: copy it from the password file, `postgres/secret` in the folder above (`%LOCALAPPDATA%\ReviewBridge\postgres\secret` on Windows); only your user can read it
+
+`init` and `review-bridge status` end with the same four values, the port in use and the password file:
 
 ```text
-Database: host 127.0.0.1  port 57065  database bridge  user bridge
-          password file: C:\Users\you\AppData\Local\ReviewBridge\postgres\secret
+Database in VS Code: install Microsoft's PostgreSQL extension and add a connection with
+  Server 127.0.0.1  Port 5432  User bridge  Database bridge
+  Password: copy it from C:\Users\you\AppData\Local\ReviewBridge\postgres\secret
 ```
 
-To look at every table in VS Code, install Microsoft's PostgreSQL extension (or SQLTools with its PostgreSQL driver), add a connection with that host, port, database and user, and paste the password from that file (only your user can read it). The server listens on 127.0.0.1 only and keeps running between commands; the port can change when it restarts, so take it from `status`.
+To start from another port, add `"database": { "port": 5440 }` to your `settings.json` in the same folder. It takes effect the next time the database starts: after your computer restarts, or at once with `review-bridge backup`, which stops and starts it.
+
+The database is the record; the files under `.review-bridge/` are the running copy. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. The server listens on 127.0.0.1 only and keeps running between commands.
 
 ## Upgrade and remove
 

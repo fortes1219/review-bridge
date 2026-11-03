@@ -101,8 +101,8 @@ test("backup stops the database, copies it whole and starts it again; a restore 
   const backup = path.join(backups, folder);
   assert.equal(done.stdout.split("\n")[0], "Backed up the database to " + backup);
   assert.match(done.stdout, /set REVIEW_BRIDGE_DATA_HOME to that folder/);
-  // The whole cluster with its password and port, closed cleanly: no server's pid file, no pg_ctl words.
-  for (const file of ["data/PG_VERSION", "data/global/pg_control", "secret", "server.json"]) {
+  // The whole cluster with its password, closed cleanly: no server's pid file, no pg_ctl words.
+  for (const file of ["data/PG_VERSION", "data/global/pg_control", "secret"]) {
     assert.ok(await fsp.stat(path.join(backup, "postgres", file)).catch(() => null), file);
   }
   for (const file of ["data/postmaster.pid", "pg_ctl.out"]) assert.equal(await fsp.stat(path.join(backup, "postgres", file)).catch(() => null), null, file);

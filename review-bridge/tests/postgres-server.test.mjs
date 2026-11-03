@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
-  bridgeDataHome, clusterPaths, connect, ensureCluster, postgresBinaries, serverLogFiles, serverRunning, startServer, stopServer,
+  bridgeDataHome, clusterPaths, connect, DEFAULT_PORT, ensureCluster, postgresBinaries, serverLogFiles, serverRunning, startServer, stopServer,
 } from "../service/database/postgresServer.mjs";
 
 // RC3-BLOCKER-01 step 1: the embedded PostgreSQL server is created, started, stopped and found again
@@ -16,11 +16,14 @@ import {
 const moduleUrl = pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "service", "database", "postgresServer.mjs")).href;
 const binaries = await postgresBinaries();
 
+// The cluster is the postgres folder of its own data home, where the person's settings.json sits.
 async function cluster(t) {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-pg-"));
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-pg-"));
+  const root = path.join(home, "postgres");
   t.after(async () => {
     await stopServer(root, { binaries }).catch(() => {});
-    await fsp.rm(root, { recursive: true, force: true });
+    // On Windows the stopped server's folder can stay held for a moment.
+    await fsp.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   await ensureCluster(root, { binaries });
   return root;
@@ -103,17 +106,127 @@ test("a server killed without warning comes back with every committed row", { ti
   assert.match(await serverLog(root), /not properly shut down|automatic recovery/);
 });
 
-test("a remembered port that is taken is replaced by a free one, and the server is found there", { timeout: 120_000 }, async (t) => {
+async function portFree(port) {
+  const probe = net.createServer();
+  const free = await new Promise((resolve) => probe.once("error", () => resolve(false)).listen(port, "127.0.0.1", () => resolve(true)));
+  if (free) await new Promise((resolve) => probe.close(resolve));
+  return free;
+}
+
+// A port free now whose next port up is free too. The system hands these out far above 5432.
+async function freePortPair() {
+  for (;;) {
+    const probe = net.createServer();
+    await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const { port } = probe.address();
+    await new Promise((resolve) => probe.close(resolve));
+    if (port < 65535 && await portFree(port + 1)) return port;
+  }
+}
+
+const settingsOf = (root) => path.join(path.dirname(root), "settings.json");
+const writeSettings = (root, settings) => fsp.writeFile(settingsOf(root), JSON.stringify({ schema_version: 1, ...settings }, null, 2) + "\n");
+const startPortIs = (root, port) => writeSettings(root, { default_roles: { writer: "claude", reviewer: "codex" }, database: { port } });
+const oldServerFile = (root) => path.join(root, "server.json");
+
+// Other test files start their own servers at the same time from the same default, so the ports from
+// 5432 up may be theirs: the server lands in the default's range. The ports below it are not checked,
+// since another file's server can stop in the meantime.
+function inDefaultRange(port) {
+  assert.ok(port >= DEFAULT_PORT && port <= DEFAULT_PORT + 20, "port " + port + " is not 5432 or a port just above it");
+}
+
+test("a new cluster starts at PostgreSQL's default port 5432, or the first free port above it, and records the port nowhere", { timeout: 120_000 }, async (t) => {
   const root = await cluster(t);
-  const settingsFile = clusterPaths(root).settings;
-  const { port: remembered } = JSON.parse(await fsp.readFile(settingsFile, "utf8"));
-  const squatter = net.createServer();
-  await new Promise((resolve) => squatter.listen(remembered, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => squatter.close(resolve)));
+  assert.equal(DEFAULT_PORT, 5432);
+  const { port } = await startServer(root, { binaries });
+  inDefaultRange(port);
+  assert.equal(await fsp.access(oldServerFile(root)).then(() => true, () => false), false, "no server.json");
+  assert.deepEqual(await query(root, "select 1 as one"), [{ one: 1 }]);
+});
+
+test("a port an older Bridge remembered in server.json is not reused: the restart looks from 5432 again", { timeout: 120_000 }, async (t) => {
+  const root = await cluster(t);
+  const remembered = await freePortPair();
+  await fsp.writeFile(oldServerFile(root), JSON.stringify({ port: remembered }, null, 2) + "\n");
   const { port } = await startServer(root, { binaries });
   assert.notEqual(port, remembered);
-  assert.equal(JSON.parse(await fsp.readFile(settingsFile, "utf8")).port, port);
+  inDefaultRange(port);
+});
+
+test("the start port in settings.json is where the search starts, and a free one is taken again on every restart", { timeout: 120_000 }, async (t) => {
+  const root = await cluster(t);
+  const start = await freePortPair();
+  await startPortIs(root, start);
+  assert.equal((await startServer(root, { binaries })).port, start);
+  await stopServer(root, { binaries });
+  assert.equal((await startServer(root, { binaries })).port, start);
   assert.deepEqual(await query(root, "select 1 as one"), [{ one: 1 }]);
+});
+
+test("a start port that is taken gives the next port up, and the server is found there", { timeout: 120_000 }, async (t) => {
+  const root = await cluster(t);
+  const start = await freePortPair();
+  await startPortIs(root, start);
+  const squatter = net.createServer();
+  await new Promise((resolve) => squatter.listen(start, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => squatter.close(resolve)));
+  const { port } = await startServer(root, { binaries });
+  assert.equal(port, start + 1);
+  assert.deepEqual(await query(root, "select 1 as one"), [{ one: 1 }]);
+});
+
+// Holds `count` ports in a row, starting at a port the system hands out; returns the first one.
+async function squatRow(t, count) {
+  for (;;) {
+    const start = await freePortPair();
+    if (start + count > 65535) continue;
+    const held = [];
+    for (let port = start; port < start + count; port += 1) {
+      const squatter = net.createServer();
+      const ok = await new Promise((resolve) => squatter.once("error", () => resolve(false)).listen(port, "127.0.0.1", () => resolve(true)));
+      if (!ok) break;
+      held.push(squatter);
+    }
+    if (held.length === count) {
+      t.after(() => Promise.all(held.map((squatter) => new Promise((resolve) => squatter.close(resolve)))));
+      return start;
+    }
+    await Promise.all(held.map((squatter) => new Promise((resolve) => squatter.close(resolve))));
+  }
+}
+
+test("the search has no limit of its own: with 21 ports taken from the start port, the 22nd is used", { timeout: 120_000 }, async (t) => {
+  const root = await cluster(t);
+  const start = await squatRow(t, 21);
+  await startPortIs(root, start);
+  assert.equal((await startServer(root, { binaries })).port, start + 21);
+});
+
+test("when every port from the start port up to 65535 is taken, the start is refused by name", { timeout: 120_000 }, async (t) => {
+  const root = await cluster(t);
+  await startPortIs(root, 65535);
+  // Held here, or already held by something else: taken either way.
+  const squatter = net.createServer();
+  await new Promise((resolve) => squatter.once("error", resolve).listen(65535, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => squatter.close(() => resolve())));
+  await assert.rejects(startServer(root, { binaries }), /PostgreSQL's ports from 65535 up to 65535 are all taken\./);
+  assert.equal(await serverRunning(root, { binaries }), false);
+});
+
+test("a settings.json without database.port, as older ones are, starts from 5432 as usual", { timeout: 120_000 }, async (t) => {
+  const root = await cluster(t);
+  await writeSettings(root, { default_roles: { writer: "claude", reviewer: "codex" } });
+  inDefaultRange((await startServer(root, { binaries })).port);
+});
+
+test("a database.port that is not a port is refused, never replaced by 5432", { timeout: 120_000 }, async (t) => {
+  const root = await cluster(t);
+  for (const port of ["5440", 0, 70000, 5440.5]) {
+    await startPortIs(root, port);
+    await assert.rejects(startServer(root, { binaries }), /Your Review Bridge settings are not readable .*database\.port is not a port number/);
+  }
+  assert.equal(await serverRunning(root, { binaries }), false);
 });
 
 test("four processes starting the same cluster at once leave one server, and all can use it", { timeout: 120_000 }, async (t) => {

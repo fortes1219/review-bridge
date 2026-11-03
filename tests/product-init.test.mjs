@@ -46,6 +46,19 @@ async function freePort() {
   return port;
 }
 
+// The lines init and status end with for VS Code: the running server's port, from its own
+// postmaster.pid, and the password file. The password is read only to show it is not printed.
+async function databaseLines(indent = "  ") {
+  const port = Number((await fsp.readFile(path.join(dataHome, "postgres", "data", "postmaster.pid"), "utf8")).split(/\r?\n/)[3]);
+  return [
+    "",
+    indent + (indent ? "database" : "Database") + " in VS Code: install Microsoft's PostgreSQL extension and add a connection with",
+    indent + "  Server 127.0.0.1  Port " + port + "  User bridge  Database bridge",
+    indent + "  Password: copy it from " + path.join(dataHome, "postgres", "secret"),
+  ];
+}
+const databasePassword = async () => (await fsp.readFile(path.join(dataHome, "postgres", "secret"), "utf8")).trim();
+
 // init starts the resident page service; stop it before the workspace is removed.
 function removeWorkspace(root) {
   spawnSync(process.execPath, [path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "down"], {
@@ -92,8 +105,10 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     "  at a terminal, for advanced use and CI:",
     "    review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: http://localhost:" + port + "/",
+    ...(await databaseLines()),
   ]);
   assert.doesNotMatch(result.stdout, /SHA-?256|plan_sha256|[0-9a-f]{64}|\[y\/N\]/i);
+  assert.equal(result.stdout.includes(await databasePassword()), false, "the password itself is not printed");
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
   assert.equal(config.profile_id, "vue-frontend");
 });
@@ -306,7 +321,7 @@ test("init starts the resident service and ends with cd, the work folder, the st
   ], { cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(result.status, 0, result.stderr);
   const workFolder = path.join(root, ".review-bridge", "work-packages");
-  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/).slice(-9), [
+  assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/).slice(-13), [
     "Done. Now:",
     "",
     "  cd " + path.relative(packageRoot, root),
@@ -316,7 +331,9 @@ test("init starts the resident service and ends with cd, the work folder, the st
     "  at a terminal, for advanced use and CI:",
     "    review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: " + url,
+    ...(await databaseLines()),
   ]);
+  assert.equal(result.stdout.includes(await databasePassword()), false, "the password itself is not printed");
   await fsp.access(workFolder);
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
   assert.deepEqual(config.watch, { port, strict_port: false });
@@ -827,8 +844,8 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
   // From the database: the run, its status, why it stopped, its work order file and when it began.
   assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running\\n  " + runId + "  completed +  cancelled +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\dT", "m"));
   assert.match(status.stdout, /\nReview queue: pending \d+, running \d+, done \d+, failed \d+\n/);
-  assert.match(status.stdout, /\nDatabase: host 127\.0\.0\.1  port \d+  database bridge  user bridge\n {10}password file: .*[\\/]postgres[\\/]secret\n$/);
-  assert.doesNotMatch(status.stdout, new RegExp((await fsp.readFile(path.join(dataHome, "postgres", "secret"), "utf8")).trim()), "the password itself is not printed");
+  assert.ok(status.stdout.endsWith("\n" + (await databaseLines("")).slice(1).join("\n") + "\n"), status.stdout);
+  assert.equal(status.stdout.includes(await databasePassword()), false, "the password itself is not printed");
 
   const card = cli(["resume", runId, "--fake-cli"]);
   assert.equal(card.status, 1);

@@ -31,7 +31,9 @@ export function runningAsRoot() {
   return process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() === 0;
 }
 
-export function doneMessage(target, cwd, url) {
+// `database` is how to reach Bridge's database (host, port, user, database, passwordFile); it is
+// shown the way VS Code's PostgreSQL extension asks for it, and the password stays in its file.
+export function doneMessage(target, cwd, url, database) {
   const lines = ["Done. Now:", ""];
   const relative = path.relative(cwd, target);
   if (relative) lines.push("  cd " + (relative.includes(" ") ? "\"" + relative + "\"" : relative));
@@ -41,6 +43,10 @@ export function doneMessage(target, cwd, url) {
   lines.push("  at a terminal, for advanced use and CI:");
   lines.push("    review-bridge start .review-bridge/work-packages/<file>.md");
   lines.push("  page: " + (url || "not running; start it with review-bridge up"));
+  lines.push("");
+  lines.push("  database in VS Code: install Microsoft's PostgreSQL extension and add a connection with");
+  lines.push("    Server " + database.host + "  Port " + database.port + "  User " + database.user + "  Database " + database.database);
+  lines.push("    Password: copy it from " + database.passwordFile);
   return lines.join("\n");
 }
 
@@ -112,7 +118,7 @@ export async function runGuide(options, {
     target, roles, profileId, watchPort: options.port === undefined ? undefined : Number(options.port), fakeCli: Boolean(options["fake-cli"]),
   }, step);
   await saveDefaultRoles(roles, { dataHome });
-  const message = doneMessage(target, cwd, result.url);
+  const message = doneMessage(target, cwd, result.url, result.database);
   if (interactive) ui.outro(message);
   else if (!options.json) write(message + "\n");
   return { ...result, printed: !options.json };
