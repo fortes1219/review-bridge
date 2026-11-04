@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -41,7 +42,7 @@ async function makeRuntime(prefix) {
     path.join(bridgeRoot, "config", "default-policy.json"),
   );
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } });
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(), schema_version: 4, roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } });
   await writeJson(paths.policyOverridePath, { schema_version: 5 });
   return { repoRoot, bridgeRoot, paths };
 }
@@ -81,9 +82,9 @@ test("R1 multiline task files allow newline, tab, and backticks", async () => {
     "\tKeep this indented acceptance note.",
   ].join("\n");
   const taskFile = path.join(runtime.paths.privateRoot, "work-packages", "r1.md");
-  const outPath = path.join(runtime.paths.queueRoot, "r1.plan.json");
+  const outPath = path.join(runtime.paths.privateRoot, "r1.plan.json");
   // A work-order file seals the installed rules and checks that an explicit path exists.
-  await fsp.copyFile(path.join(sourceBridgeRoot, "..", "project-templates", "rules.md"), path.join(runtime.paths.configRoot, "rules.md"));
+  await fsp.copyFile(path.join(sourceBridgeRoot, "..", "project-templates", "rules.md"), runtime.paths.rulesPath);
   await fsp.writeFile(path.join(runtime.repoRoot, "README.md"), "# demo\n");
   await fsp.mkdir(path.dirname(taskFile), { recursive: true });
   await fsp.writeFile(taskFile, task, "utf8");

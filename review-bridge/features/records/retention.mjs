@@ -1,10 +1,12 @@
 // Run-record retention (T0-02): one archive file per day, kept for a fixed number
 // of days, with merge (run -> day file), prune, and rm. Zero model involvement.
 //
-// A terminal run's artifacts are folded into <privateRoot>/archive/<YYYY-MM-DD>.jsonl
-// as one JSON line each, then deleted. Small per-run records (projection,
+// A terminal run's artifacts are folded into <state>/archive/<YYYY-MM-DD>.jsonl
+// as one JSON line each, then the service's own copies are deleted. The run's log
+// folder (<log>/<project_id>/<run_id>/) and its small records (projection,
 // authorization, claim, lock, guard) stay until the run is older than the
-// retention window. Nothing that belongs to an active run is ever touched.
+// retention window, then go whole, as logrotate drops an expired log. Nothing
+// that belongs to an active run is ever touched.
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -29,6 +31,7 @@ import {
   writeJsonAtomicDurable,
 } from "../../service/index.mjs";
 import { DAY_MS, olderThan } from "../../utils/dates.mjs";
+import { isUnder } from "../../utils/pathGuard.mjs";
 
 const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
 
@@ -38,6 +41,9 @@ const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
 // Files directly in the queue or reviews root that are part of the Bridge's own
 // control surface; never archived as orphans.
 const PROTECTED_ROOT_FILES = new Set([
+  "review-bridge-install.json",
+  "watch-session.json",
+  "watch-url.txt",
   "CONTROL.json",
   "bounded-resume-state.json",
   "upgrade-in-progress.json",
@@ -45,6 +51,13 @@ const PROTECTED_ROOT_FILES = new Set([
   "bounded-resume.node.lock",
   "LATEST.txt",
 ]);
+
+// A folder nothing was written in for the window: its newest file, or the folder itself when empty.
+async function olderFolder(folder, days, now) {
+  let newest = (await fsp.stat(folder).catch(() => null))?.mtimeMs ?? 0;
+  for (const file of await listFiles(folder)) newest = Math.max(newest, (await fsp.stat(file).catch(() => null))?.mtimeMs ?? 0);
+  return now - newest > days * DAY_MS;
+}
 
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
@@ -128,25 +141,16 @@ export async function collectRunArtifacts(paths, run) {
     ...(run.authorization_id ? [run.authorization_id] : []),
   ];
   for (const authorizationId of authorizationIds) {
-    add("authorized_plan", path.join(paths.queueRoot, "authorized-" + authorizationId + ".txt"));
     if (authorizationId.startsWith("plan-")) directories.add(path.join(paths.evidenceRoot, authorizationId.slice(5, 37)));
   }
-  for (const file of await listJson(paths.queueRoot)) {
-    if (!file.endsWith(".plan.json")) continue;
-    const plan = await readOptionalJson(file);
-    if (plan?.proposed_run_id === runId) add("plan", file);
-  }
-  const stamps = new Set();
-  const candidates = [...statePaths(run.last_state), ...events.flatMap((event) => statePaths(event?.projection?.last_state))];
-  for (const candidate of candidates) {
-    const stamp = stampOf(candidate);
-    if (stamp) stamps.add(stamp);
-  }
-  if (stamps.size) {
-    for (const file of await listFiles(paths.queueRoot)) {
-      const stamp = stampOf(file);
-      if (stamp && stamps.has(stamp)) add(writerKind(path.basename(file)), file);
-    }
+  // Every file the run wrote while it worked is in its own log folder: its plan, the card it ran on,
+  // each call's prompt and output, its result.
+  for (const file of await listFiles(paths.runLogDir(runId))) {
+    const base = path.basename(file);
+    if (base.endsWith(".plan.json")) add("plan", file);
+    else if (base.startsWith("authorized-")) add("authorized_plan", file);
+    else if (/-reviewer\.(stdout|stderr)\.log$/.test(base)) add(reviewKind(base), file);
+    else if (stampOf(file)) add(writerKind(base), file);
   }
   // T0-07 V2.1: the per-run result file is archived with the run (its text is under the 256 KB cap).
   if (run.result_path) add("result", run.result_path);
@@ -245,13 +249,17 @@ export async function mergeRun(paths, runId, { clock = Date.now, undelivered = f
   const { archive_error: _dropped, ...rest } = run;
   await writeJsonAtomicDurable(projectionFile, { ...rest, archived_at: archivedAt, archive_file: archiveFile });
 
+  // What is in the run's log folder stays there until the folder expires (prune) or the run is removed.
   let deleted = 0;
+  const logs = paths.runLogDir(runId);
   for (const file of collected.artifacts.keys()) {
+    if (isUnder(file, logs)) continue;
     await fsp.rm(file, { force: true });
     deleted += 1;
   }
+  // fileExists answers for files only; an evidence folder is asked as a folder.
   for (const directory of collected.directories) {
-    if (await fileExists(directory)) { await fsp.rm(directory, { recursive: true, force: true }); deleted += 1; }
+    if ((await fsp.stat(directory).catch(() => null))?.isDirectory()) { await fsp.rm(directory, { recursive: true, force: true }); deleted += 1; }
   }
   if (collected.eventsPresent) { await fsp.rm(collected.eventFile, { force: true }); deleted += 1; }
   if (collected.ioPresent) { await fsp.rm(collected.ioFile, { force: true }); deleted += 1; }
@@ -286,6 +294,7 @@ export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000,
     archive_files_deleted: 0,
     probe_audit_files_deleted: 0,
     run_records_deleted: 0,
+    log_folders_deleted: 0,
     authorizations_deleted: 0,
     job_files_deleted: 0,
     orphans_archived: 0,
@@ -340,6 +349,16 @@ export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000,
       if (await fileExists(file)) { await fsp.rm(file, { force: true }); summary.run_records_deleted += 1; }
     }
   }
+  // The log folders: a run's goes with its records; one whose run is not here (a card never said yes
+  // to, a run removed by hand) goes when nothing was written in it for the window. A running one stays.
+  const knownRuns = new Set(runs.map((run) => run.run_id));
+  for (const entry of await fsp.readdir(paths.logRoot, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory() || activeIds.has(entry.name)) continue;
+    const folder = path.join(paths.logRoot, entry.name);
+    if (knownRuns.has(entry.name) ? !expiredRunIds.has(entry.name) : !(await olderFolder(folder, days, now))) continue;
+    await fsp.rm(folder, { recursive: true, force: true });
+    summary.log_folders_deleted += 1;
+  }
   // Authorizations, claims and invalidations go when their run is gone, or when
   // their TTL passed, they are older than the window, and no active run holds them.
   const knownRunIds = new Set(runs.map((run) => run.run_id));
@@ -369,7 +388,7 @@ export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000,
   }
 
   // 5. Orphans directly under the queue and reviews roots (R1.9).
-  for (const root of [paths.queueRoot, paths.reviewsRoot]) {
+  for (const root of [paths.stateRoot, paths.reviewsRoot]) {
     for (const file of await listFiles(root)) {
       const base = path.basename(file);
       if (PROTECTED_ROOT_FILES.has(base)) continue;
@@ -408,7 +427,7 @@ export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000,
   // 6. Events a run kept while the database was gone that the database refused when they were
   // written late (replayUnrecorded leaves them as <run>.jsonl.refused-<time>): folded into today's
   // day file like an orphan, then removed.
-  for (const file of await listFiles(path.join(paths.queueRoot, "unrecorded"))) {
+  for (const file of await listFiles(paths.unrecordedDir)) {
     if (!/\.jsonl\.refused-\d+$/.test(path.basename(file))) continue;
     const line = await artifactLine("refused_unrecorded", file);
     await appendArchiveLines(archiveFileForDate(paths, new Date(now)), [{
@@ -430,6 +449,7 @@ export function formatPruneSummary(summary) {
   if (summary.archive_files_deleted) parts.push("清掉 " + summary.archive_files_deleted + " 天份紀錄");
   if (summary.probe_audit_files_deleted) parts.push("清掉 " + summary.probe_audit_files_deleted + " 天份設定檢查紀錄");
   if (summary.run_records_deleted) parts.push(summary.run_records_deleted + " 個過期 run 記錄");
+  if (summary.log_folders_deleted) parts.push(summary.log_folders_deleted + " 個過期 log 資料夾");
   if (summary.authorizations_deleted) parts.push(summary.authorizations_deleted + " 個過期授權");
   if (summary.job_files_deleted) parts.push(summary.job_files_deleted + " 個過期審查檔");
   if (summary.orphans_archived) parts.push(summary.orphans_archived + " 個殘留檔");
@@ -458,6 +478,7 @@ export async function removeRun(paths, runId, { clock = Date.now } = {}) {
   for (const directory of [paths.runsDir, paths.runLocksDir, paths.reconcileGuardsDir]) {
     await fsp.rm(path.join(directory, runId + ".json"), { force: true });
   }
+  await fsp.rm(paths.runLogDir(runId), { recursive: true, force: true });
   return {
     exitCode: 0, line: "已移除 " + runId, reason: merged ? "merged_and_removed" : "removed",
     archive_file: (merged || run).archive_file, undelivered,

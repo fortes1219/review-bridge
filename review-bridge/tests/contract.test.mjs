@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -26,6 +27,12 @@ import { canonical, digest } from "../utils/digest.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// The project's id names its state and logs (RC3-FIX-02); a project built by hand gets one.
+async function withProjectId(paths) {
+  await fsp.mkdir(paths.privateRoot, { recursive: true });
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4, project_id: randomUUID() }));
+}
 const GATE = { kind: "command", command: "npm test" };
 const NO_GATE = { kind: "not_configured", command: null };
 
@@ -180,6 +187,7 @@ test("a sealed contract matches its schema, is stored once under its hash, and a
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
+  await withProjectId(paths);
   const contract = build();
   const sealed = await sealContract(paths, contract);
   assert.equal(sealed.sha256, digest(contract));
@@ -201,6 +209,7 @@ test("a contract an older Bridge sealed is refused by name, and the person is to
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-old-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
+  await withProjectId(paths);
   const old = { ...build(), schema_version: 1 };
   await fsp.mkdir(paths.contractsDir, { recursive: true });
   await fsp.writeFile(contractPath(paths, digest(old)), JSON.stringify(old));
@@ -214,6 +223,7 @@ test("a stop between two contract calls is honoured before the next call starts"
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-stop-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
+  await withProjectId(paths);
   const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, call_timeout: 60_000 };
   const limits = { tokens_per_call: 10_000_000, tokens: 10_000_000 };
   let calls = 0;
@@ -241,6 +251,7 @@ test("a stop between the pre-call check and the pid record kills the call that j
   process.env.FAKE_CONTRACT_SLEEP_MS = "20000";
   t.after(() => { if (previous === undefined) delete process.env.FAKE_CONTRACT_SLEEP_MS; else process.env.FAKE_CONTRACT_SLEEP_MS = previous; });
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
+  await withProjectId(paths);
   const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, call_timeout: 60_000 };
   const seen = [];
   // Running at the check before the call; stopped by the time the call has its pid.

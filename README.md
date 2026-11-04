@@ -20,7 +20,7 @@ Review Bridge runs your work orders with two separate agents: a writer that does
 
 Then it sets the current folder up and prints the next commands:
 
-- creates `.review-bridge/` with the project settings, the work-order templates (`TEMPLATE.md` in English, `TEMPLATE.zh-TW.md` in Chinese) and the queue; in a Git repository it is kept out of Git through `.git/info/exclude` (tracked `.gitignore` is never edited);
+- creates `.review-bridge/` with the project settings (`bridge.json`, `policy.override.json`, `rules.md`) and the work-order templates (`TEMPLATE.md` in English, `TEMPLATE.zh-TW.md` in Chinese); in a Git repository the whole folder, results included, is kept out of Git through `.git/info/exclude` (tracked `.gitignore` is never edited);
 - runs four fake self-tests (`PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, `RATE_LIMIT`) that call no model;
 - starts the local page on `127.0.0.1`;
 - adds a `/review-bridge` command for Claude Code (`.claude/commands/review-bridge.md`, only if there is none) and the same steps for any agent to `AGENTS.md` (appended, never overwritten). `uninstall` removes both again unless you edited them.
@@ -49,7 +49,7 @@ Then, in Claude Code, type:
 /review-bridge start .review-bridge/work-packages/add-readme.md
 ```
 
-Codex reads the same steps from `AGENTS.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, checks once per page session that the reviewer cannot write files, prints a card with what you are authorizing and stops with `Needs authorization`. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. Your yes is the only authorization, and the authorization records that it came through an agent. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in `.review-bridge/results/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
+Codex reads the same steps from `AGENTS.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, checks once per page session that the reviewer cannot write files, prints a card with what you are authorizing and stops with `Needs authorization`. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. Your yes is the only authorization, and the authorization records that it came through an agent. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in the work order's own folder, `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. Beside it is the sealed contract the result names, `contract.v<version>.<short SHA-256>.json`. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
 
 `/review-bridge` takes the same four actions as the commands below: `start <file>`, `stop <run_id>`, `resume <run_id>` and `clean [<run_id>]`.
 
@@ -154,20 +154,21 @@ Add the cart.
 Usage: review-bridge <command> [options]
 
 Commands:
-  init              Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
-  start <file>      Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
-  stop <run_id>     Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
-  resume <run_id>   Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start
-  clean [<run_id>]  Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
-  status            Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
-  up                Start the local page service in the background
-  down              Stop the local page service
-  ps                Show whether the local page service is running, and its address
-  watch             Run the local page in this terminal until Ctrl+C
-  upgrade           Move this folder's setup to the installed Review Bridge version, with a backup
-  uninstall         Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
-  doctor            Check which platform adapter this machine uses, without running any work
-  backup            Copy your database, for all your projects, with the database stopped (refused while a run is running)
+  init                Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
+  start <file>        Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+  stop <run_id>       Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
+  resume <run_id>     Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start
+  clean [<run_id>]    Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
+  status              Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
+  logs <run_id|file>  Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
+  up                  Start the local page service in the background
+  down                Stop the local page service
+  ps                  Show whether the local page service is running, and its address
+  watch               Run the local page in this terminal until Ctrl+C
+  upgrade             Move this folder's setup to the installed Review Bridge version, with a backup
+  uninstall           Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
+  doctor              Check which platform adapter this machine uses, without running any work
+  backup              Copy your database, for all your projects, with the database stopped (refused while a run is running)
 
 Options:
   -v, --version   Print the version
@@ -294,6 +295,22 @@ Options:
       Show the ten runs after this one (the next page) (string; default: the newest runs)
   --json
       Print the result as JSON (boolean)
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
+### logs
+
+```text
+Usage: review-bridge logs <run_id|file> [options]
+
+Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
+
+Options:
+  --after <run_id>
+      Show the ten runs after this one (the next page) (string; default: the newest runs)
+  --json
+      Print the result as JSON, with the same run fields as work-status (boolean)
   --project <folder>
       The project folder (string; default: the current folder)
 ```
@@ -461,7 +478,7 @@ Options:
   --task <text>
       Work text instead of a work order file (needs --allow-paths) (string)
   --out <file>
-      Where the plan is written (string; default: .review-bridge/review-queue/<name>.plan.json)
+      Where the plan is written (string; default: <name>.plan.json in the run's log folder)
   --plain
       Print a short summary of the plan (boolean)
   --json
@@ -624,8 +641,10 @@ Options:
 
 ## Where data lives
 
-- In the project: `.review-bridge/`.
-- For you, shared by all your projects: your settings (`settings.json`, the default roles) and the database, in `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS and `~/.local/share/review-bridge` on Linux. `REVIEW_BRIDGE_DATA_HOME` moves it.
+- In the project, only what you write and read: `.review-bridge/bridge.json`, `policy.override.json` and `rules.md` (the settings), `work-packages/` (your work orders) and `results/` (one folder per work order with its results and contracts).
+- For you, shared by all your projects: your settings (`settings.json`, the default roles), the database, and each project's run state in `projects/<project_id>/` (the queue, locks, event copies, evidence, the install record), in `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS and `~/.local/share/review-bridge` on Linux. `REVIEW_BRIDGE_DATA_HOME` moves it.
+- Each run's logs (the prompt, stream and stderr of every model call, the test output, the plan and the card you said yes to), in your platform's log folder under `<project_id>/<run_id>/`: `%LOCALAPPDATA%\ReviewBridge\Log` on Windows, `~/Library/Logs/ReviewBridge` on macOS, `$XDG_STATE_HOME/review-bridge` (`~/.local/state/review-bridge`) on Linux, or `logs/` under `REVIEW_BRIDGE_DATA_HOME`. A run's folder goes when the run is past the retention days, or with `clean <run_id>`. `review-bridge status` prints the folder; `review-bridge logs <run_id>` lists a run's files and `review-bridge logs <work order>` its runs.
+- A project set up before this is moved once by `upgrade`: the settings up into `.review-bridge/`, the old run state (`review-queue/`, `reviews/`, `archive/`) into `projects/<project_id>/`, and the old call logs, plans and cards into the log folder, each file under its own name and checked by SHA-256; a call log, plan or card of a run that retention already removed goes. If `upgrade` is cut off, run it again and it finishes. Result files an older Bridge left directly in `results/` stay where they are; they are your copies, delete them whenever you like.
 - Backups, in `backups` under that folder: `backups/database` holds the copies `review-bridge backup` makes of the database; `backups/installer` holds what `upgrade` and `uninstall` keep (or `--backup-root <folder>`). They can hold private work data; do not publish them.
 
 `review-bridge backup` is PostgreSQL's file system level backup: it refuses while a run is running, stops the database, copies its whole folder (the data and its password file) and starts it again. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
@@ -648,7 +667,7 @@ Database in VS Code: install Microsoft's PostgreSQL extension and add a connecti
 
 To start from another port, add `"database": { "port": 5440 }` to your `settings.json` in the same folder. It takes effect the next time the database starts: after your computer restarts, or at once with `review-bridge backup`, which stops and starts it.
 
-The database is the record; the files under `.review-bridge/` are the running copy. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. The server listens on 127.0.0.1 only and keeps running between commands.
+The database is the record; the run state under `projects/<project_id>/` is the running copy, and the logs and result files can be deleted without losing anything. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. The server listens on 127.0.0.1 only and keeps running between commands.
 
 ## Upgrade and remove
 

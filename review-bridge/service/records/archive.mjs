@@ -1,4 +1,4 @@
-// The run archive: one <privateRoot>/archive/<YYYY-MM-DD>.jsonl per local day, appended only.
+// The run archive: one <state>/archive/<YYYY-MM-DD>.jsonl per local day, appended only.
 import fsp from "node:fs/promises";
 import path from "node:path";
 

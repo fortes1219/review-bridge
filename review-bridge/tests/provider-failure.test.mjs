@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -18,6 +19,12 @@ import { budgetStop } from "../features/workOrder/budget.mjs";
 import { runReviewWorker } from "../features/workOrder/review.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// The project's id names its state and logs (RC3-FIX-02); a project built by hand gets one.
+async function withProjectId(paths) {
+  await fsp.mkdir(paths.privateRoot, { recursive: true });
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4, project_id: randomUUID() }));
+}
 
 // Observed s2-03 Codex reviewer stderr shape (fake replay; no model call).
 export const CODEX_LIMIT_STDERR = [
@@ -145,6 +152,7 @@ test("review worker preserves the failed job and links a private typed failure r
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-provider-failure-"));
   try {
     const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
+    await withProjectId(paths);
     const fakeCodex = path.join(repoRoot, "fake-codex-limit.mjs");
     await fsp.writeFile(fakeCodex, [
       "for await (const _ of process.stdin) {}",

@@ -56,7 +56,7 @@ export async function validateReviewWorker({ paths, control, adapter }) {
   return {
     valid: true,
     repo_root: paths.repoRoot,
-    queue_root: paths.queueRoot,
+    queue_root: paths.stateRoot,
     reviews_dir: paths.reviewsRoot,
     reviewer_executable: reviewerExecutable,
     prompt_template: reviewPromptPath,
@@ -134,14 +134,14 @@ export async function runReviewWorker({
 }) {
   const reviewPromptPath = await resolveReviewPromptPath(paths);
   for (const directory of [
-    paths.queueRoot,
+    paths.stateRoot,
     paths.pendingDir,
     paths.runningDir,
     paths.doneDir,
     paths.failedDir,
     paths.reviewsRoot,
   ]) {
-    assertUnder(directory, paths.privateRoot, "Bridge runtime directory");
+    assertUnder(directory, paths.stateRoot, "Bridge runtime directory");
     await ensureDir(directory);
   }
   if (!(await fileExists(reviewPromptPath))) {
@@ -167,12 +167,13 @@ export async function runReviewWorker({
       const resultPath = path.join(paths.reviewsRoot, jobId + "-reviewer-review.md");
       const promptPath = path.join(paths.reviewsRoot, jobId + "-review-prompt.md");
       const metadataPath = path.join(paths.reviewsRoot, jobId + "-job.json");
-      const stdoutPath = path.join(paths.reviewsRoot, jobId + "-reviewer.stdout.log");
-      const stderrPath = path.join(paths.reviewsRoot, jobId + "-reviewer.stderr.log");
+      // The reviewer call's own output goes to its run's log folder once the job names the run.
+      let stdoutPath = path.join(paths.reviewsRoot, jobId + "-reviewer.stdout.log");
+      let stderrPath = path.join(paths.reviewsRoot, jobId + "-reviewer.stderr.log");
       for (const candidate of [
         runningPath, donePath, failedPath, reportPath, resultPath,
         promptPath, metadataPath, stdoutPath, stderrPath,
-      ]) assertUnder(candidate, paths.privateRoot, "Review artifact");
+      ]) assertUnder(candidate, paths.stateRoot, "Review artifact");
 
       try {
         await fsp.rename(pendingPath, runningPath);
@@ -188,6 +189,10 @@ export async function runReviewWorker({
         await writeJson(metadataPath, job);
         await writeText(reportPath, String(job.last_assistant_message));
         const runId = job.authorization?.run_id || null;
+        if (runId) {
+          stdoutPath = path.join(paths.runLogDir(runId), jobId + "-reviewer.stdout.log");
+          stderrPath = path.join(paths.runLogDir(runId), jobId + "-reviewer.stderr.log");
+        }
         const template = await fsp.readFile(reviewPromptPath, "utf8");
         const reviewInput = await buildReviewInput({ paths, job, control });
         if (runId) await appendIoEvent(paths, runId, reviewInput);

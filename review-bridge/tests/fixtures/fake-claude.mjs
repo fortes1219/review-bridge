@@ -6,6 +6,11 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { getBridgePaths } from "../../utils/paths.mjs";
+// The project's state, outside the project, found the way Bridge finds it: a writer that tampers
+// with Bridge's records reaches them there.
+const stateRoot = () => getBridgePaths(process.cwd(), path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."), { privateRootName: ".review-bridge" }).stateRoot;
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -63,7 +68,7 @@ function translationOutput() {
 // change its own instructions would.
 function tamperContract(sha) {
   if (process.env.FAKE_CONTRACT_TAMPER !== "1" || !sha) return;
-  const file = path.join(process.cwd(), ".review-bridge", "review-queue", "contracts", sha + ".json");
+  const file = path.join(stateRoot(), "contracts", sha + ".json");
   const contract = JSON.parse(fs.readFileSync(file, "utf8"));
   contract.acceptance = [];
   fs.writeFileSync(file, JSON.stringify(contract, null, 2) + "\n");
@@ -90,7 +95,7 @@ function structuredOutput() {
   const workOrder = /"work_order": "([^"]+)"/.exec(prompt)?.[1] || "unknown";
   const contractSha = /"contract_sha256": "([0-9a-f]{64})"/.exec(prompt)?.[1] || null;
   tamperContract(contractSha);
-  const evidenceRoot = path.join(process.cwd(), ".review-bridge", "review-queue", "workspace-evidence");
+  const evidenceRoot = path.join(stateRoot(), "workspace-evidence");
   const evidenceDirs = () => (fs.existsSync(evidenceRoot) ? fs.readdirSync(evidenceRoot).map((dir) => path.join(evidenceRoot, dir)) : []);
   // FAKE_CLAUDE_EVIDENCE_TAMPER=1 empties the forbidden list in the run's starting record, as a
   // writer trying to change what its work is judged against would.
@@ -110,7 +115,7 @@ function structuredOutput() {
   // FAKE_CLAUDE_FORGE_WINDOW=1 forges another run's call record overlapping this call, plus a run
   // record for it, as a writer hiding its own out-of-scope change behind a second run would.
   if (process.env.FAKE_CLAUDE_FORGE_WINDOW === "1") {
-    const runsDir = path.join(process.cwd(), ".review-bridge", "review-queue", "runs");
+    const runsDir = path.join(stateRoot(), "runs");
     fs.writeFileSync(path.join(runsDir, "run-b-forged.json"), JSON.stringify({ run_id: "run-b-forged", created_at: new Date(Date.now() - 3_600_000).toISOString() }));
     const forged = path.join(evidenceRoot, "forged-b", "windows");
     fs.mkdirSync(forged, { recursive: true });

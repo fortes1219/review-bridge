@@ -38,7 +38,8 @@ export async function inspectDoctor({
       reviewer_readonly_authority: "watch_session_only",
       reason: "Native work starts on the person's yes to the card (at a terminal, or through an agent with --yes) after the reviewer read-only check passed in the running Bridge page; doctor cannot see that proof.",
     } : null,
-    state_filesystem: inspectStateFilesystem(paths.repoRoot),
+    // The state lives in the service's own folder, not the project (RC3-FIX-02): that is where its locks are.
+    state_filesystem: inspectStateFilesystem(paths.stateRoot),
     platform: {
       target: adapter.target,
       adapter: adapter.id,

@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -25,11 +26,14 @@ async function runtime(t, config = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-retention-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, {
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(),
     schema_version: 4, active_runs: "derive_from_run_projections", ...config,
   });
   return { repoRoot, paths };
 }
+
+// A folder or a file is there (fileExists answers for files only).
+const pathExists = (target) => fsp.stat(target).then(() => true, () => false);
 
 function iso(offsetMs = 0) {
   return new Date(Date.now() + offsetMs).toISOString();
@@ -43,8 +47,9 @@ async function terminalRunFixture(paths, { runId = "run-" + Math.random().toStri
   const PLAN_SHA = serial.repeat(2) + BASE_SHA.slice(6);
   const stamp = "20261012T155054" + serial + "Z";
   const jobId = "20261012T155930" + serial + "Z-60141da11c31e5e9";
-  const stdoutPath = path.join(paths.queueRoot, stamp + "-writer.stdout.json");
-  const lastState = { status: "pass", call: 1, writer_stdout_path: stdoutPath, stderr_path: path.join(paths.queueRoot, stamp + "-writer.stderr.log") };
+  const logs = paths.runLogDir(runId);
+  const stdoutPath = path.join(logs, stamp + "-writer.stdout.json");
+  const lastState = { status: "pass", call: 1, writer_stdout_path: stdoutPath, stderr_path: path.join(logs, stamp + "-writer.stderr.log") };
   const run = {
     run_id: runId, status, ...(status === "completed" ? { conclusion: "success", closed_reason: closedReason } : {}),
     closed_at: closedAt, updated_at: closedAt, created_at: closedAt, ...(delivered ? { result_sha256: "f".repeat(64) } : {}),
@@ -56,16 +61,17 @@ async function terminalRunFixture(paths, { runId = "run-" + Math.random().toStri
     JSON.stringify({ schema_version: 4, run_id: runId, sequence: 1, type: "run_started", projection: { ...run, last_state: null } }),
     JSON.stringify({ schema_version: 4, run_id: runId, sequence: 2, type: "run_terminal", projection: run }),
   ].join("\n") + "\n");
-  await fsp.writeFile(path.join(paths.queueRoot, stamp + "-writer-only-prompt.txt"), "prompt text");
+  await fsp.mkdir(logs, { recursive: true });
+  await fsp.writeFile(path.join(logs, stamp + "-writer-only-prompt.txt"), "prompt text");
   await fsp.writeFile(stdoutPath, JSON.stringify({
     type: "result", num_turns: 58, total_cost_usd: 3.03, result: "SECRET TRANSCRIPT",
     usage: { input_tokens: 94, cache_read_input_tokens: 4871292, cache_creation_input_tokens: 150800, output_tokens: 42211 },
     modelUsage: { "claude-opus-5-5": {} },
   }));
   await fsp.writeFile(lastState.stderr_path, "stderr tail");
-  await fsp.writeFile(path.join(paths.queueRoot, stamp + "-stop-payload.json"), "{}");
-  await fsp.writeFile(path.join(paths.queueRoot, "demo-" + serial + ".plan.json"), JSON.stringify({ proposed_run_id: runId, plan_sha256: PLAN_SHA }));
-  await fsp.writeFile(path.join(paths.queueRoot, "authorized-plan-" + PLAN_SHA + ".txt"), "task text");
+  await fsp.writeFile(path.join(logs, stamp + "-stop-payload.json"), "{}");
+  await fsp.writeFile(path.join(logs, "demo-" + serial + ".plan.json"), JSON.stringify({ proposed_run_id: runId, plan_sha256: PLAN_SHA }));
+  await fsp.writeFile(path.join(logs, "authorized-plan-" + PLAN_SHA + ".txt"), "task text");
   const evidenceDir = path.join(paths.evidenceRoot, PLAN_SHA.slice(0, 32));
   await fsp.mkdir(path.join(evidenceDir, "before", "src"), { recursive: true });
   await fsp.writeFile(path.join(evidenceDir, "before", "src", "a.mjs"), "before copy");
@@ -91,6 +97,7 @@ async function readArchive(file) {
 test("T1 merge folds a terminal run into its day file and deletes what it folded", async (t) => {
   const { paths } = await runtime(t);
   const fixture = await terminalRunFixture(paths);
+  assert.equal(await pathExists(fixture.evidenceDir), true);
   const result = await mergeRun(paths, fixture.run.run_id);
   assert.equal(result.already_archived, false);
   assert.equal(path.basename(result.archive_file), localDateKey(fixture.run.closed_at) + ".jsonl");
@@ -113,11 +120,16 @@ test("T1 merge folds a terminal run into its day file and deletes what it folded
   assert.equal(JSON.stringify(lines).includes("SECRET TRANSCRIPT"), false);
   assert.equal(JSON.stringify(lines).includes("before copy"), false);
 
-  for (const file of [fixture.stdoutPath, path.join(paths.eventsDir, fixture.run.run_id + ".jsonl"), fixture.deltaPath,
-    path.join(paths.queueRoot, "demo-001.plan.json"), path.join(paths.reviewsRoot, fixture.jobId + "-reviewer-review.md")]) {
+  for (const file of [path.join(paths.eventsDir, fixture.run.run_id + ".jsonl"), fixture.deltaPath,
+    path.join(paths.reviewsRoot, fixture.jobId + "-reviewer-review.md")]) {
     assert.equal(await fileExists(file), false, file);
   }
-  assert.equal(await fileExists(fixture.evidenceDir), false);
+  // The run's log folder is not folded away: it stays until the run is past the window (RC3-FIX-02).
+  for (const file of [fixture.stdoutPath, path.join(paths.runLogDir(fixture.run.run_id), "demo-001.plan.json")]) {
+    assert.equal(await fileExists(file), true, file);
+  }
+  // The evidence folder goes with the run it was folded into (fileExists answers for files only).
+  assert.equal(await pathExists(fixture.evidenceDir), false);
   assert.equal(await fileExists(path.join(paths.reviewsRoot, "LATEST.txt")), true);
   const projection = JSON.parse(await fsp.readFile(path.join(paths.runsDir, fixture.run.run_id + ".json"), "utf8"));
   assert.ok(projection.archived_at);
@@ -175,6 +187,34 @@ test("T3 prune merges, drops day files and run records past the window, and keep
   assert.equal(await fileExists(path.join(paths.archiveDir, localDateKey(fresh.run.closed_at) + ".jsonl")), true);
 });
 
+test("T3b a run's log folder goes whole once the run is past the window; a card never said yes to goes by age; running and recent ones stay", async (t) => {
+  const { paths } = await runtime(t);
+  const now = Date.now();
+  const expired = await terminalRunFixture(paths, { runId: "run-expired-0002", closedAt: iso(-20 * DAY_MS) });
+  const fresh = await terminalRunFixture(paths, { runId: "run-fresh-00002", closedAt: iso(-1 * DAY_MS) });
+  const active = { run_id: "run-active-0004", status: "in_progress", updated_at: iso(), authorization_ids: [], last_state: null };
+  await writeJson(path.join(paths.runsDir, active.run_id + ".json"), active);
+  const activeLog = path.join(paths.runLogDir(active.run_id), "x-writer.stream.jsonl");
+  const unsaid = path.join(paths.runLogDir("run-unsaid-0001"), "card.plan.json");
+  const unsaidRecent = path.join(paths.runLogDir("run-unsaid-0002"), "card.plan.json");
+  for (const file of [activeLog, unsaid, unsaidRecent]) {
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, "{}");
+  }
+  const longAgo = new Date(now - 20 * DAY_MS);
+  for (const file of [activeLog, unsaid]) await fsp.utimes(file, longAgo, longAgo);
+  for (const folder of [path.dirname(activeLog), path.dirname(unsaid)]) await fsp.utimes(folder, longAgo, longAgo);
+
+  const summary = await prune(paths, { config: { retention: { days: 15 } }, clock: () => now });
+  assert.equal(summary.log_folders_deleted, 2);
+  assert.equal(await pathExists(paths.runLogDir(expired.run.run_id)), false);
+  assert.equal(await pathExists(path.dirname(unsaid)), false);
+  assert.equal(await pathExists(paths.runLogDir(fresh.run.run_id)), true);
+  assert.equal(await fileExists(activeLog), true);
+  assert.equal(await fileExists(unsaidRecent), true);
+  assert.match(formatPruneSummary(summary), /2 個過期 log 資料夾/);
+});
+
 test("T4 an invalid retention setting refuses to prune and deletes nothing", async (t) => {
   const { paths } = await runtime(t);
   await fsp.mkdir(paths.archiveDir, { recursive: true });
@@ -195,11 +235,14 @@ test("T5 rm refuses an active run, folds and removes a finished one, and names a
   assert.equal(await fileExists(path.join(paths.runsDir, active.run_id + ".json")), true);
 
   const done = await terminalRunFixture(paths, { runId: "run-done-000001" });
+  assert.equal(await pathExists(paths.runLogDir(done.run.run_id)), true);
   const removed = await removeRun(paths, done.run.run_id);
   assert.equal(removed.exitCode, 0);
   assert.equal(removed.reason, "merged_and_removed");
   assert.equal(await fileExists(path.join(paths.runsDir, done.run.run_id + ".json")), false);
   assert.equal(await fileExists(removed.archive_file), true);
+  // clean <run_id> takes the run's log folder with it.
+  assert.equal(await pathExists(paths.runLogDir(done.run.run_id)), false);
   assert.equal((await removeRun(paths, "run-missing-0001")).exitCode, 1);
   assert.equal((await removeRun(paths, "../escape")).exitCode, 1);
 });
@@ -207,13 +250,13 @@ test("T5 rm refuses an active run, folds and removes a finished one, and names a
 test("T7 a stray file maps to no run: archived as an orphan by its own date and deleted; active-run files untouched", async (t) => {
   const { paths } = await runtime(t);
   const now = Date.now();
-  await fsp.mkdir(paths.queueRoot, { recursive: true });
-  const stray = path.join(paths.queueRoot, "hook-errors.log");
+  await fsp.mkdir(paths.stateRoot, { recursive: true });
+  const stray = path.join(paths.stateRoot, "hook-errors.log");
   await fsp.writeFile(stray, "old noise\n");
   const strayDate = new Date(now - 3 * DAY_MS);
   await fsp.utimes(stray, strayDate, strayDate);
   const activeStamp = "20261013T010000000Z";
-  const activeFile = path.join(paths.queueRoot, activeStamp + "-writer.stdout.json");
+  const activeFile = path.join(paths.stateRoot, activeStamp + "-writer.stdout.json");
   await fsp.writeFile(activeFile, "{}");
   await writeJson(path.join(paths.runsDir, "run-active-0003.json"), {
     run_id: "run-active-0003", status: "in_progress", updated_at: iso(), authorization_ids: [], last_state: { writer_stdout_path: activeFile },
@@ -333,7 +376,8 @@ test("T0-11 C3 prune also drops reviewer check day files past the window and kee
 test("T0-11 E3 prune retires the old single reviewer record by age and refuses an invalid setting", async (t) => {
   const { paths } = await runtime(t);
   const now = Date.now();
-  const legacy = path.join(paths.configRoot, "reviewer-probe-audit.json");
+  const legacy = path.join(paths.stateRoot, "reviewer-probe-audit.json");
+  await fsp.mkdir(paths.stateRoot, { recursive: true });
   await fsp.writeFile(legacy, "{}\n");
   const old = new Date(now - 16 * DAY_MS);
   await fsp.utimes(legacy, old, old);

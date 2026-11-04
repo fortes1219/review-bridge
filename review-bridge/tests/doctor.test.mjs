@@ -1,3 +1,6 @@
+// Keeps the person's database out of these tests (see the fixture).
+import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -21,7 +24,7 @@ async function project(t) {
   await fsp.copyFile(path.join(sourceBridgeRoot, "config", "default-policy.json"), path.join(bridgeRoot, "config", "default-policy.json"));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await fsp.mkdir(path.dirname(paths.bridgeConfigPath), { recursive: true });
-  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4, roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } }));
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4, project_id: randomUUID(), roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } }));
   return paths;
 }
 
@@ -38,6 +41,8 @@ test("on Windows doctor names the profile line when PowerShell writes code page 
   assert.ok(hint.includes("$PROFILE") && hint.includes(PROFILE_LINE) && hint.includes("pwsh"));
   const utf8 = await doctor(paths, "win32", 65001);
   assert.equal(utf8.warnings.some((line) => line.includes("PowerShell")), false);
+  // The filesystem checked is the state's, where the locks are, not the project's (RC3-FIX-02).
+  assert.equal(utf8.state_filesystem.path, path.resolve(paths.stateRoot));
 });
 
 test("doctor asks nothing about PowerShell off Windows, and says so when PowerShell could not be asked", async (t) => {

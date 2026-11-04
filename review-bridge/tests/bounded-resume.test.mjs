@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -135,7 +136,7 @@ async function makeRuntime(t, override = { schema_version: 5 }, { git = false, w
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   t.after(() => fsp.rm(toolsRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, {
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(),
     schema_version: 4, active_runs: "derive_from_run_projections",
     test: { profile_id: "node-backend", rules: withTests ? [{ command: "npm test", package_script: "test" }] : [] },
   });
@@ -165,7 +166,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
     await fsp.writeFile(runtime.paths.reviewPromptOverridePath, reviewPrompt, "utf8");
   }
   const argsOut = path.join(runtime.toolsRoot, "claude-args.json");
-  const planPath = path.join(runtime.paths.queueRoot, "plan.json");
+  const planPath = path.join(runtime.paths.privateRoot, "plan.json");
   const plan = await createWorkPackagePlan({
     paths: runtime.paths,
     task: "Update README.md only.",
@@ -267,7 +268,7 @@ test("a change list that is deleted or broken before the review stops the run as
       assert.equal(events.some((event) => event.event === "review.input" || event.event === "review.result"), false, at);
       const delivery = await deliverOutcome({ paths: runtime.paths, runId: run.run_id, notify: false });
       assert.equal(delivery.closed_reason, "evidence_unavailable", at);
-      const result = await fsp.readFile(path.join(runtime.paths.queueRoot, run.run_id + ".result.md"), "utf8");
+      const result = await fsp.readFile(path.join(runtime.paths.runLogDir(run.run_id), run.run_id + ".result.md"), "utf8");
       assert.match(result, /The change evidence could not be read|改動證據讀不到/, at);
     }
   }
@@ -419,7 +420,7 @@ test("a malformed writer model override is refused", async (t) => {
     allowedPaths: "README.md",
     rounds: 1,
     callTimeout: 60_000,
-    outPath: path.join(runtime.paths.queueRoot, "plan.json"),
+    outPath: path.join(runtime.paths.privateRoot, "plan.json"),
   }), /writer model for medium is invalid/);
 });
 

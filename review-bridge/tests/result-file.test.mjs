@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -8,13 +9,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { dispatchCommand } from "../router/index.mjs";
+import { cancelWork } from "../features/workOrder/commands.mjs";
 import { appendIoEvent, readIoEvents } from "../service/records/ioEvents.mjs";
 import { createTranslator, resolveLocale } from "../features/workOrder/i18n.mjs";
 import { readJson, writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import { afterIdentity, latestResultCopy, nextSecond, resultCopies } from "./fixtures/resultCopies.mjs";
 import { loadOrCreatePolicySnapshot } from "../service/records/policySnapshots.mjs";
-import { composeSections, deliverOutcome, deliverPendingRuns, renderResult, resultKey, RESULT_MAX_BYTES, shellQuote, stdoutLines, tokenRows, windowsArgQuote } from "../features/workOrder/delivery.mjs";
+import { composeSections, deliverOutcome, deliverPendingRuns, renderResult, resultKey, RESULT_MAX_BYTES, stdoutLines, tokenRows } from "../features/workOrder/delivery.mjs";
 import { mergeRun } from "../features/records/retention.mjs";
 import { CLOSED_REASONS, consumeRun, readRun, recordRunState, withRunLock } from "../service/records/runStore.mjs";
 import { authorizeWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
@@ -27,14 +29,14 @@ async function runtime(t, { locale = "zh-TW" } = {}) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-result-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, {
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(),
     schema_version: 4, active_runs: "derive_from_run_projections",
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     ...(locale ? { locale } : {}),
     test: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
   await writeJson(paths.policyOverridePath, { schema_version: 5 });
-  await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
+  await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), paths.rulesPath);
   await fsp.mkdir(path.join(paths.privateRoot, "work-packages"), { recursive: true });
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# demo\n");
   await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({ name: "r", scripts: { test: "node -e \"process.exit(0)\"" } }));
@@ -49,7 +51,7 @@ async function terminalRun(rt, status, { state = null, gate = null, events = [],
   if (!task) await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
     paths: rt.paths, ...(task ? { task } : { taskFile }), owner: "Fortes", workPackage: id, breakpoint,
-    ...(task || allowedPaths ? { allowedPaths: allowedPaths || "README.md" } : {}), rounds: 2, callTimeout: 60_000, outPath: path.join(rt.paths.queueRoot, id + "-" + Math.random().toString(16).slice(2, 6) + ".plan.json"),
+    ...(task || allowedPaths ? { allowedPaths: allowedPaths || "README.md" } : {}), rounds: 2, callTimeout: 60_000, outPath: path.join(rt.paths.privateRoot, id + "-" + Math.random().toString(16).slice(2, 6) + ".plan.json"),
   });
   const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
   const runId = authorization.run.run_id;
@@ -60,6 +62,13 @@ async function terminalRun(rt, status, { state = null, gate = null, events = [],
 }
 
 const usage = (role, call, cacheRead) => ({ event: "usage", role, provider: role === "writer" ? "claude" : "codex", call, turns: 3, duration_ms: 10, tokens: { input: 10, cache_write: 20, cache_read: cacheRead, output: 5 }, cost_usd: role === "writer" ? 0.5 : null, source: "cli_json" });
+// The next step by closed reason; every other one that is not a success says only "start it again".
+const NEXT_LINE = Object.freeze({
+  rate_limited: "等額度恢復後再 start 一次。", token_limit: "等額度恢復後再 start 一次。",
+  review_hard_stop: "照上面 Why 段的發現改工單或程式，再 start 一次。", rounds_exhausted: "照上面 Why 段的發現改工單或程式，再 start 一次。",
+  acceptance_unverified: "照上面 Why 段的發現改工單或程式，再 start 一次。",
+  run_timeout: "把工單拆小，或把 budget.run_timeout 調大，再 start 一次。", writer_timeout: "把工單拆小，或把 budget.run_timeout 調大，再 start 一次。",
+});
 const finding = (id) => ({ id, severity: "HIGH", path: "README.md", line: 1, reach: "r", claim: "claim " + id, evidence: "e", fix: "fix " + id, acceptance_ref: 1 });
 
 async function projectionEvents(rt, runId) {
@@ -108,14 +117,19 @@ test("S1 every closed reason delivers once: two files, the right title, three se
     assert.equal(closed.status, "completed", status);
     assert.equal(delivery.conclusion, closed.conclusion, status);
     assert.equal(delivery.closed_reason, status);
-    const runCopy = await fsp.readFile(path.join(rt.paths.queueRoot, runId + ".result.md"), "utf8");
+    const runCopy = await fsp.readFile(path.join(rt.paths.runLogDir(runId), runId + ".result.md"), "utf8");
     const title = afterIdentity(runCopy).split("\n")[0];
     assert.equal(title, "# " + tr(resultKey(tr, "outcome", closed)) + (title.includes("（") ? title.slice(title.indexOf("（")) : ""), status);
-    // The person's copy is the run's result as it is, in results/, never beside the work order.
+    // The person's copy is the run's result as it is, in results/<work order>/, never beside the work order.
     assert.equal(await fsp.readFile(delivery.latest_path, "utf8"), runCopy, status);
-    assert.equal(path.dirname(delivery.latest_path), rt.paths.resultsDir, status);
+    assert.equal(path.dirname(path.dirname(delivery.latest_path)), rt.paths.resultsDir, status);
     assert.equal(await fsp.stat(taskFile.replace(/\.md$/, ".result.md")).catch(() => null), null, status);
     for (const heading of ["## 為什麼", "## 下一步", "## 改了哪些檔", "## token"]) assert.ok(runCopy.includes(heading), status + " " + heading);
+    // Whatever stopped it, the next step is one line in plain words, picked by the closed reason, with
+    // no command in it (Owner 2026-11-04).
+    const next = /## 下一步\n([\s\S]*?)\n\n## /.exec(runCopy)[1];
+    if (closed.conclusion !== "success") assert.equal(next, NEXT_LINE[status] || "再 start 一次。", status);
+    assert.doesNotMatch(next, /plan|批准|node |review-bridge|\//, status);
     const delivered = (await projectionEvents(rt, runId)).filter((event) => event.type === "run_delivered");
     assert.equal(delivered.length, 1, status);
     const run = await readRun(rt.paths, runId);
@@ -261,7 +275,8 @@ test("S4c a result over 64 KB is trimmed in the fixed order and keeps its headin
   const lines = (await fsp.readFile(merged.archive_file, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
   const artifact = lines.find((line) => line.type === "artifact" && line.kind === "result");
   assert.equal(artifact.text, text);
-  assert.equal(await fsp.stat(delivered.result_path).catch(() => null), null);
+  // The run's own copy is in its log folder, which stays until the run is past the window (RC3-FIX-02).
+  assert.ok(await fsp.stat(delivered.result_path));
 });
 
 test("S6 the language pack drives every string; unknown locales fall back; missing keys return the key", async (t) => {
@@ -288,21 +303,21 @@ test("S6 the language pack drives every string; unknown locales fall back; missi
   assert.equal(tr("stdout.file", { path: "p" }), "結果檔：p");
 });
 
-test("S8 task_file is sealed; each run's copy is results/<work order> <local date> <hh-mm-ss> <conclusion>.md, inline tasks are named by their id", async (t) => {
+test("S8 task_file is sealed; each run's copy is results/<work order>/<work order> <local date> <hh-mm-ss> <conclusion>.md, inline tasks are named by their id", async (t) => {
   const rt = await runtime(t);
   // Without the database the work order's file name comes from the run's plan.
   const two = (number) => String(number).padStart(2, "0");
   const copyOf = async (runId, name) => {
     const run = await readRun(rt.paths, runId);
     const at = new Date(run.closed_at);
-    return path.join(rt.paths.resultsDir, name + " " + at.getFullYear() + "-" + two(at.getMonth() + 1) + "-" + two(at.getDate()) + " "
+    return path.join(rt.paths.resultsDir, name, name + " " + at.getFullYear() + "-" + two(at.getMonth() + 1) + "-" + two(at.getDate()) + " "
       + two(at.getHours()) + "-" + two(at.getMinutes()) + "-" + two(at.getSeconds()) + " " + run.conclusion + ".md");
   };
   const first = await terminalRun(rt, "cancelled", { id: "farm" });
   assert.equal(first.plan.task_file, ".review-bridge/work-packages/farm.md");
   const d1 = await deliverOutcome({ paths: rt.paths, runId: first.runId, notify: false });
   assert.equal(d1.latest_path, await copyOf(first.runId, "farm"));
-  assert.equal(d1.result_path, path.join(rt.paths.queueRoot, first.runId + ".result.md"));
+  assert.equal(d1.result_path, path.join(rt.paths.runLogDir(first.runId), first.runId + ".result.md"));
   // The same work order run again: a copy of its own; the first one is left as it was.
   const firstText = await fsp.readFile(d1.latest_path, "utf8");
   await nextSecond();
@@ -319,7 +334,7 @@ test("S8 task_file is sealed; each run's copy is results/<work order> <local dat
   const d3 = await deliverOutcome({ paths: rt.paths, runId: inline.runId, notify: false });
   assert.equal(d3.latest_path, await copyOf(inline.runId, "inline-1"));
   assert.doesNotMatch(await fsp.readFile(d3.result_path, "utf8"), /work-plan/); // no task file, no command
-  assert.match(await fsp.readFile(d3.result_path, "utf8"), /重新建 plan/);
+  assert.match(await fsp.readFile(d3.result_path, "utf8"), /## 下一步\n再 start 一次。\n/);
   // A name already holding another run's result is never written over; the delivery stops instead.
   await nextSecond();
   const taken = await terminalRun(rt, "cancelled", { id: "farm" });
@@ -329,37 +344,13 @@ test("S8 task_file is sealed; each run's copy is results/<work order> <local dat
   assert.equal(await fsp.readFile(occupied, "utf8"), "another run's result\n");
 });
 
-test("shellQuote follows each shell's single-quote rule", () => {
-  assert.equal(shellQuote("a'b", "sh"), "'a'\\''b'");
-  assert.equal(shellQuote("a'b", "powershell"), "'a''b'");
-  assert.equal(shellQuote("plain $x `y` \"z\" 中文", "sh"), "'plain $x `y` \"z\" 中文'");
-  assert.equal(shellQuote("", "sh"), "''");
-});
-
-test("windowsArgQuote follows the C runtime rules that node itself parses", () => {
-  assert.equal(windowsArgQuote("plain"), "plain");
-  assert.equal(windowsArgQuote("with space"), '"with space"');
-  assert.equal(windowsArgQuote('it\'s "quoted" $x `y` 中文'), '"it\'s \\"quoted\\" $x `y` 中文"');
-  assert.equal(windowsArgQuote('back\\slash'), "back\\slash");
-  assert.equal(windowsArgQuote('ends with\\'), '"ends with\\\\"');
-  assert.equal(windowsArgQuote('a\\"b'), '"a\\\\\\"b"');
-  assert.equal(windowsArgQuote(""), '""');
-});
-
-test("C1 the rebuild command keeps an explicit scope; the default scope of a work order needs no flag", async (t) => {
+test("C1 a result carries no command to paste, whatever its scope (RC3-FIX-02)", async (t) => {
   const rt = await runtime(t);
-  const explicit = await terminalRun(rt, "cancelled", { id: "scoped", allowedPaths: "README.md" });
-  assert.equal(explicit.plan.scope.source, "explicit");
-  const text = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: explicit.runId, notify: false })).result_path, "utf8");
-  const sh = /sh：\n\n```\n(.+)\n```/.exec(text)[1];
-  const ps = /PowerShell：\n\n```\n(.+)\n```/.exec(text)[1];
-  assert.match(sh, / --allow-paths 'README\.md' /);
-  assert.match(ps, / --allow-paths README\.md /);
-  // Paths written in a work order are context, not scope: without --allow-paths the scope is the default.
-  const byRefs = await terminalRun(rt, "cancelled", { id: "refs" });
-  assert.equal(byRefs.plan.scope.source, "default");
-  const refsText = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: byRefs.runId, notify: false })).result_path, "utf8");
-  assert.doesNotMatch(refsText, /--allow-paths/);
+  for (const options of [{ id: "scoped", allowedPaths: "README.md" }, { id: "refs" }]) {
+    const run = await terminalRun(rt, "cancelled", options);
+    const text = await fsp.readFile((await deliverOutcome({ paths: rt.paths, runId: run.runId, notify: false })).result_path, "utf8");
+    assert.doesNotMatch(text, /bootstrap\.mjs|work-plan --|--allow-paths/, options.id);
+  }
 });
 
 test("C3 the 64 KB cap holds for any list size: out-of-scope files, changed files, long why sections", async (t) => {
@@ -417,14 +408,14 @@ test("C6 work-cancel delivers on the spot", async (t) => {
   await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
     paths: rt.paths, taskFile, owner: "Fortes", workPackage: "cancel-1", breakpoint: "b",
-    rounds: 1, callTimeout: 60_000, outPath: path.join(rt.paths.queueRoot, "cancel-1.plan.json"),
+    rounds: 1, callTimeout: 60_000, outPath: path.join(rt.paths.privateRoot, "cancel-1.plan.json"),
   });
   const authorization = await authorizeWorkPackage({ paths: rt.paths, planPath: plan.plan_path, approval: plan.plan_sha256, executionMode: "fake_cli" });
   const original = process.stdout.write;
   process.stdout.write = () => true;
   let exitCode;
   try {
-    exitCode = await dispatchCommand({ privateRootName: ".review-bridge", command: "work-cancel", args: [], repoRoot: rt.repoRoot, bridgeRoot, adapter: { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} } });
+    exitCode = await cancelWork({ paths: rt.paths, options: {}, adapter: { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} } });
   } finally {
     process.stdout.write = original;
   }

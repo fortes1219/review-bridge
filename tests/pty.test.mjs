@@ -61,7 +61,7 @@ test("the Guide at a terminal: Enter on its three questions sets the folder up a
   assert.equal(await guide.exited, 0, guide.text());
   assert.match(guide.text(), /Done\. Now:/);
   assert.match(guide.text(), /review-bridge start \.review-bridge\/work-packages\/<file>\.md/);
-  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.deepEqual([config.roles.writer.provider_id, config.roles.reviewer.provider_id], ["claude", "codex"]);
 });
 
@@ -85,7 +85,7 @@ async function card(t, answer) {
   await start.waitFor(/Start this work\? \[y\/N\]/);
   start.press(answer + KEYS.enter);
   const code = await start.exited;
-  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   return { code, text: start.text(), projectId };
 }
 

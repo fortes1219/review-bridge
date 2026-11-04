@@ -6,7 +6,7 @@ import { DAY_MS } from "../../utils/dates.mjs";
 
 // T0-11 C3: reviewer read-only check records, one day file per local day like the run archive.
 export function probeAuditDir(paths) {
-  return path.join(paths.configRoot, "reviewer-probe-audit");
+  return paths.probeAuditDir;
 }
 
 // The reviewer check records: the day files, and the single file versions before T0-11 wrote

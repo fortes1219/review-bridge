@@ -205,9 +205,9 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   const reviewPrompt = await fsp.readFile(path.join(paths.reviewsRoot, promptName), "utf8");
   assert.match(reviewPrompt, /=== review\.input ===/);
   assert.doesNotMatch(reviewPrompt, /AGENTS\.md|CURRENT_HANDOFF|go read|Required procedure/i);
-  const files = await fsp.readdir(paths.queueRoot);
+  const files = await fsp.readdir(paths.runLogDir(plan.proposed_run_id));
   const promptFile = files.find((name) => name.endsWith("-writer-only-prompt.txt"));
-  const prompt = await fsp.readFile(path.join(paths.queueRoot, promptFile), "utf8");
+  const prompt = await fsp.readFile(path.join(paths.runLogDir(plan.proposed_run_id), promptFile), "utf8");
   assert.match(prompt, /=== RULES \(rules\.md\) ===/);
   assert.match(prompt, new RegExp("Contract: " + contractSha));
   // A path named in the work order is context for the writer, not a file Bridge injects.
@@ -225,11 +225,11 @@ test("S7 / S5 live: work-start prints three plain lines, writes the result in re
   assert.equal(lines.length, 3, started.stdout);
   assert.doesNotMatch(started.stdout, /^\s*[{[]/);
   assert.match(lines[0], /^已交付：現有測試通過，reviewer 通過$/);
-  assert.match(lines[1], /^結果檔：.*[\\/]\.review-bridge[\\/]results[\\/]stop \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md$/);
+  assert.match(lines[1], /^結果檔：.*[\\/]\.review-bridge[\\/]results[\\/]stop[\\/]stop \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md$/);
   assert.match(lines[2], /^token：writer \d+，reviewer \d+$/);
   const latest = await latestResultCopy(root, "stop");
   // The person's copy is the run's result as it is (no "latest copy" header: every run has its own).
-  assert.equal(latest, await fsp.readFile(path.join(root, ".review-bridge", "review-queue", plan.proposed_run_id + ".result.md"), "utf8"));
+  assert.equal(latest, await fsp.readFile(path.join(paths.runLogDir(plan.proposed_run_id), plan.proposed_run_id + ".result.md"), "utf8"));
   assert.match(afterIdentity(latest), /^# 已交付\n/);
   assert.match(latest, /現有測試通過：npm test/);
   assert.doesNotMatch(latest, /功能驗過|全部驗過/);
@@ -260,55 +260,20 @@ test("S7b a failing notification never touches the result or the exit code", asy
   assert.match(notified.error, /fake notification failure/);
 });
 
-test("S4b the rebuild commands in a needs-fix result run as written in sh and in PowerShell and build a new plan", async (t) => {
-  const { root, bridge, paths } = await install(t);
-  const breakpoint = "it's \"quoted\" $x `y` 中文 done";
-  const order = path.join(root, ".review-bridge", "work-packages", "quote.md");
-  await workOrderFromTemplate(root, order);
-  const planned = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/quote.md", "--owner", "Fortes O'Neil", "--work-package", "quote-1",
-    "--breakpoint", breakpoint, "--allow-paths", "package.json", "--rounds", "1", "--call-timeout", "120000",
-    "--out", ".review-bridge/review-queue/quote-1.plan.json"]);
-  assert.equal(planned.status, 0, planned.stderr);
-  const plan = await readJson(path.join(root, ".review-bridge", "review-queue", "quote-1.plan.json"));
-  assert.equal(plan.breakpoint, breakpoint);
-  const started = bridge(["work-start", "--plan", ".review-bridge/review-queue/quote-1.plan.json", "--approve", plan.plan_sha256, "--fake-cli"], { FAKE_GATE_EXIT: "2" });
-  assert.equal(started.status, 76, started.stderr + started.stdout);
-  assert.match(started.stdout, /^需修正：現有測試沒過/m);
-  const result = await latestResultCopy(root, "quote");
-  assert.match(result, /重新 work-plan 建新 plan/);
-  const sh = /sh：\n\n```\n(.+)\n```/.exec(result)?.[1];
-  const ps = /PowerShell：\n\n```\n(.+)\n```/.exec(result)?.[1];
-  assert.ok(sh && ps, result);
-  assert.match(sh, /--out '\.review-bridge\/review-queue\/quote-1-2\.plan\.json'/);
-  // Both lines were generated together, so both name the same --out; each shell must create it on its own.
-  const out = path.join(root, ".review-bridge", "review-queue", "quote-1-2.plan.json");
-  const shells = [
-    { name: "sh", exe: "sh", args: ["-c", sh] },
-    { name: "powershell", exe: "powershell.exe", args: ["-NoProfile", "-Command", ps] },
-  ];
-  // One subtest per shell: a missing shell shows up as a skip in the report, never as a pass.
-  for (const shell of shells) {
-    const probe = spawnSync(shell.exe, shell.name === "sh" ? ["-c", "exit 0"] : ["-NoProfile", "-Command", "exit 0"], { encoding: "utf8", windowsHide: true });
-    await t.test(shell.name, { skip: probe.error ? shell.name + " is not available here" : false }, async () => {
-      await fsp.rm(out, { force: true });
-      const run = spawnSync(shell.exe, shell.args, { cwd: root, encoding: "utf8", windowsHide: true, env: process.env });
-      assert.equal(run.status, 0, shell.name + "\n" + run.stdout + run.stderr);
-      assert.match(run.stdout, /驗收：會跑 npm test（profile 核准）/);
-      const rebuilt = await readJson(out);
-      assert.equal(rebuilt.task_file, plan.task_file);
-      assert.equal(rebuilt.owner, "Fortes O'Neil");
-      assert.equal(rebuilt.breakpoint, breakpoint);
-      // Codex 2026-10-14: the explicit scope survives the rebuild instead of widening.
-      assert.equal(rebuilt.scope.source, "explicit");
-      assert.deepEqual(rebuilt.scope.allowed_paths, ["package.json"]);
-      assert.deepEqual(rebuilt.budget, plan.budget);
-    });
-  }
-  // A fake run raises no desktop notification; the event says so instead of claiming one was sent.
-  const notified = (await readIoEvents(paths, plan.proposed_run_id)).filter((event) => event.event === "notified");
-  assert.equal(notified.length, 1);
-  assert.equal(notified[0].sent, false);
-  assert.equal(notified[0].reason, "fake_cli");
+test("S4b a reviewer answer without a verdict for every condition: the result says so in words and the next step is start, with no command to paste", async (t) => {
+  const { root, bridge } = await install(t);
+  const { plan, planArg } = await planFakeWork(root, bridge, "verdicts");
+  const started = bridge(["work-start", "--plan", planArg, "--approve", plan.plan_sha256, "--fake-cli"], { FAKE_CODEX_VERDICT: "missing" });
+  assert.equal(started.status, 79, started.stderr + started.stdout);
+  const result = await latestResultCopy(root, "verdicts");
+  assert.ok(result, "a result copy");
+  assert.match(result, /reviewer 的回覆不符合約定的格式，Bridge 沒辦法採用：\n- 缺 AC\d+ 的判定/);
+  assert.doesNotMatch(result, /bootstrap\.mjs/);
+  assert.doesNotMatch(result, /work-plan/);
+  assert.doesNotMatch(result, /PowerShell：|sh：/);
+  const next = /## 下一步\n([\s\S]*?)\n\n## /.exec(result)?.[1] || "";
+  // A reviewer reply that does not fit is met by starting again, said with no command (Owner 2026-11-04).
+  assert.equal(next, "再 start 一次。");
 });
 
 test("S1e an external stop before the writer enqueued still lists the files changed so far", async (t) => {
@@ -351,7 +316,7 @@ test("S1c the prune command delivers a run whose delivery was lost, then folds i
   const kept = (await fsp.readFile(eventsFile, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((event) => event.type !== "run_delivered");
   await fsp.writeFile(eventsFile, kept.map((event) => JSON.stringify(event)).join("\n") + "\n");
   await fsp.writeFile(path.join(paths.runsDir, runId + ".json"), JSON.stringify(kept.at(-1).projection));
-  await fsp.rm(path.join(paths.queueRoot, runId + ".result.md"), { force: true });
+  await fsp.rm(path.join(paths.runLogDir(runId), runId + ".result.md"), { force: true });
   for (const copy of await resultCopies(root, "stop-lost")) await fsp.rm(copy, { force: true });
   const pruned = bridge(["prune"]);
   assert.equal(pruned.status, 0, pruned.stderr + pruned.stdout);

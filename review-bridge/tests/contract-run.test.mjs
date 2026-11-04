@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -185,8 +186,8 @@ test("a translation the reviewer finds wrong is redone, not sent to the human; a
   const checks = (await eventsOf(rt, redone)).filter((event) => event.event === "contract.check");
   assert.deepEqual(checks.map((event) => event.decision), ["retranslate", "pass"]);
   assert.equal((await loadContract(rt.paths, passed.contract_sha256)).translated_by.attempt, 2);
-  const prompts = (await fsp.readdir(rt.paths.queueRoot)).filter((name) => name.endsWith("-contract-prompt.txt")).sort();
-  assert.match(await fsp.readFile(path.join(rt.paths.queueRoot, prompts.at(-1)), "utf8"), /- AC1 does not match its lines: says more than its lines/);
+  const prompts = (await fsp.readdir(rt.paths.runLogDir(passed.run_id))).filter((name) => name.endsWith("-contract-prompt.txt")).sort();
+  assert.match(await fsp.readFile(path.join(rt.paths.runLogDir(passed.run_id), prompts.at(-1)), "utf8"), /- AC1 does not match its lines: says more than its lines/);
   const exhausted = await planWork(rt, "exhausted", SINGLE);
   assert.equal(start(rt, exhausted, { FAKE_CONTRACT_CHECK: "unfaithful_always" }).status, 79);
   const rejected = await runOf(rt, exhausted);
@@ -411,7 +412,7 @@ test("starting an edited work order again stops the running version first, and n
   // The old authorization cannot start anything again.
   assert.notEqual(start(rt, first).status, 0);
   // The old run's own result says why it stopped.
-  const oldResult = await fsp.readFile(path.join(rt.paths.queueRoot, first.plan.proposed_run_id + ".result.md"), "utf8");
+  const oldResult = await fsp.readFile(path.join(rt.paths.runLogDir(first.plan.proposed_run_id), first.plan.proposed_run_id + ".result.md"), "utf8");
   // Whichever side delivered first, the new run is named; it is never left out.
   assert.match(oldResult, new RegExp("started again as a new version: run " + second.plan.proposed_run_id + "[. ]"));
 });
@@ -461,7 +462,7 @@ test("an old version's verdict and finding are not carried into the new version"
   assert.equal(newEvents.some((event) => event.event === "fix.input"), false);
   assert.equal(JSON.stringify(newEvents).includes(oldClaim), false, "the old finding reached the new version's records");
   assert.ok(newEvents.find((event) => event.event === "acceptance").rows.every((row) => row.result === "proven"));
-  const newResult = await fsp.readFile(path.join(rt.paths.queueRoot, second.plan.proposed_run_id + ".result.md"), "utf8");
+  const newResult = await fsp.readFile(path.join(rt.paths.runLogDir(second.plan.proposed_run_id), second.plan.proposed_run_id + ".result.md"), "utf8");
   assert.match(newResult, /# Delivered/);
   assert.equal(newResult.includes(oldClaim), false, "the old finding reached the new version's result");
 });
@@ -470,6 +471,8 @@ test("the new version waits for the old work-start to let go of its run, and ref
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-lock-"));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const paths = getBridgePaths(root, runtimeSource, { privateRootName: ".review-bridge" });
+  await fsp.mkdir(paths.privateRoot, { recursive: true });
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4, project_id: randomUUID() }));
   const oldRun = "6b1f0c2e-8d4a-4f7b-9c3e-2a5d7e9f1b40";
   const lockFile = workLockFile(paths, oldRun);
   await fsp.mkdir(path.dirname(lockFile), { recursive: true });
@@ -1054,7 +1057,8 @@ test("a work order that breaks the format, or asks for more than the policy allo
     const refused = rt.bridge(["start", order, "--fake-cli"]);
     assert.notEqual(refused.status, 0, name);
     assert.match(refused.stderr, message, name + ": " + refused.stderr);
-    assert.equal(await fsp.stat(path.join(rt.paths.queueRoot, name + ".plan.json")).catch(() => null), null, name + ": no plan");
+    // A plan is written in the log folder of the run it proposes; there is none.
+    assert.deepEqual((await fsp.readdir(rt.paths.logRoot, { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isDirectory()), [], name + ": no plan");
   }
   assert.deepEqual((await fsp.readdir(rt.paths.runsDir).catch(() => [])).filter((entry) => entry.endsWith(".json")), [], "nothing started");
 });

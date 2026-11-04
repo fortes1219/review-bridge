@@ -37,6 +37,15 @@ export async function workOrderOfFile(db, { projectId, fileName }) {
   return rows[0]?.work_order_id || null;
 }
 
+// `logs <source_id>`: this project's work orders one of whose versions carries that source_id (a copied
+// work order keeps it, so there may be several), through work_order_versions_by_source_id.
+export async function workOrdersWithSourceId(db, { projectId, sourceId }) {
+  const { rows } = await db.query(
+    "select distinct v.work_order_id from work_order_versions v join work_orders w on w.work_order_id = v.work_order_id"
+    + " where v.source_id = $2 and w.project_id = $1", [projectId, sourceId]);
+  return rows.map((row) => row.work_order_id);
+}
+
 // Who a run's result is about, for the head of the result (RC3-FIX-01 round 2), in one statement by
 // primary key: the sealed version the run worked on and the file it was started from (the plan's,
 // which is this run's; work_orders.last_file_name moves with later starts), the contract and the
@@ -226,11 +235,11 @@ export async function recordStart(db, { planSha256, authorize }) {
       if (!updated.rowCount) throw new Error("The work order " + workOrderId + " this card updates is no longer in Bridge's records. Run: review-bridge start <file> again");
     }
     const version = await tx.query(
-      "insert into work_order_versions (work_order_id, content_sha256, version_no, title, source_text, source_file, sealed_at)"
-      + " select $1, $2, coalesce(max(version_no), 0) + 1, $3, $4, $5, $6 from work_order_versions where work_order_id = $1"
+      "insert into work_order_versions (work_order_id, content_sha256, version_no, title, source_text, source_file, sealed_at, source_id)"
+      + " select $1, $2, coalesce(max(version_no), 0) + 1, $3, $4, $5, $6, $7 from work_order_versions where work_order_id = $1"
       + " on conflict (work_order_id, content_sha256) do update set content_sha256 = excluded.content_sha256"
       + " returning version_no",
-      [workOrderId, plan.task_sha256, workOrder.title, plan.task, file, now],
+      [workOrderId, plan.task_sha256, workOrder.title, plan.task, file, now, parseWorkOrder(plan.task).frontmatter.source_id],
     );
     const authorization = started.authorization;
     await tx.query(

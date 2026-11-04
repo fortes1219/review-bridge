@@ -17,6 +17,14 @@ export function assertUnder(candidate, root, label = "Path") {
   return path.resolve(candidate);
 }
 
+// The same check against several allowed roots: the path must stay under one of them.
+export function assertUnderOne(candidate, roots, label = "Path") {
+  if (!roots.some((root) => isUnder(candidate, root))) {
+    throw new Error(label + " escaped its allowed root.");
+  }
+  return path.resolve(candidate);
+}
+
 export function samePath(left, right) {
   const a = path.resolve(left);
   const b = path.resolve(right);

@@ -7,7 +7,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
+import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
 import {
   applyNeutralInstall,
   fileSnapshot,
@@ -17,6 +19,8 @@ import {
   runtimeFingerprint,
   verifyNeutralInstall,
 } from "../installer/neutral-install.mjs";
+
+const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function workspace(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-neutral-test-"));
@@ -55,11 +59,13 @@ test("Git project gets local private exclusion without changing tracked ignore o
   assert.equal(plan.git.repository, true);
   assert.equal(plan.git.ignored, false);
   await applyNeutralInstall(plan, plan.plan_sha256);
-  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/review-bridge-install.json"], {
+  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/bridge.json"], {
     cwd: root, windowsHide: true,
   });
   assert.equal(ignored.status, 0);
+  // Bridge touches no file the person tracks: .review-bridge/, results included, is excluded locally.
   assert.equal(await fsp.readFile(path.join(root, ".gitignore"), "utf8"), "dist/\n");
+  assert.equal(spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/results/a.md"], { cwd: root, windowsHide: true }).status, 0);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
 });
 
@@ -82,7 +88,7 @@ test("a Git project named by its Windows short path is set up and excluded like 
   const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
   assert.equal(plan.git.repository, true);
   await applyNeutralInstall(plan, plan.plan_sha256);
-  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/review-bridge-install.json"], { cwd: root, windowsHide: true });
+  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/bridge.json"], { cwd: root, windowsHide: true });
   assert.equal(ignored.status, 0);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
 });
@@ -106,7 +112,7 @@ test("fresh setup rollback removes only unchanged Bridge state", async (t) => {
   await applyNeutralInstall(plan, plan.plan_sha256);
   assert.equal((await rollbackFreshNeutralInstall(plan)).rolled_back, true);
   assert.equal(await fsp.stat(path.join(root, ".review-bridge")).catch(() => null), null);
-  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/review-bridge-install.json"], {
+  const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/bridge.json"], {
     cwd: root, windowsHide: true,
   });
   assert.equal(ignored.status, 1);
@@ -143,7 +149,7 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" }, watchPort: port });
   assert.deepEqual(plan.watch, { port, strict_port: false });
   await applyNeutralInstall(plan, plan.plan_sha256);
-  const configPath = path.join(root, ".review-bridge", "review-bridge", "bridge.json");
+  const configPath = path.join(root, ".review-bridge", "bridge.json");
   const config = JSON.parse(await fsp.readFile(configPath, "utf8"));
   assert.deepEqual(config.watch, { port, strict_port: false });
   // T0-02 R3.1: retention ships with the 15-day default and is owner-editable.
@@ -159,14 +165,14 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   assert.match(chinese, /^<!-- bridge:acceptance -->\n## 驗收$/m);
   const { createHash } = await import("node:crypto");
   const hashOf = (text) => createHash("sha256").update(text).digest("hex");
-  assert.deepEqual(JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge-install.json"), "utf8")).work_template_sha256, {
+  assert.deepEqual(JSON.parse(await fsp.readFile(getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" }).installManifestPath, "utf8")).work_template_sha256, {
     "work-packages/TEMPLATE.md": hashOf(template), "work-packages/TEMPLATE.zh-TW.md": hashOf(chinese),
   });
   // Each template the install recorded has to exist.
   await fsp.rm(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.zh-TW.md"));
   await assert.rejects(verifyNeutralInstall(root), /Neutral work template is missing or empty \(\.review-bridge\/work-packages\/TEMPLATE\.zh-TW\.md\)/);
   await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.zh-TW.md"), chinese);
-  const rulesPath = path.join(root, ".review-bridge", "review-bridge", "rules.md");
+  const rulesPath = path.join(root, ".review-bridge", "rules.md");
   assert.ok((await fsp.readFile(rulesPath, "utf8")).length > 0);
   await fsp.writeFile(rulesPath, "# 我的規則\n不要動測試。\n");
   await verifyNeutralInstall(root);

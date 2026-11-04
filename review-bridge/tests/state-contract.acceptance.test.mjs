@@ -52,7 +52,7 @@ async function makeRuntime(prefix = "ac-state-", baseRoot = os.tmpdir()) {
     path.join(bridgeRoot, "config", "default-policy.json"),
   );
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, {
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(),
     schema_version: 4,
     active_runs: "derive_from_run_projections",
   });
@@ -289,7 +289,7 @@ describe("AC-11 active runs are derived from run projections", () => {
     await startFixture(runtime);
     await startFixture(runtime);
     assert.equal((await listRuns(runtime.paths, { activeOnly: true })).length, 2);
-    assert.equal(await fileExists(path.join(runtime.paths.queueRoot, "active_run_ids.json")), false);
+    assert.equal(await fileExists(path.join(runtime.paths.stateRoot, "active_run_ids.json")), false);
   });
 });
 
@@ -431,7 +431,8 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     const first = spawnSync(process.execPath, startArgs, { cwd: target, encoding: "utf8" });
     assert.equal(first.status, 0, first.stderr);
     const firstStatus = JSON.parse(first.stdout);
-    const eventsPath = path.join(target, ".review-bridge", "review-queue", "events", firstStatus.run_id + ".jsonl");
+    const targetPaths = getBridgePaths(target, sourceBridgeRoot, { privateRootName: ".review-bridge" });
+    const eventsPath = path.join(targetPaths.eventsDir, firstStatus.run_id + ".jsonl");
     const before = await fsp.readFile(eventsPath);
     const beforeSha = sha256(before);
 
@@ -440,6 +441,6 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     // The records refuse it first (one card, one yes), before the file claim is looked at.
     assert.match(second.stderr, /This card was already said yes to; one card starts one run\./);
     assert.equal(sha256(await fsp.readFile(eventsPath)), beforeSha);
-    assert.deepEqual((await fsp.readdir(path.join(target, ".review-bridge", "review-queue", "runs"))).length, 1);
+    assert.deepEqual((await fsp.readdir(targetPaths.runsDir)).length, 1);
   });
 });

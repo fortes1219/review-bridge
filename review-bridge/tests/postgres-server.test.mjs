@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   bridgeDataHome, clusterPaths, connect, DEFAULT_PORT, ensureCluster, postgresBinaries, serverLogFiles, serverRunning, startServer, stopServer,
 } from "../service/database/postgresServer.mjs";
+import { bridgeLogHome } from "../service/database/dataHome.mjs";
 
 // RC3-BLOCKER-01 step 1: the embedded PostgreSQL server is created, started, stopped and found again
 // with its data. Every test uses a real server in its own temporary folder; none calls a model.
@@ -104,6 +105,66 @@ test("a server killed without warning comes back with every committed row", { ti
   assert.notEqual(await postmasterPid(root), postmaster, "a new server was started");
   assert.deepEqual(await query(root, "select count(*)::int as n from kept"), [{ n: 500 }]);
   assert.match(await serverLog(root), /not properly shut down|automatic recovery/);
+});
+
+// A server that died and left children: no process is started or stopped here. The pid file, what
+// pg_ctl says and the process list are all made up; only their file is real, in the test's own folder.
+const HINT_OUTPUT = "FATAL:  pre-existing shared memory block is still in use\nHINT:  Check if there are any old server processes still running, and terminate them.\n";
+const OLD_POSTMASTER = 900_001;
+const BRIDGE_CHILD = 900_002;
+const OTHER_CHILD = 900_003;
+
+async function deadServer(t, { oldAlive }) {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-pg-seams-"));
+  t.after(() => fsp.rm(home, { recursive: true, force: true }));
+  const root = path.join(home, "postgres");
+  const { data } = clusterPaths(root);
+  await fsp.mkdir(data, { recursive: true });
+  await fsp.writeFile(path.join(data, "PG_VERSION"), "18\n");
+  const pidFile = path.join(data, "postmaster.pid");
+  await fsp.writeFile(pidFile, OLD_POSTMASTER + "\n" + data + "\n0\n5432\n");
+  const fakeBinaries = { pg_ctl: "fake-pg_ctl", postgres: path.join(home, "bin", "postgres") };
+  // Windows lists the full path, ps the command name.
+  const program = process.platform === "win32" ? fakeBinaries.postgres : path.basename(fakeBinaries.postgres);
+  const calls = { starts: 0, listed: [], signals: [], ready: 0 };
+  const seams = {
+    binaries: fakeBinaries,
+    tool: async () => ({ code: 3, stdout: "", stderr: "" }),
+    // As PostgreSQL does: the failed start takes the pid file with it; a good one writes its own.
+    detached: async (file, args) => {
+      calls.starts += 1;
+      if (calls.starts === 1) {
+        await fsp.rm(pidFile, { force: true });
+        return { code: 1, stdout: HINT_OUTPUT, stderr: "" };
+      }
+      await fsp.writeFile(pidFile, "900010\n" + data + "\n0\n" + /-p (\d+)/.exec(args.at(-1))[1] + "\n");
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    children: async (parent) => {
+      calls.listed.push(parent);
+      return [{ pid: BRIDGE_CHILD, program }, { pid: OTHER_CHILD, program: path.join(home, "other", "not-postgres") }];
+    },
+    alive: (pid) => (pid === OLD_POSTMASTER ? oldAlive : !calls.signals.includes(pid)),
+    signal: (pid) => { calls.signals.push(pid); },
+    ready: async () => { calls.ready += 1; },
+  };
+  return { root, calls, seams };
+}
+
+test("a dead postmaster's child that runs Bridge's postgres is the only one stopped, and the start is tried once more", async (t) => {
+  const { root, calls, seams } = await deadServer(t, { oldAlive: false });
+  const { port } = await startServer(root, seams);
+  assert.deepEqual(calls.listed, [OLD_POSTMASTER], "the old pid was read before the failed start removed its file");
+  assert.deepEqual(calls.signals, [BRIDGE_CHILD]);
+  assert.equal(calls.starts, 2);
+  assert.equal(calls.ready, 1);
+  assert.ok(Number.isInteger(port) && port > 0);
+});
+
+test("while the pid file's process is alive nothing is stopped, listed or signalled", async (t) => {
+  const { root, calls, seams } = await deadServer(t, { oldAlive: true });
+  await assert.rejects(startServer(root, seams), /pre-existing shared memory block is still in use/);
+  assert.deepEqual([calls.listed, calls.signals, calls.starts], [[], [], 1]);
 });
 
 async function portFree(port) {
@@ -432,6 +493,15 @@ test("Bridge's data home is outside every project, per platform, and can be move
   assert.equal(bridgeDataHome({ env: {}, platform: "darwin", home: "/Users/a" }), path.join("/Users/a", "Library", "Application Support", "ReviewBridge"));
   assert.equal(bridgeDataHome({ env: { XDG_DATA_HOME: "/x" }, platform: "linux", home: "/home/a" }), path.join("/x", "review-bridge"));
   assert.equal(bridgeDataHome({ env: {}, platform: "linux", home: "/home/a" }), path.join("/home/a", ".local", "share", "review-bridge"));
+});
+
+test("Bridge's run logs are in the platform's log folder, as env-paths names it, or under a moved data home", () => {
+  assert.equal(bridgeLogHome({ env: { REVIEW_BRIDGE_DATA_HOME: "relative-home" } }), path.join(path.resolve("relative-home"), "logs"));
+  assert.equal(bridgeLogHome({ env: { LOCALAPPDATA: "C:\\Users\\a\\AppData\\Local" }, platform: "win32", home: "C:\\Users\\a" }),
+    path.join("C:\\Users\\a\\AppData\\Local", "ReviewBridge", "Log"));
+  assert.equal(bridgeLogHome({ env: {}, platform: "darwin", home: "/Users/a" }), path.join("/Users/a", "Library", "Logs", "ReviewBridge"));
+  assert.equal(bridgeLogHome({ env: { XDG_STATE_HOME: "/s" }, platform: "linux", home: "/home/a" }), path.join("/s", "review-bridge"));
+  assert.equal(bridgeLogHome({ env: {}, platform: "linux", home: "/home/a" }), path.join("/home/a", ".local", "state", "review-bridge"));
 });
 
 test("the password file can be read only by its owner", { skip: process.platform === "win32" && "file modes do not apply on Windows; the folder sits under the user's own profile" }, async (t) => {

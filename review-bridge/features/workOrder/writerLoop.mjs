@@ -28,7 +28,7 @@ import {
   writeJson,
   writeText,
 } from "../../service/index.mjs";
-import { assertUnder } from "../../utils/pathGuard.mjs";
+import { assertUnder, assertUnderOne } from "../../utils/pathGuard.mjs";
 import { enqueueReview, hasPendingMessageHash } from "./reviewQueue.mjs";
 import { runReviewWorker } from "./review.mjs";
 import {
@@ -326,7 +326,8 @@ export async function validateBoundedResume({
   callTimeout,
 }) {
   validateWriterPolicy(control, rounds, callTimeout);
-  const resolvedPrompt = assertUnder(path.resolve(promptPath), paths.privateRoot, "Bounded prompt");
+  // Bridge writes the prompt into the run's log folder; one given by hand comes from the project's.
+  const resolvedPrompt = assertUnderOne(path.resolve(promptPath), [paths.logRoot, paths.privateRoot], "Bounded prompt");
   if (!(await fileExists(resolvedPrompt))) throw new Error("Prompt file is missing.");
   // Only this run's own review jobs hold it back; other runs' reviews go on beside it. A job that
   // moved between listing and reading is skipped; one that cannot be read counts as this run's.
@@ -408,11 +409,12 @@ export async function runBoundedResume({
         throw new Error("Work package authorization is no longer active.");
       }
       const stamp = callStamp(runtimeState.runId);
-      const stdoutPath = path.join(paths.queueRoot, stamp + "-writer.stdout.json");
-      const streamPath = path.join(paths.queueRoot, stamp + "-writer.stream.jsonl");
-      const stderrPath = path.join(paths.queueRoot, stamp + "-writer.stderr.log");
-      const payloadPath = path.join(paths.queueRoot, stamp + "-stop-payload.json");
-      const effectivePromptPath = path.join(paths.queueRoot, stamp + "-writer-only-prompt.txt");
+      const logs = paths.runLogDir(runtimeState.runId);
+      const stdoutPath = path.join(logs, stamp + "-writer.stdout.json");
+      const streamPath = path.join(logs, stamp + "-writer.stream.jsonl");
+      const stderrPath = path.join(logs, stamp + "-writer.stderr.log");
+      const payloadPath = path.join(logs, stamp + "-stop-payload.json");
+      const effectivePromptPath = path.join(logs, stamp + "-writer-only-prompt.txt");
       const workPackage = currentControl.run.work_package;
       const runId = runtimeState.runId;
       const limits = effectiveLimits(currentControl);
@@ -537,7 +539,7 @@ export async function runBoundedResume({
         }
       }
       if (processResult.timedOut) {
-        const timeout = await writeFailureRecord(paths, paths.queueRoot, stamp + "-writer", classifyProviderFailure({
+        const timeout = await writeFailureRecord(paths, logs, stamp + "-writer", classifyProviderFailure({
           role: "writer", provider: "claude", phase: "write", exitCode: processResult.exitCode, timedOut: true,
         }), { stdout_path: stdoutPath, stderr_path: stderrPath });
         await writeBoundedState(paths, runtimeState, {
@@ -579,7 +581,7 @@ export async function runBoundedResume({
             claudeResult ? "" : await readEvidenceTail(stdoutPath),
           ],
         });
-        const written = await writeFailureRecord(paths, paths.queueRoot, stamp + "-writer", classified, {
+        const written = await writeFailureRecord(paths, logs, stamp + "-writer", classified, {
           stdout_path: stdoutPath,
           stderr_path: stderrPath,
         });
@@ -646,8 +648,8 @@ export async function runBoundedResume({
         onStep(workPackage.test.kind === "command" ? "Tests: running " + workPackage.test.command : "Tests: not configured for this project");
         testResult ={ ...(await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "test" }, () => runTest({
           paths, test: workPackage.test,
-          stdoutPath: path.join(paths.queueRoot, stamp + "-test.stdout.log"),
-          stderrPath: path.join(paths.queueRoot, stamp + "-test.stderr.log"),
+          stdoutPath: path.join(logs, stamp + "-test.stdout.log"),
+          stderrPath: path.join(logs, stamp + "-test.stderr.log"),
           timeoutMs: testTimeout,
           onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "controller", provider: "test", call }),
         }))), work_version: testedVersion };

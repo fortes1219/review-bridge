@@ -3,11 +3,13 @@
 //
 // The binaries come from the @embedded-postgres/<platform> package. Its wrapper is never imported:
 // it hooks process exit and would stop the server whenever a Bridge command ends. Starting runs
-// `pg_ctl start -w` and never reads log text. Ready means a SQL round trip answers: pg_ctl's own wait
-// can be fooled by the postmaster.pid a killed server left behind (measured on Windows: it reported
-// the server ready while the new one was still recovering). Stopping is pg_ctl's fast shutdown and
-// waits for it; the server is never killed. While a server runs, its own postmaster.pid is the truth
-// for where it listens; nothing else records the port.
+// `pg_ctl start -w`; what the server said is read only when a start fails, to tell a taken port and
+// an old server's leftovers apart. Ready means a SQL round trip answers: pg_ctl's own wait can be
+// fooled by the postmaster.pid a killed server left behind (measured on Windows: it reported the
+// server ready while the new one was still recovering). Stopping is pg_ctl's fast shutdown and waits
+// for it; a running server is never killed, only the children a dead one left behind (see
+// startServer). While a server runs, its own postmaster.pid is the truth for where it listens;
+// nothing else records the port.
 //
 // Not exported from service/index.mjs: every command imports that index, and only the commands that
 // keep records load pg and the server binaries (through database/index.mjs).
@@ -218,8 +220,8 @@ export async function ensureCluster(root, { binaries }) {
 }
 
 // Running means pg_ctl finds a live server for this data folder (exit 0); 3 is "not running".
-export async function serverRunning(root, { binaries }) {
-  const status = await runTool(binaries.pg_ctl, ["status", "-D", clusterPaths(root).data], { timeoutMs: 30_000 });
+export async function serverRunning(root, { binaries, tool = runTool }) {
+  const status = await tool(binaries.pg_ctl, ["status", "-D", clusterPaths(root).data], { timeoutMs: 30_000 });
   if (status.code === 0) return true;
   if (status.code === 3) return false;
   throw new Error("pg_ctl status failed: " + lastLines(status.stderr || status.stdout));
@@ -285,10 +287,66 @@ async function waitUntilReady(root, deadline) {
   }
 }
 
+// A server that died without shutting down (killed, the machine off) leaves its postmaster.pid, and on
+// Windows its busy children keep running and hold the cluster's shared memory (measured: a backend in
+// a long query and the log collector stay, their parent the dead postmaster). The next start then stops
+// with "pre-existing shared memory block is still in use" and PostgreSQL's hint, said on pg_ctl's
+// output since the log collector is not up yet (src/backend/port/win32_shmem.c; POSIX sysv_shmem.c).
+// When the pid file's postmaster is gone and the start says the hint, the hint is followed: a process is
+// stopped only when its parent is that postmaster and its program is this Bridge's postgres binary, both
+// at once, and the start is tried once more. The pid is read before the first start, since a failed
+// start removes the file.
+const OLD_SERVER_HINT = /Check if there are any old server processes still running|Terminate any old server processes associated with data directory/;
+const STOP_WAIT_MS = 10_000;
+
+async function postmasterPidOf(paths) {
+  const text = await fsp.readFile(path.join(paths.data, "postmaster.pid"), "utf8").catch(() => null);
+  const pid = Number(text?.split(/\r?\n/)[0]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+// The processes whose parent is `parent`, each with its program: the full path on Windows (Win32_Process),
+// the command name elsewhere (ps).
+async function childProcesses(parent) {
+  if (process.platform === "win32") {
+    const listed = await runTool("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-CimInstance Win32_Process -Filter \"ParentProcessId=" + parent
+      + "\" | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress"], { timeoutMs: 30_000 });
+    if (listed.code !== 0) throw new Error("the old server's processes could not be listed: " + lastLines(listed.stderr || listed.stdout));
+    const rows = listed.stdout.trim() ? [].concat(JSON.parse(listed.stdout)) : [];
+    return rows.map((row) => ({ pid: Number(row.ProcessId), program: String(row.ExecutablePath || "") }));
+  }
+  const listed = await runTool("ps", ["-A", "-o", "pid=,ppid=,comm="], { timeoutMs: 30_000 });
+  if (listed.code !== 0) throw new Error("the old server's processes could not be listed: " + lastLines(listed.stderr || listed.stdout));
+  return listed.stdout.split(/\r?\n/).map((line) => /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)).filter(Boolean)
+    .filter((match) => Number(match[2]) === parent).map((match) => ({ pid: Number(match[1]), program: match[3] }));
+}
+
+function isBridgePostgres(program, binaries) {
+  if (process.platform === "win32") return Boolean(program) && path.resolve(program).toLowerCase() === path.resolve(binaries.postgres).toLowerCase();
+  return program === path.basename(binaries.postgres);
+}
+
+// Stops the dead postmaster's children that run this Bridge's postgres, and waits until they are gone.
+async function stopOldServerProcesses(parent, binaries, { children, alive, signal }) {
+  const old = (await children(parent)).filter((child) => isBridgePostgres(child.program, binaries));
+  for (const { pid } of old) { try { signal(pid); } catch {} }
+  const deadline = Date.now() + STOP_WAIT_MS;
+  while (old.some(({ pid }) => alive(pid)) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  return old.map(({ pid }) => pid);
+}
+
+// What the server itself said when it stopped: its FATAL, ERROR, DETAIL and HINT lines.
+const serverWords = (text) => String(text || "").split(/\r?\n/).filter((line) => /\b(PANIC|FATAL|ERROR|DETAIL|HINT):/.test(line)).slice(-4).join(" | ");
+
 // Starts the server, or finds it already running (another Bridge command may have started it, or
 // won a race to start it). The server takes the first free port from the start port up. Either way
-// the start counts only once a SQL round trip answers, within the timeout.
-export async function startServer(root, { binaries, timeoutSeconds = 60 }) {
+// the start counts only once a SQL round trip answers, within the timeout. `tool`, `detached`,
+// `children`, `alive`, `signal` and `ready` are seams for tests.
+export async function startServer(root, {
+  binaries, timeoutSeconds = 60, tool = runTool, detached = runDetaching, children = childProcesses, alive = processAlive,
+  signal = (pid) => process.kill(pid), ready = waitUntilReady,
+}) {
   const paths = clusterPaths(root);
   const deadline = Date.now() + timeoutSeconds * 1000;
   try {
@@ -304,23 +362,37 @@ export async function startServer(root, { binaries, timeoutSeconds = 60 }) {
   // home, beside the person's settings.json.
   const start = (await readDatabasePort({ dataHome: path.dirname(root) })) ?? DEFAULT_PORT;
   let from = start;
-  while (!(await serverRunning(root, { binaries }))) {
+  // A postmaster.pid with no server running is a server that died. A pid that is alive is another
+  // start's new server, or a number reused by something else; neither is touched.
+  const stale = (await serverRunning(root, { binaries, tool })) ? null : await postmasterPidOf(paths);
+  let oldProcessesStopped = false;
+  while (!(await serverRunning(root, { binaries, tool }))) {
     const port = await firstFreePort(from);
     if (port === null) throw new Error("PostgreSQL's ports from " + start + " up to 65535 are all taken.");
-    const result = await runDetaching(binaries.pg_ctl, [
+    const result = await detached(binaries.pg_ctl, [
       "start", "-D", paths.data, "-w", "-t", String(timeoutSeconds),
       "-o", "-h " + LISTEN_HOST + " -p " + port,
     ], { timeoutMs: (timeoutSeconds + 30) * 1000, outputFile: paths.control, cwd: paths.root });
-    if (result.code === 0 || (await serverRunning(root, { binaries }))) break;
+    if (result.code === 0 || (await serverRunning(root, { binaries, tool }))) break;
     const latest = (await serverLogFiles(root)).at(-1);
     const log = latest ? await fsp.readFile(latest, "utf8").catch(() => "") : "";
     if (/could not create any TCP\/IP sockets/.test(log.split(/\r?\n/).slice(-5).join("\n"))) {
       from = port + 1;
       continue;
     }
-    throw new Error("PostgreSQL did not start within " + timeoutSeconds + "s: " + lastLines(result.stderr || result.stdout) + " | log: " + lastLines(log, 3));
+    const said = result.stdout + "\n" + log.split(/\r?\n/).slice(-5).join("\n");
+    if (!oldProcessesStopped && stale !== null && !alive(stale) && OLD_SERVER_HINT.test(said)) {
+      oldProcessesStopped = true;
+      try {
+        await stopOldServerProcesses(stale, binaries, { children, alive, signal });
+      } catch (error) {
+        throw new Error("PostgreSQL did not start: " + serverWords(said) + " | " + error.message);
+      }
+      continue;
+    }
+    throw new Error("PostgreSQL did not start within " + timeoutSeconds + "s: " + (serverWords(said) || "pg_ctl exited " + result.code + "."));
   }
-  await waitUntilReady(root, deadline);
+  await ready(root, deadline);
   return { port: await runningPort(paths) };
 }
 

@@ -1,5 +1,5 @@
 // Delivery (T0-07): when a run reaches a terminal state, write one plain-language result
-// file in review-queue/ and the person's copy in results/, one best-effort desktop
+// file in the run's log folder and the person's copy in results/<work order>/, one best-effort desktop
 // notification, and three lines on stdout. Everything is composed from typed records; no
 // model writes any of it.
 import { createHash, randomUUID } from "node:crypto";
@@ -23,7 +23,7 @@ import {
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
-import { loadContract } from "./contract.mjs";
+import { contractPath, loadContract } from "./contract.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
 import { resultIdentity } from "./workOrderRecords.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
@@ -38,6 +38,14 @@ export const LOCK_RETRY_DELAY_MS = 250;
 export const LATE_DELIVERY_MS = 60_000;
 
 export const ORDER_CHANGE_MAX_LINES = 20;
+
+// The result's Next step for a run that did not succeed, by closed reason; any reason not named is
+// "start it again" (Owner 2026-11-04).
+const NEXT_STEP = Object.freeze({
+  rate_limited: "result.next.quota", token_limit: "result.next.quota",
+  review_hard_stop: "result.next.findings", rounds_exhausted: "result.next.findings", acceptance_unverified: "result.next.findings",
+  run_timeout: "result.next.timeout", writer_timeout: "result.next.timeout",
+});
 
 // The work order as sealed at the start against the file as it is now. Null when they match
 // (outer blank lines aside), { missing } when the file is gone; otherwise the lines that left and
@@ -108,65 +116,9 @@ function resultCase(run) {
   }
 }
 
-// V2.4: one argument, quoted for the named shell by rule, never by hand.
-export function shellQuote(value, shell) {
-  const text = String(value ?? "");
-  if (shell === "powershell") return "'" + text.replaceAll("'", "''") + "'";
-  return "'" + text.replaceAll("'", "'\\''") + "'";
-}
-
-// Windows command-line quoting as the C runtime parses it: wrap in double quotes, write an
-// embedded `"` as `\"`, and double the backslashes that sit before a quote or at the end.
-// The PowerShell line is `node --% ...` so PowerShell passes this verbatim; Windows PowerShell
-// 5.1 would otherwise drop embedded double quotes when calling a native program.
-export function windowsArgQuote(value) {
-  const text = String(value ?? "");
-  if (text !== "" && !/[\s"]/.test(text)) return text;
-  return '"' + text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1") + '"';
-}
-
-function posixRelative(from, to) {
-  return path.relative(from, to).split(path.sep).join("/");
-}
-
-// V2.4: the work-plan line that rebuilds a plan from this run's own values.
-export async function rebuildCommands({ paths, plan, workPackage }) {
-  const taskFile = plan?.task_file || workPackage?.task_file || null;
-  if (!taskFile) return null;
-  const id = workPackage.work_package_id;
-  let suffix = 2;
-  let outName;
-  for (;;) {
-    outName = id + "-" + suffix + ".plan.json";
-    const exists = await fsp.stat(path.join(paths.queueRoot, outName)).then(() => true, () => false);
-    if (!exists) break;
-    suffix += 1;
-  }
-  const outPath = posixRelative(paths.repoRoot, path.join(paths.queueRoot, outName));
-  const bootstrap = posixRelative(paths.repoRoot, path.join(paths.bridgeRoot, "bootstrap.mjs"));
-  const budget = workPackage.budget || {};
-  const args = [
-    "work-plan",
-    "--task-file", taskFile,
-    "--owner", plan?.owner ?? "",
-    "--work-package", id,
-    "--breakpoint", workPackage.breakpoint ?? "",
-    // Codex 2026-10-14: a scope the human named explicitly must survive the rebuild; without it the
-    // new plan would fall back to the references or the whole project.
-    ...(workPackage.scope?.source === "explicit" ? ["--allow-paths", (workPackage.scope.allowed_paths || []).join(",")] : []),
-    "--rounds", String(budget.rounds ?? ""),
-    "--call-timeout", String(budget.call_timeout ?? ""),
-    "--out", outPath,
-    "--plain",
-  ];
-  const bare = (arg) => arg === "work-plan" || arg.startsWith("--");
-  const sh = ["node", shellQuote(bootstrap, "sh"), ...args.map((arg) => (bare(arg) ? arg : shellQuote(arg, "sh")))].join(" ");
-  const powershell = ["node", "--%", windowsArgQuote(bootstrap), ...args.map((arg) => (bare(arg) ? arg : windowsArgQuote(arg)))].join(" ");
-  return { powershell, sh, out: outPath };
-}
-
+// The plan the run was started from: its copy in the run's own log folder.
 async function planForRun(paths, runId) {
-  for (const file of await listJson(paths.queueRoot)) {
+  for (const file of await listJson(paths.runLogDir(runId))) {
     if (!file.endsWith(".plan.json")) continue;
     const plan = await readJson(file).catch(() => null);
     if (plan?.proposed_run_id === runId) return plan;
@@ -327,24 +279,27 @@ export function composeSections({ t, run, workPackage, plan, events, delta, cont
     why.push(t("result.why.run_timeout", { limit: workPackage?.budget?.run_timeout ?? run.budget?.run_timeout ?? "" }));
   } else {
     if (run.closed_reason === "evidence_unavailable") why.push(t("result.why.evidence_unavailable"));
+    // An answer that broke the agreed format is said in words first, with what was wrong in it (a
+    // missing condition named); the reason code and the logs come after.
+    const malformed = { malformed_review_result: "reviewer", malformed_writer_result: "writer" }[run.closed_reason];
+    const errors = Array.isArray(state.errors) ? state.errors.slice(0, 10).map((line) => {
+      const missing = malformed && /^\$\.(?:verdicts|criteria): missing (.+)$/.exec(line);
+      return "- " + (missing ? t("result.why.malformed.missing", { ids: missing[1] }) : line);
+    }) : [];
+    if (malformed) why.push(t("result.why.malformed." + malformed), ...errors);
     why.push(t("result.why.error", { reason: run.closed_reason || run.conclusion }));
     for (const file of [state.stderr_path, state.writer_stderr_path, state.review_error_path, failure?.record_path].filter(Boolean)) why.push(t("result.why.error.log", { path: file }));
     if (state.error) why.push(String(state.error));
-    if (Array.isArray(state.errors)) for (const line of state.errors.slice(0, 10)) why.push("- " + line);
+    if (!malformed) why.push(...errors);
     if (state.contract_problems?.length) {
       why.push(t("result.why.contract.problems"));
       for (const line of state.contract_problems.slice(0, 10)) why.push("- " + line);
     }
   }
 
-  const next = [];
-  const nextKey = resultKey(t, "result.next", run);
-  if (kind === "rate_limited") next.push(t(nextKey, { provider: failure?.provider || "", hint: failure?.reset_hint ? t(nextKey + ".hint", { hint: failure.reset_hint }) : "" }));
-  else if (kind === "failure") {
-    const log = state.stderr_path || state.writer_stderr_path || failure?.record_path || null;
-    next.push(log ? t(nextKey, { path: log }) : t(nextKey + ".nolog"));
-  } else next.push(t(nextKey));
-  if (kind !== "success") next.push(t("result.next.plan_used"));
+  // Every way a run ends short of success is met by starting the work order again, said in one line
+  // with no command; the closed reason only picks what to do first (Owner 2026-11-04).
+  const next = [t(kind === "success" ? "result.next.success" : NEXT_STEP[run.closed_reason] || "result.next.start_again")];
 
   // The changed list is computed at delivery time. A late delivery (prune after a crash, days on)
   // would otherwise present the owner's later edits as the run's work; it says so instead.
@@ -434,8 +389,8 @@ function clipLine(line, max) {
   return max === Infinity || line.length <= max ? line : line.slice(0, max - 1) + "…";
 }
 
-export function renderResult({ t, sections, commands, identity = [] }) {
-  const build = ({ stderr, findings, changed, whyMax = Infinity, clip = Infinity, withCommands = true, trimmed = false }) => {
+export function renderResult({ t, sections, identity = [] }) {
+  const build = ({ stderr, findings, changed, whyMax = Infinity, clip = Infinity, trimmed = false }) => {
     let why = [...sections.why];
     if (!stderr && sections.stderrTail.length) {
       const start = why.indexOf("```");
@@ -470,7 +425,6 @@ export function renderResult({ t, sections, commands, identity = [] }) {
       "",
       "## " + t("result.section.next"),
       ...sections.next,
-      ...(commands && withCommands ? ["", t("result.next.command.powershell"), "", "```", commands.powershell, "```", "", t("result.next.command.sh"), "", "```", commands.sh, "```"] : []),
       "",
       "## " + t("result.section.changed"),
       ...(sections.changedNote ? [sections.changedNote, ""] : []),
@@ -494,7 +448,7 @@ export function renderResult({ t, sections, commands, identity = [] }) {
     { stderr: false, findings: RESULT_MAX_FINDINGS, changed: RESULT_MAX_CHANGED },
     { stderr: false, findings: 5, changed: 20 },
     { stderr: false, findings: 5, changed: 0, whyMax: 12, clip: 300, trimmed: true },
-    { stderr: false, findings: 0, changed: 0, whyMax: 0, clip: 300, withCommands: false, trimmed: true },
+    { stderr: false, findings: 0, changed: 0, whyMax: 0, clip: 300, trimmed: true },
   ];
   let text = "";
   for (const step of steps) {
@@ -551,15 +505,22 @@ const two = (number) => String(number).padStart(2, "0");
 // A file name holds no \ / : * ? " < > | or control characters on Windows, nor a trailing dot or space.
 const fileNamePart = (text) => String(text).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
 
+// The work order's own folder for the person's copies: .review-bridge/results/<work order file>/, one
+// folder per work order as Playwright keeps test-results/<test>/ (DECISIONS 2026-11-04).
+function resultFolder(paths, { identity, workPackage, plan }) {
+  const taskFile = !identity.unavailable ? identity.source_file : plan?.task_file || workPackage?.task_file || null;
+  const name = taskFile ? path.basename(taskFile).replace(/\.md$/i, "") : workPackage.work_package_id;
+  return { name, folder: path.join(paths.resultsDir, fileNamePart(name)) };
+}
+
 // The person's copy of a run's result (DECISIONS 2026-11-03, RC3-FIX-01 round 2): one file per run in
-// .review-bridge/results/, never in work-packages/, named so an auditor holding a ticket number or a
-// date finds it: "<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md". Without the
-// database the work order's file name comes from the run's plan. The person may delete these; the
-// record is the database and review-queue/<run_id>.result.md.
+// the work order's results folder, never in work-packages/, named so an auditor holding a ticket number
+// or a date finds it: "<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md". Without
+// the database the work order's file name comes from the run's plan. The person may delete these; the
+// record is the database, and the run's log folder keeps <run_id>.result.md.
 function resultCopyPath(paths, { identity, run, workPackage, plan }) {
   const known = !identity.unavailable;
-  const taskFile = known ? identity.source_file : plan?.task_file || workPackage?.task_file || null;
-  const name = taskFile ? path.basename(taskFile).replace(/\.md$/i, "") : workPackage.work_package_id;
+  const { name, folder } = resultFolder(paths, { identity, workPackage, plan });
   const closed = new Date(known ? identity.closed_at : run.closed_at || run.updated_at);
   const parts = [
     ...(known && identity.source_id !== null ? [identity.source_id] : []),
@@ -568,19 +529,31 @@ function resultCopyPath(paths, { identity, run, workPackage, plan }) {
     two(closed.getHours()) + "-" + two(closed.getMinutes()) + "-" + two(closed.getSeconds()),
     known ? identity.conclusion : run.conclusion,
   ];
-  return path.join(paths.resultsDir, parts.map(fileNamePart).join(" ") + ".md");
+  return path.join(folder, parts.map(fileNamePart).join(" ") + ".md");
+}
+
+// The sealed contract beside the results that point to it: contract.v<version>.<short SHA>.json, the
+// short SHA as Git abbreviates a commit (7 characters), so each result's contract_sha256 names its own
+// file even when one version was started twice (Owner 2026-11-04). The bytes are the sealed file's.
+// Without the version from the database there is no name to give it, and it is not written.
+async function contractCopy(paths, { identity, workPackage, plan, contractSha256 }) {
+  if (identity.unavailable || !contractSha256) return null;
+  const bytes = await fsp.readFile(contractPath(paths, contractSha256), "utf8").catch(() => null);
+  if (bytes === null) return null;
+  const file = path.join(resultFolder(paths, { identity, workPackage, plan }).folder, "contract.v" + identity.version_no + "." + contractSha256.slice(0, 7) + ".json");
+  return { file, bytes };
 }
 
 // The copy is created, never overwritten (exclusive create). A file of that name with this very text
 // is this delivery tried again and is kept as the copy; one with other text is another run's, and
 // the delivery stops rather than write over it.
-async function writeNewCopy(file, text) {
+async function writeNewCopy(file, text, taken = "is already another run's result") {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   try {
     await fsp.writeFile(file, text, { encoding: "utf8", flag: "wx" });
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
-    if (await fsp.readFile(file, "utf8") !== text) throw new Error("The result file " + file + " is already another run's result; it was not written over.");
+    if (await fsp.readFile(file, "utf8") !== text) throw new Error("The result file " + file + " " + taken + "; it was not written over.");
   }
   return file;
 }
@@ -632,11 +605,11 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   const orderChange = current === undefined ? null : current?.unreadable ? current : workOrderChange(workPackage.task, current);
   const successorExists = run.superseded_by ? await readRun(paths, run.superseded_by).then(() => true, () => false) : false;
   const sections = composeSections({ t, run, workPackage, plan, events, delta, contract, orderChange, successorExists, limits: control.run.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
-  const commands = run.conclusion === "success" ? null : await rebuildCommands({ paths, plan, workPackage });
-  const runPath = path.join(paths.queueRoot, runId + ".result.md");
+  const runPath = path.join(paths.runLogDir(runId), runId + ".result.md");
   const identity = await readIdentity(runId);
   const copyPath = resultCopyPath(paths, { identity, run, workPackage, plan });
-  const body = renderResult({ t, sections, commands, identity: identityLines(t, identity) });
+  const contractFile = await contractCopy(paths, { identity, workPackage, plan, contractSha256: control.run.contract_sha256 });
+  const body = renderResult({ t, sections, identity: identityLines(t, identity) });
   const sha256 = createHash("sha256").update(body).digest("hex");
 
   let delivered = null;
@@ -644,6 +617,7 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
     try {
       delivered = await deliverRun(paths, runId, async () => {
         await writeAtomic(runPath, body);
+        if (contractFile) await writeNewCopy(contractFile.file, contractFile.bytes, "holds another contract");
         const copy = await writeNewCopy(copyPath, body);
         return { result_path: runPath, latest_path: copy, latest_written: true, sha256 };
       });

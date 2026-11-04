@@ -2,7 +2,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 
 import { readJson } from "../../service/index.mjs";
-import { assertUnder } from "../../utils/pathGuard.mjs";
+import { assertUnderOne } from "../../utils/pathGuard.mjs";
 import { BUDGET_KEYS } from "./workOrderFormat.mjs";
 import { assertCurrentPlan, runningVersions } from "./workPackage.mjs";
 
@@ -64,7 +64,7 @@ export async function startCard(paths, plan) {
 // it is asked here; without one the card is printed with the command an agent runs once the person
 // said yes, and null is returned: nothing starts.
 export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask = true, again = null } = {}) {
-  const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
+  const resolvedPlan = assertUnderOne(path.resolve(planPath), [paths.logRoot, paths.privateRoot], "Work plan");
   const plan = await readJson(resolvedPlan);
   assertCurrentPlan(plan);
   if (assumeYes) return plan.plan_sha256;

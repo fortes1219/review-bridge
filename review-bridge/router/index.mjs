@@ -122,6 +122,14 @@ export const COMMANDS = {
     options: { "--after": AFTER, "--json": { ...JSON_OUT } },
     run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.checkService(context.paths) }),
   },
+  logs: {
+    audience: "human",
+    positional: "target",
+    usage: "<run_id|file>",
+    summary: "Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first",
+    options: { "--after": AFTER, "--json": { ...JSON_OUT, help: "Print the result as JSON, with the same run fields as work-status" } },
+    run: (context) => workOrder.showLogs(context),
+  },
   up: {
     audience: "human",
     summary: "Start the local page service in the background",
@@ -204,7 +212,7 @@ export const COMMANDS = {
       ...WORK_ORDER_OPTIONS,
       "--task-file": { key: "taskFile", type: "string", value: "<file>", help: "The work order, instead of giving it first" },
       "--task": { key: "task", type: "string", value: "<text>", internal: true, help: "Work text instead of a work order file (needs --allow-paths)" },
-      "--out": { key: "outPath", type: "string", value: "<file>", default: ".review-bridge/review-queue/<name>.plan.json", help: "Where the plan is written" },
+      "--out": { key: "outPath", type: "string", value: "<file>", default: "<name>.plan.json in the run's log folder", help: "Where the plan is written" },
       "--plain": { key: "plain", type: "boolean", help: "Print a short summary of the plan" },
       "--json": { ...JSON_OUT },
     },

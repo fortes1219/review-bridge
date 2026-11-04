@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -25,14 +26,14 @@ async function runtime(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-wp-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, {
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(),
     schema_version: 4, active_runs: "derive_from_run_projections",
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     test: { profile_id: "node-backend", rules: [{ command: "npm test", package_script: "test" }] },
   });
   await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify({ name: "wp", scripts: { test: "node -e \"process.exit(0)\"" } }));
   await writeJson(paths.policyOverridePath, { schema_version: 5 });
-  await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
+  await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), paths.rulesPath);
   await fsp.mkdir(path.join(repoRoot, "src", "game"), { recursive: true });
   await fsp.writeFile(path.join(repoRoot, "src", "game", "farm.js"), "// farm\n");
   await fsp.writeFile(path.join(repoRoot, "src", "index.js"), "// index\n");
@@ -128,7 +129,7 @@ test("T8 an explicit --allow-paths must exist and stay out of the forbidden list
 test("T9 the plan seals the rules digest and the work-order text; a changed work order changes the sha", async (t) => {
   const r = await runtime(t);
   const first = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "seal-a" });
-  assert.equal(first.rules.path, ".review-bridge/review-bridge/rules.md");
+  assert.equal(first.rules.path, ".review-bridge/rules.md");
   assert.match(first.rules.sha256, /^[0-9a-f]{64}$/);
   assert.match(first.rules.text, /規則摘要/);
   const second = await plan(r, { task: order({ references: "src/game/farm.js\n- one more line" }), id: "seal-b" });
@@ -147,14 +148,14 @@ test("T10 authorize fails closed when the work order or rules.md changed after t
   await assert.rejects(authorizeWorkPackage({ paths: r.paths, planPath: sealed.plan_path, approval: sealed.plan_sha256, executionMode: "fake_cli" }),
     /The work order \.review-bridge\/stale-order\.md changed after the plan was built\. Build a new plan\./);
   const sealedRules = await plan(r, { task: order(), id: "stale-rules" });
-  await fsp.appendFile(path.join(r.paths.configRoot, "rules.md"), "\n再加一條。\n");
+  await fsp.appendFile(r.paths.rulesPath, "\n再加一條。\n");
   await assert.rejects(authorizeWorkPackage({ paths: r.paths, planPath: sealedRules.plan_path, approval: sealedRules.plan_sha256, executionMode: "fake_cli" }),
-    /批准後 \.review-bridge\/review-bridge\/rules\.md 變了/);
+    /批准後 \.review-bridge\/rules\.md 變了/);
 });
 
 test("T11 a missing, empty or oversized rules.md stops work-plan", async (t) => {
   const r = await runtime(t);
-  const rules = path.join(r.paths.configRoot, "rules.md");
+  const rules = r.paths.rulesPath;
   await fsp.rm(rules);
   await assert.rejects(plan(r, { task: order() }), /規則摘要檔不見了/);
   await fsp.writeFile(rules, "   \n");

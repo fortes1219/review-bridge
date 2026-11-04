@@ -33,6 +33,8 @@ process.on("exit", () => fs.rmSync(defaultBase, { recursive: true, force: true }
 const childEnv = { ...process.env };
 
 const sha = (data) => createHash("sha256").update(data).digest("hex");
+const { getBridgePaths } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "utils", "paths.mjs")).href);
+const projectPaths = (root) => getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" });
 
 async function workspace(t, { gitRepo = true } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-uninstall-"));
@@ -87,8 +89,8 @@ async function addUserData(root) {
   await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.result.md"), "# 已交付\n");
   await fsp.mkdir(path.join(privateRoot, "archive"), { recursive: true });
   await fsp.writeFile(path.join(privateRoot, "archive", "2026-10-14.jsonl"), "{\"type\":\"run\"}\n");
-  await fsp.appendFile(path.join(privateRoot, "review-bridge", "rules.md"), "\n不要動測試。\n");
-  const configPath = path.join(privateRoot, "review-bridge", "bridge.json");
+  await fsp.appendFile(path.join(privateRoot, "rules.md"), "\n不要動測試。\n");
+  const configPath = path.join(privateRoot, "bridge.json");
   const config = JSON.parse(await fsp.readFile(configPath, "utf8"));
   config.retention = { days: 20 };
   await fsp.writeFile(configPath, JSON.stringify(config, null, 2) + "\n");
@@ -150,10 +152,12 @@ test("V1 uninstall removes .review-bridge/, restores the exclusion, keeps .claud
   await install(root);
   await addUserData(root);
   const before = await tree(path.join(root, ".review-bridge"));
+  const manifest = projectPaths(root).installManifestPath;
+  assert.equal(await exists(manifest), true);
   const { plan, result } = await uninstall(root);
   assert.equal(plan.kind, "fresh");
   assert.ok(plan.user_files.includes("work-packages/farm.md"));
-  assert.ok(plan.user_files.includes("review-bridge/rules.md"));
+  assert.ok(plan.user_files.includes("rules.md"));
   assert.equal(plan.backup_root, await fsp.realpath(defaultBackupRoot()).catch(() => defaultBackupRoot()));
   assert.equal(await exists(path.join(root, ".review-bridge")), false);
   assert.equal(await exists(path.join(root, ".review-bridge-install.lock")), false);
@@ -161,7 +165,9 @@ test("V1 uninstall removes .review-bridge/, restores the exclusion, keeps .claud
   assert.deepEqual(await tree(path.join(root, ".claude")), claudeBefore);
   const backup = await tree(path.join(result.backup_dir, "files"));
   for (const [name, hash] of before) assert.equal(backup.get(name), hash, name);
-  for (const name of ["work-packages/farm.md", "work-packages/farm.result.md", "archive/2026-10-14.jsonl", "review-bridge/rules.md"]) assert.ok(backup.has(name), name);
+  for (const name of ["work-packages/farm.md", "work-packages/farm.result.md", "archive/2026-10-14.jsonl", "rules.md", "@state/review-bridge-install.json"]) assert.ok(backup.has(name), name);
+  // The install record goes with the project's files.
+  assert.equal(await exists(manifest), false);
   const journal = await readJson(path.join(result.backup_dir, "journal.json"));
   assert.equal(journal.state, "complete");
   assert.equal((await journalOf(plan)).indexed, null);
@@ -184,14 +190,12 @@ test("V2 / V8k a run in progress, a changed plan, a failed backup and a changed 
     assert.equal((await planNeutralUninstall({ target: root })).kind, "fresh", reason + ": next plan is fresh");
   };
   // A run in progress.
-  const runFile = path.join(root, ".review-bridge", "review-queue", "runs", "run-0001.json");
+  const runFile = path.join(projectPaths(root).runsDir, "run-0001.json");
   await fsp.writeFile(runFile, JSON.stringify({ run_id: "run-0001", status: "in_progress" }));
-  before.set("review-queue/runs/run-0001.json", sha(await fsp.readFile(runFile)));
   let plan = await planNeutralUninstall({ target: root });
   await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256), /Work is still running: run-0001 \(in_progress\)/);
   await checkCancelled(plan, "active_run");
   await fsp.rm(runFile);
-  before.delete("review-queue/runs/run-0001.json");
   // The plan changed after it was shown.
   plan = await planNeutralUninstall({ target: root });
   await fsp.appendFile(path.join(root, ".review-bridge", "work-packages", "farm.md"), "改了\n");
@@ -234,7 +238,7 @@ test("V3 maintenance blocks new work, and a run claimed as the marker appears is
   const paths = getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" });
   const makePlan = async (id) => createWorkPackagePlan({
     paths, task: "Update package.json only.", owner: "o", workPackage: id, breakpoint: "b",
-    allowedPaths: "package.json", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.queueRoot, id + ".plan.json"),
+    allowedPaths: "package.json", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.privateRoot, id + ".plan.json"),
   });
   const marker = path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
   const blocked = await makePlan("blocked-1");
@@ -269,7 +273,7 @@ test("approval binds the plan; invalid targets, held locks, foreign markers, ins
   await fsp.writeFile(marker, JSON.stringify({ operation: "upgrade", upgrade_id: "u" }));
   await assert.rejects(planNeutralUninstall({ target: root }), /interrupted Bridge upgrade .*upgrade --rollback/);
   await fsp.rm(marker);
-  assert.ok(await exists(path.join(root, ".review-bridge", "review-bridge-install.json")), "nothing was touched");
+  assert.ok(await exists(projectPaths(root).installManifestPath), "nothing was touched");
   // The CLI has no --yes, and a missing terminal is refused with the --plan route.
   const yes = spawnSync(process.execPath, [bridge, "uninstall", "--target", root, "--yes"], { cwd: packageRoot, encoding: "utf8", env: childEnv, windowsHide: true });
   assert.equal(yes.status, 2);
@@ -469,7 +473,7 @@ test("V6 a process that merely claims the session is never killed", async (t) =>
   await install(root);
   const sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { windowsHide: true, stdio: "ignore" });
   t.after(() => { try { sleeper.kill(); } catch {} });
-  await fsp.writeFile(path.join(root, ".review-bridge", "watch-session.json"), JSON.stringify({ pid: sleeper.pid, port: await freePort(), url: "http://127.0.0.1:1/", service_id: "f".repeat(32), started_at: new Date().toISOString() }));
+  await fsp.writeFile(projectPaths(root).watchSessionPath, JSON.stringify({ pid: sleeper.pid, port: await freePort(), url: "http://127.0.0.1:1/", service_id: "f".repeat(32), started_at: new Date().toISOString() }));
   const plan = await planNeutralUninstall({ target: root });
   assert.equal(plan.service_running, false);
   await applyNeutralUninstall(plan, plan.plan_sha256);
@@ -565,25 +569,25 @@ test("L2 an interrupted takeover is not guessed at: the message names both files
     assert.ok(error.message.includes(lock + ".takeover") && error.message.includes(lock));
     return true;
   });
-  assert.ok(await exists(path.join(root, ".review-bridge", "review-bridge-install.json")), "nothing was touched");
+  assert.ok(await exists(projectPaths(root).installManifestPath), "nothing was touched");
 });
 
 test("R1 a run record that cannot be read refuses and cancels cleanly", async (t) => {
   const root = await workspace(t);
   await install(root);
-  await fsp.writeFile(path.join(root, ".review-bridge", "review-queue", "runs", "broken.json"), "{");
+  await fsp.writeFile(path.join(projectPaths(root).runsDir, "broken.json"), "{");
   const plan = await planNeutralUninstall({ target: root });
   await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256), /Cannot confirm that no work is running: the run record broken\.json cannot be read/);
   assert.equal(await exists(path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"))), false);
   assert.equal((await journalOf(plan)).indexed, null);
-  assert.ok(await exists(path.join(root, ".review-bridge", "review-bridge-install.json")));
+  assert.ok(await exists(projectPaths(root).installManifestPath));
   // A status this Bridge does not know is not "not running".
-  await fsp.writeFile(path.join(root, ".review-bridge", "review-queue", "runs", "broken.json"), JSON.stringify({ run_id: "run-odd", status: "paused_by_future_version" }));
+  await fsp.writeFile(path.join(projectPaths(root).runsDir, "broken.json"), JSON.stringify({ run_id: "run-odd", status: "paused_by_future_version" }));
   const second = await planNeutralUninstall({ target: root });
   await assert.rejects(applyNeutralUninstall(second, second.plan_sha256), /run run-odd \(broken\.json\) has a status this Bridge does not know: paused_by_future_version/);
   assert.equal(await exists(path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"))), false);
   // Every status the state machine knows is either active or terminal; a terminal one lets uninstall go on.
-  await fsp.writeFile(path.join(root, ".review-bridge", "review-queue", "runs", "broken.json"), JSON.stringify({ run_id: "run-done", status: "completed", conclusion: "failure", closed_reason: "token_limit" }));
+  await fsp.writeFile(path.join(projectPaths(root).runsDir, "broken.json"), JSON.stringify({ run_id: "run-done", status: "completed", conclusion: "failure", closed_reason: "token_limit" }));
   const third = await planNeutralUninstall({ target: root });
   assert.equal((await applyNeutralUninstall(third, third.plan_sha256)).ok, true);
 });
@@ -669,7 +673,7 @@ test("I3 an index that cannot be cleared is reported as unfinished and retried; 
   await install(second);
   const marker = path.join(second, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
   const cancelPlan = await planNeutralUninstall({ target: second });
-  await fsp.appendFile(path.join(second, ".review-bridge", "review-bridge", "rules.md"), "changed\n");
+  await fsp.appendFile(path.join(second, ".review-bridge", "rules.md"), "changed\n");
   await assert.rejects(applyNeutralUninstall(cancelPlan, cancelPlan.plan_sha256, { beforeIndexRemoval: async () => { throw new Error("index locked"); } }),
     /The cancel did not finish: the backup index could not be cleared \(index locked\)/);
   assert.equal(await exists(marker), true, "the marker stays");
@@ -688,7 +692,7 @@ test("S1 a cancel whose running page service does not come back keeps the marker
   assert.equal(plan.service_running, true);
   // The backup fails after the service was stopped; the restart during the cancel fails too.
   await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256, {
-    afterBackup: async (dir) => fsp.appendFile(path.join(dir, "files", "review-bridge", "rules.md"), "tampered"),
+    afterBackup: async (dir) => fsp.appendFile(path.join(dir, "files", "rules.md"), "tampered"),
     restartService: async () => false,
   }), /The cancel did not finish: the Bridge page service that was running did not restart/);
   assert.equal(await exists(marker), true, "the marker stays");
@@ -741,7 +745,7 @@ test("a cancel whose page service fails to restart with a reason shows that reas
   const marker = path.join(root, ".review-bridge", ...MAINTENANCE_MARKER.split("/"));
   const plan = await planNeutralUninstall({ target: root });
   await assert.rejects(applyNeutralUninstall(plan, plan.plan_sha256, {
-    afterBackup: async (dir) => fsp.appendFile(path.join(dir, "files", "review-bridge", "rules.md"), "tampered"),
+    afterBackup: async (dir) => fsp.appendFile(path.join(dir, "files", "rules.md"), "tampered"),
     restartService: async () => ({ running: false, reason: "up exited 2 | port 4888 is taken" }),
   }), /The cancel did not finish: the Bridge page service that was running did not restart: up exited 2 \| port 4888 is taken\. Nothing was deleted/);
   assert.equal(await exists(marker), true, "the marker stays");

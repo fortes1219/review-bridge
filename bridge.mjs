@@ -17,6 +17,7 @@ import { renderCommandHelp, renderMainHelp } from "./review-bridge/router/help.m
 import { COMMANDS, parseCommandLine } from "./review-bridge/router/index.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
 import { loadAdapterForInspection, resolveAdapterModule, UNSUPPORTED_ADAPTER } from "./review-bridge/router/platform.mjs";
+import { projectLogRoot, projectStateRoot } from "./review-bridge/utils/paths.mjs";
 import {
   applyNeutralInstall, applyNeutralUninstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult,
   formatUpgradeRollbackPlan, formatUpgradeRollbackResult, loadInstalledServiceModules, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
@@ -69,7 +70,6 @@ async function selfTestFailure(name, result, completed, resultFile) {
 async function runFakeScenarios(target, privateName) {
   const bootstrap = bootstrapPath;
   const workRoot = path.join(target, privateName, "work-packages");
-  const queueRoot = path.join(target, privateName, "review-queue");
   await fsp.mkdir(workRoot, { recursive: true });
   const scenarios = [
     { name: "PASS", expectedExit: [0], status: "pass" },
@@ -81,7 +81,6 @@ async function runFakeScenarios(target, privateName) {
   for (const scenario of scenarios) {
     const id = "init-self-test-" + scenario.name.toLowerCase().replaceAll("_", "-");
     const taskPath = path.join(workRoot, id + ".md");
-    const planPath = path.join(queueRoot, id + ".plan.json");
     // A minimal work order: the fake translation turns its one acceptance line into AC1.
     await fsp.writeFile(taskPath, [
       "# Review Bridge self-test",
@@ -105,13 +104,12 @@ async function runFakeScenarios(target, privateName) {
       "--allow-paths", "README.md",
       "--rounds", "2",
       "--call-timeout", "60000",
-      "--out", planPath,
       "--json",
     ], { cwd: target }), scenario.name + " work plan");
     const started = spawnSync(process.execPath, [
       bootstrap,
       "work-start",
-      "--plan", planPath,
+      "--plan", planned.plan_path,
       "--yes",
       "--fake-cli",
       "--fake-scenario", scenario.name,
@@ -145,13 +143,16 @@ async function runDisposableFakeScenarios(target, privateName = ".claude") {
     // The copy is its own project in the person's database, never the real one, and its records go
     // when the self-tests end. It has no test rules: the self-tests check Bridge's own four paths, not
     // the project's tests (the copy has none of its dependencies), so its runs record not_configured.
-    const config = path.join(disposable, privateName, "review-bridge", "bridge.json");
+    const config = path.join(disposable, privateName, "bridge.json");
     const settings = JSON.parse(await fsp.readFile(config, "utf8"));
-    await fsp.writeFile(config, JSON.stringify({ ...settings, project_id: randomUUID(), test: { ...settings.test, rules: [] } }, null, 2) + "\n", "utf8");
+    const projectId = randomUUID();
+    await fsp.writeFile(config, JSON.stringify({ ...settings, project_id: projectId, test: { ...settings.test, rules: [] } }, null, 2) + "\n", "utf8");
     try {
       return await runFakeScenarios(disposable, privateName);
     } finally {
       run(process.execPath, [bootstrapPath, "clean", "--all"], { cwd: disposable, expected: [0, 1, 2] });
+      // Its state and logs live outside the copy, under its own id, and go with its records.
+      for (const folder of [projectStateRoot(projectId), projectLogRoot(projectId)]) await fsp.rm(folder, { recursive: true, force: true });
     }
   } catch (error) {
     // A failed self-test keeps the copy, so the file its message names is still there.

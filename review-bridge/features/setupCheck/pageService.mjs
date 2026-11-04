@@ -15,13 +15,14 @@ const PROBE_TIMEOUT_MS = 2_000;
 export const NOT_RUNNING_LINE = "Bridge 沒在跑，執行 review-bridge up";
 export const CHECK_REASONS = Object.freeze(["running", "no_session", "pid_dead", "unreachable", "timeout", "wrong_service"]);
 
-// Everything the resident service exposes after a restart is read back from these files.
+// Everything the resident service exposes after a restart is read back from these files: its session
+// in the service's state, its output in the project's log folder, never in the project.
 export function serviceFiles(paths) {
   return {
-    sessionPath: path.join(paths.privateRoot, "watch-session.json"),
-    urlPath: path.join(paths.privateRoot, "watch-url.txt"),
-    stdoutPath: path.join(paths.privateRoot, "logs", "watch.stdout.log"),
-    stderrPath: path.join(paths.privateRoot, "logs", "watch.stderr.log"),
+    sessionPath: paths.watchSessionPath,
+    urlPath: paths.watchUrlPath,
+    stdoutPath: path.join(paths.logRoot, "watch.stdout.log"),
+    stderrPath: path.join(paths.logRoot, "watch.stderr.log"),
   };
 }
 

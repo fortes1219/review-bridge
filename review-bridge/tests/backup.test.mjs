@@ -14,6 +14,7 @@ import { backUpBeforeMigrating, openDatabase } from "../service/database/index.m
 import { migrationFiles } from "../service/database/migrate.mjs";
 import { connect, postgresBinaries, serverRunning, startServer } from "../service/database/postgresServer.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
 
 // RC3-BLOCKER-01 step 5: PostgreSQL's file system level backup of the person's database, and its
 // restore into a new data home. A real server in a temporary data home; every model call is the fake CLI.
@@ -140,19 +141,12 @@ test("backup stops the database, copies it whole and starts it again; a restore 
   }
 
   // On another machine the project's run files may be gone: the restored database still lists the
-  // run, and the first command that reads it writes its files again, as they were.
+  // run, and the first command that reads it writes its files again, as they were. They are the
+  // service's state in the data home, so the restored home starts without them.
   const { root } = await projectWithRun();
-  const queue = path.join(root, ".review-bridge", "review-queue");
-  const kept = path.join(root, "..", path.basename(root) + "-files-elsewhere");
-  await fsp.mkdir(kept, { recursive: true });
-  t.after(async () => {
-    for (const folder of ["runs", "events"]) {
-      await fsp.rm(path.join(queue, folder), { recursive: true, force: true });
-      await fsp.rename(path.join(kept, folder), path.join(queue, folder));
-    }
-    await fsp.rm(kept, { recursive: true, force: true });
-  });
-  for (const folder of ["runs", "events"]) await fsp.rename(path.join(queue, folder), path.join(kept, folder));
+  const stateUnder = (home) => getBridgePaths(root, runtimeSource, { privateRootName: ".review-bridge", env: { REVIEW_BRIDGE_DATA_HOME: home } }).stateRoot;
+  const kept = stateUnder(dataHome);
+  const queue = stateUnder(newHome);
   const there = (args) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: newHome },
   });

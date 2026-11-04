@@ -163,7 +163,7 @@ async function append(client, entry, { late = false } = {}) {
 
 // Events the database could not take while it was gone, kept beside the run's files until the next
 // command that opens the database writes them there (replayUnrecorded), in the order they happened.
-const unrecordedDir = (paths) => path.join(paths.queueRoot, "unrecorded");
+const unrecordedDir = (paths) => paths.unrecordedDir;
 const unrecordedFile = (paths, runId) => path.join(unrecordedDir(paths), runId + ".jsonl");
 
 // The last sequence a run's two event files hold (runStore's eventFile, ioEvents' ioEventFile): every
@@ -264,6 +264,25 @@ export async function projectRuns(db, projectId, { limit = 10, after = null } = 
     [projectId, limit + 1, after],
   );
   return { runs: rows.slice(0, limit), more: rows.length > limit };
+}
+
+// `logs <work order>`: the runs of these work orders, newest first, one page (runs_by_work_order), with
+// the same fields as a project's runs.
+export async function workOrderRuns(db, workOrderIds, { limit = 10, after = null } = {}) {
+  const { rows } = await db.query(
+    "select r.run_id, r.status, r.conclusion, r.closed_reason, r.created_at, r.closed_at, r.updated_at, p.source_file,"
+    + " p.body->>'work_package_id' as work_package_id, a.authorized_via"
+    + " from runs r join plans p using (plan_sha256) left join authorizations a on a.plan_sha256 = r.plan_sha256 and a.kind = 'start'"
+    + " where r.work_order_id = any($1::uuid[]) and ($3::uuid is null or (r.created_at, r.run_id) < (select created_at, run_id from runs where run_id = $3::uuid))"
+    + " order by r.created_at desc, r.run_id desc limit $2",
+    [workOrderIds, limit + 1, after],
+  );
+  return { runs: rows.slice(0, limit), more: rows.length > limit };
+}
+
+// One run of this project by its id, or null.
+export async function projectRun(db, projectId, runId) {
+  return (await db.query("select run_id, status, conclusion, closed_reason, created_at, closed_at from runs where run_id = $1 and project_id = $2", [runId, projectId])).rows[0] || null;
 }
 
 // Q6: the project's running runs.

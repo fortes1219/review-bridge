@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -27,9 +28,10 @@ async function freePort() {
 async function workspace(t, watch) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-service-"));
   const runtime = runtimeSource;
-  await fsp.mkdir(path.join(root, ".review-bridge", "review-bridge"), { recursive: true });
-  await fsp.writeFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), JSON.stringify({
+  await fsp.mkdir(path.join(root, ".review-bridge"), { recursive: true });
+  await fsp.writeFile(path.join(root, ".review-bridge", "bridge.json"), JSON.stringify({
     schema_version: 4,
+    project_id: randomUUID(),
     roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     watch,
   }));
@@ -41,7 +43,9 @@ async function workspace(t, watch) {
     await fsp.rm(root, { recursive: true, force: true });
   });
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
-  return { root, bridge, privateRoot: path.join(root, ".review-bridge"), paths };
+  // The page keeps its session in the project's state, outside the project.
+  await fsp.mkdir(paths.stateRoot, { recursive: true });
+  return { root, bridge, privateRoot: paths.stateRoot, paths };
 }
 
 async function deadPid() {

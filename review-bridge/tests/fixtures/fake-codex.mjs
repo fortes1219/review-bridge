@@ -2,6 +2,9 @@
 // from the packet in the prompt and prints the `--json` event stream; without it, the
 // legacy two gate lines. No model is involved.
 import fsp from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { getBridgePaths } from "../../utils/paths.mjs";
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -83,7 +86,7 @@ if (process.env.FAKE_CODEX_TOUCH === "1") await fsp.appendFile("README.md", "cha
 // check must run on the reviewer's failure path too.
 if (process.env.FAKE_CODEX_WINDOW_TAMPER === "1") {
   const { readdir, readFile, writeFile } = fsp;
-  const root = ".review-bridge/review-queue/workspace-evidence";
+  const root = path.join(getBridgePaths(process.cwd(), path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."), { privateRootName: ".review-bridge" }).stateRoot, "workspace-evidence");
   for (const dir of await readdir(root).catch(() => [])) {
     for (const name of await readdir(root + "/" + dir + "/windows").catch(() => [])) {
       const file = root + "/" + dir + "/windows/" + name;

@@ -11,6 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { localTimestamp } from "../review-bridge/utils/dates.mjs";
+import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bridge = path.join(packageRoot, "bridge.mjs");
@@ -20,6 +22,12 @@ const bridge = path.join(packageRoot, "bridge.mjs");
 const isolatedHome = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-no-cli-home-"));
 process.on("exit", () => { try { fsSync.rmSync(isolatedHome, { recursive: true, force: true }); } catch {} });
 // stop needs the OS process tools (ps on POSIX), so the system directories stay on PATH.
+// The project's state and logs, outside the project (RC3-FIX-02), where the commands these tests run find them.
+function projectPaths(root, overrides = {}) {
+  return getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge", env: isolatedEnv(overrides) });
+}
+const readJsonFile = async (file) => JSON.parse(await fsp.readFile(file, "utf8"));
+
 function isolatedEnv(overrides = {}) {
   const system = process.platform === "win32"
     ? [process.env.SystemRoot && path.join(process.env.SystemRoot, "System32")]
@@ -62,9 +70,9 @@ async function databaseLines(indent = "  ") {
 const databasePassword = async () => (await fsp.readFile(path.join(dataHome, "postgres", "secret"), "utf8")).trim();
 
 // init starts the resident page service; stop it before the workspace is removed.
-function removeWorkspace(root) {
+function removeWorkspace(root, env = process.env) {
   spawnSync(process.execPath, [path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "down"], {
-    cwd: root, encoding: "utf8", windowsHide: true,
+    cwd: root, encoding: "utf8", windowsHide: true, env,
   });
   return fsp.rm(root, { recursive: true, force: true });
 }
@@ -111,7 +119,7 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
   ]);
   assert.doesNotMatch(result.stdout, /SHA-?256|plan_sha256|[0-9a-f]{64}|\[y\/N\]/i);
   assert.equal(result.stdout.includes(await databasePassword()), false, "the password itself is not printed");
-  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.equal(config.profile_id, "vue-frontend");
 });
 
@@ -150,10 +158,10 @@ test("R5 init keeps self-test artifacts disposable and installs both work-order 
     { scenario: "HARD_STOP", status: "hard_stop" },
     { scenario: "RATE_LIMIT", status: "rate_limited" },
   ]);
-  await fsp.access(path.join(root, ".review-bridge", "review-bridge-install.json"));
+  await fsp.access(path.join(projectPaths(root).stateRoot, "review-bridge-install.json"));
   assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "work-packages")), ["TEMPLATE.md", "TEMPLATE.zh-TW.md"]);
-  const queueEntries = await fsp.readdir(path.join(root, ".review-bridge", "review-queue"), { withFileTypes: true });
-  assert.deepEqual(queueEntries.filter((entry) => entry.isFile()).map((entry) => entry.name), []);
+  // The project keeps only its settings and work orders; the run state lives outside it.
+  assert.deepEqual((await fsp.readdir(path.join(root, ".review-bridge"))).sort(), ["bridge.json", "policy.override.json", "rules.md", "work-packages"]);
 
   const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const doctor = spawnSync(process.execPath, [bootstrap, "doctor", "--fake-cli"], {
@@ -188,7 +196,7 @@ test("R5 init keeps self-test artifacts disposable and installs both work-order 
   });
   assert.equal(removed.status, 2);
   assert.match(removed.stderr, /Unknown command: enqueue\. Run: review-bridge --help/);
-  assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "review-queue", "authorizations")), []);
+  assert.deepEqual(await fsp.readdir(projectPaths(root).authorizationsDir), []);
 });
 
 test("role-first init supports either provider pairing without touching existing agent settings", async (t) => {
@@ -212,7 +220,7 @@ test("role-first init supports either provider pairing without touching existing
   assert.deepEqual(await fsp.readdir(path.join(root, ".claude")), ["commands", "settings.local.json"]);
   assert.deepEqual(await fsp.readdir(path.join(root, ".claude", "commands")), ["review-bridge.md"]);
   assert.deepEqual(await fsp.readdir(path.join(root, ".codex")), ["config.toml"]);
-  await fsp.access(path.join(root, ".review-bridge", "review-bridge-install.json"));
+  await fsp.access(path.join(projectPaths(root).stateRoot, "review-bridge-install.json"));
 });
 
 test("same provider for both roles remains blocked until separate sessions are proved", async (t) => {
@@ -229,7 +237,7 @@ test("same provider for both roles remains blocked until separate sessions are p
   const output = JSON.parse(result.stdout);
   assert.equal(output.role_readiness.separate_sessions_proven, "not_run");
   assert.equal(output.real_mode.ready, false);
-  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json")));
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json")));
   assert.equal(config.roles.separate_sessions, true);
   assert.equal(config.roles.writer.provider_id, "codex");
   assert.equal(config.roles.reviewer.provider_id, "codex");
@@ -238,8 +246,9 @@ test("same provider for both roles remains blocked until separate sessions are p
 test("init without a terminal takes claude and codex when no role is given or saved, and sets up an empty folder as type none", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-"));
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-home-"));
-  t.after(() => { stopServerIn(home); return Promise.all([removeWorkspace(root), fsp.rm(home, { recursive: true, force: true })]); });
   const env = isolatedEnv({ REVIEW_BRIDGE_DATA_HOME: home });
+  // The page's session is in that data home, so down looks there.
+  t.after(async () => { await removeWorkspace(root, env); stopServerIn(home); await fsp.rm(home, { recursive: true, force: true }); });
   const result = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root), {
     cwd: packageRoot, encoding: "utf8", env, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
@@ -247,7 +256,7 @@ test("init without a terminal takes claude and codex when no role is given or sa
   const output = JSON.parse(result.stdout);
   assert.deepEqual(output.roles, { writer: "claude", reviewer: "codex" });
   assert.equal(output.profile, null);
-  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.equal(config.profile_id, null);
   assert.deepEqual(config.test, { profile_id: null, rules: [] });
 });
@@ -337,12 +346,12 @@ test("init starts the resident service and ends with cd, the work folder, the st
   ]);
   assert.equal(result.stdout.includes(await databasePassword()), false, "the password itself is not printed");
   await fsp.access(workFolder);
-  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.deepEqual(config.watch, { port, strict_port: false });
-  assert.equal((await fsp.readFile(path.join(root, ".review-bridge", "watch-url.txt"), "utf8")).trim(), url);
+  assert.equal((await fsp.readFile(projectPaths(root).watchUrlPath, "utf8")).trim(), url);
   assert.equal((await fetch(url)).status, 200);
   // B8: the URL init printed is the one the running service recorded and answers for.
-  const session = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "watch-session.json"), "utf8"));
+  const session = JSON.parse(await fsp.readFile(projectPaths(root).watchSessionPath, "utf8"));
   assert.equal(session.url, url);
   assert.equal((await (await fetch(url + "api/status")).json()).service_id, session.service_id);
 
@@ -385,14 +394,15 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   // D4: two lines by default; JSON only with --json.
   const plain = run(file, "--breakpoint", "after the review");
   assert.equal(plain.status, 0, plain.stderr);
-  const planFile = path.join(".review-bridge", "review-queue", "add-readme.plan.json");
+  const [, planFile] = /^Plan written to (.+)\n/.exec(plain.stdout) || [];
+  assert.ok(planFile?.startsWith(projectPaths(root).logRoot) && planFile.endsWith("add-readme.plan.json"), plain.stdout);
   assert.deepEqual(plain.stdout.trimEnd().split(/\r?\n/), ["Plan written to " + planFile, "Next: review-bridge work-start --plan " + planFile]);
   const planned = run(file, "--breakpoint", "after the review", "--json");
   assert.equal(planned.status, 0, planned.stderr);
   const output = JSON.parse(planned.stdout);
   assert.equal(output.work_package, "add-readme");
   assert.equal(output.owner, os.userInfo().username);
-  assert.equal(output.plan_path, path.join(root, ".review-bridge", "review-queue", "add-readme.plan.json"));
+  assert.equal(output.plan_path, path.join(projectPaths(root).runLogDir((await readJsonFile(output.plan_path)).proposed_run_id), "add-readme.plan.json"));
   await fsp.access(output.plan_path);
 
   // A type-none project has no test rules: the work still plans, and its tests are not configured.
@@ -421,7 +431,7 @@ test("a chosen project type that does not fit the folder is set up, and its work
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
-  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.equal(config.profile_id, "vue-frontend");
   assert.deepEqual(config.test.rules, [{ command: "npm test", package_script: "test" }]);
 
@@ -449,7 +459,7 @@ test("init with a project type whose test rule fits passes its four self-tests: 
   assert.equal(init.status, 0, init.stdout + init.stderr);
   assert.deepEqual(JSON.parse(init.stdout).fake_self_tests.map((entry) => entry.status), ["pass", "pass", "hard_stop", "rate_limited"]);
   // The project keeps its test rule; only the self-tests' copy runs without one.
-  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.deepEqual(config.test.rules, [{ command: "npm test", package_script: "test" }]);
 });
 
@@ -471,7 +481,8 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   const done = start("--fake-cli", "--yes", "--breakpoint", "after the review");
   assert.equal(done.status, 0, done.stderr);
   const lines = done.stdout.trimEnd().split(/\r?\n/);
-  assert.equal(lines[0], "Plan from the card: " + path.join(".review-bridge", "review-queue", "hello.plan.json"));
+  assert.match(lines[0], /^Plan from the card: .+[\\/]hello\.plan\.json$/);
+  assert.ok(lines[0].slice("Plan from the card: ".length).startsWith(projectPaths(root).logRoot), lines[0]);
   assert.equal(lines[1], "Reviewer read-only check: not needed with the fake CLI (no model is called)");
   for (const line of ["Work order:   " + order, "Stops:        after the review", "Tests:        not configured (no test rule matched; the work starts without tests)",
     "Priority:     medium (config)", "Effort:       medium (priority table), for every writer call",
@@ -486,7 +497,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     "  Tests: not configured for this project",
     "  Reviewer checking the work",
   ]);
-  assert.match(done.stdout, /\nDelivered: .*\nResult file: .*[\\/]\.review-bridge[\\/]results[\\/]hello \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md\nTokens: /);
+  assert.match(done.stdout, /\nDelivered: .*\nResult file: .*[\\/]\.review-bridge[\\/]results[\\/]hello[\\/]hello \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md\nTokens: /);
 });
 
 // E: four actions for people (start, stop, resume, clean) on three routes: a person at a terminal
@@ -505,7 +516,7 @@ async function fourActionsProject(t, prefix) {
   const cli = (args, env = {}) => spawnSync(process.execPath, [bridge, ...args], {
     cwd: root, encoding: "utf8", env: isolatedEnv(env), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
-  const queue = path.join(root, ".review-bridge", "review-queue");
+  const queue = projectPaths(root).stateRoot;
   const listed = async (folder) => (await fsp.readdir(path.join(queue, folder)).catch(() => [])).filter((name) => name.endsWith(".json"));
   return { root, order, cli, queue, listed };
 }
@@ -558,7 +569,7 @@ test("an agent's start --yes runs the project's tests when its rules give a comm
   const yes = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(yes.status, 0, yes.stdout + yes.stderr);
   assert.match(yes.stdout, /\n {2}Tests: running npm test\n {2}Tests passed\n/);
-  const [runFile] = (await fsp.readdir(path.join(root, ".review-bridge", "review-queue", "runs"))).filter((name) => name.endsWith(".json"));
+  const [runFile] = (await fsp.readdir(projectPaths(root).runsDir)).filter((name) => name.endsWith(".json"));
   assert.deepEqual(await queryRecords("select kind, passed from test_results where run_id = $1", [runFile.slice(0, -5)]), [{ kind: "command", passed: true }]);
 });
 
@@ -605,7 +616,7 @@ test("--yes is refused when the work order changed after the card, when no card 
 // per yes, one contract per run.
 test("the card names the work order: new, then updated, renamed or copied; the records are in the database", async (t) => {
   const { root, order, cli } = await fourActionsProject(t, "review-bridge-identity-");
-  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   const decision = (args) => {
     const card = cli(["start", ...args, "--fake-cli"]);
     assert.equal(card.status, 1, card.stderr);
@@ -645,14 +656,14 @@ test("the card names the work order: new, then updated, renamed or copied; the r
   const contracts = await rows("select c.contract_sha256 from contracts c join work_orders w using (work_order_id) where w.project_id = $1");
   assert.equal(contracts.length, 3, "one contract per run");
   for (const { run_id: runId } of claims) {
-    const run = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-queue", "runs", runId + ".json"), "utf8"));
+    const run = JSON.parse(await fsp.readFile(path.join(projectPaths(root).runsDir, runId + ".json"), "utf8"));
     assert.ok(contracts.some((row) => row.contract_sha256 === run.contract_sha256), "the run's contract is recorded");
   }
 });
 
 test("two --yes to one card at once start one run; clean --all clears the project's records", async (t) => {
   const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-two-yes-");
-  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   const { spawn } = await import("node:child_process");
   const yes = () => new Promise((resolve) => {
@@ -686,7 +697,7 @@ test("two --yes to one card at once start one run; clean --all clears the projec
 // are in the database; a stopped run is recorded as stopped; clean <run_id> is one delete that takes
 // every row the run owns and keeps its authorization and claim.
 test("a run's events, verdicts, tests and delivery are in the database; stop and clean <run_id> follow", async (t) => {
-  const { order, cli, queue } = await fourActionsProject(t, "review-bridge-run-records-");
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-run-records-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
   const [runFile] = (await fsp.readdir(path.join(queue, "runs"))).filter((name) => name.endsWith(".json"));
@@ -713,7 +724,7 @@ test("a run's events, verdicts, tests and delivery are in the database; stop and
   // A run stopped from another process is recorded as stopped there too.
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   const { spawn } = await import("node:child_process");
-  const slow = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: path.dirname(path.dirname(queue)), env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "30000" }), windowsHide: true, stdio: "ignore" });
+  const slow = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: root, env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "30000" }), windowsHide: true, stdio: "ignore" });
   const ended = new Promise((resolve) => slow.once("close", resolve));
   let stoppedId = null;
   for (const until = Date.now() + 30_000; !stoppedId && Date.now() < until;) {
@@ -743,10 +754,9 @@ test("a run's events, verdicts, tests and delivery are in the database; stop and
 // database_unavailable and calls no model after that; once the database is back, status shows the
 // run as it ended. A read that cannot open the database says why and where to look, and exits non-0.
 test("a run whose database goes away stops as database_unavailable; reads without a database say why", async (t) => {
-  const { order, cli, queue } = await fourActionsProject(t, "review-bridge-database-gone-");
+  const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-database-gone-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   const { spawn } = await import("node:child_process");
-  const root = path.dirname(path.dirname(queue));
   const child = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: root, env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "6000" }), windowsHide: true, stdio: "ignore" });
   const exited = new Promise((resolve) => child.once("close", resolve));
   let runId = null;
@@ -785,7 +795,8 @@ test("a run whose database goes away stops as database_unavailable; reads withou
   const broken = path.join(root, "..", path.basename(root) + "-broken-home");
   await fsp.mkdir(path.join(broken, "postgres"), { recursive: true });
   await fsp.writeFile(path.join(broken, "postgres", "notes.txt"), "not a cluster\n");
-  t.after(() => fsp.rm(broken, { recursive: true, force: true }));
+  await reachSameState(broken);
+  t.after(() => leaveBrokenHome(broken));
   for (const command of ["status", "work-status", "doctor"]) {
     const read = cli([command], { REVIEW_BRIDGE_DATA_HOME: broken });
     assert.equal(read.status, 2, command + ": " + read.stdout);
@@ -984,7 +995,8 @@ test("without the database a running run is stopped and delivered from its files
   const broken = path.join(root, "..", path.basename(root) + "-broken-home");
   await fsp.mkdir(path.join(broken, "postgres"), { recursive: true });
   await fsp.writeFile(path.join(broken, "postgres", "notes.txt"), "not a cluster\n");
-  t.after(() => fsp.rm(broken, { recursive: true, force: true }));
+  await reachSameState(broken);
+  t.after(() => leaveBrokenHome(broken));
   const unavailable = /^Review bridge failed closed: Bridge's database at .*postgres is not available: /;
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   const { spawn } = await import("node:child_process");
@@ -1083,7 +1095,7 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
   const status = cli(["status"]);
   assert.equal(status.status, 0, status.stderr);
   // From the database: the run, its status, why it stopped, its work order file and when it began.
-  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running\\n  " + runId + "  completed +  cancelled +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\dT", "m"));
+  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running\\n  " + runId + "  completed +  cancelled +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d [+-]\\d{4}\\n", "m"));
   assert.match(status.stdout, /\nReview queue: pending \d+, running \d+, done \d+, failed \d+\n/);
   assert.ok(status.stdout.endsWith("\n" + (await databaseLines("")).slice(1).join("\n") + "\n"), status.stdout);
   assert.equal(status.stdout.includes(await databasePassword()), false, "the password itself is not printed");
@@ -1284,10 +1296,10 @@ test("each run's result is its own file in .review-bridge/results/, never in wor
   };
   const first = runOnce();
   const second = runOnce();
-  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   const runs = await queryRecords("select run_id, closed_at, conclusion from runs where project_id = $1 order by closed_at", [projectId]);
   assert.equal(runs.length, 2);
-  const expected = runs.map((run) => path.join(root, ".review-bridge", "results", "hello " + localName(run.closed_at) + " " + run.conclusion + ".md"));
+  const expected = runs.map((run) => path.join(root, ".review-bridge", "results", "hello", "hello " + localName(run.closed_at) + " " + run.conclusion + ".md"));
   assert.deepEqual(await resultCopies(root, "hello"), expected);
   assert.deepEqual((await fsp.readdir(path.join(root, ".review-bridge", "work-packages"))).filter((name) => name.endsWith(".result.md")), []);
   for (const [started, copy] of [[first, expected[0]], [second, expected[1]]]) assert.ok(started.stdout.includes(copy), "the run says where its result is: " + copy);
@@ -1299,28 +1311,28 @@ test("each run's result is its own file in .review-bridge/results/, never in wor
   assert.equal(clean.status, 0, clean.stderr);
   assert.deepEqual(await resultCopies(root, "hello"), expected, "clean leaves the results");
   assert.deepEqual((await fsp.readdir(path.join(queue, "unrecorded"))).filter((name) => name.includes(".refused-")), []);
-  const archive = path.join(root, ".review-bridge", "archive");
+  const archive = projectPaths(root).archiveDir;
   const dayLines = (await Promise.all((await fsp.readdir(archive)).map((name) => fsp.readFile(path.join(archive, name), "utf8")))).join("");
   assert.match(dayLines, new RegExp("\"run_id\":\"" + runs[0].run_id + "\"[^\n]*\"type\":\"refused_unrecorded\""));
 });
 
 // RC3-FIX-01 round 2: an auditor holding the ticket number finds the result by its file name, and the
 // head of the result names the sealed version, the contract, the run and the commit as the database
-// holds them; the person's copy and review-queue/<run_id>.result.md are the same text.
+// holds them; the person's copy and <run_id>.result.md in the run's log folder are the same text.
 test("a result is named by its source_id and opens with who it is about, as the database has it", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-result-identity-");
   await fsp.writeFile(path.join(root, order), "---\nsource_id: CANARY-1\n---\n" + await fsp.readFile(path.join(root, order), "utf8"));
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   const started = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(started.status, 0, started.stderr);
-  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "review-bridge", "bridge.json"), "utf8"));
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   const [row] = await queryRecords("select r.run_id, r.closed_at, r.conclusion, r.contract_sha256, v.version_no, v.title, p.source_file,"
     + " (select d.review_version->>'head' from acceptance_decisions d where d.run_id = r.run_id order by d.sequence desc limit 1) as commit"
     + " from runs r join work_order_versions v using (work_order_id, content_sha256) join plans p using (plan_sha256) where r.project_id = $1", [projectId]);
-  const copy = path.join(root, ".review-bridge", "results", "CANARY-1 hello " + localName(row.closed_at) + " " + row.conclusion + ".md");
+  const copy = path.join(root, ".review-bridge", "results", "hello", "CANARY-1 hello " + localName(row.closed_at) + " " + row.conclusion + ".md");
   assert.ok(started.stdout.includes("Result file: " + copy), started.stdout);
   const result = await fsp.readFile(copy, "utf8");
-  assert.equal(result, await fsp.readFile(path.join(queue, row.run_id + ".result.md"), "utf8"), "both copies are the same text");
+  assert.equal(result, await fsp.readFile(path.join(projectPaths(root).runLogDir(row.run_id), row.run_id + ".result.md"), "utf8"), "both copies are the same text");
   const [, front, rest] = /^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(result);
   const { parse } = createRequire(import.meta.url)("yaml");
   assert.deepEqual(parse(front), {
@@ -1335,6 +1347,136 @@ test("a result is named by its source_id and opens with who it is about, as the 
 
 // RC3-FIX-01: the budget check reads the run's running total by primary key; it never fetches the
 // run's usage events, and the total is what they add up to.
+// A data home whose database is broken but whose project state and logs are the test data home's
+// (junctions on Windows, links elsewhere), so a command there misses only the database.
+async function reachSameState(broken) {
+  for (const folder of ["projects", "logs"]) {
+    await fsp.mkdir(path.join(dataHome, folder), { recursive: true });
+    await fsp.symlink(path.join(dataHome, folder), path.join(broken, folder), "junction");
+  }
+}
+async function leaveBrokenHome(broken) {
+  // The links go first, so removing the folder never reaches what they point to.
+  for (const folder of ["projects", "logs"]) await fsp.unlink(path.join(broken, folder)).catch(() => fsp.rmdir(path.join(broken, folder)).catch(() => {}));
+  for (const folder of ["projects", "logs"]) if (await fsp.lstat(path.join(broken, folder)).catch(() => null)) return;
+  await fsp.rm(broken, { recursive: true, force: true });
+}
+
+// The files under a folder, relative and with "/", walked with a stack; .git is Git's own.
+async function filesUnder(root) {
+  const files = [];
+  const stack = [""];
+  while (stack.length) {
+    const relative = stack.pop();
+    for (const entry of await fsp.readdir(path.join(root, relative), { withFileTypes: true })) {
+      const next = relative ? relative + "/" + entry.name : entry.name;
+      if (entry.isDirectory()) { if (next !== ".git") stack.push(next); } else files.push(next);
+    }
+  }
+  return files.sort();
+}
+
+// RC3-FIX-02 (Owner 2026-11-04): Bridge is a backend service, and a backend service keeps its state
+// and logs off the customer's folder. After a run the project holds its settings, its work orders and
+// the work order's results folder; the run's logs are in the log folder under <project_id>/<run_id>/,
+// which logs and status name; clean <run_id> takes it; the database stays the record.
+test("after a run the project holds only its settings, work orders and results/<work order>/; the logs are outside it and logs, status and clean find them", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-run-folder-"));
+  t.after(() => removeWorkspace(root));
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "run-folder", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(0)\"" } }) + "\n");
+  await fsp.writeFile(path.join(root, ".gitignore"), "node_modules/\n");
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  // init leaves the person's tracked files alone; .review-bridge/, results included, is excluded locally.
+  assert.equal(await fsp.readFile(path.join(root, ".gitignore"), "utf8"), "node_modules/\n");
+  const order = ".review-bridge/work-packages/hello.md";
+  await fsp.writeFile(path.join(root, order), "---\nsource_id: SHOP-412\n---\n# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
+  const cli = (args) => spawnSync(process.execPath, [bridge, ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  const runOnce = () => {
+    assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+    const started = cli(["start", order, "--fake-cli", "--yes"]);
+    assert.equal(started.status, 0, started.stdout + started.stderr);
+  };
+  runOnce();
+  const paths = projectPaths(root);
+  const [run] = await queryRecords("select r.run_id, r.contract_sha256, r.plan_sha256 from runs r where r.project_id = $1", [paths.projectId]);
+
+  // The project: three settings, the work orders, and one folder of results with the contract and the result.
+  const project = await filesUnder(path.join(root, ".review-bridge"));
+  const results = project.filter((name) => name.startsWith("results/"));
+  assert.deepEqual(project.filter((name) => !name.startsWith("results/")), ["bridge.json", "policy.override.json", "rules.md", "work-packages/TEMPLATE.md", "work-packages/TEMPLATE.zh-TW.md", "work-packages/hello.md"]);
+  assert.equal(results.length, 2, results.join(", "));
+  assert.ok(results.includes("results/hello/contract.v1." + run.contract_sha256.slice(0, 7) + ".json"), results.join(", "));
+  assert.equal(await fsp.readFile(path.join(root, ".review-bridge", "results", "hello", "contract.v1." + run.contract_sha256.slice(0, 7) + ".json"), "utf8"),
+    await fsp.readFile(path.join(paths.contractsDir, run.contract_sha256 + ".json"), "utf8"), "the sealed contract, as it was sealed");
+  assert.ok(results.some((name) => /^results\/hello\/SHOP-412 hello \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md$/.test(name)), results.join(", "));
+  assert.deepEqual((await filesUnder(root)).filter((name) => /\.(jsonl|log|lock)$/.test(name)), [], "no event, log or lock file in the project");
+  assert.equal(await fsp.stat(path.join(root, ".review-bridge", "review-queue")).catch(() => null), null);
+
+  // The run's log folder: the plan, the card it ran on, each call's prompt, stream and stderr, the test output.
+  const folder = paths.runLogDir(run.run_id);
+  assert.equal(folder, path.join(dataHome, "logs", paths.projectId, run.run_id));
+  const logs = await fsp.readdir(folder);
+  for (const pattern of [/^hello\.plan\.json$/, /^authorized-plan-[0-9a-f]{64}\.txt$/, /-contract-prompt\.txt$/, /-contract\.stream\.jsonl$/, /-contract\.stderr\.log$/,
+    /-contract-check-prompt\.txt$/, /-writer-only-prompt\.txt$/, /-writer\.stream\.jsonl$/, /-writer\.stderr\.log$/, /-test\.stdout\.log$/, /-test\.stderr\.log$/,
+    /-reviewer\.stdout\.log$/, /-reviewer\.stderr\.log$/, new RegExp("^" + run.run_id + "\\.result\\.md$")]) {
+    assert.ok(logs.some((name) => pattern.test(name)), pattern + " in " + logs.join(", "));
+  }
+
+  // logs <run_id> names the folder and every file in it; status names where the logs are.
+  const shown = cli(["logs", run.run_id]);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(shown.stdout.split("\n")[0], "Logs of run " + run.run_id + " (success): " + folder);
+  for (const name of logs) assert.ok(shown.stdout.includes(name), name);
+  assert.match(shown.stdout, /\n {2}call 1 {3}writer {6}translate {7}prompt {14}\S+-contract-prompt\.txt\n/);
+  assert.match(shown.stdout, /\n {2}call \d {3}controller {2}test {12}stdout {14}\S+-test\.stdout\.log\n/);
+  const listed = JSON.parse(cli(["logs", run.run_id, "--json"]).stdout);
+  assert.deepEqual(listed.files.map((file) => file.name).sort(), [...logs].sort());
+  const status = cli(["status"]);
+  assert.ok(status.stdout.split("\n").includes("Logs: " + paths.logRoot), status.stdout);
+
+  // A second run; logs <file>, logs <bare name> and logs <source_id> list both, newest first, with the
+  // run fields work-status uses and each run's log folder.
+  runOnce();
+  const ordered = (await queryRecords("select run_id from runs where project_id = $1 order by created_at desc", [paths.projectId])).map((row) => row.run_id);
+  const workStatus = JSON.parse(cli(["work-status"]).stdout);
+  for (const name of [order, "hello", "SHOP-412"]) {
+    const byName = cli(["logs", name, "--json"]);
+    assert.equal(byName.status, 0, name + ": " + byName.stderr);
+    const parsed = JSON.parse(byName.stdout);
+    assert.deepEqual(parsed.runs.map((entry) => entry.run_id), ordered, name);
+    assert.deepEqual(Object.keys(parsed.runs[0]), [...Object.keys(workStatus.runs[0]), "log_path"], name + ": the work-status fields, then the log folder");
+    assert.equal(parsed.runs[0].log_path, paths.runLogDir(ordered[0]));
+    const plain = cli(["logs", name]).stdout.split("\n");
+    assert.equal(plain[0], "Runs of " + name + ", newest first:");
+    assert.ok(plain[1].startsWith("  " + ordered[0] + "  ") && plain[1].endsWith(paths.runLogDir(ordered[0])), plain[1]);
+    // People read local time with its offset; --json keeps the ISO value.
+    assert.match(parsed.runs[0].created_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.ok(plain[1].includes("  " + localTimestamp(parsed.runs[0].created_at) + "  "), plain[1]);
+  }
+  const statusLine = cli(["status"]).stdout.split("\n").find((line) => line.startsWith("  " + ordered[0] + "  "));
+  assert.ok(statusLine?.endsWith("  " + localTimestamp(workStatus.runs.find((entry) => entry.run_id === ordered[0]).created_at)), statusLine);
+  assert.equal(cli(["logs", "NOT-THERE"]).status, 2);
+
+  // The database is the record: without the logs and the results, status still lists both runs and a
+  // new run writes its result and contract again.
+  await fsp.rm(paths.logRoot, { recursive: true, force: true });
+  await fsp.rm(path.join(root, ".review-bridge", "results"), { recursive: true, force: true });
+  const after = cli(["status"]);
+  assert.equal(after.status, 0, after.stderr);
+  for (const runId of ordered) assert.ok(after.stdout.includes("  " + runId + "  completed"), after.stdout);
+  assert.match(cli(["logs", ordered[0]]).stdout, /\n {2}None: they were removed after the retention days, or by clean /);
+  runOnce();
+  assert.equal((await fsp.readdir(path.join(root, ".review-bridge", "results", "hello"))).length, 2, "a result and its contract");
+  // clean <run_id> takes the run's log folder with it.
+  const [newest] = (await queryRecords("select run_id from runs where project_id = $1 order by created_at desc limit 1", [paths.projectId])).map((row) => row.run_id);
+  assert.equal(await fsp.stat(paths.runLogDir(newest)).then(() => true, () => false), true);
+  assert.equal(cli(["clean", newest]).status, 0);
+  assert.equal(await fsp.stat(paths.runLogDir(newest)).catch(() => null), null);
+});
+
 test("the budget check asks the database for one number by primary key, equal to the sum of the run's usage events", async (t) => {
   const { root, order, cli } = await fourActionsProject(t, "review-bridge-usage-total-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);

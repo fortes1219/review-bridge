@@ -1,6 +1,7 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -35,7 +36,9 @@ async function project(t, { git = true } = {}) {
   await fsp.writeFile(path.join(root, "src", "old.ts"), "export const old = true;\n");
   await fsp.writeFile(path.join(root, "README.md"), "before\n");
   await fsp.writeFile(path.join(root, ".gitignore"), ".env\nnode_modules/\n.venv/\nbuild/\n");
-  await fsp.mkdir(path.join(root, ".review-bridge", "review-queue"), { recursive: true });
+  await fsp.mkdir(path.join(root, ".review-bridge"), { recursive: true });
+  // The project's id names its state, where the evidence is kept (RC3-FIX-02).
+  await fsp.writeFile(path.join(root, ".review-bridge", "bridge.json"), JSON.stringify({ schema_version: 4, project_id: randomUUID() }));
   const run = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true });
   if (git) {
     run("init", "-q");

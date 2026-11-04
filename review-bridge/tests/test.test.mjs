@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -22,9 +23,9 @@ async function workspace(t, { bridge = { test: { profile_id: "node-backend", rul
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-test-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } }, ...bridge });
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(), schema_version: 4, active_runs: "derive_from_run_projections", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } }, ...bridge });
   await writeJson(paths.policyOverridePath, { schema_version: 5 });
-  await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), path.join(paths.configRoot, "rules.md"));
+  await fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), paths.rulesPath);
   if (manifest) await fsp.writeFile(path.join(repoRoot, "package.json"), JSON.stringify(manifest));
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# demo\n");
   await fsp.mkdir(path.join(repoRoot, "src"), { recursive: true });
@@ -100,17 +101,17 @@ test("R4 approval re-checks the sealed entry point; removing it refuses the star
 test("R8 the sealed command runs through the shell with a timeout; over time is a failure; the minutes limit only tightens", async (t) => {
   const ws = await workspace(t);
   const rule = { kind: "command", command: "node -e \"console.log('ok-out');process.exit(0)\"", label: "x" };
-  const ok = await runTest({ paths: ws.paths, test: rule, stdoutPath: path.join(ws.paths.queueRoot, "ok.out"), stderrPath: path.join(ws.paths.queueRoot, "ok.err"), timeoutMs: 60_000 });
+  const ok = await runTest({ paths: ws.paths, test: rule, stdoutPath: path.join(ws.paths.stateRoot, "ok.out"), stderrPath: path.join(ws.paths.stateRoot, "ok.err"), timeoutMs: 60_000 });
   assert.equal(ok.passed, true);
   assert.equal(ok.exit_code, 0);
   assert.match(ok.stdout_tail, /ok-out/);
   const failing = { kind: "command", command: "node -e \"console.error('boom');process.exit(4)\"", label: "x" };
-  const bad = await runTest({ paths: ws.paths, test: failing, stdoutPath: path.join(ws.paths.queueRoot, "bad.out"), stderrPath: path.join(ws.paths.queueRoot, "bad.err"), timeoutMs: 60_000 });
+  const bad = await runTest({ paths: ws.paths, test: failing, stdoutPath: path.join(ws.paths.stateRoot, "bad.out"), stderrPath: path.join(ws.paths.stateRoot, "bad.err"), timeoutMs: 60_000 });
   assert.equal(bad.passed, false);
   assert.equal(bad.exit_code, 4);
   assert.match(bad.stderr_tail, /boom/);
   const slow = { kind: "command", command: "node -e \"setTimeout(()=>{},20000)\"", label: "x" };
-  const late = await runTest({ paths: ws.paths, test: slow, stdoutPath: path.join(ws.paths.queueRoot, "slow.out"), stderrPath: path.join(ws.paths.queueRoot, "slow.err"), timeoutMs: 500 });
+  const late = await runTest({ paths: ws.paths, test: slow, stdoutPath: path.join(ws.paths.stateRoot, "slow.out"), stderrPath: path.join(ws.paths.stateRoot, "slow.err"), timeoutMs: 500 });
   assert.equal(late.timed_out, true);
   assert.equal(late.passed, false);
   const none = await runTest({ paths: ws.paths, test: { kind: "not_configured" }, stdoutPath: "", stderrPath: "", timeoutMs: 1 });
@@ -155,7 +156,7 @@ test("R8b a timeout terminates the whole tree while the shell is alive: a delaye
   ].join("\n"));
   const rule = { kind: "command", command: "node slow-child.cjs", label: "x" };
   const startedAt = Date.now();
-  const result = await runTest({ paths: ws.paths, test: rule, stdoutPath: path.join(ws.paths.queueRoot, "tree.out"), stderrPath: path.join(ws.paths.queueRoot, "tree.err"), timeoutMs: 500 });
+  const result = await runTest({ paths: ws.paths, test: rule, stdoutPath: path.join(ws.paths.stateRoot, "tree.out"), stderrPath: path.join(ws.paths.stateRoot, "tree.err"), timeoutMs: 500 });
   assert.equal(result.timed_out, true);
   assert.equal(result.passed, false);
   assert.ok(Date.now() - startedAt < 12_000, "the timeout returned before the parent's own 15 s idle");
@@ -170,11 +171,11 @@ test("the tail is only the last 4 KB of a large log, read from the end", async (
   const ws = await workspace(t);
   await fsp.writeFile(path.join(ws.repoRoot, "big.cjs"), "process.stdout.write('x'.repeat(200000) + '\\nLAST-LINE\\n');");
   const rule = { kind: "command", command: "node big.cjs", label: "x" };
-  const result = await runTest({ paths: ws.paths, test: rule, stdoutPath: path.join(ws.paths.queueRoot, "big.out"), stderrPath: path.join(ws.paths.queueRoot, "big.err"), timeoutMs: 60_000 });
+  const result = await runTest({ paths: ws.paths, test: rule, stdoutPath: path.join(ws.paths.stateRoot, "big.out"), stderrPath: path.join(ws.paths.stateRoot, "big.err"), timeoutMs: 60_000 });
   assert.equal(result.passed, true);
   assert.ok(result.stdout_tail.length <= 4 * 1024);
   assert.match(result.stdout_tail, /LAST-LINE/);
-  assert.equal((await fsp.stat(path.join(ws.paths.queueRoot, "big.out"))).size > 200_000, true);
+  assert.equal((await fsp.stat(path.join(ws.paths.stateRoot, "big.out"))).size > 200_000, true);
 });
 
 test("a failed taskkill is reported as a failed tree kill, never as a cleared tree", { skip: process.platform !== "win32" }, async () => {

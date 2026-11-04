@@ -8,9 +8,9 @@ export function copyName(name) {
   return new RegExp("^(?:(.+) )?" + escaped + " (\\d{4}-\\d{2}-\\d{2}) (\\d{2}-\\d{2}-\\d{2}) ([a-z_]+)\\.md$");
 }
 
-// The person's copies of one work order's results in <root>/.review-bridge/results/, oldest first.
+// The person's copies of one work order's results in <root>/.review-bridge/results/<name>/, oldest first.
 export async function resultCopies(root, name) {
-  const dir = path.join(root, ".review-bridge", "results");
+  const dir = path.join(root, ".review-bridge", "results", name);
   const pattern = copyName(name);
   const names = (await fsp.readdir(dir).catch(() => [])).filter((entry) => pattern.test(entry)).sort();
   return names.map((entry) => path.join(dir, entry));

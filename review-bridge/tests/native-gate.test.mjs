@@ -1,5 +1,6 @@
 // Keeps the person's database out of these tests (see the fixture).
 import "./fixtures/isolatedDataHome.mjs";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -48,7 +49,7 @@ test("G3 without the reviewer proof dispatchCommand refuses native work-start, w
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-native-gate-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(), schema_version: 4, active_runs: "derive_from_run_projections" });
   const adapter = { id: "test", async resolveExecutable() { return process.execPath; }, buildInvocation() {}, async notify() {} };
   for (const args of [["--plan", "x", "--approve", "x"], ["--plan", "x", "--yes"], ["--plan", "x"]]) {
     await assert.rejects(
@@ -78,7 +79,7 @@ async function configuredPaths(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-native-proof-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { schema_version: 4, active_runs: "derive_from_run_projections" });
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(), schema_version: 4, active_runs: "derive_from_run_projections" });
   return { repoRoot, paths };
 }
 

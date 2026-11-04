@@ -8,6 +8,17 @@ export function localDateKey(value) {
   return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate());
 }
 
+// A moment as the person reads it, in local time with its offset, as `git log --date=iso` prints it:
+// 2026-11-04 13:33:27 +0800.
+export function localTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("Invalid date to print.");
+  const pad = (n) => String(n).padStart(2, "0");
+  const offset = -date.getTimezoneOffset();
+  return localDateKey(date) + " " + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds())
+    + " " + (offset < 0 ? "-" : "+") + pad(Math.trunc(Math.abs(offset) / 60)) + pad(Math.abs(offset) % 60);
+}
+
 // Whether the moment `iso` lies more than `days` whole days before `now`.
 export function olderThan(iso, days, now) {
   const time = Date.parse(iso);

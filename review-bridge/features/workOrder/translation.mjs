@@ -53,9 +53,9 @@ export function unsupportedContractStep(steps) {
 }
 
 // A provider failure is reported as one, like the writer's or reviewer's own.
-async function providerStop({ paths, stamp, role, provider, phase, processResult, texts, evidence }) {
+async function providerStop({ paths, runId, stamp, role, provider, phase, processResult, texts, evidence }) {
   const classified = classifyProviderFailure({ role, provider, phase, exitCode: processResult.exitCode, timedOut: processResult.timedOut, texts });
-  const written = await writeFailureRecord(paths, paths.queueRoot, stamp + "-" + phase, classified, evidence);
+  const written = await writeFailureRecord(paths, paths.runLogDir(runId), stamp + "-" + phase, classified, evidence);
   const status = processResult.timedOut ? (role === "translator" ? "writer_timeout" : "reviewer_failed")
     : classified.reason === "provider_usage_limit" ? "rate_limited"
       : role === "translator" ? "writer_failed" : "reviewer_failed";
@@ -79,9 +79,10 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
   if (timeoutMs === null) return { timedOut: true };
   const prompt = composeTranslationPrompt({ workPackageId: workPackage.work_package_id, lines, format, test: workPackage.test, attempt, feedback });
   const stamp = callStamp(runId);
-  const streamPath = path.join(paths.queueRoot, stamp + "-contract.stream.jsonl");
-  const stderrPath = path.join(paths.queueRoot, stamp + "-contract.stderr.log");
-  await writeText(path.join(paths.queueRoot, stamp + "-contract-prompt.txt"), prompt);
+  const logs = paths.runLogDir(runId);
+  const streamPath = path.join(logs, stamp + "-contract.stream.jsonl");
+  const stderrPath = path.join(logs, stamp + "-contract.stderr.log");
+  await writeText(path.join(logs, stamp + "-contract-prompt.txt"), prompt);
   const executable = await adapter.resolveExecutable("claude");
   const args = [
     "-p",
@@ -109,13 +110,13 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
   await appendIoEvent(paths, runId, usage);
   if (processResult.timedOut || !stream.result || stream.result.is_error === true || processResult.exitCode !== 0) {
     return { usage, stop: await providerStop({
-      paths, stamp, role: "translator", provider: "claude", phase: "translate", processResult,
+      paths, runId, stamp, role: "translator", provider: "claude", phase: "translate", processResult,
       // `result` is the CLI's own message only when it marks the error (is_error); else the model's text.
       texts: [stream.result?.is_error === true ? String(stream.result.result || "") : "", await readEvidenceTail(stderrPath)], evidence: { stdout_path: streamPath, stderr_path: stderrPath },
     }) };
   }
   const translation = writerResultFromClaudeResult(stream.result);
-  const resultPath = path.join(paths.queueRoot, stamp + "-contract.result.json");
+  const resultPath = path.join(logs, stamp + "-contract.result.json");
   await writeJson(resultPath, translation);
   return { usage, translation, resultPath };
 }
@@ -125,10 +126,11 @@ async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, for
   if (timeoutMs === null) return { timedOut: true };
   const prompt = composeCheckPrompt({ workPackageId: workPackage.work_package_id, lines, format, candidate, sha256, attempt });
   const stamp = callStamp(runId);
-  const stdoutPath = path.join(paths.queueRoot, stamp + "-contract-check.stdout.log");
-  const stderrPath = path.join(paths.queueRoot, stamp + "-contract-check.stderr.log");
-  const resultPath = path.join(paths.queueRoot, stamp + "-contract-check.result.json");
-  await writeText(path.join(paths.queueRoot, stamp + "-contract-check-prompt.txt"), prompt);
+  const logs = paths.runLogDir(runId);
+  const stdoutPath = path.join(logs, stamp + "-contract-check.stdout.log");
+  const stderrPath = path.join(logs, stamp + "-contract-check.stderr.log");
+  const resultPath = path.join(logs, stamp + "-contract-check.result.json");
+  await writeText(path.join(logs, stamp + "-contract-check-prompt.txt"), prompt);
   const executable = await adapter.resolveExecutable("codex");
   // The reviewer's own read-only, throwaway session, never the writer's.
   const args = [
@@ -151,7 +153,7 @@ async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, for
   const text = await fsp.readFile(resultPath, "utf8").catch(() => "");
   if (processResult.timedOut || processResult.exitCode !== 0 || !text.trim()) {
     return { usage, stop: await providerStop({
-      paths, stamp, role: "contract_checker", provider: "codex", phase: "contract_check", processResult,
+      paths, runId, stamp, role: "contract_checker", provider: "codex", phase: "contract_check", processResult,
       texts: [codexDiagnosticTrailer(await readEvidenceTail(stderrPath))], evidence: { stdout_path: stdoutPath, stderr_path: stderrPath },
     }) };
   }

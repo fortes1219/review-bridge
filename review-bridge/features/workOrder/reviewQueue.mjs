@@ -81,7 +81,7 @@ export async function enqueueReview({
     sealed: sealedEvidence,
   });
   const jobId = timestampId() + "-" + shortHash;
-  const jobPath = assertUnder(path.join(paths.pendingDir, jobId + ".json"), paths.queueRoot, "Queue job");
+  const jobPath = assertUnder(path.join(paths.pendingDir, jobId + ".json"), paths.stateRoot, "Queue job");
   const job = {
     schema_version: 4,
     job_id: jobId,

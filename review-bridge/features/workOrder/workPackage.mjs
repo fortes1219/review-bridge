@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
+import { assertUnder, assertUnderOne, samePath } from "../../utils/pathGuard.mjs";
 import {
   acquireLock,
   activeRunsOfWorkOrder,
@@ -58,7 +58,6 @@ export const FORBIDDEN_PATHS = Object.freeze([
   "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum", "poetry.lock", "composer.lock", "Gemfile.lock",
   ".github/**", ".gitlab-ci.yml", "Jenkinsfile", "Dockerfile*", "docker-compose*", "**/*.tf",
 ]);
-const RULES_RELATIVE = "review-bridge/rules.md";
 const RULES_MAX_CHARS = 4_000;
 
 function sha256Of(buffer) {
@@ -89,8 +88,8 @@ async function resolveScope({ paths, workOrderFile, allowedPaths }) {
 
 // C3.3: the rules digest the writer will be shown, sealed into the plan.
 export async function snapshotRules(paths) {
-  const absolute = path.join(paths.configRoot, "rules.md");
-  const relative = path.basename(paths.privateRoot) + "/" + RULES_RELATIVE;
+  const absolute = paths.rulesPath;
+  const relative = path.relative(paths.repoRoot, absolute).split(path.sep).join("/");
   const text = await fsp.readFile(absolute, "utf8").catch(() => null);
   if (text === null) throw new Error("規則摘要檔不見了：" + relative + "。從 project-templates/rules.md 復原後再建 plan。");
   if (!text.trim()) throw new Error("規則摘要檔是空的：" + relative + "。寫回內容或從 project-templates/rules.md 復原。");
@@ -197,7 +196,10 @@ export async function createWorkPackagePlan({
   allowedPaths,
   rounds,
   callTimeout,
+  // Where the plan is written. Without one it goes to the log folder of the run it proposes, as
+  // <planName or work package>.plan.json.
   outPath,
+  planName,
   // Which work order this file is (Q13), as the card shows it; sealed with the plan, so the yes
   // approves it too.
   workOrder = null,
@@ -252,9 +254,14 @@ export async function createWorkPackagePlan({
     ).toISOString(),
   };
   plan.plan_sha256 = planDigest(plan);
-  const resolvedOut = assertUnder(path.resolve(outPath), paths.privateRoot, "Work plan output");
+  const resolvedOut = assertUnderOne(path.resolve(outPath || planFilePath(paths, plan, planName)), [paths.logRoot, paths.privateRoot], "Work plan output");
   await writeJson(resolvedOut, plan);
   return { ...plan, plan_path: resolvedOut };
+}
+
+// The plan's file in the log folder of the run it proposes: a copy of the card, the database holds it.
+export function planFilePath(paths, plan, planName = null) {
+  return path.join(paths.runLogDir(plan.proposed_run_id), (planName || plan.work_package_id) + ".plan.json");
 }
 
 // E8: whether the work-order file still reads as the plan sealed it (the SHA-256 the card showed).
@@ -420,7 +427,7 @@ export async function closeFailedStart(paths, runId, error) {
 }
 
 export async function authorizeWorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
-  const resolvedPlan = assertUnder(path.resolve(planPath), paths.privateRoot, "Work plan");
+  const resolvedPlan = assertUnderOne(path.resolve(planPath), [paths.logRoot, paths.privateRoot], "Work plan");
   const plan = await readJson(resolvedPlan);
   assertCurrentPlan(plan);
   const actual = planDigest(plan);
@@ -548,7 +555,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
     await letGoOfStart();
     // T0-09 M2: maintenance (uninstall or upgrade) may have begun after the claim checked the marker.
     await cancelIfMaintenance(paths, started.run.run_id);
-    const promptPath = path.join(paths.queueRoot, "authorized-" + authorization.authorization_id + ".txt");
+    const promptPath = path.join(paths.runLogDir(started.run.run_id), "authorized-" + authorization.authorization_id + ".txt");
     await writeText(promptPath, plan.task);
     return {
       plan,
