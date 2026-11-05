@@ -34,7 +34,7 @@ export interface HomeContent {
 
 export const HOME_CONTENT: Record<HomeLocale, HomeContent> = {
   'zh-TW': {
-    eyebrow: 'REVIEW BRIDGE',
+    eyebrow: 'AI REVIEW HARNESS',
     productName: 'Review Bridge',
     titleFirst: '工單進，',
     titleAccent: '證據出。',
@@ -56,9 +56,9 @@ export const HOME_CONTENT: Record<HomeLocale, HomeContent> = {
     ],
   },
   'en-US': {
-    eyebrow: 'REVIEW BRIDGE',
+    eyebrow: 'AI REVIEW HARNESS',
     productName: 'Review Bridge',
-    titleFirst: 'Work orders in,',
+    titleFirst: 'Work orders in, ',
     titleAccent: 'evidence out.',
     lead: 'A command bridge for agent-driven work: every run is sealed, authorized, written by one agent, verified by tests, checked by an independent read-only reviewer, and recorded.',
     primaryAction: 'Get started',
@@ -78,7 +78,7 @@ export const HOME_CONTENT: Record<HomeLocale, HomeContent> = {
     ],
   },
   'ja': {
-    eyebrow: 'REVIEW BRIDGE',
+    eyebrow: 'AI REVIEW HARNESS',
     productName: 'Review Bridge',
     titleFirst: '作業指示を入れ、',
     titleAccent: '証拠を出す。',
