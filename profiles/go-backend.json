@@ -2,21 +2,64 @@
   "schema_version": 2,
   "profile_id": "go-backend",
   "display_name": "Go backend",
-  "required_files_any": ["go.mod"],
-  "auto_detection": { "files_any": ["go.mod"] },
-  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
-  "verification_candidates": ["gofmt -l .", "go vet ./...", "go test ./..."],
+  "required_files_any": [
+    "go.mod"
+  ],
+  "auto_detection": {
+    "files_any": [
+      "go.mod"
+    ]
+  },
+  "source_of_truth_candidates": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/docs/SESSION_HANDOFF_NEXT.md"
+  ],
+  "verification_rules": [
+    {
+      "command": "go test ./...",
+      "files_any": [
+        "go.mod"
+      ]
+    }
+  ],
   "semantic_reference_tool": "gopls",
   "structural_search_tool": "sg",
   "capability_patterns": [
-    { "name": "gin", "file": "go.mod", "patterns": ["github\\.com/gin-gonic/gin"] },
-    { "name": "echo", "file": "go.mod", "patterns": ["github\\.com/labstack/echo"] },
-    { "name": "fiber", "file": "go.mod", "patterns": ["github\\.com/gofiber/fiber"] },
-    { "name": "gorm", "file": "go.mod", "patterns": ["gorm\\.io/gorm"] },
-    { "name": "pgx", "file": "go.mod", "patterns": ["github\\.com/jackc/pgx"] }
-  ],
-  "review_terms": {
-    "security": ["authentication", "authorization", "credential", "context cancellation"],
-    "full": ["API contract", "database schema", "transaction state", "goroutine lifecycle", "cross-package architecture"]
-  }
+    {
+      "name": "gin",
+      "file": "go.mod",
+      "patterns": [
+        "github\\.com/gin-gonic/gin"
+      ]
+    },
+    {
+      "name": "echo",
+      "file": "go.mod",
+      "patterns": [
+        "github\\.com/labstack/echo"
+      ]
+    },
+    {
+      "name": "fiber",
+      "file": "go.mod",
+      "patterns": [
+        "github\\.com/gofiber/fiber"
+      ]
+    },
+    {
+      "name": "gorm",
+      "file": "go.mod",
+      "patterns": [
+        "gorm\\.io/gorm"
+      ]
+    },
+    {
+      "name": "pgx",
+      "file": "go.mod",
+      "patterns": [
+        "github\\.com/jackc/pgx"
+      ]
+    }
+  ]
 }

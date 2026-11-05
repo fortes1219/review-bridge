@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="review-bridge-session" content="__SESSION_TOKEN__">
+<title>Review Bridge 設定檢查</title>
+<link rel="stylesheet" href="/watch.css">
+</head>
+<body>
+<main>
+  <h1>Review Bridge 設定檢查</h1>
+  <p class="note">開啟或重新整理此頁不會呼叫任何模型，只會在本機檢查 CLI 是否安裝與登入。</p>
+
+  <section>
+    <h2>角色</h2>
+    <dl id="roles"><dt>載入中…</dt></dl>
+    <button type="button" id="refresh">重新檢查（不使用模型）</button>
+  </section>
+
+  <section>
+    <h2>Reviewer 是否無法寫檔</h2>
+    <p id="readonly-state">載入中…</p>
+    <p class="note">檢查結果只保存在這次執行中的 watch 程式記憶體；關閉或重新啟動 watch 後會回到「這次網頁服務啟動後還沒檢查過」。此頁的按鈕不代表人類授權。</p>
+    <p class="cost" id="cost-notice"><strong>注意：</strong>每次按下最多啟動一次 reviewer CLI；可能消耗模型額度，實際模型請求次數與 token 無法預先保證；不會自動重試。Bridge 會在一個臨時空資料夾裡，請 reviewer 嘗試寫入一個檔案，並確認唯讀沙箱確實擋下。</p>
+    <button type="button" id="probe" disabled>確認 reviewer 無法寫入（最多啟動一次 reviewer CLI，可能消耗模型額度）</button>
+    <p id="probe-result" role="status"></p>
+    <details id="readonly-details" hidden>
+      <summary>詳細資訊</summary>
+      <ul id="readonly-evidence"></ul>
+      <button type="button" id="probe-retry" hidden>再檢查一次（最多啟動一次 reviewer CLI，可能消耗模型額度）</button>
+    </details>
+  </section>
+
+  <section>
+    <h2>能不能開始實際工作</h2>
+    <p id="native-state">載入中…</p>
+  </section>
+</main>
+<script type="module" src="/watch.js"></script>
+</body>
+</html>

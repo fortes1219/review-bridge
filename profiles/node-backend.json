@@ -2,35 +2,112 @@
   "schema_version": 2,
   "profile_id": "node-backend",
   "display_name": "Node.js backend",
-  "required_files_any": ["package.json"],
+  "required_files_any": [
+    "package.json"
+  ],
   "auto_detection": {
-    "files_any": ["package.json"],
-    "content_none": [{ "file": "package.json", "patterns": ["\\\"(vue|react|next|nuxt|svelte|angular)\\\"\\s*:"] }]
+    "files_any": [
+      "package.json"
+    ],
+    "content_none": [
+      {
+        "file": "package.json",
+        "patterns": [
+          "\\\"(vue|react|next|nuxt|svelte|angular)\\\"\\s*:"
+        ]
+      }
+    ]
   },
-  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
-  "verification_script_candidates": ["format:check", "lint", "typecheck", "test:run", "test", "build"],
+  "verification_rules": [
+    {
+      "command": "npm test",
+      "package_script": "test"
+    }
+  ],
+  "source_of_truth_candidates": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/docs/SESSION_HANDOFF_NEXT.md"
+  ],
+  "verification_script_candidates": [
+    "format:check",
+    "lint",
+    "typecheck",
+    "test:run",
+    "test",
+    "build"
+  ],
   "semantic_reference_tool": "typescript-language-server",
   "structural_search_tool": "sg",
   "dependency_manifest": {
     "file": "package.json",
-    "sections": ["dependencies", "devDependencies"],
+    "sections": [
+      "dependencies",
+      "devDependencies"
+    ],
     "script_section": "scripts",
     "script_runner": "npm run",
     "capabilities": [
-      { "name": "typescript", "dependencies": ["typescript"] },
-      { "name": "express", "dependencies": ["express"] },
-      { "name": "fastify", "dependencies": ["fastify"] },
-      { "name": "koa", "dependencies": ["koa"] },
-      { "name": "hono", "dependencies": ["hono"] },
-      { "name": "nestjs", "dependencies": ["@nestjs/core"] },
-      { "name": "socket.io", "dependencies": ["socket.io"] },
-      { "name": "zod", "dependencies": ["zod"] },
-      { "name": "vitest", "dependencies": ["vitest"] },
-      { "name": "jest", "dependencies": ["jest"] }
+      {
+        "name": "typescript",
+        "dependencies": [
+          "typescript"
+        ]
+      },
+      {
+        "name": "express",
+        "dependencies": [
+          "express"
+        ]
+      },
+      {
+        "name": "fastify",
+        "dependencies": [
+          "fastify"
+        ]
+      },
+      {
+        "name": "koa",
+        "dependencies": [
+          "koa"
+        ]
+      },
+      {
+        "name": "hono",
+        "dependencies": [
+          "hono"
+        ]
+      },
+      {
+        "name": "nestjs",
+        "dependencies": [
+          "@nestjs/core"
+        ]
+      },
+      {
+        "name": "socket.io",
+        "dependencies": [
+          "socket.io"
+        ]
+      },
+      {
+        "name": "zod",
+        "dependencies": [
+          "zod"
+        ]
+      },
+      {
+        "name": "vitest",
+        "dependencies": [
+          "vitest"
+        ]
+      },
+      {
+        "name": "jest",
+        "dependencies": [
+          "jest"
+        ]
+      }
     ]
-  },
-  "review_terms": {
-    "security": ["authentication", "authorization", "credential", "csrf", "request cancellation"],
-    "full": ["API contract", "database schema", "transaction state", "event contract", "cross-module architecture"]
   }
 }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveAdapterModule, selectAdapter, targetKey } from "../core/platform.mjs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadAdapterForInspection, resolveAdapterModule, selectAdapter, targetKey, UNSUPPORTED_ADAPTER } from "../router/platform.mjs";
 import * as darwinAdapter from "../platforms/darwin-arm64/adapter.mjs";
 
 const manifest = {
@@ -73,4 +75,25 @@ test("darwin-arm64 adapter satisfies the contract with explicit CLI paths", asyn
     if (previousClaude === undefined) delete process.env.CLAUDE_REVIEW_CLI;
     else process.env.CLAUDE_REVIEW_CLI = previousClaude;
   }
+});
+
+// RC3-LINUX-00: the page and the checks that call no model run on any defined platform; only an
+// adapter the manifest marks active or candidate is eligible to call a model.
+test("the adapter for model-free checks: any defined platform, eligible only by the manifest's status", async () => {
+  const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const linux = loadAdapterForInspection(manifest, "linux", "x64", { bridgeRoot });
+  assert.deepEqual([linux.target, linux.status, linux.eligible], ["linux-x64", "experimental", false]);
+  assert.equal(loadAdapterForInspection(manifest, "win32", "x64", { bridgeRoot }).eligible, true);
+  assert.equal(loadAdapterForInspection(manifest, "darwin", "arm64", { bridgeRoot }).eligible, true);
+  // A definition cannot make itself eligible.
+  const claims = { ...manifest, adapters: { ...manifest.adapters, "linux-x64": { ...manifest.adapters["linux-x64"], eligible: true } } };
+  assert.equal(loadAdapterForInspection(claims, "linux", "x64", { bridgeRoot }).eligible, false);
+  // No definition, or a module that is not there: null, never an error.
+  assert.equal(loadAdapterForInspection(manifest, "linux", "arm64", { bridgeRoot }), null);
+  const gone = { ...manifest, adapters: { "linux-x64": { ...manifest.adapters["linux-x64"], module: "./platforms/nowhere/adapter.mjs" } } };
+  assert.equal(loadAdapterForInspection(gone, "linux", "x64", { bridgeRoot }), null);
+  await assert.rejects(UNSUPPORTED_ADAPTER.resolveExecutable("codex"));
+  assert.throws(() => UNSUPPORTED_ADAPTER.buildInvocation("codex", "codex", []));
+  // Model commands still take only an active or candidate adapter.
+  assert.throws(() => selectAdapter(manifest, "linux", "x64"), /No active review bridge adapter for linux-x64/);
 });

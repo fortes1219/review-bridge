@@ -1,4 +1,4 @@
-# Codex Review Bridge Runtime 0.2.0-rc.2
+# Review Bridge Runtime 0.2.0-rc.2
 
 This runtime is installed through the checksum-gated package installer. Do not copy runtime state between projects.
 
@@ -8,7 +8,7 @@ This runtime is installed through the checksum-gated package installer. Do not c
 - Apple Silicon macOS is a selectable canary candidate, not native-verified.
 - Linux x64 is experimental and fail-closed.
 - Fresh installations create no authorization, run, model session, or legacy `CONTROL.json`.
-- Work packages, authorizations, claims, run projections, and event logs have separate v4 lifecycles.
+- Work packages, authorizations, claims, run projections, and event logs have separate lifecycles.
 - Known OneDrive, Dropbox, iCloud Drive, UNC, NFS, CIFS, and SMB state locations are unsupported for concurrent controllers.
 
 ## Human entry point

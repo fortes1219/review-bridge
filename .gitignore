@@ -2,6 +2,10 @@ node_modules/
 dist/
 coverage/
 *.zip
+*.tgz
 *.sha256
 .tmp/
 
+.claude/
+.review-bridge/
+_fable-inbox/

@@ -3,9 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { readJson } from "../core/io.mjs";
-import { targetKey } from "../core/platform.mjs";
-import { runProcess } from "../core/process.mjs";
+import { readJson } from "../service/records/fileStore.mjs";
+import { targetKey } from "../router/platform.mjs";
+import { runProcess } from "../service/agentCli/process.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = await readJson(path.join(bridgeRoot, "manifest.json"));

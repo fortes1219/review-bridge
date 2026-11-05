@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { parseJson, readJson } from "../core/io.mjs";
-import { targetKey } from "../core/platform.mjs";
-import { runProcess } from "../core/process.mjs";
+import { parseJson, readJson } from "../service/records/fileStore.mjs";
+import { targetKey } from "../router/platform.mjs";
+import { runProcess } from "../service/agentCli/process.mjs";
 
 const confirmationFlag = "--confirm-live-model-calls";
 const maxBudgetUsdPerCall = 0.25;
@@ -113,7 +113,7 @@ try {
     target,
     adapter: definition.id,
     manifest_status: definition.status,
-    claude_executable: claude,
+    writer_executable: claude,
     session_id_preserved: true,
     resumed_context_verified: true,
     live_model_calls: 2,

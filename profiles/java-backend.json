@@ -21,9 +21,5 @@
     { "command": ".\\gradlew.bat test", "files_any": ["gradlew.bat"], "platform": "win32" },
     { "command": "./gradlew test", "files_any": ["gradlew"], "platforms": ["darwin", "linux"] },
     { "command": "gradle test", "files_any": ["build.gradle", "build.gradle.kts"], "files_none": ["gradlew", "gradlew.bat"] }
-  ],
-  "review_terms": {
-    "security": ["authentication", "authorization", "credential", "csrf", "security filter chain"],
-    "full": ["API contract", "entity model", "migration", "transaction boundary", "cross-module architecture"]
-  }
+  ]
 }

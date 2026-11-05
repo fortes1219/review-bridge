@@ -1,0 +1,486 @@
+// Run-record retention (T0-02): one archive file per day, kept for a fixed number
+// of days, with merge (run -> day file), prune, and rm. Zero model involvement.
+//
+// A terminal run's artifacts are folded into <state>/archive/<YYYY-MM-DD>.jsonl
+// as one JSON line each, then the service's own copies are deleted. The run's log
+// folder (<log>/<project_id>/<run_id>/) and its small records (projection,
+// authorization, claim, lock, guard) stay until the run is older than the
+// retention window, then go whole, as logrotate drops an expired log. Nothing
+// that belongs to an active run is ever touched.
+import fsp from "node:fs/promises";
+import path from "node:path";
+import { createHash } from "node:crypto";
+
+import {
+  appendArchiveLine,
+  appendArchiveLines,
+  ARCHIVE_SCHEMA_VERSION,
+  archiveFileForDate,
+  CLOSED_REASONS,
+  fileExists,
+  isActiveRun,
+  listFiles,
+  listJson,
+  parseReviewerUsage,
+  parseWriterUsage,
+  probeAuditDir,
+  pruneDayFiles,
+  pruneProbeRecords,
+  readJson,
+  retentionDays,
+  writeJsonAtomicDurable,
+} from "../../service/index.mjs";
+import { DAY_MS, olderThan } from "../../utils/dates.mjs";
+import { isUnder } from "../../utils/pathGuard.mjs";
+
+const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
+
+// One list of closed reasons for the whole runtime (Codex finding 2026-10-13: a copy here had lost
+// the terminal statuses added since T0-04, so those runs were never archived or pruned).
+
+// Files directly in the queue or reviews root that are part of the Bridge's own
+// control surface; never archived as orphans.
+const PROTECTED_ROOT_FILES = new Set([
+  "review-bridge-install.json",
+  "watch-session.json",
+  "watch-url.txt",
+  "CONTROL.json",
+  "bounded-resume-state.json",
+  "upgrade-in-progress.json",
+  "worker.node.lock",
+  "bounded-resume.node.lock",
+  "LATEST.txt",
+]);
+
+// A folder nothing was written in for the window: its newest file, or the folder itself when empty.
+async function olderFolder(folder, days, now) {
+  let newest = (await fsp.stat(folder).catch(() => null))?.mtimeMs ?? 0;
+  for (const file of await listFiles(folder)) newest = Math.max(newest, (await fsp.stat(file).catch(() => null))?.mtimeMs ?? 0);
+  return now - newest > days * DAY_MS;
+}
+
+function sha256(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+async function readOptionalJson(file) {
+  try { return await readJson(file); } catch { return null; }
+}
+
+async function readOptionalText(file) {
+  try { return await fsp.readFile(file, "utf8"); } catch { return null; }
+}
+
+// --- mapping artifacts to a run (R2.3): by recorded ids and paths, never by time ---
+
+function stampOf(filePath) {
+  const base = path.basename(String(filePath || ""));
+  // The time, and the run when the name carries it (callStamp), so two runs' calls in the same
+  // millisecond are never taken for one another.
+  const match = /^(\d{8}T\d{9}Z(?:-r[0-9a-f]{8})?)-/.exec(base);
+  return match ? match[1] : null;
+}
+
+function statePaths(state) {
+  if (!state || typeof state !== "object") return [];
+  return [state.stdout_path, state.stderr_path, state.writer_stdout_path, state.writer_stderr_path, state.review_path]
+    .filter((value) => typeof value === "string" && value);
+}
+
+async function readEvents(paths, runId) {
+  const file = path.join(paths.eventsDir, runId + ".jsonl");
+  const text = await readOptionalText(file);
+  if (text === null) return { file, events: [], present: false };
+  const events = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line)); } catch { events.push({ unparsable: line }); }
+  }
+  return { file, events, present: true };
+}
+
+async function reviewJobsForRun(paths, runId) {
+  const jobs = [];
+  for (const directory of [paths.pendingDir, paths.runningDir, paths.doneDir, paths.failedDir]) {
+    for (const file of await listJson(directory)) {
+      const job = await readOptionalJson(file);
+      if (job?.authorization?.run_id === runId) jobs.push({ file, job, jobId: path.basename(file, ".json") });
+    }
+  }
+  return jobs;
+}
+
+function reviewKind(base) {
+  if (base.endsWith("-reviewer-review.md")) return "review_result";
+  if (base.endsWith("-writer-report.md")) return "writer_report";
+  if (base.endsWith("-review-prompt.md")) return "review_prompt";
+  if (base.endsWith("-reviewer.stdout.log")) return "reviewer_stdout";
+  if (base.endsWith("-reviewer.stderr.log")) return "reviewer_stderr";
+  if (base.endsWith("-job.json")) return "review_job_copy";
+  return "review_other";
+}
+
+function writerKind(base) {
+  if (base.endsWith("-writer.stdout.json")) return "writer_stdout";
+  if (base.endsWith("-writer.stderr.log")) return "writer_stderr";
+  if (base.endsWith("-stop-payload.json")) return "stop_payload";
+  if (base.endsWith("-writer-only-prompt.txt")) return "writer_prompt";
+  if (base.endsWith("-bounded-correction.txt")) return "correction_prompt";
+  return "writer_other";
+}
+
+export async function collectRunArtifacts(paths, run) {
+  const runId = run.run_id;
+  const { file: eventFile, events, present } = await readEvents(paths, runId);
+  const artifacts = new Map();
+  const add = (kind, file) => { if (file && !artifacts.has(file)) artifacts.set(file, kind); };
+  const directories = new Set();
+
+  const authorizationIds = [
+    ...(Array.isArray(run.authorization_ids) ? run.authorization_ids : []),
+    ...(run.authorization_id ? [run.authorization_id] : []),
+  ];
+  for (const authorizationId of authorizationIds) {
+    if (authorizationId.startsWith("plan-")) directories.add(path.join(paths.evidenceRoot, authorizationId.slice(5, 37)));
+  }
+  // Every file the run wrote while it worked is in its own log folder: its plan, the card it ran on,
+  // each call's prompt and output, its result.
+  for (const file of await listFiles(paths.runLogDir(runId))) {
+    const base = path.basename(file);
+    if (base.endsWith(".plan.json")) add("plan", file);
+    else if (base.startsWith("authorized-")) add("authorized_plan", file);
+    else if (/-reviewer\.(stdout|stderr)\.log$/.test(base)) add(reviewKind(base), file);
+    else if (stampOf(file)) add(writerKind(base), file);
+  }
+  // T0-07 V2.1: the per-run result file is archived with the run (its text is under the 256 KB cap).
+  if (run.result_path) add("result", run.result_path);
+  const jobs = await reviewJobsForRun(paths, runId);
+  for (const { file, job, jobId } of jobs) {
+    add("review_job", file);
+    for (const reviewFile of await listFiles(paths.reviewsRoot)) {
+      if (path.basename(reviewFile).startsWith(jobId + "-")) add(reviewKind(path.basename(reviewFile)), reviewFile);
+    }
+    const evidence = job.workspace_evidence;
+    if (evidence?.delta_path) add("evidence_delta", evidence.delta_path);
+    if (evidence?.evidence_dir) directories.add(evidence.evidence_dir);
+    if (evidence?.baseline_path) directories.add(path.dirname(evidence.baseline_path));
+  }
+  for (const directory of directories) {
+    for (const file of await listFiles(directory)) {
+      if (path.basename(file).startsWith("delta-")) add("evidence_delta", file);
+    }
+  }
+  const ioFile = path.join(paths.eventsDir, runId + ".io.jsonl");
+  const ioText = await readOptionalText(ioFile);
+  const ioEvents = [];
+  for (const line of (ioText || "").split("\n")) {
+    if (!line.trim()) continue;
+    try { ioEvents.push(JSON.parse(line)); } catch { ioEvents.push({ unparsable: line }); }
+  }
+  return { eventFile, eventsPresent: present, events, artifacts, directories: [...directories], jobs, ioFile, ioPresent: ioText !== null, ioEvents };
+}
+
+async function artifactLine(kind, file) {
+  const buffer = await fsp.readFile(file);
+  const text = buffer.length <= MAX_ARCHIVED_TEXT_BYTES ? buffer.toString("utf8") : undefined;
+  return {
+    type: "artifact",
+    kind,
+    name: path.basename(file),
+    source_path: file,
+    sha256: sha256(buffer),
+    bytes: buffer.length,
+    ...(text === undefined ? { truncated: true } : { text }),
+  };
+}
+
+export function isTerminalRun(run) {
+  return Boolean(run) && run.status === "completed" && CLOSED_REASONS.includes(run.closed_reason);
+}
+
+export { isActiveRun };
+
+function runTerminalAt(run) {
+  return run.closed_at || run.updated_at || run.created_at || new Date().toISOString();
+}
+
+// R2: fold one terminal run into its day file, then delete what was folded.
+export async function mergeRun(paths, runId, { clock = Date.now, undelivered = false } = {}) {
+  const projectionFile = path.join(paths.runsDir, runId + ".json");
+  const run = await readOptionalJson(projectionFile);
+  if (!run) throw new Error("Run does not exist: " + runId);
+  if (!isTerminalRun(run)) throw new Error("Run is still active: " + runId);
+  if (run.archived_at) return { run_id: runId, archive_file: run.archive_file, already_archived: true, lines: 0, deleted: 0 };
+
+  const collected = await collectRunArtifacts(paths, run);
+  const archivedAt = new Date(clock()).toISOString();
+  const terminalAt = runTerminalAt(run);
+  const archiveFile = archiveFileForDate(paths, terminalAt);
+  const base = { schema_version: ARCHIVE_SCHEMA_VERSION, archived_at: archivedAt, run_id: runId };
+  const lines = [{ ...base, type: "run", terminal_at: terminalAt, run: { ...run }, ...(undelivered ? { undelivered: true } : {}) }];
+  for (const event of collected.events) lines.push({ ...base, type: "event", event });
+  for (const event of collected.ioEvents) lines.push({ ...base, type: "io_event", event });
+  // T0-05 D5.4: when the run recorded usage as I/O events those are the usage lines;
+  // the transcript and stderr-trailer parsers are only the fallback for runs without them.
+  const ioUsageRoles = new Set(collected.ioEvents.filter((event) => event.event === "usage" && !event.parse_error).map((event) => event.role));
+  let call = 0;
+  for (const [file, kind] of collected.artifacts) {
+    if (!(await fileExists(file))) { collected.artifacts.delete(file); continue; } // recorded path already gone
+    if (kind === "writer_stdout") {
+      call += 1;
+      if (!ioUsageRoles.has("writer")) lines.push({ ...base, type: "usage", ...parseWriterUsage(await fsp.readFile(file, "utf8"), { call }) });
+      continue; // R1.7: the full transcript is not archived, only its usage.
+    }
+    const line = await artifactLine(kind, file);
+    lines.push({ ...base, ...line });
+    if (kind === "reviewer_stderr" && !ioUsageRoles.has("reviewer")) {
+      const jobId = path.basename(file).replace(/-reviewer\.stderr\.log$/, "");
+      lines.push({ ...base, type: "usage", ...parseReviewerUsage(line.text || "", { jobId }) });
+    }
+  }
+
+  try {
+    await appendArchiveLines(archiveFile, lines);
+  } catch (error) {
+    // R2.4: nothing deleted; the projection says why so prune retries later.
+    await writeJsonAtomicDurable(projectionFile, { ...run, archive_error: String(error.message || error) }).catch(() => {});
+    throw error;
+  }
+  const { archive_error: _dropped, ...rest } = run;
+  await writeJsonAtomicDurable(projectionFile, { ...rest, archived_at: archivedAt, archive_file: archiveFile });
+
+  // What is in the run's log folder stays there until the folder expires (prune) or the run is removed.
+  let deleted = 0;
+  const logs = paths.runLogDir(runId);
+  for (const file of collected.artifacts.keys()) {
+    if (isUnder(file, logs)) continue;
+    await fsp.rm(file, { force: true });
+    deleted += 1;
+  }
+  // fileExists answers for files only; an evidence folder is asked as a folder.
+  for (const directory of collected.directories) {
+    if ((await fsp.stat(directory).catch(() => null))?.isDirectory()) { await fsp.rm(directory, { recursive: true, force: true }); deleted += 1; }
+  }
+  if (collected.eventsPresent) { await fsp.rm(collected.eventFile, { force: true }); deleted += 1; }
+  if (collected.ioPresent) { await fsp.rm(collected.ioFile, { force: true }); deleted += 1; }
+  await fsp.rm(path.join(paths.runLocksDir, runId + ".process.json"), { force: true });
+  await fsp.rm(path.join(paths.runLocksDir, runId + ".work.lock"), { force: true });
+  return { run_id: runId, archive_file: archiveFile, already_archived: false, lines: lines.length, deleted };
+}
+
+// --- prune (R3) -------------------------------------------------------------
+
+async function activeReferences(paths, runs) {
+  const stamps = new Set();
+  const jobIds = new Set();
+  for (const run of runs) {
+    if (!isActiveRun(run)) continue;
+    for (const candidate of statePaths(run.last_state)) {
+      const stamp = stampOf(candidate);
+      if (stamp) stamps.add(stamp);
+    }
+    for (const { jobId } of await reviewJobsForRun(paths, run.run_id)) jobIds.add(jobId);
+  }
+  return { stamps, jobIds };
+}
+
+export async function prune(paths, { config, clock = Date.now, ttl = 86_400_000, deliver = null } = {}) {
+  const days = retentionDays(config); // RetentionConfigError here means nothing is deleted
+  const now = clock();
+  const summary = {
+    days,
+    merged_runs: 0,
+    merge_errors: [],
+    archive_files_deleted: 0,
+    probe_audit_files_deleted: 0,
+    run_records_deleted: 0,
+    log_folders_deleted: 0,
+    authorizations_deleted: 0,
+    job_files_deleted: 0,
+    orphans_archived: 0,
+    refused_archived: 0,
+    undelivered: [],
+    undelivered_archived: 0,
+  };
+  const runs = [];
+  for (const file of await listJson(paths.runsDir)) {
+    const run = await readOptionalJson(file);
+    if (run?.run_id) runs.push(run);
+  }
+  const activeIds = new Set(runs.filter(isActiveRun).map((run) => run.run_id));
+
+  // 1. Fold every terminal run that is not folded yet.
+  for (const run of runs) {
+    if (!isTerminalRun(run) || run.archived_at) continue;
+    // T0-07 (Codex 2026-10-14): a run is folded only after its result was delivered, whoever calls
+    // prune (the prune command, watch at start, the daily timer). A run that still cannot be
+    // delivered waits; once it is older than the retention window it is folded anyway, marked.
+    let current = run;
+    if (!current.result_sha256 && deliver) {
+      try { await deliver(run.run_id); } catch { /* reported below as undelivered */ }
+      current = (await readOptionalJson(path.join(paths.runsDir, run.run_id + ".json"))) || run;
+    }
+    let undelivered = false;
+    if (!current.result_sha256) {
+      if (!olderThan(runTerminalAt(current), days, now)) { summary.undelivered.push(run.run_id); continue; }
+      undelivered = true;
+    }
+    try {
+      await mergeRun(paths, run.run_id, { clock, undelivered });
+      run.archived_at = new Date(now).toISOString();
+      summary.merged_runs += 1;
+      if (undelivered) summary.undelivered_archived += 1;
+    } catch (error) {
+      summary.merge_errors.push({ run_id: run.run_id, error: String(error.message || error) });
+    }
+  }
+
+  // 2. Day files older than the window; never today's. The reviewer check records too (T0-11 C3).
+  summary.archive_files_deleted = await pruneDayFiles(paths.archiveDir, days, now);
+  summary.probe_audit_files_deleted = await pruneProbeRecords(probeAuditDir(paths), days, now);
+
+  // 3. Small per-run records of runs that ended more than `days` ago.
+  const expiredRunIds = new Set();
+  for (const run of runs) {
+    if (!isTerminalRun(run) || !run.archived_at || !olderThan(runTerminalAt(run), days, now)) continue;
+    expiredRunIds.add(run.run_id);
+    for (const directory of [paths.runsDir, paths.runLocksDir, paths.reconcileGuardsDir]) {
+      const file = path.join(directory, run.run_id + ".json");
+      if (await fileExists(file)) { await fsp.rm(file, { force: true }); summary.run_records_deleted += 1; }
+    }
+  }
+  // The log folders: a run's goes with its records; one whose run is not here (a card never said yes
+  // to, a run removed by hand) goes when nothing was written in it for the window. A running one stays.
+  const knownRuns = new Set(runs.map((run) => run.run_id));
+  for (const entry of await fsp.readdir(paths.logRoot, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory() || activeIds.has(entry.name)) continue;
+    const folder = path.join(paths.logRoot, entry.name);
+    if (knownRuns.has(entry.name) ? !expiredRunIds.has(entry.name) : !(await olderFolder(folder, days, now))) continue;
+    await fsp.rm(folder, { recursive: true, force: true });
+    summary.log_folders_deleted += 1;
+  }
+  // Authorizations, claims and invalidations go when their run is gone, or when
+  // their TTL passed, they are older than the window, and no active run holds them.
+  const knownRunIds = new Set(runs.map((run) => run.run_id));
+  for (const directory of [paths.authorizationClaimsDir, paths.authorizationsDir, paths.authorizationInvalidationsDir]) {
+    for (const file of await listJson(directory)) {
+      const record = await readOptionalJson(file);
+      const runId = record?.run_id || null;
+      if (runId && activeIds.has(runId)) continue;
+      const stampedAt = record?.claimed_at || record?.authorized_at || record?.invalidated_at || null;
+      const ttlPassed = stampedAt ? now - Date.parse(stampedAt) > ttl : false;
+      const runGone = runId ? !knownRunIds.has(runId) || expiredRunIds.has(runId) : false;
+      if (runGone || (ttlPassed && olderThan(stampedAt, days, now))) {
+        await fsp.rm(file, { force: true });
+        summary.authorizations_deleted += 1;
+      }
+    }
+  }
+
+  // 4. Review job files and upgrade reports older than the window that no active run references.
+  const { stamps: activeStamps, jobIds: activeJobIds } = await activeReferences(paths, runs);
+  for (const directory of [paths.pendingDir, paths.runningDir, paths.doneDir, paths.failedDir, paths.upgradeReportsDir]) {
+    for (const file of await listFiles(directory)) {
+      if (activeJobIds.has(path.basename(file, ".json"))) continue;
+      const stat = await fsp.stat(file).catch(() => null);
+      if (stat && now - stat.mtimeMs > days * DAY_MS) { await fsp.rm(file, { force: true }); summary.job_files_deleted += 1; }
+    }
+  }
+
+  // 5. Orphans directly under the queue and reviews roots (R1.9).
+  for (const root of [paths.stateRoot, paths.reviewsRoot]) {
+    for (const file of await listFiles(root)) {
+      const base = path.basename(file);
+      if (PROTECTED_ROOT_FILES.has(base)) continue;
+      const stamp = stampOf(file);
+      if (stamp && activeStamps.has(stamp)) continue;
+      if (base.endsWith(".plan.json")) {
+        const plan = await readOptionalJson(file);
+        if (plan?.proposed_run_id && activeIds.has(plan.proposed_run_id)) continue;
+        if (plan?.proposed_run_id && !knownRunIds.has(plan.proposed_run_id)
+          && plan.authorization_expires_at && Date.parse(plan.authorization_expires_at) > now) continue; // not started yet
+      }
+      if (base.startsWith("authorized-plan-")) {
+        const authorizationId = base.replace(/^authorized-/, "").replace(/\.txt$/, "");
+        const owner = runs.find((run) => (run.authorization_ids || []).includes(authorizationId));
+        if (owner && (isActiveRun(owner) || !owner.archived_at)) continue;
+      }
+      if (root === paths.reviewsRoot) {
+        const jobId = base.replace(/-(job\.json|review-prompt\.md|writer-report\.md|reviewer-review\.md|reviewer\.stdout\.log|reviewer\.stderr\.log|error\.txt)$/, "");
+        if (activeJobIds.has(jobId)) continue;
+      }
+      const stat = await fsp.stat(file).catch(() => null);
+      if (!stat) continue;
+      const line = await artifactLine("orphan", file);
+      await appendArchiveLines(archiveFileForDate(paths, stat.mtime), [{
+        schema_version: ARCHIVE_SCHEMA_VERSION,
+        archived_at: new Date(now).toISOString(),
+        run_id: null,
+        ...line,
+        type: "orphan",
+      }]);
+      await fsp.rm(file, { force: true });
+      summary.orphans_archived += 1;
+    }
+  }
+
+  // 6. Events a run kept while the database was gone that the database refused when they were
+  // written late (replayUnrecorded leaves them as <run>.jsonl.refused-<time>): folded into today's
+  // day file like an orphan, then removed.
+  for (const file of await listFiles(paths.unrecordedDir)) {
+    if (!/\.jsonl\.refused-\d+$/.test(path.basename(file))) continue;
+    const line = await artifactLine("refused_unrecorded", file);
+    await appendArchiveLines(archiveFileForDate(paths, new Date(now)), [{
+      schema_version: ARCHIVE_SCHEMA_VERSION,
+      archived_at: new Date(now).toISOString(),
+      run_id: path.basename(file).replace(/\.jsonl\.refused-\d+$/, ""),
+      ...line,
+      type: "refused_unrecorded",
+    }]);
+    await fsp.rm(file, { force: true });
+    summary.refused_archived += 1;
+  }
+  return summary;
+}
+
+export function formatPruneSummary(summary) {
+  const parts = [];
+  if (summary.merged_runs) parts.push("合併 " + summary.merged_runs + " 條紀錄");
+  if (summary.archive_files_deleted) parts.push("清掉 " + summary.archive_files_deleted + " 天份紀錄");
+  if (summary.probe_audit_files_deleted) parts.push("清掉 " + summary.probe_audit_files_deleted + " 天份設定檢查紀錄");
+  if (summary.run_records_deleted) parts.push(summary.run_records_deleted + " 個過期 run 記錄");
+  if (summary.log_folders_deleted) parts.push(summary.log_folders_deleted + " 個過期 log 資料夾");
+  if (summary.authorizations_deleted) parts.push(summary.authorizations_deleted + " 個過期授權");
+  if (summary.job_files_deleted) parts.push(summary.job_files_deleted + " 個過期審查檔");
+  if (summary.orphans_archived) parts.push(summary.orphans_archived + " 個殘留檔");
+  if (summary.refused_archived) parts.push(summary.refused_archived + " 個資料庫拒絕補寫的事件檔");
+  if (summary.undelivered_archived) parts.push(summary.undelivered_archived + " 條超過保留天數仍沒交付，已歸檔並標記");
+  const line = parts.length ? parts.join("、") : "沒有要清的";
+  const errors = summary.merge_errors.map((entry) => "合併失敗 " + entry.run_id + "：" + entry.error);
+  if (summary.undelivered?.length) errors.push(summary.undelivered.length + " 條還沒交付結果，這次不歸檔：" + summary.undelivered.join("、"));
+  return [line + "（保留 " + summary.days + " 天）", ...errors].join("\n");
+}
+
+// --- rm (R4) ----------------------------------------------------------------
+
+export async function removeRun(paths, runId, { clock = Date.now } = {}) {
+  if (!/^[A-Za-z0-9-]{8,80}$/.test(String(runId || ""))) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
+  const projectionFile = path.join(paths.runsDir, runId + ".json");
+  const run = await readOptionalJson(projectionFile);
+  if (!run) return { exitCode: 1, line: "沒有這條", reason: "unknown" };
+  if (isActiveRun(run)) return { exitCode: 1, line: "進行中，先 stop", reason: "active" };
+  let merged = null;
+  // Codex 2026-10-14: a run removed without a result is marked, never lost silently. A run folded
+  // earlier keeps its old day-file line; today's day file gets a line saying it was removed undelivered.
+  const undelivered = !run.result_sha256;
+  if (!run.archived_at) merged = await mergeRun(paths, runId, { clock, undelivered });
+  else if (undelivered) await appendArchiveLine(paths, { type: "removed", run_id: runId, undelivered: true, archive_file: run.archive_file || null }, clock);
+  for (const directory of [paths.runsDir, paths.runLocksDir, paths.reconcileGuardsDir]) {
+    await fsp.rm(path.join(directory, runId + ".json"), { force: true });
+  }
+  await fsp.rm(paths.runLogDir(runId), { recursive: true, force: true });
+  return {
+    exitCode: 0, line: "已移除 " + runId, reason: merged ? "merged_and_removed" : "removed",
+    archive_file: (merged || run).archive_file, undelivered,
+  };
+}

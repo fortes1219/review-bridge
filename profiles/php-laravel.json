@@ -2,31 +2,83 @@
   "schema_version": 2,
   "profile_id": "php-laravel",
   "display_name": "PHP Laravel backend",
-  "required_files_any": ["composer.json", "artisan"],
+  "required_files_any": [
+    "composer.json",
+    "artisan"
+  ],
   "auto_detection": {
-    "files_all": ["composer.json", "artisan"],
-    "content_all": [{ "file": "composer.json", "patterns": ["laravel/framework"] }]
+    "files_all": [
+      "composer.json",
+      "artisan"
+    ],
+    "content_all": [
+      {
+        "file": "composer.json",
+        "patterns": [
+          "laravel/framework"
+        ]
+      }
+    ]
   },
-  "source_of_truth_candidates": ["AGENTS.md", "CLAUDE.md", ".claude/docs/SESSION_HANDOFF_NEXT.md"],
-  "verification_candidates": ["php artisan test"],
-  "verification_script_candidates": ["test", "lint", "analyse"],
+  "source_of_truth_candidates": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/docs/SESSION_HANDOFF_NEXT.md"
+  ],
+  "verification_rules": [
+    {
+      "command": "php artisan test",
+      "files_any": [
+        "artisan"
+      ]
+    }
+  ],
+  "verification_script_candidates": [
+    "test",
+    "lint",
+    "analyse"
+  ],
   "semantic_reference_tool": "phpactor-or-intelephense",
   "structural_search_tool": "sg",
   "dependency_manifest": {
     "file": "composer.json",
-    "sections": ["require", "require-dev"],
+    "sections": [
+      "require",
+      "require-dev"
+    ],
     "script_section": "scripts",
     "script_runner": "composer run-script",
     "capabilities": [
-      { "name": "laravel", "dependencies": ["laravel/framework"] },
-      { "name": "sanctum", "dependencies": ["laravel/sanctum"] },
-      { "name": "passport", "dependencies": ["laravel/passport"] },
-      { "name": "pest", "dependencies": ["pestphp/pest"] },
-      { "name": "phpunit", "dependencies": ["phpunit/phpunit"] }
+      {
+        "name": "laravel",
+        "dependencies": [
+          "laravel/framework"
+        ]
+      },
+      {
+        "name": "sanctum",
+        "dependencies": [
+          "laravel/sanctum"
+        ]
+      },
+      {
+        "name": "passport",
+        "dependencies": [
+          "laravel/passport"
+        ]
+      },
+      {
+        "name": "pest",
+        "dependencies": [
+          "pestphp/pest"
+        ]
+      },
+      {
+        "name": "phpunit",
+        "dependencies": [
+          "phpunit/phpunit"
+        ]
+      }
     ]
-  },
-  "review_terms": {
-    "security": ["authentication", "authorization", "policy", "guard", "csrf", "mass assignment"],
-    "full": ["API resource contract", "eloquent model", "migration", "transaction boundary", "queue lifecycle"]
   }
 }

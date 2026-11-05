@@ -2,7 +2,9 @@
   "schema_version": 2,
   "entrypoint": "bootstrap.mjs",
   "commands": [
-    "enqueue",
+    "start",
+    "resume",
+    "clean",
     "review",
     "bounded-resume",
     "work-plan",
@@ -10,8 +12,16 @@
     "work-status",
     "work-cancel",
     "status",
+    "logs",
     "wait",
-    "migrate-control"
+    "watch",
+    "up",
+    "down",
+    "ps",
+    "prune",
+    "rm",
+    "stop",
+    "backup"
   ],
   "adapters": {
     "win32-x64": {

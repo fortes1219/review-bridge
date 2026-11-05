@@ -1,5 +1,5 @@
 {
-  "package": "codex-review-bridge-runtime",
+  "package": "review-bridge-runtime",
   "version": "0.2.0-rc.2",
   "snapshot_date": "2026-08-28",
   "status": "private-release-candidate",
@@ -11,7 +11,7 @@
     "Windows, Darwin, and Linux adapters",
     "fake CLI and native smoke tests",
     "generic review prompt",
-    "state contract v4 default policy and hook integration",
+    "state contract default policy and hook integration",
     "immutable work-package, authorization, claim, run, and event state",
     "bridge completion rule",
     "architecture documentation"
