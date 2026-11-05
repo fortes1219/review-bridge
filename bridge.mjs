@@ -391,6 +391,11 @@ function formatUninstallPlan(plan) {
     ...Object.values(plan.agent_files_state || {}).map((part) => (part.unchanged
       ? "會移除安裝時加的 " + part.path + (part.path === "AGENTS.md" ? " 那一段" : "")
       : part.path + " 裡安裝時加的內容你改過，留著不動")),
+    ...(plan.agent_entries || []).filter((entry) => entry.outcome !== "absent").map((entry) => ({
+      removed: "會移除 Bridge 裝在使用者層級的 " + (entry.folder ? entry.folder + "（整個資料夾）" : entry.path),
+      kept_in_use: entry.path + " 其他專案還在用，留著",
+      kept_changed: entry.path + " 你改過，留著不動",
+    }[entry.outcome])),
   ].join("\n") + "\n";
 }
 

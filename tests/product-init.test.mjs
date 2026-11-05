@@ -111,7 +111,7 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     "",
     "  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:",
     "    /review-bridge start .review-bridge/work-packages/<file>.md",
-    "    (Codex reads the same steps from AGENTS.md)",
+    "    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)",
     "  at a terminal, for advanced use and CI:",
     "    review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: http://localhost:" + port + "/",
@@ -216,10 +216,11 @@ test("role-first init supports either provider pairing without touching existing
   assert.deepEqual(JSON.parse(result.stdout).roles, { writer: "codex", reviewer: "claude" });
   assert.equal(await fsp.readFile(path.join(root, ".claude", "settings.local.json"), "utf8"), "{\"keep\":true}\n");
   assert.equal(await fsp.readFile(path.join(root, ".codex", "config.toml"), "utf8"), "keep = true\n");
-  // B3: the only addition is Bridge's own /review-bridge command.
-  assert.deepEqual(await fsp.readdir(path.join(root, ".claude")), ["commands", "settings.local.json"]);
-  assert.deepEqual(await fsp.readdir(path.join(root, ".claude", "commands")), ["review-bridge.md"]);
+  // RC3-ENTRY-02: nothing of an agent's is added to the project; the entries are at user level.
+  assert.deepEqual(await fsp.readdir(path.join(root, ".claude")), ["settings.local.json"]);
   assert.deepEqual(await fsp.readdir(path.join(root, ".codex")), ["config.toml"]);
+  await fsp.access(path.join(isolatedHome, ".claude", "commands", "review-bridge.md"));
+  await fsp.access(path.join(isolatedHome, ".agents", "skills", "review-bridge", "SKILL.md"));
   await fsp.access(path.join(projectPaths(root).stateRoot, "review-bridge-install.json"));
 });
 
@@ -248,7 +249,7 @@ test("init without a terminal takes claude and codex when no role is given or sa
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-home-"));
   const env = isolatedEnv({ REVIEW_BRIDGE_DATA_HOME: home });
   // The page's session is in that data home, so down looks there.
-  t.after(async () => { await removeWorkspace(root, env); stopServerIn(home); await fsp.rm(home, { recursive: true, force: true }); });
+  t.after(async () => { await removeWorkspace(root, env); stopServerIn(home); await fsp.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); });
   const result = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root), {
     cwd: packageRoot, encoding: "utf8", env, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
@@ -338,7 +339,7 @@ test("init starts the resident service and ends with cd, the work folder, the st
     "  cd " + path.relative(packageRoot, root),
     "  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:",
     "    /review-bridge start .review-bridge/work-packages/<file>.md",
-    "    (Codex reads the same steps from AGENTS.md)",
+    "    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)",
     "  at a terminal, for advanced use and CI:",
     "    review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: " + url,

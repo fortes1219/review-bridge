@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome, separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -12,7 +12,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
-  applyNeutralInstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeRollbackPlan,
+  applyNeutralInstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult, formatUpgradeRollbackPlan,
   loadInstalledServiceModules, MAINTENANCE_MARKER, planNeutralInstall, planNeutralUpgrade, planNeutralUpgradeRollback, PROOF_LOSS_LINE, TRANSIENT_FILES,
   verifyNeutralInstall,
 } from "../installer/neutral-install.mjs";
@@ -944,4 +944,113 @@ test("a rollback whose page service does not come back keeps the marker and says
   assert.equal(await exists(markerOf(root)), true);
   const { result } = await rollback(root);
   assert.equal(result.service_restarted, true);
+});
+
+// RC3-ENTRY-02. These look at the agent files only, so the check after the upgrade opens no database.
+const noDatabase = { healthCheck: async () => {} };
+const earlierCommand = ".claude/commands/review-bridge.md";
+
+// A project set up before the entries moved has them in the project, named in its install record.
+async function earlierAgentFiles(root, own) {
+  const command = "---\ndescription: earlier\n---\n";
+  await fsp.mkdir(path.join(root, ".claude", "commands"), { recursive: true });
+  await fsp.writeFile(path.join(root, ".claude", "commands", "review-bridge.md"), command);
+  const added = Buffer.from("\n<!-- review-bridge:start -->\n## Review Bridge\n<!-- review-bridge:end -->\n");
+  await fsp.writeFile(path.join(root, "AGENTS.md"), Buffer.concat([own, added]));
+  const manifest = await readJson(manifestOf(root));
+  manifest.agent_files = {
+    command: { path: earlierCommand, sha256: sha(command), created_dirs: [".claude/commands"] },
+    agents: { path: "AGENTS.md", created_file: false, added_prefix_newline: false, added_sha256: sha(added), added_length: added.length },
+  };
+  await writeJson(manifestOf(root), manifest);
+}
+
+test("upgrade takes back what an earlier Bridge wrote into the project, with the entries at user level first, and says so", async (t) => {
+  const me = separatePerson(t);
+  const root = await workspace(t);
+  const own = Buffer.from("# Rules\n\nKeep this.\n");
+  await install(root);
+  await fsp.rm(me.claudeEntry);
+  await earlierAgentFiles(root, own);
+  const plan = await planNeutralUpgrade({ target: root });
+  assert.equal(plan.up_to_date, undefined, "an unchanged runtime does not make it up to date");
+  assert.deepEqual(plan.agent_files_state, {
+    command: { path: earlierCommand, unchanged: true },
+    agents: { path: "AGENTS.md", unchanged: true },
+  });
+  const shown = formatUpgradePlan(plan);
+  assert.ok(shown.includes("/review-bridge 會裝在使用者層級：" + me.claudeEntry), shown);
+  assert.ok(shown.includes("舊版寫進專案的 " + earlierCommand + "、AGENTS.md 那一段會收回"), shown);
+  const result = await applyNeutralUpgrade(plan, plan.plan_sha256, noDatabase);
+  assert.deepEqual(result.agent_files, { command: "removed", agents: "removed" });
+  assert.ok(formatUpgradeResult(result).includes("舊版寫進專案的 " + earlierCommand + "、AGENTS.md 那一段已收回"), formatUpgradeResult(result));
+  assert.equal(await exists(path.join(root, ".claude", "commands")), false);
+  assert.equal(await fsp.readFile(path.join(root, ".claude", "settings.local.json"), "utf8"), "{\"hooks\":{}}\n", "the rest of .claude/ stays");
+  assert.deepEqual(await fsp.readFile(path.join(root, "AGENTS.md")), own, "AGENTS.md is back byte for byte");
+  assert.equal(await exists(me.claudeEntry), true);
+  assert.equal((await readJson(manifestOf(root))).agent_files, undefined);
+  assert.equal((await planNeutralUpgrade({ target: root })).up_to_date, true);
+  await verifyNeutralInstall(root);
+});
+
+test("upgrade leaves what the person edited, says so once, and an AGENTS.md it created goes", async (t) => {
+  const me = separatePerson(t);
+  const root = await workspace(t);
+  await install(root);
+  await earlierAgentFiles(root, Buffer.alloc(0));
+  await fsp.appendFile(path.join(root, ".claude", "commands", "review-bridge.md"), "mine\n");
+  await fsp.appendFile(path.join(root, "AGENTS.md"), "My own line.\n");
+  const plan = await planNeutralUpgrade({ target: root });
+  assert.deepEqual(plan.agent_files_state, {
+    command: { path: earlierCommand, unchanged: false },
+    agents: { path: "AGENTS.md", unchanged: false },
+  });
+  const result = await applyNeutralUpgrade(plan, plan.plan_sha256, noDatabase);
+  assert.deepEqual(result.agent_files, { command: "kept_changed", agents: "kept_changed" });
+  assert.ok(formatUpgradeResult(result).includes("舊版寫進專案的 " + earlierCommand + "、AGENTS.md 那一段 你改過，留著不動"), formatUpgradeResult(result));
+  assert.match(await fsp.readFile(path.join(root, ".claude", "commands", "review-bridge.md"), "utf8"), /mine\n$/);
+  assert.match(await fsp.readFile(path.join(root, "AGENTS.md"), "utf8"), /My own line\.\n$/);
+  assert.equal((await planNeutralUpgrade({ target: root })).up_to_date, true, "reported once, not on every upgrade");
+  assert.equal(await exists(me.codexEntry), true);
+
+  const created = await workspace(t);
+  await install(created);
+  await earlierAgentFiles(created, Buffer.alloc(0));
+  const manifest = await readJson(manifestOf(created));
+  manifest.agent_files.agents.created_file = true;
+  await writeJson(manifestOf(created), manifest);
+  await upgrade(created, noDatabase);
+  assert.equal(await exists(path.join(created, "AGENTS.md")), false);
+});
+
+test("a failed upgrade leaves what an earlier Bridge wrote in the project, and the next one takes it back", async (t) => {
+  separatePerson(t);
+  const root = await workspace(t);
+  await install(root);
+  await earlierAgentFiles(root, Buffer.from("# Rules\n"));
+  const plan = await planNeutralUpgrade({ target: root });
+  await assert.rejects(applyNeutralUpgrade(plan, plan.plan_sha256, { healthCheck: async () => { throw new Error("no database"); } }), /rolled back.*no database/);
+  assert.equal(await exists(path.join(root, ".claude", "commands", "review-bridge.md")), true);
+  assert.equal((await readJson(manifestOf(root))).agent_files.command.path, earlierCommand);
+  const { result } = await upgrade(root, noDatabase);
+  assert.deepEqual(result.agent_files, { command: "removed", agents: "removed" });
+  assert.equal(await fsp.readFile(path.join(root, "AGENTS.md"), "utf8"), "# Rules\n");
+});
+
+test("upgrade puts a missing entry back, leaves a file of the person's, and is up to date afterwards", async (t) => {
+  const me = separatePerson(t);
+  const root = await workspace(t);
+  await install(root);
+  await fsp.rm(me.codexEntry);
+  await fsp.writeFile(me.claudeEntry, "my own command\n");
+  const record = await readJson(me.record);
+  record.entries = record.entries.filter((entry) => entry.path !== me.claudeEntry);
+  await writeJson(me.record, record);
+  const plan = await planNeutralUpgrade({ target: root });
+  assert.deepEqual(plan.agent_entries.map((entry) => entry.action), ["keep", "add"]);
+  const result = await applyNeutralUpgrade(plan, plan.plan_sha256, noDatabase);
+  assert.ok(formatUpgradeResult(result).includes(me.claudeEntry + " 是你自己的檔，不動"), formatUpgradeResult(result));
+  assert.equal(await exists(me.codexEntry), true);
+  assert.equal(await fsp.readFile(me.claudeEntry, "utf8"), "my own command\n");
+  assert.equal((await planNeutralUpgrade({ target: root })).up_to_date, true);
 });

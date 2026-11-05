@@ -58,7 +58,7 @@ export const COMMANDS = {
     audience: "human",
     installer: true,
     summary: "Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type",
-    note: "Afterwards you start work through your agent: in Claude Code type /review-bridge start <file>; Codex reads the same steps from AGENTS.md. review-bridge start <file> at a terminal is for advanced use and CI.",
+    note: "Afterwards you start work through your agent: in Claude Code type /review-bridge start <file>; in Codex, $review-bridge start <file>. review-bridge start <file> at a terminal is for advanced use and CI.",
     options: {
       "--target": { key: "target", type: "string", value: "<folder>", default: "the current folder", help: "Set up this folder instead" },
       "--writer": { key: "writer", type: "string", value: PROVIDER, default: "your saved default, else claude", help: "Writer role" },

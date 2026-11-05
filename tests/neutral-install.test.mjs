@@ -1,6 +1,7 @@
 // Keeps the person's database out of these tests (see the fixture).
-import "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
 import net from "node:net";
@@ -10,6 +11,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
+import { agentEntryFiles } from "../installer/agent-files.mjs";
 import {
   applyNeutralInstall,
   fileSnapshot,
@@ -191,60 +193,124 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   await assert.rejects(planNeutralInstall({ target: root, roles: plan.roles, watchPort: 70000 }));
 });
 
-// B3: init adds Claude Code's /review-bridge command and the same note in AGENTS.md.
-test("install adds the /review-bridge command and appends to AGENTS.md; a project's own command file is kept", async (t) => {
+// RC3-ENTRY-02: the project keeps nothing of an agent's; each agent's entry is at user level.
+test("init leaves a clean Git project clean: no .claude/, AGENTS.md or CLAUDE.md change, and git status shows nothing", async (t) => {
+  separatePerson(t);
   const root = await workspace(t);
-  const agents = Buffer.from("# Project rules\r\n\r\nNo trailing newline here.");
+  const git = (...args) => spawnSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: root, encoding: "utf8", windowsHide: true });
+  const agents = Buffer.from("# Rules\r\n\r\nNo trailing newline here.");
+  const claude = Buffer.from("# Claude rules\n");
   await fsp.writeFile(path.join(root, "AGENTS.md"), agents);
+  await fsp.writeFile(path.join(root, "CLAUDE.md"), claude);
+  assert.equal(git("init", "--quiet").status, 0);
+  assert.equal(git("add", "-A").status, 0);
+  assert.equal(git("commit", "--quiet", "-m", "start").status, 0);
   const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
-  assert.deepEqual(plan.agent_files, {
-    command: { path: ".claude/commands/review-bridge.md", action: "create" },
-    agents: { path: "AGENTS.md", action: "append" },
-  });
   await applyNeutralInstall(plan, plan.plan_sha256);
-  const command = await fsp.readFile(path.join(root, ".claude", "commands", "review-bridge.md"), "utf8");
+  assert.equal(git("status", "--porcelain", "--untracked-files=all", "--ignored=no").stdout, "");
+  assert.deepEqual(await fsp.readFile(path.join(root, "AGENTS.md")), agents);
+  assert.deepEqual(await fsp.readFile(path.join(root, "CLAUDE.md")), claude);
+  assert.equal(await fsp.stat(path.join(root, ".claude")).catch(() => null), null);
+  assert.equal(await fsp.stat(path.join(root, ".codex")).catch(() => null), null);
+  assert.equal(await fsp.stat(path.join(root, ".gitignore")).catch(() => null), null);
+
+  const bare = await workspace(t);
+  const again = await planNeutralInstall({ target: bare, roles: { writer: "claude", reviewer: "codex" } });
+  await applyNeutralInstall(again, again.plan_sha256);
+  assert.equal(await fsp.stat(path.join(bare, "AGENTS.md")).catch(() => null), null, "no AGENTS.md is created");
+});
+
+test("init puts each agent's /review-bridge entry where its CLI looks; the person's other files there stay", async (t) => {
+  const me = separatePerson(t);
+  const root = await workspace(t);
+  const theirs = Buffer.from("# My global rules\n");
+  await fsp.mkdir(me.codexHome, { recursive: true });
+  await fsp.writeFile(path.join(me.codexHome, "AGENTS.md"), theirs);
+  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  assert.deepEqual(plan.agent_entries, [
+    { provider: "claude", path: me.claudeEntry, action: "add" },
+    { provider: "codex", path: me.codexEntry, action: "add" },
+  ]);
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  const command = await fsp.readFile(me.claudeEntry, "utf8");
   assert.match(command, /^---\ndescription: .+\nargument-hint: .+\n---\n/);
   assert.match(command, /^argument-hint: start <file> \| stop <run_id> \| resume <run_id> \| clean \[<run_id>\]$/m);
   assert.match(command, /four actions \(\$ARGUMENTS\)/);
-  assert.match(command, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with `--yes`/);
-  const after = await fsp.readFile(path.join(root, "AGENTS.md"));
-  assert.deepEqual(after.subarray(0, agents.length), agents, "the existing text is kept byte for byte");
-  assert.match(after.subarray(agents.length).toString("utf8"), /^\n\n<!-- review-bridge:start -->\n## Review Bridge\n[\s\S]*`review-bridge <action> <file\|run_id>`[\s\S]*<!-- review-bridge:end -->\n$/);
+  assert.match(command, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with .--yes./);
+  // Codex takes a skill: it requires the description, and it expands no arguments, so none is promised.
+  const skill = await fsp.readFile(me.codexEntry, "utf8");
+  assert.match(skill, /^---\nname: review-bridge\ndescription: .+\n---\n/);
+  assert.doesNotMatch(skill, /\$ARGUMENTS|\{\{args\}\}|argument-hint/);
+  assert.match(skill, /one of\nfour actions:/);
+  assert.match(skill, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with .--yes./);
+  assert.deepEqual(await fsp.readFile(path.join(me.codexHome, "AGENTS.md")), theirs);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
 
-  const second = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-neutral-test-"));
-  t.after(() => fsp.rm(second, { recursive: true, force: true }));
-  await fsp.mkdir(path.join(second, ".claude", "commands"), { recursive: true });
-  await fsp.writeFile(path.join(second, ".claude", "commands", "review-bridge.md"), "my own command\n");
-  await fsp.writeFile(path.join(second, "AGENTS.md"), after);
-  const kept = await planNeutralInstall({ target: second, profileId: "none", roles: { writer: "claude", reviewer: "codex" } });
-  assert.deepEqual(kept.agent_files, {
-    command: { path: ".claude/commands/review-bridge.md", action: "keep" },
-    agents: { path: "AGENTS.md", action: "keep" },
-  });
-  await applyNeutralInstall(kept, kept.plan_sha256);
-  assert.equal(await fsp.readFile(path.join(second, ".claude", "commands", "review-bridge.md"), "utf8"), "my own command\n");
-  assert.deepEqual(await fsp.readFile(path.join(second, "AGENTS.md")), after);
+  // The places are the ones the CLIs read. Codex's user skills are under the home directory,
+  // wherever CODEX_HOME points (openai/codex ext/skills/src/host_roots.rs).
+  const home = path.resolve("H");
+  assert.deepEqual(agentEntryFiles({ env: {}, home }).map((entry) => entry.file), [
+    path.join(home, ".claude", "commands", "review-bridge.md"),
+    path.join(home, ".agents", "skills", "review-bridge", "SKILL.md"),
+  ]);
+  assert.deepEqual(agentEntryFiles({ env: { CLAUDE_CONFIG_DIR: path.resolve("C"), CODEX_HOME: path.resolve("X") }, home }).map((entry) => entry.file), [
+    path.join(path.resolve("C"), "commands", "review-bridge.md"),
+    path.join(home, ".agents", "skills", "review-bridge", "SKILL.md"),
+  ]);
 });
 
-test("install rollback removes the agent files it wrote and restores AGENTS.md; an edited one is kept", async (t) => {
+test("a file of the person's at an entry's path is left alone; Bridge's older copy is replaced; this one is left as it is", async (t) => {
+  const me = separatePerson(t);
+  const first = await workspace(t);
+  await fsp.mkdir(path.dirname(me.claudeEntry), { recursive: true });
+  await fsp.writeFile(me.claudeEntry, "my own command\n");
+  const plan = await planNeutralInstall({ target: first, roles: { writer: "claude", reviewer: "codex" } });
+  assert.deepEqual(plan.agent_entries.map((entry) => entry.action), ["keep", "add"]);
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  assert.equal(await fsp.readFile(me.claudeEntry, "utf8"), "my own command\n");
+  const current = await fsp.readFile(me.codexEntry, "utf8");
+
+  // What an older Bridge wrote: the record names it, so it is Bridge's to replace.
+  const older = "older steps\n";
+  await fsp.writeFile(me.codexEntry, older);
+  const record = JSON.parse(await fsp.readFile(me.record, "utf8"));
+  assert.deepEqual(record.entries.map((entry) => entry.path), [me.codexEntry], "only what Bridge wrote is recorded");
+  record.entries[0].sha256 = createHash("sha256").update(older).digest("hex");
+  await fsp.writeFile(me.record, JSON.stringify(record));
+  const second = await workspace(t);
+  const next = await planNeutralInstall({ target: second, roles: { writer: "claude", reviewer: "codex" } });
+  assert.deepEqual(next.agent_entries.map((entry) => entry.action), ["keep", "replace"]);
+  await applyNeutralInstall(next, next.plan_sha256);
+  assert.equal(await fsp.readFile(me.codexEntry, "utf8"), current);
+
+  const third = await workspace(t);
+  const same = await planNeutralInstall({ target: third, roles: { writer: "claude", reviewer: "codex" } });
+  assert.deepEqual(same.agent_entries.map((entry) => entry.action), ["keep", "unchanged"]);
+});
+
+test("install rollback takes the entries back unless another project uses them or they were edited", async (t) => {
+  const me = separatePerson(t);
+  const roles = { writer: "claude", reviewer: "codex" };
   const root = await workspace(t);
-  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  const plan = await planNeutralInstall({ target: root, roles });
   await applyNeutralInstall(plan, plan.plan_sha256);
   const rolled = await rollbackFreshNeutralInstall(plan);
-  assert.deepEqual(rolled.agent_files, { command: "removed", agents: "removed" });
-  assert.equal(await fsp.stat(path.join(root, ".claude")).catch(() => null), null, "the folders init made are gone too");
-  assert.equal(await fsp.stat(path.join(root, "AGENTS.md")).catch(() => null), null, "an AGENTS.md init created is gone");
+  assert.deepEqual(rolled.agent_entries.map((entry) => entry.outcome), ["removed", "removed"]);
+  for (const gone of [me.claudeHome, path.join(me.home, ".agents"), me.record]) assert.equal(await fsp.stat(gone).catch(() => null), null, gone + " is gone");
 
-  const edited = await workspace(t);
-  await fsp.writeFile(path.join(edited, "AGENTS.md"), "# Rules\n");
-  const again = await planNeutralInstall({ target: edited, roles: { writer: "claude", reviewer: "codex" } });
-  await applyNeutralInstall(again, again.plan_sha256);
-  await fsp.appendFile(path.join(edited, "AGENTS.md"), "My own line.\n");
-  await fsp.appendFile(path.join(edited, ".claude", "commands", "review-bridge.md"), "edited\n");
-  assert.deepEqual((await rollbackFreshNeutralInstall(again)).agent_files, { command: "kept_changed", agents: "kept_changed" });
-  assert.match(await fsp.readFile(path.join(edited, "AGENTS.md"), "utf8"), /My own line\.\n$/);
-  assert.match(await fsp.readFile(path.join(edited, ".claude", "commands", "review-bridge.md"), "utf8"), /edited\n$/);
+  const staying = await workspace(t);
+  const stayingPlan = await planNeutralInstall({ target: staying, roles });
+  await applyNeutralInstall(stayingPlan, stayingPlan.plan_sha256);
+  const leaving = await workspace(t);
+  const leavingPlan = await planNeutralInstall({ target: leaving, roles });
+  await applyNeutralInstall(leavingPlan, leavingPlan.plan_sha256);
+  assert.deepEqual((await rollbackFreshNeutralInstall(leavingPlan)).agent_entries.map((entry) => entry.outcome), ["kept_in_use", "kept_in_use"]);
+  assert.ok(await fsp.stat(me.claudeEntry));
+
+  await fsp.appendFile(me.claudeEntry, "edited\n");
+  assert.deepEqual((await rollbackFreshNeutralInstall(stayingPlan)).agent_entries.map((entry) => entry.outcome), ["kept_changed", "removed"]);
+  assert.match(await fsp.readFile(me.claudeEntry, "utf8"), /edited\n$/);
+  assert.equal(await fsp.stat(me.codexEntry).catch(() => null), null);
 });
 
 async function tree(t, files, directories = []) {

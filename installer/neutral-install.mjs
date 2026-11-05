@@ -17,7 +17,9 @@ import {
 } from "../review-bridge/service/index.mjs";
 import { bridgeDataHome } from "../review-bridge/service/database/dataHome.mjs";
 import { projectLogRoot, projectStateRoot, readProjectId } from "../review-bridge/utils/paths.mjs";
-import { AGENT_COMMAND_RELATIVE, agentFilesState, planAgentFiles, undoAgentFiles, writeAgentFiles } from "./agent-files.mjs";
+import {
+  AGENT_COMMAND_RELATIVE, agentEntriesPending, agentEntriesState, agentFilesState, planAgentEntries, releaseAgentEntries, undoAgentFiles, writeAgentEntries,
+} from "./agent-files.mjs";
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
 
@@ -155,7 +157,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
   }
   const boundary = gitBoundary(root);
   if (boundary.repository) await assertSafeExcludePath(boundary.excludePath);
-  const agentFiles = await planAgentFiles(root);
+  const agentEntries = await planAgentEntries();
   const plan = {
     schema_version: 1,
     operation: "install_neutral",
@@ -169,14 +171,12 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     work_template_sha256: await shippedTemplateHashes(),
     rules_sha256: sha256(await fsp.readFile(path.join(packageRoot, "project-templates", "rules.md"))),
     git: boundary,
-    agent_files: agentFiles,
+    agent_entries: agentEntries,
     changes: [
       ...(boundary.repository && !boundary.ignored ? ["Keep Bridge private state out of Git using local Git exclusion"] : []),
       "Write the settings and work order templates to .review-bridge/; Bridge keeps its run state and logs in your data and log folders",
-      ...(agentFiles.command.action === "create" ? ["Add the /review-bridge command for Claude Code: " + agentFiles.command.path] : []),
-      ...(agentFiles.agents.action === "create" ? ["Create AGENTS.md with how to run a work order"]
-        : agentFiles.agents.action === "append" ? ["Append how to run a work order to AGENTS.md"] : []),
-      "Leave everything else in .claude/ and .codex/ untouched",
+      ...agentEntries.filter((entry) => entry.action === "add" || entry.action === "replace").map((entry) => "Add the /review-bridge entry for your agent, outside the project: " + entry.path),
+      "Leave everything else in the project untouched",
       "Serve the local page at http://localhost:" + watchPort + "/ (the next free port if it is taken)",
       "Run four fake scenarios in a disposable copy",
     ],
@@ -305,6 +305,19 @@ export async function fileSnapshot(root, relative = "") {
     }
   }
   return files.sort((left, right) => left[0].localeCompare(right[0]));
+}
+
+// The agent entries belong to the person and every project uses them, so the last project set up in
+// this data home takes them along (Homebrew's InstalledDependents asks the same before an uninstall).
+// One listing and at most one stat per project; a listing that fails cannot say "none".
+async function anotherProjectInstalled(stateRoot) {
+  const projects = path.join(bridgeDataHome(), "projects");
+  const entries = await fsp.readdir(projects, { withFileTypes: true }).catch((error) => (error.code === "ENOENT" ? [] : null));
+  if (entries === null) return true;
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name !== path.basename(stateRoot || "") && await statOptional(path.join(projects, entry.name, MANIFEST_RELATIVE))) return true;
+  }
+  return false;
 }
 
 // Where an installation's files are (RC3-FIX-02). The project keeps its settings flat in .review-bridge/
@@ -504,7 +517,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
   let wroteExclude = false;
   let addedPrefixNewline = false;
   let createdRoot = false;
-  let agentRecord = null;
+  let wroteAgentEntries = false;
   let stateRoot = null;
   let createdState = false;
   try {
@@ -541,7 +554,8 @@ async function applyNeutralInstallLocked(plan, claimed) {
     stateRoot = projectStateRoot(projectId);
     createdState = !(await statOptional(stateRoot));
     for (const name of STATE_FOLDERS) await fsp.mkdir(path.join(stateRoot, name), { recursive: true });
-    agentRecord = await writeAgentFiles(plan.target, plan.agent_files);
+    wroteAgentEntries = true;
+    await writeAgentEntries();
     const installedFiles = await fileSnapshot(privateRoot);
     await writeJson(installPath({ privateRoot, stateRoot }, STATE_MANIFEST), {
       schema_version: 1,
@@ -557,11 +571,10 @@ async function applyNeutralInstallLocked(plan, claimed) {
       rules_sha256: plan.rules_sha256,
       installed_files: installedFiles,
       git_exclusion: wroteExclude ? { path: excludePath, pattern: plan.git.pattern, added_prefix_newline: addedPrefixNewline } : null,
-      agent_files: agentRecord,
     });
     return { ok: true, target: plan.target, profile: plan.profile.id, roles: plan.roles, private_root: privateRoot };
   } catch (error) {
-    if (agentRecord) await undoAgentFiles(plan.target, agentRecord).catch(() => {});
+    if (wroteAgentEntries) await releaseAgentEntries({ inUse: await anotherProjectInstalled(stateRoot) }).catch(() => {});
     if (createdState) await fsp.rm(stateRoot, { recursive: true, force: true });
     if (createdRoot && path.resolve(privateRoot) === path.resolve(plan.target, privateName)) {
       await fsp.rm(privateRoot, { recursive: true, force: true });
@@ -611,8 +624,8 @@ async function rollbackFreshNeutralInstallLocked(plan) {
     if (remaining.length === 0) await fsp.rm(exclusion.path, { force: true });
     else await fsp.writeFile(exclusion.path, remaining);
   }
-  const agentFiles = await undoAgentFiles(target, manifest.agent_files || null);
-  return { rolled_back: true, target, agent_files: agentFiles };
+  const agentEntries = await releaseAgentEntries({ inUse: await anotherProjectInstalled(layout.stateRoot) });
+  return { rolled_back: true, target, agent_entries: agentEntries };
 }
 
 // `leftovers` lets an older setup's files still be there: only the upgrade's own plan asks so, since
@@ -954,8 +967,8 @@ function persistentOnly(files) {
   return files.filter(([name]) => !TRANSIENT_FILES.includes(name));
 }
 
-// `skip` leaves out a file Bridge itself added there (init's /review-bridge command), which
-// uninstall removes on purpose, together with the folders init made for it; so a folder that
+// `skip` leaves out a file an earlier Bridge added there (its /review-bridge command), which
+// uninstall removes on purpose, together with the folders it made for it; so a folder that
 // holds no other file counts as absent.
 async function treeHash(root, skip = null) {
   if (!(await statOptional(root))) return null;
@@ -1029,9 +1042,12 @@ async function planFreshUninstall(root, backupRootOverride) {
     git_exclusion: await excludeState(manifest.git_exclusion || null),
     // Where the install record is, for an uninstall resumed after the settings naming it are gone.
     state_root: layout.stateRoot,
-    // What init added for agents, and whether each part is still as written (an edited one stays).
+    // What an earlier Bridge added to the project for agents, and whether each part is still as
+    // written (an edited one stays).
     agent_files: manifest.agent_files || null,
     agent_files_state: await agentFilesState(root, manifest.agent_files || null),
+    // What this uninstall does with the entries outside the project.
+    agent_entries: await agentEntriesState({ inUse: await anotherProjectInstalled(layout.stateRoot) }),
     backup_root: backupRoot,
     backup_root_custom: Boolean(backupRootOverride),
     service_running: await pageServiceRunning(root),
@@ -1466,12 +1482,13 @@ async function applyFreshUninstall(plan, hooks) {
   const exclusion = await restoreExclusion(plan.git_exclusion);
   await journalWrite(context, { step: "f_exclusion", exclusion });
   const agentFiles = await undoAgentFiles(root, plan.agent_files || null);
-  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles });
+  const agentEntries = await releaseAgentEntries({ inUse: await anotherProjectInstalled(plan.state_root) });
+  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles, agent_entries_outcome: agentEntries });
   if (hooks.beforeVerify) await hooks.beforeVerify(context);
   await finishTransaction(context, exclusion);
   return {
     ok: true, operation: "uninstall", target: root, backup_dir: context.journal.backup_dir,
-    file_count: backup.manifest.files.length, user_file_count: plan.user_file_count, exclusion, agent_files: agentFiles,
+    file_count: backup.manifest.files.length, user_file_count: plan.user_file_count, exclusion, agent_files: agentFiles, agent_entries: agentEntries,
   };
 }
 
@@ -1518,9 +1535,10 @@ async function applyResumeUninstall(plan, hooks) {
   const exclusion = await restoreExclusion(journal.git_exclusion);
   await journalWrite(context, { step: "f_exclusion", exclusion });
   const agentFiles = await undoAgentFiles(root, journal.agent_files || null);
-  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles });
+  const agentEntries = await releaseAgentEntries({ inUse: await anotherProjectInstalled(journal.state_root) });
+  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles, agent_entries_outcome: agentEntries });
   await finishTransaction(context, exclusion);
-  return { ok: true, operation: "uninstall", kind: plan.kind, target: root, backup_dir: journal.backup_dir, exclusion, agent_files: agentFiles };
+  return { ok: true, operation: "uninstall", kind: plan.kind, target: root, backup_dir: journal.backup_dir, exclusion, agent_files: agentFiles, agent_entries: agentEntries };
 }
 
 // U1.4 / U2.1: approval binds the exact plan; it is rebuilt under the install lock before acting.
@@ -1704,7 +1722,11 @@ async function planFreshUpgrade(root, backupRootOverride) {
   const leftovers = old.moves.length + old.drops.length + old.page_files.length;
   const from = { version: manifest.bridge_version ?? null, runtime_sha256: manifest.runtime_sha256 };
   const to = { version: await runtimeVersion(sourceRuntime), runtime_sha256: await runtimeFingerprint(sourceRuntime) };
-  if (from.runtime_sha256 === to.runtime_sha256 && legacy.length === 0 && !layout.nested && leftovers === 0) return { up_to_date: true, target: root, version: to.version, runtime_sha256: to.runtime_sha256 };
+  const agentEntries = await planAgentEntries();
+  const agentFiles = manifest.agent_files?.command || manifest.agent_files?.agents ? manifest.agent_files : null;
+  if (from.runtime_sha256 === to.runtime_sha256 && legacy.length === 0 && !layout.nested && leftovers === 0 && !agentFiles && !agentEntriesPending(agentEntries)) {
+    return { up_to_date: true, target: root, version: to.version, runtime_sha256: to.runtime_sha256 };
+  }
   const defaults = await defaultConfigFor(root, config, manifest);
   if (config.schema_version !== defaults.schema_version) {
     throw new Error("The new version uses another bridge.json schema (" + config.schema_version + " to "
@@ -1737,6 +1759,9 @@ async function planFreshUpgrade(root, backupRootOverride) {
     layout_move: layout.nested,
     // The older setup's run state and logs leave the project, each file under its own name.
     legacy_files: { moved: old.moves.length, dropped: old.drops.length, page_files: old.page_files.length, sha256: old.sha256 },
+    // The agent entries outside the project, and what an earlier Bridge wrote into it for agents.
+    agent_entries: agentEntries,
+    agent_files_state: await agentFilesState(root, agentFiles),
     persistent_sha256: sha256(JSON.stringify(persistent)),
     persistent_count: persistent.length,
     user_file_count: userFiles.length,
@@ -2231,6 +2256,20 @@ async function statusHealth(root) {
   }
 }
 
+// What an earlier Bridge wrote into the project for agents goes once the upgrade stands, and with the
+// entries outside the project already in place (OpenSpec retires its old Codex prompts the same way:
+// only after the replacement exists). A rollback therefore leaves those files as they were. The record
+// goes with them, an edited part included: it is the person's now and is reported once. Cut off before
+// this, the record stays and the next upgrade does it.
+async function reclaimAgentFiles(context) {
+  const file = installPath(context, context.manifestName);
+  const { agent_files: record, ...rest } = JSON.parse(await fsp.readFile(file, "utf8"));
+  if (record === undefined) return null;
+  const outcome = await undoAgentFiles(context.root, record);
+  await writeJsonDurable(file, rest);
+  return outcome;
+}
+
 // P2.7-P2.12: the changes, every one of which a resumed upgrade can run again: what already moved is
 // not moved twice, a report already written is reused, an upgrade already in the record is not added.
 // Any failure, the check after the upgrade included, puts the project back as it was.
@@ -2251,6 +2290,7 @@ async function applyUpgradeChanges(context, plan) {
     report = await writeInvalidations(context);
     legacyRemoved = await removeLegacyRuntime(context, plan);
     if (hooks.afterLegacyRemoved) await hooks.afterLegacyRemoved(context);
+    await writeAgentEntries();
     await writeUpgradeManifest(context, plan, report);
     if (hooks.beforeVerify) await hooks.beforeVerify(context);
     await verifyNeutralInstall(root);
@@ -2260,6 +2300,12 @@ async function applyUpgradeChanges(context, plan) {
   }
   await fsp.rm(context.markerPath, { force: true });
   const warnings = [];
+  let agentFiles = null;
+  try {
+    agentFiles = await reclaimAgentFiles(context);
+  } catch (error) {
+    warnings.push("What an earlier Bridge wrote into this project for agents could not be taken back (" + error.message + "); run upgrade again.");
+  }
   let restarted = false;
   if (plan.service_running) {
     const outcome = await restartOutcome(hooks.restartService, root);
@@ -2270,6 +2316,7 @@ async function applyUpgradeChanges(context, plan) {
     ok: true, operation: "upgrade", target: root, from: plan.from, to: plan.to, backup_dir: context.marker.backup_dir,
     kept_user_file_count: plan.user_file_count, config_added_keys: settings.added, templates: settings.templates,
     legacy_runtime_removed: legacyRemoved, legacy_files_moved: moved.moved, legacy_files_dropped: moved.dropped,
+    agent_entries: plan.agent_entries, agent_files: agentFiles,
     invalidated_count: report.invalidated_count, invalidated_authorization_ids: report.invalidated_authorization_ids,
     service_restarted: restarted, reviewer_readonly: "not_run", warnings,
   };
@@ -2415,6 +2462,20 @@ export async function applyNeutralUpgradeRollback(plan, approval, hooks = {}) {
 export const PROOF_LOSS_LINE = "升級會重啟網頁服務；reviewer 唯讀實測的證明存在服務記憶體裡，重啟後會消失。之後要做原生工作，得在網頁上重做一次實測（會呼叫一次 reviewer 模型）。";
 const PROOF_REDO_LINE = "reviewer 唯讀實測要在網頁上重做一次，才能做原生工作";
 const versionText = (side) => (side.version || "未標版本") + "（" + String(side.runtime_sha256).slice(0, 8) + "）";
+const AGENT_FILE_NAMES = Object.freeze({ command: AGENT_COMMAND_RELATIVE, agents: "AGENTS.md 那一段" });
+const agentEntryPaths = (entries, ...actions) => (entries || []).filter((entry) => actions.includes(entry.action)).map((entry) => entry.path).join("、");
+
+// The lines about the agent entries and the project files an earlier Bridge wrote: `taken` and `kept`
+// name those project files, each already worded for before or after the upgrade.
+function agentLines(entries, verb, taken, kept) {
+  const moved = agentEntryPaths(entries, "add", "replace");
+  const own = agentEntryPaths(entries, "keep");
+  return [
+    ...(moved || taken.length ? [[moved ? "/review-bridge " + verb + "裝在使用者層級：" + moved : "", taken.length ? "舊版寫進專案的 " + taken.join("、") + verb + "收回" : ""].filter(Boolean).join("；")] : []),
+    ...(own ? [own + " 是你自己的檔，不動"] : []),
+    ...(kept.length ? ["舊版寫進專案的 " + kept.join("、") + " 你改過，留著不動；Bridge 已不用它，要不要留由你決定"] : []),
+  ];
+}
 
 export function formatUpgradePlan(plan) {
   if (plan.kind === "resume") {
@@ -2440,6 +2501,9 @@ export function formatUpgradePlan(plan) {
     ...(plan.layout_move ? ["會把設定從 .review-bridge/review-bridge/ 搬到 .review-bridge/ 第一層（bridge.json、policy.override.json、rules.md），安裝紀錄搬到資料夾外的 Bridge 狀態目錄"] : []),
     ...(plan.legacy_files?.moved ? ["會把舊版留在專案裡的執行紀錄搬出專案：" + plan.legacy_files.moved + " 個檔搬到 Bridge 的狀態目錄與 log 目錄，名字不變，搬完逐檔核對 SHA-256"] : []),
     ...(plan.legacy_files?.dropped ? ["對不到任何 run 的舊呼叫紀錄、plan 與授權卡 " + plan.legacy_files.dropped + " 個，那些 run 已過保留期，會刪掉"] : []),
+    ...agentLines(plan.agent_entries, "會",
+      Object.entries(plan.agent_files_state || {}).filter(([, part]) => part.unchanged).map(([name]) => AGENT_FILE_NAMES[name]),
+      Object.entries(plan.agent_files_state || {}).filter(([, part]) => !part.unchanged).map(([name]) => AGENT_FILE_NAMES[name])),
     ...(plan.config_added_keys.length ? ["bridge.json 會補上新設定：" + plan.config_added_keys.join("、")] : []),
     ...(plan.config_updated_keys.length ? ["bridge.json 會更新 Bridge 自己的設定：" + plan.config_updated_keys.join("、")] : []),
     ...(plan.config_removed_keys.length ? ["bridge.json 會移除 Bridge 不再使用的設定：" + plan.config_removed_keys.join("、")] : []),
@@ -2458,6 +2522,9 @@ export function formatUpgradeResult(result) {
     "備份在 " + result.backup_dir,
     ...(result.legacy_runtime_removed ? ["拿掉了舊的 tools/（" + result.legacy_runtime_removed + " 個檔）"] : []),
     ...(result.legacy_files_moved ? ["舊的執行紀錄搬出專案 " + result.legacy_files_moved + " 個檔" + (result.legacy_files_dropped ? "，刪掉對不到 run 的 " + result.legacy_files_dropped + " 個" : "")] : []),
+    ...agentLines(result.agent_entries, "已",
+      Object.entries(result.agent_files || {}).filter(([, outcome]) => outcome === "removed").map(([name]) => AGENT_FILE_NAMES[name]),
+      Object.entries(result.agent_files || {}).filter(([, outcome]) => outcome === "kept_changed").map(([name]) => AGENT_FILE_NAMES[name])),
     ...(result.invalidated_count ? ["失效的授權 " + result.invalidated_count + " 個；要做那些工作得重新建 plan"] : []),
     ...Object.entries(result.templates).filter(([, template]) => template.action === "keep_and_write_new")
       .map(([relative, template]) => path.posix.basename(relative) + " 你改過，保留了；新版在 " + path.posix.basename(template.new_path)),

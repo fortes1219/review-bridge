@@ -23,9 +23,9 @@ Then it sets the current folder up and prints the next commands:
 - creates `.review-bridge/` with the project settings (`bridge.json`, `policy.override.json`, `rules.md`) and the work-order templates (`TEMPLATE.md` in English, `TEMPLATE.zh-TW.md` in Chinese); in a Git repository the whole folder, results included, is kept out of Git through `.git/info/exclude` (tracked `.gitignore` is never edited);
 - runs four fake self-tests (`PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, `RATE_LIMIT`) that call no model;
 - starts the local page on `127.0.0.1`;
-- adds a `/review-bridge` command for Claude Code (`.claude/commands/review-bridge.md`, only if there is none) and the same steps for any agent to `AGENTS.md` (appended, never overwritten). `uninstall` removes both again unless you edited them.
+- adds Bridge's own entry outside the project, where each agent looks for yours, so every project sees it: the command `~/.claude/commands/review-bridge.md` for Claude Code (`/review-bridge`; `CLAUDE_CONFIG_DIR` is honoured) and the skill `~/.agents/skills/review-bridge/SKILL.md` for Codex (`$review-bridge`). A file of yours already at that path is left alone. `uninstall` of the last project set up removes them unless you edited them.
 
-It changes no application file and nothing else in `.claude/` or `.codex/`. Options answer the questions instead (`--writer`, `--reviewer`, `--profile <type|none>`, `--target <folder>`); without a terminal, or with `--yes`, nothing is asked and the defaults are used.
+Nothing outside `.review-bridge/` changes in the project: no application file, no `.gitignore`, `AGENTS.md`, `CLAUDE.md` or `.claude/`, so `git status` shows nothing. Options answer the questions instead (`--writer`, `--reviewer`, `--profile <type|none>`, `--target <folder>`); without a terminal, or with `--yes`, nothing is asked and the defaults are used.
 
 The project type only picks the verification command Bridge runs after every writer call (for example `npm test`). With `none`, or when the project has no such command, the work still starts; the card, the run's records and the result all say the tests are not configured.
 
@@ -49,7 +49,7 @@ Then, in Claude Code, type:
 /review-bridge start .review-bridge/work-packages/add-readme.md
 ```
 
-Codex reads the same steps from `AGENTS.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, checks once per page session that the reviewer cannot write files, prints a card with what you are authorizing and stops with `Needs authorization`. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. Your yes is the only authorization, and the authorization records that it came through an agent. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in the work order's own folder, `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. Beside it is the sealed contract the result names, `contract.v<version>.<short SHA-256>.json`. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
+In Codex the same thing is `$review-bridge start .review-bridge/work-packages/add-readme.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, checks once per page session that the reviewer cannot write files, prints a card with what you are authorizing and stops with `Needs authorization`. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. Your yes is the only authorization, and the authorization records that it came through an agent. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in the work order's own folder, `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. Beside it is the sealed contract the result names, `contract.v<version>.<short SHA-256>.json`. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
 
 `/review-bridge` takes the same four actions as the commands below: `start <file>`, `stop <run_id>`, `resume <run_id>` and `clean [<run_id>]`.
 
@@ -186,7 +186,7 @@ Usage: review-bridge init [options]
 
 Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
 
-Afterwards you start work through your agent: in Claude Code type /review-bridge start <file>; Codex reads the same steps from AGENTS.md. review-bridge start <file> at a terminal is for advanced use and CI.
+Afterwards you start work through your agent: in Claude Code type /review-bridge start <file>; in Codex, $review-bridge start <file>. review-bridge start <file> at a terminal is for advanced use and CI.
 
 Options:
   --target <folder>

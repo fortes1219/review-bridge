@@ -11,7 +11,32 @@ import { connect, postgresBinaries } from "../../service/database/postgresServer
 
 export const dataHome = fs.mkdtempSync(path.join(os.tmpdir(), "rb-test-data-home-"));
 process.env.REVIEW_BRIDGE_DATA_HOME = dataHome;
+// The person's agent folders too: init puts the /review-bridge entries there. Codex's is under the
+// home directory and no variable moves it, so the home directory moves (USERPROFILE on Windows).
+process.env.CLAUDE_CONFIG_DIR = path.join(dataHome, "claude-config");
+process.env.HOME = process.env.USERPROFILE = path.join(dataHome, "home");
+fs.mkdirSync(process.env.HOME);
 const { pg_ctl: pgCtl } = await postgresBinaries();
+
+// For a test about what belongs to the person, shared by all their projects: a machine of its own,
+// whose data home holds no other test's projects, for this test only.
+export function separatePerson(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rb-test-person-"));
+  const claudeHome = path.join(home, ".claude");
+  const codexHome = path.join(home, ".codex");
+  const skillFolder = path.join(home, ".agents", "skills", "review-bridge");
+  const env = { REVIEW_BRIDGE_DATA_HOME: path.join(home, "data"), CLAUDE_CONFIG_DIR: claudeHome, HOME: home, USERPROFILE: home };
+  const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  t.after(() => {
+    Object.assign(process.env, saved);
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  return {
+    env, home, claudeHome, codexHome, skillFolder, record: path.join(env.REVIEW_BRIDGE_DATA_HOME, "agent-entries.json"),
+    claudeEntry: path.join(claudeHome, "commands", "review-bridge.md"), codexEntry: path.join(skillFolder, "SKILL.md"),
+  };
+}
 
 // The rows a query returns from the records a command wrote (the server is running by then).
 export async function queryRecords(sql, values = [], home = dataHome) {
