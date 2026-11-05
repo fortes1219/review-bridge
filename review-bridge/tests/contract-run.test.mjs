@@ -14,7 +14,6 @@ import { loadContract } from "../features/workOrder/contract.mjs";
 import { workOrderChange } from "../features/workOrder/delivery.mjs";
 import { processFile, startLockFile, workLockFile } from "../features/workOrder/processRecords.mjs";
 import { workLockReleased, workOrderLocation } from "../features/workOrder/workPackage.mjs";
-import { unsupportedContractStep } from "../features/workOrder/translation.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
@@ -49,12 +48,12 @@ async function install(t) {
   });
   t.after(async () => {
     bridge(["down"]);
-    await fsp.rm(root, { recursive: true, force: true });
+    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   return { root, bootstrap, bridge, paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }) };
 }
 
-const planArgs = (order, name, planArg) => ["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name,
+const planArgs = (order, name, planArg) => ["work-plan", "--fake-cli", "--task-file", order, "--owner", "Fortes", "--work-package", name,
   "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000", "--out", planArg];
 
 async function planWork(rt, name, text) {
@@ -148,14 +147,12 @@ test("the plan names the contract calls before the work, and the human approves 
   });
   const plain = rt.bridge([...planArgs(work.order, "farm-plain", ".review-bridge/review-queue/farm-plain.plan.json"), "--plain"]);
   assert.match(plain.stdout, /Before the work: up to 2 work-order translation\(s\) by the writer \(claude\) and 2 check\(s\) by the reviewer \(codex\), 2 minute\(s\) per call/);
-  // The plan records the configured reviewer as it is; a native run refuses one it cannot call yet.
+  // The plan seals the configured reviewer as it is.
   const configPath = rt.paths.bridgeConfigPath;
   const config = await readJson(configPath);
   await fsp.writeFile(configPath, JSON.stringify({ ...config, roles: { ...config.roles, reviewer: { provider_id: "claude" } } }));
   const other = await planWork(rt, "farm-other", SINGLE);
   assert.deepEqual(other.plan.contract_steps.check, { role: "reviewer", provider: "claude" });
-  assert.equal(unsupportedContractStep(other.plan.contract_steps), "The reviewer role is claude; only codex can check a translation in this version.");
-  assert.equal(unsupportedContractStep(work.plan.contract_steps), null);
 });
 
 test("the reviewer checks the translation in its own call before the writer starts; the run then works from the sealed contract", async (t) => {
@@ -978,18 +975,18 @@ test("a Chinese work order with frontmatter, a two-run plan and all 17 blocks: e
   const order = ".review-bridge/work-packages/checkout.md";
   await fsp.writeFile(path.join(rt.root, order), CHINESE_ORDER);
   const planArg = ".review-bridge/review-queue/checkout.plan.json";
-  const planned = rt.bridge(["work-plan", order, "--breakpoint", "return after review", "--out", planArg]);
+  const planned = rt.bridge(["work-plan", order, "--fake-cli", "--breakpoint", "return after review", "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(rt.root, planArg));
   // The values the run uses, each with the layer it came from.
-  assert.deepEqual([plan.priority, plan.priority_source, plan.effort, plan.effort_source], ["high", "work_order", "high", "work_order"]);
-  assert.deepEqual(plan.writer, { model: "opus", effort: "high" });
-  assert.deepEqual(plan.reviewer, { model: null, effort: "high" }, "the reviewer's effort is the priority table's, never the work order's");
+  assert.deepEqual([plan.priority, plan.priority_source], ["high", "work_order"]);
+  assert.deepEqual(plan.writer, { provider: "claude", provider_source: "config", model: null, model_source: "priority", effort: "high", effort_source: "work_order", mcp_off: [] });
+  assert.deepEqual(plan.reviewer, { provider: "codex", provider_source: "config", model: null, model_source: "priority", effort: "high", effort_source: "priority", mcp_off: [], mcp: [] });
   assert.deepEqual(plan.budget, { tokens: 2_000_000, tokens_per_call: 1_000_000, call_timeout: 600_000, test_timeout: 300_000, run_timeout: 7_200_000, rounds: 1 });
   assert.ok(Object.values(plan.budget_source).every((source) => source === "work_order"));
   assert.equal(plan.contract_steps.call_timeout, 600_000);
   // A flag given at the terminal comes first.
-  const flagged = rt.bridge(["work-plan", order, "--breakpoint", "return after review", "--call-timeout", "120000", "--out", ".review-bridge/review-queue/checkout-flag.plan.json"]);
+  const flagged = rt.bridge(["work-plan", order, "--fake-cli", "--breakpoint", "return after review", "--call-timeout", "120000", "--out", ".review-bridge/review-queue/checkout-flag.plan.json"]);
   assert.equal(flagged.status, 0, flagged.stderr);
   const flaggedPlan = await readJson(path.join(rt.root, ".review-bridge", "review-queue", "checkout-flag.plan.json"));
   assert.deepEqual([flaggedPlan.budget.call_timeout, flaggedPlan.budget_source.call_timeout, flaggedPlan.budget_source.rounds], [120_000, "cli", "work_order"]);

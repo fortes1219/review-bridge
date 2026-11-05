@@ -5,14 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_RETENTION_DAYS, inspectRoleReadiness, pruneProbeRecords } from "../../service/index.mjs";
+import { classifyProviderFailure, DEFAULT_RETENTION_DAYS, inspectRoleReadiness, mcpConfigFor, mcpOffArgs, NO_CONNECTORS_ARGS, pruneProbeRecords, READ_ONLY_TOOLS, readOnlyArgs } from "../../service/index.mjs";
 import { localDateKey } from "../../utils/dates.mjs";
 
-// Only adapters that run the reviewer under a provider-enforced sandbox and emit
-// per-command evidence can prove write denial. Others stay unproven.
+// The two proofs differ in strength and each says what it is. Codex runs under an OS sandbox and
+// shows a write that was tried and denied. Claude Code has no sandbox on this CLI's Windows build;
+// its session is shown to hold no tool that writes, by its own init event (Owner 2026-11-04).
 export const PROBE_ADAPTERS = Object.freeze({
   codex: Object.freeze({ id: "codex-exec-readonly-jsonl-v1", sandbox: "read-only", supported: true }),
-  claude: Object.freeze({ id: "claude-unsupported-v1", sandbox: null, supported: false }),
+  claude: Object.freeze({ id: "claude-plan-readonly-stream-v1", sandbox: null, supported: true }),
 });
 
 export const PROBE_TIMEOUT_MS = 180_000;
@@ -37,9 +38,17 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-export function buildProbeArgs(provider, probeDir) {
+// The MCP servers a check runs with: those turned off by name and those let through, as a plan seals
+// them. `config` is what a Claude reviewer loads the let-through ones from.
+const NO_MCP = Object.freeze({ off: [], allow: [], config: null });
+
+export function buildProbeArgs(provider, probeDir, mcp = NO_MCP) {
+  // The same flags every review of this reviewer runs with: what is proven is what reviews.
+  if (provider === "claude") return ["-p", ...readOnlyArgs({ mcpConfig: mcp.config, mcp: mcp.allow }), "--no-session-persistence", "--output-format", "stream-json", "--verbose"];
   if (provider !== "codex") throw new Error("Reviewer probe adapter is not supported for " + provider + ".");
   return [
+    ...NO_CONNECTORS_ARGS,
+    ...mcpOffArgs(mcp.off),
     "--ask-for-approval", "never",
     "exec",
     "--ephemeral",
@@ -257,10 +266,57 @@ function codexEvents(stdout) {
   return { commands, fileChanges, completed: phase === "done" && !disordered, failed, rateLimited, unknown };
 }
 
-// Positive proof needs: a zero CLI exit with one complete ordered turn, exactly one command
+// One Claude call's stream: its one init event, its one result, every tool it asked for, and how many
+// lines could not be read.
+function claudeEvents(stdout) {
+  const inits = [];
+  const toolUses = [];
+  let result = null;
+  let unknown = 0;
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try { event = JSON.parse(line); } catch { unknown += 1; continue; }
+    if (event?.type === "system" && event.subtype === "init") inits.push(event);
+    if (event?.type === "result") result = event;
+    for (const block of Array.isArray(event?.message?.content) ? event.message.content : []) {
+      if (block?.type === "tool_use") toolUses.push(String(block.name));
+    }
+  }
+  return { init: inits.length === 1 ? inits[0] : null, result, toolUses, unknown };
+}
+
+// Claude's proof: the sentinel is absent (checked before this), the CLI ran to its end, and its own
+// init event shows plan mode and no tool beyond the three that only read. A missing file alone would
+// prove nothing: a CLI that crashed, or a model that declined, leaves none either. Only tool names and
+// counts are kept. A tool outside the list, an MCP server's included, is not a proof; the servers the
+// policy lets through are the exception, and they are not checked here (RC3-MCP-01).
+function evaluateClaudeProbe(base, result, mcpAllow) {
+  const events = claudeEvents(result.stdout);
+  const allowed = (tool) => READ_ONLY_TOOLS.includes(tool) || mcpAllow.some((name) => tool.startsWith("mcp__" + name + "__"));
+  const others = Array.isArray(events.init?.tools) ? events.init.tools.filter((tool) => !allowed(tool)) : [];
+  const evidence = {
+    ...base.evidence,
+    events: { commands: events.toolUses.length, file_changes: 0, unknown: events.unknown },
+    permission_mode: events.init?.permissionMode ?? null,
+    tools_beyond_read_only: others,
+    permission_denials: Array.isArray(events.result?.permission_denials) ? events.result.permission_denials.length : null,
+  };
+  const failure = events.result?.is_error === true ? String(events.result.result || "") : "";
+  const limited = failure && classifyProviderFailure({ role: "reviewer", provider: "claude", phase: "probe", texts: [failure] }).reason === "provider_usage_limit";
+  if (result.status !== 0) return { ...base, evidence, reason: limited ? "rate_limited" : "invocation_error" };
+  if (!events.init || !events.result || events.result.is_error === true) return { ...base, evidence, reason: limited ? "rate_limited" : "incomplete_run" };
+  if (events.init.permissionMode !== "plan" || !Array.isArray(events.init.tools) || others.length) {
+    return { ...base, evidence, proven: false, reason: "read_only_not_in_effect" };
+  }
+  if (events.unknown > 0 || events.toolUses.some((tool) => !allowed(tool))) return { ...base, evidence, reason: "ambiguous_output" };
+  return { ...base, evidence, proven: true, reason: "no_write_tool" };
+}
+
+// Codex's positive proof needs: a zero CLI exit with one complete ordered turn, exactly one command
 // event that is the fixed write to the unique sentinel, a failed non-zero exit with
 // an OS/sandbox denial message, no file change, and an absent sentinel.
-export function evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries, home = os.homedir() }) {
+export function evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries, home = os.homedir(), mcpAllow = [] }) {
   const base = { proven: "unknown", reason: "unknown", evidence: { adapter_id: PROBE_ADAPTERS[provider]?.id || null } };
   if (sentinelPresent || unexpectedEntries.length > 0) {
     return { ...base, proven: false, reason: "write_allowed",
@@ -269,6 +325,7 @@ export function evaluateProbe({ provider, result, sentinelName, probeDir, sentin
   base.evidence.sentinel_present = false;
   if (result.timedOut) return { ...base, reason: "timeout" };
   if (result.error) return { ...base, reason: "invocation_error" };
+  if (provider === "claude") return evaluateClaudeProbe(base, result, mcpAllow);
   const events = codexEvents(result.stdout);
   // T0-11 A3: counts only, never text, for every outcome that got as far as the event stream.
   base.evidence.events = { commands: events.commands.length, file_changes: events.fileChanges.length, unknown: events.unknown };
@@ -308,7 +365,7 @@ export function evaluateProbe({ provider, result, sentinelName, probeDir, sentin
 }
 
 export async function runReviewerProbe({
-  provider, executable, adapter, runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot = os.tmpdir(),
+  provider, executable, adapter, runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot = os.tmpdir(), mcp = NO_MCP,
 }) {
   if (!PROBE_ADAPTERS[provider]?.supported) {
     return { proven: "unknown", reason: "unsupported_provider", evidence: { adapter_id: PROBE_ADAPTERS[provider]?.id || null }, cli_launches: 0 };
@@ -322,7 +379,7 @@ export async function runReviewerProbe({
     probeDir = await fsp.realpath(await fsp.mkdtemp(path.join(tmpRoot, "review-bridge-probe-")));
     const sentinelName = "rb-sentinel-" + randomUUID() + ".txt";
     await fsp.writeFile(path.join(probeDir, "README.txt"), "Disposable reviewer write-denial probe.\n", "utf8");
-    const invocation = adapter.buildInvocation(provider, executable, buildProbeArgs(provider, probeDir));
+    const invocation = adapter.buildInvocation(provider, executable, buildProbeArgs(provider, probeDir, mcp));
     // Exactly one invocation per call; the result is never retried.
     stage = "runner";
     const result = await runner({ invocation, cwd: probeDir, input: probePrompt(sentinelName), timeoutMs });
@@ -332,7 +389,7 @@ export async function runReviewerProbe({
     const unexpectedEntries = (await fsp.readdir(probeDir)).filter((name) => name !== "README.txt");
     // F5: counted only when the CLI process started. It is a launch (an attempt), not proof that a
     // model was reached: the CLI can still fail or hit a limit before calling one.
-    return { ...evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries }), cli_launches: started ? 1 : 0 };
+    return { ...evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries, mcpAllow: mcp.allow }), cli_launches: started ? 1 : 0 };
   } catch (error) {
     error.modelCall = stage === "before" ? "no" : stage === "runner" ? "unknown" : started ? "yes" : "no";
     throw error;
@@ -362,30 +419,43 @@ function observedEvidence(evidence = {}) {
   };
 }
 
+// Each reviewer has its own proof: bridge.json can name another one while the page runs, and a start
+// can name another with --reviewer, and a proof of one says nothing about the other. `loadRoles` reads
+// the roles as they are now; a service given only `roles` keeps those.
 export function createReviewerProbeService({
-  roles, adapter, adapterId, adapterConfig = null, adapterSource, probeSource = PROBE_SOURCE, auditDir,
+  roles, loadRoles = null, resolveMcp = null, projectRoot = null, adapter, adapterId, adapterConfig = null, adapterSource, probeSource = PROBE_SOURCE, auditDir,
   retentionDays = DEFAULT_RETENTION_DAYS, statusProbe, versionProbe = defaultVersionProbe,
   runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot, now = () => new Date(),
 }) {
   let inFlight = false;
-  let sessionProof = null;
+  const sessionProofs = new Map();
+  const rolesFor = async (reviewer) => {
+    const current = loadRoles ? await loadRoles() : roles;
+    return reviewer ? { ...current, reviewer } : current;
+  };
   // RC3-LINUX-00: only an adapter the manifest marks active or candidate may start the check. The
   // fake adapter and an experimental one are never eligible, so a page started with either can never
   // hold a proof that a native work-start would accept.
   const eligible = adapterConfig?.eligible === true;
 
-  async function readiness() {
-    return inspectRoleReadiness(roles, { adapter, ...(statusProbe ? { statusProbe } : {}) });
+  async function readiness(current) {
+    return inspectRoleReadiness(current, { adapter, ...(statusProbe ? { statusProbe } : {}) });
   }
 
   // Zero LLM: identifies everything a stale proof depends on, including the
   // platform adapter and reviewer probe implementation bytes.
-  async function fingerprint() {
-    const provider = roles.reviewer;
+  // The list as a check takes it: a Claude reviewer's let-through servers read from the project now.
+  const withConfig = async (provider, mcp) => (provider === "claude" && mcp.allow.length
+    ? { ...mcp, config: await mcpConfigFor(projectRoot, mcp.allow) }
+    : { ...NO_MCP, ...mcp });
+
+  async function fingerprint(provider, listed = NO_MCP) {
     const probeAdapter = PROBE_ADAPTERS[provider];
     let cli;
     let sources;
+    let mcp;
     try {
+      mcp = await withConfig(provider, listed);
       if (!adapterSource || !probeSource) return null;
       const executable = await adapter.resolveExecutable(provider);
       cli = { identity: await executableIdentity(executable), version: versionProbe(executable) };
@@ -395,24 +465,28 @@ export function createReviewerProbeService({
     }
     if (!cli.version) return null;
     return sha256(JSON.stringify({
-      roles: { writer: roles.writer, reviewer: roles.reviewer },
+      reviewer: provider,
       cli,
       platform_adapter: { id: adapterId || null, config: adapterConfig, source: sources.platform_adapter },
       probe: { id: probeAdapter?.id || null, source: sources.reviewer_probe },
       sandbox: probeAdapter?.sandbox || null,
-      args: probeAdapter?.supported ? buildProbeArgs(provider, "<probe-dir>") : null,
+      args: probeAdapter?.supported ? buildProbeArgs(provider, "<probe-dir>", mcp) : null,
     }));
   }
 
-  async function status() {
-    const roleReadiness = await readiness();
+  // `mcp` is the list a start's plan sealed; a proof made under another list is stale, so that start
+  // checks again. Without one (the page itself), the list the proof was made under.
+  async function status({ reviewer: requested = null, mcp: requestedMcp = null } = {}) {
+    const current = await rolesFor(requested);
+    const roleReadiness = await readiness(current);
+    const sessionProof = sessionProofs.get(current.reviewer) || null;
     let readonly = {
       state: "not_run", reason: null, checked_at: null, authority: "watch_session_memory",
       diagnostic_id: null, cli_launches: null, observed: null, audit_recorded: null, audit_cleanup: null,
     };
     if (sessionProof) {
       // Recomputed on every refresh so a configuration change invalidates the proof.
-      const current = await fingerprint();
+      const fingerprintNow = await fingerprint(current.reviewer, requestedMcp ?? sessionProof.mcp);
       // T0-11 C4: the number of calls and the diagnostic id come from this memory, never from the audit.
       // F7: an id is shown only when its record was written.
       const record = {
@@ -420,14 +494,14 @@ export function createReviewerProbeService({
         diagnostic_id: sessionProof.audit_recorded ? sessionProof.diagnostic_id : null,
         audit_recorded: sessionProof.audit_recorded, audit_cleanup: sessionProof.audit_cleanup,
       };
-      readonly = !current || sessionProof.fingerprint !== current
+      readonly = !fingerprintNow || sessionProof.fingerprint !== fingerprintNow
         // Codex 2026-10-16: an identity that cannot be computed right now is not a proven change.
-        ? { ...readonly, ...record, state: "stale", reason: current ? "configuration_changed" : "fingerprint_unavailable" }
+        ? { ...readonly, ...record, state: "stale", reason: fingerprintNow ? "configuration_changed" : "fingerprint_unavailable" }
         : { ...readonly, ...record, state: sessionProof.proven === true ? "proven" : sessionProof.proven === false ? "failed" : "unknown",
           reason: sessionProof.reason, observed: sessionProof.proven === true ? null : sessionProof.observed };
     }
     const reviewer = roleReadiness.checks.reviewer;
-    const supported = PROBE_ADAPTERS[roles.reviewer]?.supported === true;
+    const supported = PROBE_ADAPTERS[current.reviewer]?.supported === true;
     return {
       roles: roleReadiness.roles,
       checks: roleReadiness.checks,
@@ -450,23 +524,29 @@ export function createReviewerProbeService({
     throw error;
   }
 
-  async function run() {
+  async function run({ reviewer: requested = null, mcp: requestedMcp = null } = {}) {
     if (!eligible) refuse("adapter_not_verified", "This platform's adapter is not verified; the reviewer read-only check is not available here.");
     if (inFlight) refuse("in_flight", "A reviewer check is already running.");
     inFlight = true;
     try {
-      const provider = roles.reviewer;
+      const selected = await rolesFor(requested);
+      const provider = selected.reviewer;
       if (PROBE_ADAPTERS[provider]?.supported !== true) {
         refuse("unsupported_reviewer", "The selected reviewer cannot provide sandbox evidence.");
       }
       let current;
       let executable;
+      let listed;
+      let mcp;
       try {
-        const reviewer = (await readiness()).checks.reviewer;
+        const reviewer = (await readiness(selected)).checks.reviewer;
         if (!reviewer.cli_present || reviewer.authenticated !== true) {
           refuse("reviewer_not_ready", "Reviewer CLI is not installed and signed in.");
         }
-        current = await fingerprint();
+        // The page's own button has no plan: the list is read now, as a plan would read it.
+        listed = requestedMcp ?? (resolveMcp ? await resolveMcp(provider) : { off: [], allow: [] });
+        mcp = await withConfig(provider, listed);
+        current = await fingerprint(provider, listed);
         if (!current) refuse("reviewer_not_ready", "Reviewer CLI or adapter identity cannot be established.");
         executable = await adapter.resolveExecutable(provider);
       } catch (error) {
@@ -476,7 +556,7 @@ export function createReviewerProbeService({
       }
       let outcome;
       try {
-        outcome = await runReviewerProbe({ provider, executable, adapter, runner, timeoutMs, tmpRoot });
+        outcome = await runReviewerProbe({ provider, executable, adapter, runner, timeoutMs, tmpRoot, mcp });
       } catch (error) {
         if (error.modelCall === "no") refuse("probe_not_started", "The reviewer check did not start: " + error.message);
         // T0-11 F4: the CLI was started (or it is not known whether it was): an unknown result,
@@ -493,11 +573,12 @@ export function createReviewerProbeService({
       // T0-11 C3: a short id the person can hand to a maintainer; it names this check's audit line.
       const diagnosticId = "RBP-" + randomBytes(4).toString("hex").toUpperCase();
       const observed = observedEvidence(outcome.evidence);
-      sessionProof = {
-        proven: outcome.proven, reason: outcome.reason, fingerprint: current, checked_at: checkedAt,
+      const sessionProof = {
+        proven: outcome.proven, reason: outcome.reason, fingerprint: current, mcp: listed, checked_at: checkedAt,
         diagnostic_id: diagnosticId, cli_launches: outcome.cli_launches, observed,
         audit_recorded: false, audit_cleanup: null,
       };
+      sessionProofs.set(provider, sessionProof);
       if (auditDir) {
         const audit = {
           schema_version: 3,
@@ -505,6 +586,8 @@ export function createReviewerProbeService({
           note: "Audit only. Readiness is held in the watch process memory; editing this file has no effect.",
           diagnostic_id: diagnosticId,
           provider,
+          mcp_off: listed.off,
+          mcp_allow: listed.allow,
           proven: outcome.proven,
           reason: outcome.reason,
           cli_launches: outcome.cli_launches,

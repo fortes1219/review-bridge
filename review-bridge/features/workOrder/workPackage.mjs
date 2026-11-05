@@ -11,6 +11,7 @@ import {
   consumeRun,
   createAuthorization,
   createImmutableWorkPackage,
+  disallowedToolsProblem,
   fileExists,
   isActiveRun,
   isPidAlive,
@@ -18,11 +19,14 @@ import {
   listRuns,
   loadControlView,
   loadOrCreatePolicySnapshot,
+  modelProblem,
   readJson,
   readRun,
   recordRunState,
+  settleMcp,
   recordsDatabase,
   STOP_REASONS,
+  validateRoles,
   writeJson,
   writeText,
 } from "../../service/index.mjs";
@@ -36,18 +40,27 @@ import { BUDGET_KEYS, budgetProblems, MIN_CALL_TIMEOUT, parseWorkOrder, WorkOrde
 import { stopRun } from "./writerLoop.mjs";
 
 // The model calls that turn a work order into a contract run before any work, so the plan names
-// them for the human to approve: who translates, who checks, how often, and for how long. The
-// providers are the configured roles as they are; a native run refuses one it cannot call yet.
-async function contractSteps(paths, writerModel, budget) {
-  const config = await readJson(paths.bridgeConfigPath).catch(() => ({}));
-  const writer = config?.roles?.writer?.provider_id;
-  const reviewer = config?.roles?.reviewer?.provider_id;
-  if (!writer || !reviewer) throw new Error("The writer and reviewer roles are not set in bridge.json; a work order cannot be planned.");
+// them for the human to approve: who translates, who checks, how often, and for how long.
+function contractSteps(settled) {
   return {
-    translate: { role: "writer", provider: writer, model: writerModel },
-    check: { role: "reviewer", provider: reviewer },
+    translate: { role: "writer", provider: settled.writer.provider, model: settled.writer.model },
+    check: { role: "reviewer", provider: settled.reviewer.provider },
     max_attempts: MAX_TRANSLATION_ATTEMPTS,
-    call_timeout: budget.call_timeout,
+    call_timeout: settled.budget.call_timeout,
+  };
+}
+
+// Who fills each role in this run: the flag given at the terminal, else bridge.json. The plan seals
+// it, so changing bridge.json later only affects the next start (Owner 2026-11-04).
+async function selectedRoles(paths, { writer: writerFlag, reviewer: reviewerFlag }) {
+  const config = await readJson(paths.bridgeConfigPath).catch(() => ({}));
+  const writer = writerFlag ?? config?.roles?.writer?.provider_id;
+  const reviewer = reviewerFlag ?? config?.roles?.reviewer?.provider_id;
+  if (!writer || !reviewer) throw new Error("The writer and reviewer roles are not set in bridge.json; a work order cannot be planned.");
+  validateRoles({ writer, reviewer });
+  return {
+    writer: { provider: writer, source: writerFlag ? "cli" : "config" },
+    reviewer: { provider: reviewer, source: reviewerFlag ? "cli" : "config" },
   };
 }
 
@@ -131,11 +144,11 @@ function parseAllowedPaths(value) {
 // A plan is content-addressed, as a policy snapshot is, so one made by an older Bridge (its budget in
 // calls and minutes, or its change types) is never rewritten; it is refused where it is read, and a
 // new card is made.
-export const PLAN_SCHEMA_VERSION = 6;
+export const PLAN_SCHEMA_VERSION = 7;
 
 export function assertCurrentPlan(plan) {
   if (plan?.operation !== "start_work_package") throw new Error("Unsupported work plan.");
-  if (plan.schema_version === 4 || plan.schema_version === 5) throw new Error("This plan was made by an older Bridge and is not read again. Run: review-bridge start <file> to make a new card");
+  if (plan.schema_version === 4 || plan.schema_version === 5 || plan.schema_version === 6) throw new Error("This plan was made by an older Bridge and is not read again. Run: review-bridge start <file> to make a new card");
   if (plan.schema_version !== PLAN_SCHEMA_VERSION) throw new Error("Unsupported work plan.");
 }
 
@@ -151,19 +164,40 @@ function validateBudget(policy, budget) {
   return Object.fromEntries(BUDGET_KEYS.map((key) => [key, budget[key]]));
 }
 
+// What one role runs with: its provider, and its model and effort from the work order's block over
+// the priority table, each with the layer it came from. A model that does not belong to the role's
+// provider stops here, before any card, wherever it was written.
+function settleRole(name, selected, written, table, problems) {
+  const fromOrder = "model" in written;
+  const model = fromOrder ? written.model : table.model;
+  const problem = modelProblem(selected.provider, model);
+  if (problem) problems.push((fromOrder ? "line " + written.lines.model + ": " + name + ".model: " : "The policy's priority table gives the " + name + " a model: ") + problem);
+  return {
+    provider: selected.provider,
+    provider_source: selected.source,
+    model,
+    model_source: fromOrder ? "work_order" : "priority",
+    effort: written.effort ?? table.effort,
+    effort_source: written.effort ? "work_order" : "priority",
+  };
+}
+
 // Each value the work runs with and the layer it came from, in a fixed order: a flag given at the
 // terminal, then the work order's frontmatter, then the policy's priority table, then the config.
 // The work order may only go below the config's limits; each refusal names its line.
-function settleWorkOrder(policy, format, { rounds, callTimeout }) {
-  const frontmatter = format?.frontmatter || { priority: null, effort: null, budget: null, lines: {}, budget_lines: {} };
+function settleWorkOrder(policy, format, { rounds, callTimeout, roles }) {
+  const frontmatter = format?.frontmatter || { priority: null, writer: { effort: null, lines: {} }, reviewer: { effort: null, lines: {} }, budget: null, lines: {}, budget_lines: {} };
   const problems = [
     ...budgetProblems(frontmatter.budget, policy.limits, (key) => frontmatter.budget_lines[key]),
     ...(format?.runs || []).flatMap((run) => budgetProblems(run.budget, policy.limits, () => run.line, "run " + run.name + " budget")),
   ];
-  if (problems.length) throw new WorkOrderFormatError(problems);
   const priority = frontmatter.priority ?? policy.priority.default;
   const choice = priorityChoice(policy, priority);
-  const effort = frontmatter.effort ?? choice.writer.effort;
+  const writer = settleRole("writer", roles.writer, frontmatter.writer, choice.writer, problems);
+  const reviewer = settleRole("reviewer", roles.reviewer, frontmatter.reviewer, choice.reviewer, problems);
+  if (problems.length) throw new WorkOrderFormatError(problems);
+  const refused = disallowedToolsProblem(writer.provider, policy.writer.disallowed_tools);
+  if (refused) throw new Error("This work cannot start: " + refused + ". Choose another writer or remove them from the project's policy.");
   const flags = { rounds, call_timeout: callTimeout };
   const budget = {};
   const budgetSource = {};
@@ -175,12 +209,10 @@ function settleWorkOrder(policy, format, { rounds, callTimeout }) {
   return {
     priority,
     priority_source: frontmatter.priority ? "work_order" : "config",
-    // The work order's effort is the writer's, for every writer call (the work, each fix, the
-    // translation); the reviewer's always comes from the priority table.
-    effort,
-    effort_source: frontmatter.effort ? "work_order" : "priority",
-    writer: { model: choice.writer.model, effort },
-    reviewer: choice.reviewer,
+    // The writer's values hold for every writer call (the work, each fix, the translation), the
+    // reviewer's for every reviewer call (the contract check, each review).
+    writer,
+    reviewer,
     budget: validateBudget(policy, budget),
     budget_source: budgetSource,
   };
@@ -196,6 +228,13 @@ export async function createWorkPackagePlan({
   allowedPaths,
   rounds,
   callTimeout,
+  // Who fills each role, when the terminal says so; otherwise bridge.json.
+  writer,
+  reviewer,
+  // Reads the MCP servers Codex would load, when a role is Codex's. Asked once, here: the plan seals
+  // the answer, and every call of the run takes it from there. `checkCodex` comes before it.
+  listCodexMcp,
+  checkCodex = null,
   // Where the plan is written. Without one it goes to the log folder of the run it proposes, as
   // <planName or work package>.plan.json.
   outPath,
@@ -222,10 +261,17 @@ export async function createWorkPackagePlan({
   // starts nothing, and the refusal names the lines.
   const format = workOrderFile ? parseWorkOrder(taskText) : null;
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
-  const settled = settleWorkOrder(snapshot.effective_policy, format, { rounds, callTimeout });
+  const roles = await selectedRoles(paths, { writer, reviewer });
+  const settled = settleWorkOrder(snapshot.effective_policy, format, { rounds, callTimeout, roles });
+  const mcp = await settleMcp({
+    writer: settled.writer.provider, reviewer: settled.reviewer.provider, allow: snapshot.effective_policy.reviewer.mcp_allow, listCodex: listCodexMcp, checkCodex, cwd: paths.repoRoot,
+  });
+  settled.writer.mcp_off = mcp.writerOff;
+  settled.reviewer.mcp_off = mcp.reviewerOff;
+  settled.reviewer.mcp = mcp.reviewerMcp;
   const scope = await resolveScope({ paths, workOrderFile, allowedPaths });
   const rules = workOrderFile ? await snapshotRules(paths) : null;
-  const contract = workOrderFile ? await contractSteps(paths, settled.writer.model, settled.budget) : null;
+  const contract = workOrderFile ? contractSteps(settled) : null;
   // T0-06 G2: the verification is decided here, from the installed rules, and sealed for approval.
   const test = await selectTest({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})) });
   const plan = {
@@ -281,6 +327,8 @@ export function optionAgainstCard(plan, options) {
   if (options.owner !== undefined && String(options.owner).trim() !== plan.owner) return "--owner";
   if (options.rounds !== undefined && Number(options.rounds) !== plan.budget?.rounds) return "--rounds";
   if (options.callTimeout !== undefined && Number(options.callTimeout) !== plan.budget?.call_timeout) return "--call-timeout";
+  if (options.writer !== undefined && options.writer !== plan.writer?.provider) return "--writer";
+  if (options.reviewer !== undefined && options.reviewer !== plan.reviewer?.provider) return "--reviewer";
   if (options.asNew && plan.work_order?.decision !== "new") return "--as-new";
   if (options.update !== undefined && plan.work_order?.work_order_id !== options.update) return "--update";
   return null;

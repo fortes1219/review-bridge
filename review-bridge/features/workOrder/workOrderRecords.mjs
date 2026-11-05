@@ -53,6 +53,7 @@ export async function workOrdersWithSourceId(db, { projectId, sourceId }) {
 export async function resultIdentity(db, runId) {
   const { rows } = await db.query(
     "select r.run_id, r.conclusion, r.closed_at, r.contract_sha256, v.version_no, v.title, v.source_text, p.source_file,"
+    + " r.writer_provider, r.writer_model, r.writer_effort, r.reviewer_provider, r.reviewer_model, r.reviewer_effort, r.reviewer_mcp,"
     + " (select d.review_version from acceptance_decisions d where d.run_id = r.run_id order by d.sequence desc limit 1) as review_version"
     + " from runs r join work_order_versions v on v.work_order_id = r.work_order_id and v.content_sha256 = r.content_sha256"
     + " join plans p on p.plan_sha256 = r.plan_sha256 where r.run_id = $1",
@@ -253,7 +254,7 @@ export async function recordStart(db, { planSha256, authorize }) {
       ["plan-" + planSha256, authorization.authorization_id, started.run.run_id, started.run.created_at],
     );
     await tx.query("update projects set last_activity_at = $2 where project_id = $1", [projectId, now]);
-    await insertRun(tx, { run: started.run, projectId, workOrderId, contentSha256: plan.task_sha256, planSha256, repoRoot: plan.repo_root });
+    await insertRun(tx, { run: started.run, projectId, workOrderId, contentSha256: plan.task_sha256, planSha256, repoRoot: plan.repo_root, writer: plan.writer, reviewer: plan.reviewer });
     await recorder.flush(tx);
     if (started.superseded?.length) {
       await tx.query("update runs set superseded_by = $1 where run_id = any($2::uuid[])", [started.run.run_id, started.superseded]);

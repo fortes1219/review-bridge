@@ -90,7 +90,10 @@ The frontmatter is data, read as YAML when the work is planned (the way Astro re
 ```yaml
 ---
 priority: high              # low / medium / high / urgent; default: the policy's priority.default
-effort: high                # low / medium / high; default: the policy's priority table
+writer:                     # the writer's model and effort, over the policy's priority table
+  model: gpt-5.6-sol        # must be the writer's CLI's; null is that CLI's own default
+  effort: high              # low / medium / high
+reviewer: { model: opus, effort: medium }   # the same for the reviewer
 budget:                     # each key optional; default: the policy's limit of the same name
   tokens: 2000000           # limits.tokens
   tokens_per_call: 150000   # limits.tokens_per_call
@@ -103,7 +106,9 @@ source_id: SHOP-412         # your own tracker's id; Bridge stores it and never 
 ```
 
 - Any other key is refused, with its line. So is a value out of range: a priority or effort that is not one of the values above, a budget value that is not a positive whole number, or one above the policy's limit (the refusal names the limit).
-- `effort` is the writer's effort for every writer call: the work, each fix and the contract translation. The reviewer's effort always comes from the policy's priority table.
+- `writer` holds for every writer call: the work, each fix and the contract translation. `reviewer` holds for every reviewer call: the contract check and each review. A key you leave out comes from the policy's priority table. Who fills each role is not here: that is `bridge.json`, or `--writer` and `--reviewer` for one run, and the card names them.
+- A model must belong to the role's CLI, or the work order is refused before the card: for `claude`, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a name with `claude-` in it; for `codex`, a name starting `gpt-`, `codex-` or `o` and a digit. A model from a custom Codex provider goes in Codex's own config, with `model` left out here.
+- A top-level `effort` is still read, as `writer.effort`; writing both is refused.
 - Each value is settled in a fixed order: a flag given at the terminal (`--rounds`, `--call-timeout`), then the work order, then the policy's priority table (effort and model), then the policy's limits. The plan records each value with the layer it came from (`cli`, `work_order`, `priority`, `config`), and the card shows both.
 - `run_timeout` is the run's own time limit, like a GitHub Actions job's `timeout-minutes` (default 6 hours). A run that reaches it is closed as `timed_out` with the reason `run_timeout`; every call is cut to the time left.
 
@@ -170,7 +175,7 @@ Commands:
   init                Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
   start <file>        Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
   stop <run_id>       Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
-  resume <run_id>     Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start
+  resume <run_id>     Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them
   clean [<run_id>]    Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
   status              Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
   logs <run_id|file>  Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
@@ -228,6 +233,10 @@ Usage: review-bridge start <file> [options]
 Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
 
 Options:
+  --writer <claude|codex>
+      Writer for this run only; the card shows it (string; default: the writer in bridge.json)
+  --reviewer <claude|codex>
+      Reviewer for this run only; the card shows it (string; default: the reviewer in bridge.json)
   --breakpoint <text>
       Where the work stops and comes back to you (string; default: after the review, asked at a terminal)
   --allow-paths <list>
@@ -269,9 +278,13 @@ Options:
 ```text
 Usage: review-bridge resume <run_id> [options]
 
-Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start
+Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them
 
 Options:
+  --writer <claude|codex>
+      Writer for this run only; the card shows it (string; default: the writer in bridge.json)
+  --reviewer <claude|codex>
+      Reviewer for this run only; the card shows it (string; default: the reviewer in bridge.json)
   --yes
       The person said yes to the card; an agent adds this after showing them the card (boolean)
   --project <folder>
@@ -486,6 +499,10 @@ Usage: review-bridge work-plan <file> [options]
 Seal a work order into a plan without starting it (start does this for you)
 
 Options:
+  --writer <claude|codex>
+      Writer for this run only; the card shows it (string; default: the writer in bridge.json)
+  --reviewer <claude|codex>
+      Reviewer for this run only; the card shows it (string; default: the reviewer in bridge.json)
   --breakpoint <text>
       Where the work stops and comes back to you (string; default: after the review, asked at a terminal)
   --allow-paths <list>
@@ -512,6 +529,8 @@ Options:
       Print a short summary of the plan (boolean)
   --json
       Print the result as JSON (boolean)
+  --fake-cli
+      Use the built-in fake CLI instead of a model (tests and self-checks) (boolean)
   --project <folder>
       The project folder (string; default: the current folder)
 ```
@@ -708,7 +727,8 @@ npm uninstall -g review-bridge    # remove a project's setup first: review-bridg
 ## Safety model
 
 - A missing, malformed, expired or consumed authorization fails closed.
-- The writer and the reviewer run in separate sessions; the reviewer is read-only.
+- The writer and the reviewer run in separate sessions, also when one provider fills both; the reviewer is read-only. With `codex` that is an OS sandbox that denied a real write. With `claude` it is a session in plan mode holding only `Read`, `Grep` and `Glob`, as its own `init` event shows; if your Claude Code keeps other tools there (an MCP connector, say), the check does not pass and the work does not start.
+- Your personal connectors stay out of the sessions Bridge starts. With Claude Code, none of its calls load your MCP servers, and a project's `.mcp.json` reaches the writer only. A translation session that still lists an MCP tool is not used, and the run stops and says which. With Codex, apps and plugins are off in every call, and each server in `codex mcp list` is turned off by name; if that list cannot be read, the work does not start. To let a server through to the reviewer, name it in the project policy's `reviewer.mcp_allow`: it goes through as it is, nothing shows it cannot write, and the card says so. Only the reviewer's calls keep it; the writer and the translation do not. A Claude reviewer takes it from the project's `.mcp.json`.
 - Bridge runs the verification command itself before the reviewer's verdict can pass.
 - Native model work starts only on your yes to the card (at the terminal, or through an agent with `--yes`) and only after the reviewer's read-only check passed in the local page service; `start` and `resume` run that check first. Keeping an agent from saying yes on its own is the agent tool's job (its permission prompts), not Bridge's.
 - Bridge state must be on a local filesystem; synchronized and network folders (OneDrive, Dropbox, iCloud Drive, UNC, NFS, SMB) are refused.
@@ -726,6 +746,8 @@ Codex runs its commands in Windows PowerShell, which loads your `$PROFILE`. On a
 ```
 
 Or use PowerShell 7 (`pwsh`), which writes UTF-8. `review-bridge doctor` tells you when PowerShell does not write UTF-8; it never changes your profile.
+
+Measured on Windows with Codex 0.166, in one Vue and Vitest project: inside Codex's sandbox `npm test` failed with `spawn EPERM`, and passed only with `npm test -- --configLoader native --pool threads`. This does not stop a run: Bridge runs your tests itself, outside the sandbox, after each writer call. A Codex writer may report that it could not run them. Other platforms and projects were not measured.
 
 ## Development
 

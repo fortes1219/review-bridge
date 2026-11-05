@@ -388,7 +388,7 @@ test("two processes creating the cluster for the first time at once both end up 
   const root = path.join(parent, "postgres");
   t.after(async () => {
     await stopServer(root, { binaries }).catch(() => {});
-    await fsp.rm(parent, { recursive: true, force: true });
+    await fsp.rm(parent, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   const script = [
     "const m = await import(process.env.RB_MODULE);",

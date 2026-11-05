@@ -138,6 +138,7 @@ async function makeRuntime(t, override = { schema_version: 5 }, { git = false, w
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(),
     schema_version: 4, active_runs: "derive_from_run_projections",
+    roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } },
     test: { profile_id: "node-backend", rules: withTests ? [{ command: "npm test", package_script: "test" }] : [] },
   });
   await writeJson(paths.policyOverridePath, override);
@@ -168,6 +169,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
   const argsOut = path.join(runtime.toolsRoot, "claude-args.json");
   const planPath = path.join(runtime.paths.privateRoot, "plan.json");
   const plan = await createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths: runtime.paths,
     task: "Update README.md only.",
     owner: "Human Owner",
@@ -383,11 +385,21 @@ test("plan call budget exhaustion is labeled as the work package budget", async 
   assert.equal(status.stop_reason.reset_hint, null);
 });
 
-test("writer invocation passes the default --model opus and the bounded state records it", async (t) => {
+test("with no model set the writer's CLI is given no --model, and the bounded state says so", async (t) => {
   const { exitCode, status, claudeArgs } = await start(t);
   assert.equal(exitCode, 0);
-  assert.equal(claudeArgs[claudeArgs.indexOf("--model") + 1], "opus");
-  assert.equal(status.latest_state.writer_model, "opus");
+  assert.equal(claudeArgs.includes("--model"), false);
+  assert.equal(status.latest_state.writer_model, null);
+});
+
+test("the writer's MCP servers are the project's own .mcp.json or none, never the person's", async (t) => {
+  const without = await start(t);
+  assert.equal(without.exitCode, 0);
+  assert.ok(without.claudeArgs.includes("--strict-mcp-config"));
+  assert.equal(without.claudeArgs.includes("--mcp-config"), false);
+  const withFile = await start(t, { beforeResume: async (runtime) => fsp.writeFile(path.join(runtime.paths.repoRoot, ".mcp.json"), "{\"mcpServers\":{}}\n") });
+  assert.ok(withFile.claudeArgs.includes("--strict-mcp-config"));
+  assert.equal(withFile.claudeArgs[withFile.claudeArgs.indexOf("--mcp-config") + 1], ".mcp.json");
 });
 
 test("the writer may start sub-agents by default; a project override can still disallow Agent", async (t) => {
@@ -412,6 +424,7 @@ test("project override sets the writer model; failure states record it too", asy
 test("a malformed writer model override is refused", async (t) => {
   const runtime = await makeRuntime(t, { schema_version: 5, priority: { writer: { medium: { model: "opus --dangerously" } } } });
   await assert.rejects(createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths: runtime.paths,
     task: "Update README.md only.",
     owner: "Human Owner",

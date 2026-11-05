@@ -1,7 +1,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { probeAuditDir, readJson, retentionDays } from "../../service/index.mjs";
+import { listCodexMcpServers, loadOrCreatePolicySnapshot, probeAuditDir, readJson, retentionDays, settleMcp } from "../../service/index.mjs";
 import { removeServiceSession, serviceFiles, writeServiceSession } from "./pageService.mjs";
 import { createReviewerProbeService } from "./reviewerProbe.mjs";
 import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watchServer.mjs";
@@ -12,10 +12,19 @@ export async function startWatch({ paths, adapter, adapterId, adapterDefinition,
   const config = await readJson(paths.bridgeConfigPath);
   const port = portOption ?? config.watch?.port ?? DEFAULT_WATCH_PORT;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("watch port must be 0 through 65535.");
-  const roles = { writer: config.roles?.writer?.provider_id, reviewer: config.roles?.reviewer?.provider_id };
+  const rolesIn = (current) => ({ writer: current.roles?.writer?.provider_id, reviewer: current.roles?.reviewer?.provider_id });
+  const roles = rolesIn(config);
   if (!roles.writer || !roles.reviewer) throw new Error("watch requires roles selected by init.");
   const service = createReviewerProbeService({
-    roles,
+    // Read when asked: the page stays up while bridge.json changes, and the next start uses the new roles.
+    loadRoles: async () => rolesIn(await readJson(paths.bridgeConfigPath)),
+    // For the page's own button; a start brings the list its plan sealed.
+    resolveMcp: async (provider) => {
+      const { snapshot } = await loadOrCreatePolicySnapshot(paths);
+      const settled = await settleMcp({ reviewer: provider, allow: snapshot.effective_policy.reviewer.mcp_allow, listCodex: () => listCodexMcpServers(adapter), cwd: paths.repoRoot });
+      return { off: settled.reviewerOff, allow: settled.reviewerMcp };
+    },
+    projectRoot: paths.repoRoot,
     adapter,
     adapterId,
     adapterConfig: adapterDefinition || null,

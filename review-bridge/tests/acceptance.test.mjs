@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { acceptanceRows, criteriaProblems, decideAcceptance, sameVersion, verdictProblems, workVersion } from "../features/workOrder/acceptance.mjs";
+import { acceptanceRows, criteriaProblems, decideAcceptance, sameVersion, testsDecideBlockedWriter, verdictProblems, workVersion } from "../features/workOrder/acceptance.mjs";
 import { runTest } from "../features/workOrder/test.mjs";
 import { effectiveLimits } from "../features/workOrder/writerLoop.mjs";
 
@@ -105,4 +105,19 @@ test("reading the version of a Git project fails loudly when Git fails; only a p
   process.env.GIT_DIR = path.join(root, "no-such-git-dir");
   t.after(() => { if (previous === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = previous; });
   await assert.rejects(workVersion(root), /Git could not/);
+});
+
+test("a condition the tests decide is not left open by the writer; one only the reviewer can see still is", () => {
+  const contract = { acceptance: [{ id: "AC1", verify: [{ kind: "test", check: null }] }, { id: "AC2", verify: [{ kind: "reviewer", check: "read it" }] }] };
+  const report = (status, ac1, ac2, needsHuman = []) => ({ status, needs_human: needsHuman, criteria: [{ id: "AC1", status: ac1, note: "" }, { id: "AC2", status: ac2, note: "" }] });
+  assert.deepEqual(criteriaProblems(report("done", "not_done", "done"), contract), [], "the tests decide AC1");
+  assert.deepEqual(criteriaProblems(report("done", "done", "not_done"), contract), ["$.status: done while AC2 is not done"]);
+  const command = { kind: "command", command: "npm test" };
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), contract, command), true);
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "not_done"), contract, command), false, "AC2 is the writer's to finish");
+  assert.equal(testsDecideBlockedWriter(report("blocked", "done", "done"), contract, command), false, "blocked by something it did not name in a condition");
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done", [{ question: "which?" }]), contract, command), false, "it asked the person");
+  assert.equal(testsDecideBlockedWriter(report("out_of_scope", "not_done", "done"), contract, command), false);
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), contract, { kind: "not_configured" }), false, "no test to decide it");
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), contract, null), false);
 });

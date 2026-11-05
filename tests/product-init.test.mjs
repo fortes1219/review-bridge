@@ -224,7 +224,7 @@ test("role-first init supports either provider pairing without touching existing
   await fsp.access(path.join(projectPaths(root).stateRoot, "review-bridge-install.json"));
 });
 
-test("same provider for both roles remains blocked until separate sessions are proved", async (t) => {
+test("init takes one provider for both roles: each role is its own CLI process", async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-same-provider-"));
   t.after(() => removeWorkspace(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({
@@ -236,10 +236,10 @@ test("same provider for both roles remains blocked until separate sessions are p
   ), { cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
-  assert.equal(output.role_readiness.separate_sessions_proven, "not_run");
-  assert.equal(output.real_mode.ready, false);
+  // What stands between this folder and real work is the reviewer's own check, not the pairing.
+  assert.deepEqual(Object.values(output.role_readiness.checks).map((check) => check.provider), ["codex", "codex"]);
+  assert.equal(output.role_readiness.reviewer_readonly_proven, "not_run");
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json")));
-  assert.equal(config.roles.separate_sessions, true);
   assert.equal(config.roles.writer.provider_id, "codex");
   assert.equal(config.roles.reviewer.provider_id, "codex");
 });
@@ -390,7 +390,7 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   assert.equal(init.status, 0, init.stderr);
   await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "add-readme.md"), "# Work order: add a README\n\nA README exists.\n");
   const file = ".review-bridge/work-packages/add-readme.md";
-  const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
+  const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ...args, "--fake-cli"], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
 
   // D4: two lines by default; JSON only with --json.
   const plain = run(file, "--breakpoint", "after the review");
@@ -410,7 +410,7 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   assert.deepEqual(output.test, { kind: "not_configured", command: null, label: "沒有設定測試", checked: [] });
   // Priority, effort and budget come from the policy when the work order says nothing, each with its layer.
   assert.equal(output.priority, "medium");
-  assert.equal(output.effort, "medium");
+  assert.equal(output.writer.effort, "medium");
   assert.deepEqual(output.budget, { tokens: 4_000_000, tokens_per_call: 1_500_000, call_timeout: 900_000, test_timeout: 600_000, run_timeout: 21_600_000, rounds: 2 });
   assert.ok(Object.values(output.budget_source).every((source) => source === "config"));
 
@@ -437,7 +437,7 @@ test("a chosen project type that does not fit the folder is set up, and its work
   assert.deepEqual(config.test.rules, [{ command: "npm test", package_script: "test" }]);
 
   await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "fix.md"), "# Work order: fix\n\nIt works.\n");
-  const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ".review-bridge/work-packages/fix.md", ...args], {
+  const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ".review-bridge/work-packages/fix.md", "--fake-cli", ...args], {
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
   });
   const planned = run("--breakpoint", "after the review", "--json");
@@ -486,7 +486,10 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   assert.ok(lines[0].slice("Plan from the card: ".length).startsWith(projectPaths(root).logRoot), lines[0]);
   assert.equal(lines[1], "Reviewer read-only check: not needed with the fake CLI (no model is called)");
   for (const line of ["Work order:   " + order, "Stops:        after the review", "Tests:        not configured (no test rule matched; the work starts without tests)",
-    "Priority:     medium (config)", "Effort:       medium (priority table), for every writer call",
+    "Priority:     medium (config)",
+    "Writer:       claude (config), model the CLI's default (priority table), effort medium (priority table)",
+    "Reviewer:     codex (config), model the CLI's default (priority table), effort medium (priority table)",
+    "Reviewer MCP: none",
     "Budget:       tokens 4000000 (config), tokens_per_call 1500000 (config), call_timeout 900000 (config), test_timeout 600000 (config), run_timeout 21600000 (config), rounds 2 (config)", "  │ # 工單：新增 README", "  │ 1. 專案根目錄存在 `README.md`。"]) {
     assert.ok(lines.includes(line), line);
   }
@@ -714,7 +717,7 @@ test("a run's events, verdicts, tests and delivery are in the database; stop and
   assert.deepEqual(await queryRecords("select ac_id, verdict from review_verdicts where run_id = $1", [runId]), [{ ac_id: "AC1", verdict: "pass" }]);
   assert.deepEqual(await queryRecords("select kind, passed from test_results where run_id = $1", [runId]), [{ kind: "not_configured", passed: null }]);
   // The plan keeps each settled value with its layer, and the run its own deadline; both by SQL.
-  const [planned] = await queryRecords("select p.body->>'priority' as priority, p.body->>'priority_source' as priority_source, p.body->>'effort_source' as effort_source,"
+  const [planned] = await queryRecords("select p.body->>'priority' as priority, p.body->>'priority_source' as priority_source, p.body->'writer'->>'effort_source' as effort_source,"
     + " p.body->'budget_source'->>'run_timeout' as run_timeout_source, (r.timeout_at - r.created_at) as timeout from runs r join plans p using (plan_sha256) where r.run_id = $1", [runId]);
   assert.deepEqual({ ...planned, timeout: planned.timeout.hours }, { priority: "medium", priority_source: "config", effort_source: "priority", run_timeout_source: "config", timeout: 6 });
   // A state event keeps its details with the run it left, in its record; its payload is null.
@@ -1048,8 +1051,9 @@ test("without the database a running run is stopped and delivered from its files
 // shows it). The card's "Valid until" is the plan's, as recorded.
 test("a card not shown takes no later --yes; a card past its Valid until is refused", async (t) => {
   const { order, cli, listed } = await fourActionsProject(t, "review-bridge-card-once-");
-  const notShown = cli(["start", order]);
-  assert.equal(notShown.status, 1);
+  // Claude in both roles: no Codex list to read, so this start gets as far as the reviewer's check.
+  const notShown = cli(["start", order, "--writer", "claude", "--reviewer", "claude"]);
+  assert.equal(notShown.status, 1, notShown.stderr);
   assert.match(notShown.stdout, /\nReviewer read-only check: not passed /);
   const [withdrawn] = await queryRecords("select shown_at, withdrawn_at from plans order by created_at desc limit 1");
   assert.equal(withdrawn.shown_at, null, "the card was never shown");
@@ -1142,9 +1146,14 @@ test("without the reviewer proof a real start is refused before any model call, 
   const workStart = cli(["work-start", "--plan", ".review-bridge/review-queue/hello.plan.json", "--yes"]);
   assert.equal(workStart.status, 2);
   assert.match(workStart.stderr, /Native execution is unavailable: the Bridge page service is not running/);
+  // A new card with no Codex here: the person hears what to install and sign in to, and nothing else.
+  const noCli = cli(["start", order]);
+  assert.equal(noCli.status, 1, noCli.stderr);
+  assert.match(noCli.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\n(?:Install the codex CLI and sign it in|Sign the reviewer in) \(codex login\), then run: review-bridge start /m);
+  assert.doesNotMatch(noCli.stdout + noCli.stderr, /MCP/);
   // And without --yes: refused at the check too.
   cli(["up", "--fake-cli"]);
-  const asked = cli(["start", order]);
+  const asked = cli(["start", order, "--writer", "claude", "--reviewer", "claude"]);
   assert.equal(asked.status, 1, asked.stderr);
   assert.match(asked.stdout, fakePage);
   assert.deepEqual(await listed("runs"), []);
@@ -1339,8 +1348,10 @@ test("a result is named by its source_id and opens with who it is about, as the 
   assert.deepEqual(parse(front), {
     source_id: "CANARY-1", title: row.title, source_file: row.source_file, version_no: row.version_no,
     contract_sha256: row.contract_sha256, run_id: row.run_id, commit: row.commit,
+    writer: { provider: "claude", model: null, effort: "medium" },
+    reviewer: { provider: "codex", model: null, effort: "medium", mcp: [] },
   });
-  assert.deepEqual(front.split("\n").map((line) => line.split(":")[0]), ["source_id", "title", "source_file", "version_no", "contract_sha256", "run_id", "commit"]);
+  assert.deepEqual(front.split("\n").filter((line) => !line.startsWith(" ")).map((line) => line.split(":")[0]), ["source_id", "title", "source_file", "version_no", "contract_sha256", "run_id", "commit", "writer", "reviewer"]);
   assert.match(front, /\nversion_no: 1 {2}# the sealed version this result is about, not the \.md on disk now\n/);
   assert.match(row.contract_sha256, /^[0-9a-f]{64}$/);
   assert.match(rest, /^# Delivered\n/);

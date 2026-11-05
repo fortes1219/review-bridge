@@ -80,7 +80,7 @@
           "minLength": 1
         },
         "model": {
-          "type": "string",
+          "type": ["string", "null"],
           "minLength": 1
         },
         "attempt": {

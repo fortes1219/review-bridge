@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { inspectRoleReadiness, validateRoles } from "../installer/role-readiness.mjs";
+import { inspectProvider } from "../review-bridge/service/index.mjs";
 
 test("role check reports two selected providers without claiming native readiness", async () => {
   const calls = [];
@@ -24,7 +25,6 @@ test("role check reports two selected providers without claiming native readines
   assert.equal(result.checks.writer.next_action, "none");
   assert.equal(result.ready_for_reviewer_probe, true);
   assert.equal(result.reviewer_readonly_proven, "not_run");
-  assert.equal(result.separate_sessions_proven, "not_run");
   assert.equal(result.native_ready, false);
 });
 
@@ -91,4 +91,15 @@ test("installer and installed runtime share one readiness implementation", async
   assert.equal(installer.inspectRoleReadiness, runtime.inspectRoleReadiness);
   assert.equal(installer.validateRoles, runtime.validateRoles);
   assert.equal(installer.PROVIDERS, runtime.PROVIDERS);
+});
+
+test("one provider's readiness on its own: what it is checked by, and which next step it needs", async () => {
+  const adapter = { async resolveExecutable(provider) { if (provider === "absent") throw new Error("not found"); return "/bin/" + provider; } };
+  const signedOut = () => ({ status: 1, stdout: "", stderr: "Not logged in\n" });
+  const signedIn = () => ({ status: 0, stdout: "", stderr: "Logged in using ChatGPT\n" });
+  const unknown = () => { throw new Error("cannot run"); };
+  assert.equal((await inspectProvider("codex", { adapter, statusProbe: signedIn })).next_action, "none");
+  assert.equal((await inspectProvider("codex", { adapter, statusProbe: signedOut })).next_action, "sign_in");
+  assert.equal((await inspectProvider("codex", { adapter, statusProbe: unknown })).next_action, "recheck_sign_in");
+  assert.deepEqual(await inspectProvider("absent", { adapter }), { provider: "absent", cli_present: false, authenticated: "unknown", next_action: "install_cli" });
 });

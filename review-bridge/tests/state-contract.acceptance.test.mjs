@@ -410,7 +410,7 @@ describe("AC-20 / R2 the same approved plan cannot start twice", () => {
     const planPath = path.join(target, ".review-bridge", "review-queue", "ac20.plan.json");
     await writeText(taskPath, "# AC-20\n\n<!-- bridge:requested_work -->\nUpdate `README.md`.\n\tKeep the task multiline.\n\n<!-- bridge:acceptance -->\n- README.md is updated.\n");
     const planned = spawnSync(process.execPath, [
-      bootstrap, "work-plan",
+      bootstrap, "work-plan", "--fake-cli",
       "--task-file", taskPath,
       "--owner", "AC-20 Owner",
       "--work-package", "ac20-plan-replay",

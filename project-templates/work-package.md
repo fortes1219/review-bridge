@@ -1,7 +1,8 @@
 ---
 # Every key is optional; delete what you do not need. Any other key is refused.
 # priority: medium        # low / medium / high / urgent; picks the models and effort from the policy's table
-# effort: medium          # low / medium / high; the writer's effort for every writer call
+# writer: { model: gpt-5.6-sol, effort: high }   # over the priority table; the model must be the writer's CLI's
+# reviewer: { model: opus, effort: medium }       # over the priority table; the model must be the reviewer's CLI's
 # budget:                 # each key optional; each may only be lower than the policy's limit
 #   tokens: 2000000
 #   tokens_per_call: 150000

@@ -70,7 +70,7 @@ async function planFakeWork(root, bridge, name = "stop") {
   await workOrderFromTemplate(root, order);
   const id = name + "-1";
   const planArg = ".review-bridge/review-queue/" + id + ".plan.json";
-  const planned = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/" + name + ".md", "--owner", "Fortes", "--work-package", id,
+  const planned = bridge(["work-plan", "--fake-cli", "--task-file", ".review-bridge/work-packages/" + name + ".md", "--owner", "Fortes", "--work-package", id,
     "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000",
     "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
@@ -143,14 +143,14 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   // T0-06 R1/R3 on the CLI: the plain summary names the sealed command; JSON carries it; no entry point
   // still plans, and says the tests are not configured.
   assert.equal(plan.test.command, "npm test");
-  const plainOut = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-plain",
+  const plainOut = bridge(["work-plan", "--fake-cli", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-plain",
     "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000",
     "--out", ".review-bridge/review-queue/stop-plain.plan.json", "--plain"]);
   assert.equal(plainOut.status, 0, plainOut.stderr);
   assert.match(plainOut.stdout, /驗收：會跑 npm test（profile 核准）/);
   const manifest = await fsp.readFile(path.join(root, "package.json"), "utf8");
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo" }));
-  const untested = bridge(["work-plan", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-untested",
+  const untested = bridge(["work-plan", "--fake-cli", "--task-file", ".review-bridge/work-packages/stop.md", "--owner", "Fortes", "--work-package", "stop-untested",
     "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000",
     "--out", ".review-bridge/review-queue/stop-untested.plan.json", "--plain"]);
   assert.equal(untested.status, 0, untested.stderr);

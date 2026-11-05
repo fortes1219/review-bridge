@@ -1,7 +1,8 @@
 ---
 # 每一個 key 都可以不寫；用不到的就刪掉。這裡以外的 key 會被拒絕。
 # priority: medium        # low / medium / high / urgent；照 policy 的表決定模型和 effort
-# effort: medium          # low / medium / high；writer 每一次呼叫的 effort
+# writer: { model: gpt-5.6-sol, effort: high }   # 蓋過 priority 的表；model 要是 writer 那個 CLI 的
+# reviewer: { model: opus, effort: medium }       # 蓋過 priority 的表；model 要是 reviewer 那個 CLI 的
 # budget:                 # 每一項都可以不寫；每一項只能比 policy 的上限小
 #   tokens: 2000000
 #   tokens_per_call: 150000

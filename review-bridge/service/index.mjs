@@ -1,7 +1,11 @@
 // The one entry to the shared boundaries: the agent CLIs and the persistent records. Features,
 // the router, bootstrap, bridge.mjs and the installer take what they need from here only.
+export * from "./agentCli/calls.mjs";
+export * from "./agentCli/claude.mjs";
+export * from "./agentCli/codex.mjs";
 export * from "./agentCli/codexAppServer.mjs";
 export * from "./agentCli/fakeAdapter.mjs";
+export * from "./agentCli/mcp.mjs";
 export * from "./agentCli/process.mjs";
 export * from "./agentCli/providerFailure.mjs";
 export * from "./agentCli/providers.mjs";

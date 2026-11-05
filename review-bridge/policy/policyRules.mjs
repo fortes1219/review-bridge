@@ -7,14 +7,17 @@ const effortRank = new Map([["low", 1], ["medium", 2], ["high", 3]]);
 export const PRIORITIES = Object.freeze(["low", "medium", "high", "urgent"]);
 const ROLES = Object.freeze(["writer", "reviewer"]);
 // What a project override may carry; profile_id is the installer's record of the project type.
-const OVERRIDE_KEYS = Object.freeze(["schema_version", "profile_id", "limits", "writer", "priority", "release_actions_require_human"]);
+const OVERRIDE_KEYS = Object.freeze(["schema_version", "profile_id", "limits", "writer", "reviewer", "priority", "release_actions_require_human"]);
+// An MCP server's name: it goes into a Codex config path and a Claude Code tool name as it is.
+export const MCP_SERVER_NAME = /^[A-Za-z0-9_-]+$/;
+const validMcpNames = (names) => Array.isArray(names) && names.every((name) => typeof name === "string" && MCP_SERVER_NAME.test(name));
 
 function union(left = [], right = []) {
   return [...new Set([...left, ...right])].sort();
 }
 
 // null: the provider CLI is given no --model and uses its own default.
-function validModel(model) {
+export function validModel(model) {
   return model === null || (typeof model === "string" && MODEL.test(model));
 }
 
@@ -56,6 +59,7 @@ export function validateDefaultPolicy(policy) {
     throw new Error("Reconcile guard TTL must exceed the grace period.");
   }
   if (policy.release_actions_require_human !== true) throw new Error("Release approval cannot be disabled.");
+  if (!validMcpNames(policy.reviewer?.mcp_allow)) throw new Error("reviewer.mcp_allow must be a list of MCP server names.");
   validatePriorityTable(policy.priority);
   return true;
 }
@@ -80,6 +84,13 @@ export function mergePolicy(defaultPolicy, override = {}) {
     merged.writer.disallowed_tools,
     override.writer?.disallowed_tools,
   );
+  for (const key of Object.keys(override.reviewer || {})) {
+    if (key !== "mcp_allow") throw new Error("Unknown project policy override key: reviewer." + key);
+  }
+  if (override.reviewer?.mcp_allow !== undefined) {
+    if (!validMcpNames(override.reviewer.mcp_allow)) throw new Error("Project override reviewer.mcp_allow must be a list of MCP server names.");
+    merged.reviewer.mcp_allow = union(merged.reviewer.mcp_allow, override.reviewer.mcp_allow);
+  }
   if (override.release_actions_require_human === false) {
     throw new Error("Project override cannot disable human release approval.");
   }

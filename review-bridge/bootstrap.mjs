@@ -89,8 +89,8 @@ async function main() {
   let implementation = {};
   let adapterSource = null;
   if (fakeRequested) {
-    if (!["start", "resume", "work-start", "doctor", "watch", "up"].includes(command)) {
-      throw new Error("--fake-cli is supported only by start, resume, work-start, doctor, watch, and up. Leave --fake-cli out.");
+    if (!["start", "resume", "work-plan", "work-start", "doctor", "watch", "up"].includes(command)) {
+      throw new Error("--fake-cli is supported only by start, resume, work-plan, work-start, doctor, watch, and up. Leave --fake-cli out.");
     }
     implementation = createFakeAdapter(bridgeRoot, fakeScenario);
     // The fake adapter is never eligible: a page started with it cannot run the reviewer check, so it
@@ -133,6 +133,11 @@ async function main() {
     repoRoot,
     adapter: checksFirst ? null : implementation,
     loadAdapter: async () => (await platformAdapter(manifest)).implementation,
+    // For what calls no model, a plan's list of MCP servers among it: any defined platform's adapter.
+    inspectionAdapter: async () => {
+      const definition = loadAdapterForInspection(manifest, process.platform, process.arch, { bridgeRoot });
+      return definition ? await import(resolveAdapterModule(bridgeRoot, definition.module)) : UNSUPPORTED_ADAPTER;
+    },
     adapterId: adapterDefinition?.id || null,
     adapterDefinition,
     adapterSource,

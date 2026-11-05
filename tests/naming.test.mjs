@@ -67,6 +67,7 @@ test("the shipped policy has exactly the keys of the policy's priority table and
     "limits.test_timeout", "limits.run_timeout", "limits.authorization_ttl", "limits.recovery_window", "limits.heartbeat_interval",
     "limits.lock_stale", "limits.reconcile_grace", "limits.reconcile_guard_ttl",
     "writer", "writer.mode", "writer.disallowed_tools", "writer.self_review",
+    "reviewer", "reviewer.mcp_allow",
     "priority", "priority.default", ...PRIORITY_PATHS,
     "release_actions_require_human",
   ]));

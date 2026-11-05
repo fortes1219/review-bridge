@@ -50,6 +50,7 @@ async function terminalRun(rt, status, { state = null, gate = null, events = [],
   const taskFile = path.join(rt.paths.privateRoot, "work-packages", id + ".md");
   if (!task) await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths: rt.paths, ...(task ? { task } : { taskFile }), owner: "Fortes", workPackage: id, breakpoint,
     ...(task || allowedPaths ? { allowedPaths: allowedPaths || "README.md" } : {}), rounds: 2, callTimeout: 60_000, outPath: path.join(rt.paths.privateRoot, id + "-" + Math.random().toString(16).slice(2, 6) + ".plan.json"),
   });
@@ -407,6 +408,7 @@ test("C6 work-cancel delivers on the spot", async (t) => {
   const taskFile = path.join(rt.paths.privateRoot, "work-packages", "cancel.md");
   await fsp.writeFile(taskFile, ORDER);
   const plan = await createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths: rt.paths, taskFile, owner: "Fortes", workPackage: "cancel-1", breakpoint: "b",
     rounds: 1, callTimeout: 60_000, outPath: path.join(rt.paths.privateRoot, "cancel-1.plan.json"),
   });

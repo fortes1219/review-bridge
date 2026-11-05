@@ -55,13 +55,14 @@ async function readSessionRecord(paths) {
   return validSession(session) ? session : null;
 }
 
-function probeStatus(port) {
+function probeStatus(port, reviewer = null, mcp = null) {
+  const query = [...(reviewer ? ["reviewer=" + encodeURIComponent(reviewer)] : []), ...(mcp ? ["mcp=" + encodeURIComponent(JSON.stringify(mcp))] : [])].join("&");
   return new Promise((resolve) => {
     const req = http.request({
       host: "127.0.0.1",
       port,
       method: "GET",
-      path: "/api/status",
+      path: "/api/status" + (query ? "?" + query : ""),
       headers: { Host: "localhost:" + port },
       timeout: PROBE_TIMEOUT_MS,
     }, (res) => {
@@ -85,12 +86,13 @@ function probeStatus(port) {
 }
 
 // C4/C5: the one check every command uses. Four steps in order, first failure wins,
-// never throws.
-export async function checkService(paths) {
+// never throws. `reviewer` and `mcp` ask about the proof of that reviewer under that list of MCP servers;
+// without them, the one in bridge.json under the list its proof was made with.
+export async function checkService(paths, { reviewer = null, mcp = null } = {}) {
   const session = await readSessionRecord(paths);
   if (!session) return { running: false, reason: "no_session", url: null, session: null };
   if (!isPidAlive(session.pid)) return { running: false, reason: "pid_dead", url: session.url, session };
-  const probe = await probeStatus(session.port);
+  const probe = await probeStatus(session.port, reviewer, mcp);
   if (probe.reason !== "ok") return { running: false, reason: probe.reason, url: session.url, session };
   if (probe.body.service_id !== session.service_id || probe.body.pid !== session.pid) {
     return { running: false, reason: "wrong_service", url: session.url, session };

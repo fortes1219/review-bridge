@@ -24,7 +24,7 @@ async function project(t) {
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-closing-"));
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(), schema_version: 4, active_runs: "derive_from_run_projections" });
+  await writeJson(paths.bridgeConfigPath, { project_id: randomUUID(), schema_version: 4, active_runs: "derive_from_run_projections", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } });
   await writeJson(paths.policyOverridePath, { schema_version: 5 });
   await fsp.writeFile(path.join(repoRoot, "README.md"), "# demo\n");
   return paths;
@@ -32,6 +32,7 @@ async function project(t) {
 
 async function planFor(paths, name) {
   return await createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths, task: "Update README.md only.", owner: "Fortes", workPackage: name, breakpoint: "return after review",
     allowedPaths: "README.md", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.privateRoot, name + ".plan.json"),
   });

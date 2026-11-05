@@ -41,12 +41,35 @@ function idProblems(items, ids, at) {
 
 const contractIds = (contract) => (contract?.acceptance || []).map((item) => item.id);
 
-// The writer reports every sealed condition by id, and calls the work done only if each one is.
+const leansOnTest = (condition) => (condition.verify || []).some((check) => check.kind === "test");
+
+// Conditions the writer reports as not done, apart from those that lean on the tests: Bridge runs the
+// tests itself, outside the writer's sandbox, and decides those (rowResult never reads the writer's
+// word), so a writer that could not run them has not left anything open.
+function openConditions(writerResult, contract) {
+  const decidedByTests = new Set((contract?.acceptance || []).filter(leansOnTest).map((condition) => condition.id));
+  return writerResult.criteria.filter((item) => item.status !== "done" && !decidedByTests.has(item.id)).map((item) => item.id);
+}
+
+// A writer that calls itself blocked for no other reason than a condition the tests decide, and asks
+// the person nothing, is not stopped: Bridge's own tests and the reviewer judge the work. Code decides
+// this from the sealed contract, so it does not rest on the model reading its instructions (Owner
+// 2026-11-03). Only with a test command to run; without one nothing would decide those conditions.
+export function testsDecideBlockedWriter(writerResult, contract, test) {
+  return writerResult.status === "blocked"
+    && test?.kind === "command"
+    && !writerResult.needs_human.length
+    && writerResult.criteria.some((item) => item.status !== "done")
+    && !openConditions(writerResult, contract).length;
+}
+
+// The writer reports every sealed condition by id, and calls the work done only if each one is,
+// apart from those the tests decide.
 export function criteriaProblems(writerResult, contract) {
   const ids = contractIds(contract);
   if (!contract) return writerResult.criteria.length ? ["$.criteria: there is no contract; leave it empty"] : [];
   const problems = idProblems(writerResult.criteria, ids, "$.criteria");
-  const open = writerResult.criteria.filter((item) => item.status !== "done").map((item) => item.id);
+  const open = openConditions(writerResult, contract);
   if (writerResult.status === "done" && open.length) problems.push("$.status: done while " + open.join(", ") + " is not done");
   return problems;
 }
@@ -67,8 +90,6 @@ export function verdictProblems(reviewResult, contract) {
   if (reviewResult.gate === "PASS" && reviewResult.verdicts.some((verdict) => verdict.verdict === "fail")) problems.push("$.gate: PASS while a condition fails");
   return problems;
 }
-
-const leansOnTest = (condition) => condition.verify.some((check) => check.kind === "test");
 
 // One row per sealed condition, decided from records only.
 export function acceptanceRows({ contract, writer = null, review = null, test = null, reviewVersion = null }) {

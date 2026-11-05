@@ -89,6 +89,7 @@ test("R1 multiline task files allow newline, tab, and backticks", async () => {
   await fsp.mkdir(path.dirname(taskFile), { recursive: true });
   await fsp.writeFile(taskFile, task, "utf8");
   const plan = await createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths: runtime.paths,
     taskFile,
     owner: "RC2 Test Owner",

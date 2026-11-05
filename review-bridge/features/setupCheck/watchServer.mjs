@@ -4,11 +4,23 @@ import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 
+import { PROVIDERS } from "../../service/index.mjs";
+
 export const LOOPBACK_HOST = "127.0.0.1";
 export const PUBLIC_HOST = "localhost";
 export const TOKEN_HEADER = "x-review-bridge-token";
 export const DEFAULT_WATCH_PORT = 8080;
-const MAX_BODY = 1024;
+const MAX_BODY = 16 * 1024;
+const validMcp = (mcp) => [mcp?.off, mcp?.allow].every((names) => Array.isArray(names) && names.every((name) => typeof name === "string" && /^[A-Za-z0-9_-]+$/.test(name)));
+const queryMcp = (text) => {
+  if (text === null) return null;
+  try {
+    const mcp = JSON.parse(text);
+    return validMcp(mcp) ? { off: mcp.off, allow: mcp.allow } : undefined;
+  } catch {
+    return undefined;
+  }
+};
 const STATIC = Object.freeze({
   "/": ["watch.html", "text/html; charset=utf-8"],
   "/watch.js": ["watch.js", "text/javascript; charset=utf-8"],
@@ -124,7 +136,11 @@ export async function startWatchServer({
       }
       if (req.method === "GET" && url.pathname === "/api/status") {
         // C3: identity fields let the check tell this process from anything else on the port.
-        return send(res, 200, { ok: true, ...(await service.status()), service_id: serviceId, pid: process.pid, port: server.address().port });
+        const reviewer = url.searchParams.get("reviewer");
+        if (reviewer !== null && !PROVIDERS.includes(reviewer)) return reject(res, 400, "invalid_reviewer");
+        const mcp = queryMcp(url.searchParams.get("mcp"));
+        if (mcp === undefined) return reject(res, 400, "invalid_mcp");
+        return send(res, 200, { ok: true, ...(await service.status({ reviewer, mcp })), service_id: serviceId, pid: process.pid, port: server.address().port });
       }
       if (url.pathname === "/api/reviewer-probe") {
         if (req.method !== "POST") return reject(res, 405, "method_not_allowed");
@@ -135,14 +151,16 @@ export async function startWatchServer({
         let body;
         try { body = JSON.parse(await readBody(req)); } catch { return reject(res, 400, "invalid_body"); }
         if (body?.confirm !== "one_model_call" || typeof body.request_id !== "string"
-          || !/^[A-Za-z0-9-]{16,64}$/.test(body.request_id)) {
+          || !/^[A-Za-z0-9-]{16,64}$/.test(body.request_id)
+          || (body.reviewer !== undefined && !PROVIDERS.includes(body.reviewer))
+          || (body.mcp !== undefined && !validMcp(body.mcp))) {
           return reject(res, 400, "invalid_body");
         }
         if (usedRequestIds.has(body.request_id)) return reject(res, 409, "replayed_request");
         if (service.isInFlight()) return reject(res, 409, "in_flight");
         usedRequestIds.add(body.request_id);
         try {
-          return send(res, 200, { ok: true, result: await service.run() });
+          return send(res, 200, { ok: true, result: await service.run({ reviewer: body.reviewer ?? null, mcp: body.mcp ? { off: body.mcp.off, allow: body.mcp.allow } : null }) });
         } catch (error) {
           if (error.code === "in_flight") return reject(res, 409, "in_flight");
           if (error.code === "reviewer_not_ready") return reject(res, 409, "reviewer_not_ready");

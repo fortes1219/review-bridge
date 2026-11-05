@@ -9,7 +9,7 @@ export function createFakeAdapter(bridgeRoot, requestedScenario = "PASS") {
   }
   const fakeClaude = path.join(bridgeRoot, "tests", "fixtures", "fake-claude.mjs");
   const fakeCodex = path.join(bridgeRoot, "tests", "fixtures", "fake-codex.mjs");
-  let codexCalls = 0;
+  let reviewCalls = 0;
   let claudeCalls = 0;
   return {
     id: "portable-fake-cli",
@@ -18,12 +18,11 @@ export function createFakeAdapter(bridgeRoot, requestedScenario = "PASS") {
       return process.execPath;
     },
     buildInvocation(kind, executable, args) {
-      // Only reviews count toward the scenario; a contract check is a Codex call but not a review.
-      const contractCheck = args.some((arg) => String(arg).endsWith("contract.check.schema.json"));
+      // Only reviews count toward the scenario, whichever CLI is the reviewer: its schema names it.
       if (kind === "claude") claudeCalls += 1;
-      else if (!contractCheck) codexCalls += 1;
+      if (args.some((arg) => String(arg).includes("review.result"))) reviewCalls += 1;
       let gate = "PASS";
-      if (scenario === "FAIL_THEN_PASS") gate = codexCalls === 1 ? "FAIL" : "PASS";
+      if (scenario === "FAIL_THEN_PASS") gate = reviewCalls === 1 ? "FAIL" : "PASS";
       if (scenario === "HARD_STOP") gate = "HARD_STOP";
       return {
         command: executable,

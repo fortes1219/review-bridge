@@ -112,8 +112,9 @@ Features never import each other. When one flow needs another feature's capabili
 | Module | Holds |
 |---|---|
 | `agentCli/process` | Spawning child processes and stopping a whole process tree (`taskkill /T` on Windows; on POSIX the process group of a shell run, or every descendant found with `ps` for a CLI started directly) |
-| `agentCli/codexAppServer` | Codex through `codex app-server`: one thread per call, every sub-agent thread followed, per-thread usage added once, every running turn interrupted on stop. A call is completed only when the root turn completed and every announced sub-agent's turn has ended; an interrupted or failed root ends the call with that status. Usage is complete only when every thread reported its total and every turn completed; otherwise it is recorded as partial. Not yet called by the writer loop (see section 7) |
-| `agentCli/providers` | The provider list, role validation, CLI sign-in status checks |
+| `agentCli/codexAppServer` | Codex through `codex app-server`: one thread per call, every sub-agent thread followed, per-thread usage added once, every running turn interrupted on stop. A call is completed only when the root turn completed and every announced sub-agent's turn has ended; an interrupted or failed root ends the call with that status. Usage is complete only when every thread reported its total and every turn completed; otherwise it is recorded as partial. Called through `agentCli/codex` |
+| `agentCli/calls`, `agentCli/claude`, `agentCli/codex` | One way to call a role; each provider's flags and output (section 7) |
+| `agentCli/providers` | The provider list, role validation, which model each CLI takes, CLI sign-in status checks |
 | `agentCli/providerFailure` | Reading a CLI failure: usage limits, reset hints, evidence tails |
 | `agentCli/usage` | Token usage from the writer and reviewer CLI output |
 | `agentCli/fakeAdapter` | The fake CLIs used by `--fake-cli` |
@@ -141,19 +142,27 @@ The same entry also re-exports three pure tools for the installer: `getBridgePat
 - **Installed runtime:** at upgrade and uninstall, the installer has to check and stop the page service of the runtime already installed in the target. `loadInstalledServiceModules` in `installer/neutral-install.mjs` reads it from the current layout (`utils/paths.mjs`, `features/setupCheck/pageService.mjs`). If those files are absent, it falls back to the `core/` layout that installs made before this structure use. This is what lets an older install be upgraded.
 - **Layout:** the installed runtime is a copy of the whole `review-bridge/` folder, so a new layout reaches the target without any file list in the installer.
 
-## 7. Writer and reviewer roles: current state
+## 7. Writer and reviewer roles
 
-`init` accepts either provider (`claude`, `codex`) for either role and records the choice in `.review-bridge/bridge.json`. The rest of the runtime does not yet follow that choice:
+Either provider (`claude`, `codex`) can fill either role, in all four pairings. The plan seals who fills each role, from `--writer`/`--reviewer` or else `.review-bridge/bridge.json`, with its model and effort: from the work order's `writer:`/`reviewer:` block, else the policy's priority table. A model of `null` leaves the choice to the CLI. A run does not change roles; changing `bridge.json` affects the next start, whose card names them.
 
-| Part | Follows the configured roles |
-|---|---|
-| `init` readiness check | Yes |
-| Reviewer read-only check on the setup page | Yes, but only `codex` is supported as reviewer; `claude` is reported as unsupported |
-| Writer loop (`features/workOrder/writerLoop.mjs`) | No: always starts `claude` |
-| Review worker (`features/workOrder/review.mjs`) | No: always starts `codex` |
-| Native start gate (`router/guards/nativeGate.mjs`) | No: it checks the reviewer proof, not which providers the roles name |
+`service/agentCli/calls.mjs` is the one way to call a role, and `agentCli/claude.mjs` and `agentCli/codex.mjs` the only modules that know a CLI's flags and output, the way Vitest's coverage `provider` picks one module behind one interface. A call asks for an access: `none`, `read` or `write`.
 
-As a result, only writer `claude` with reviewer `codex` runs as configured. With `codex` in both roles, the reviewer check can pass and native start is allowed, but the writer that runs is `claude`. This is an open defect and must be closed before any other pairing is described as supported.
+| Access | Used by | Claude Code | Codex |
+|---|---|---|---|
+| `none` | Contract translation | `--tools "" --strict-mcp-config` | `exec --sandbox read-only` (it has no switch that removes every tool) |
+| `read` | Contract check, review | `--permission-mode plan --tools Read,Grep,Glob --disallowedTools Write,Edit,NotebookEdit,Bash,PowerShell --strict-mcp-config --no-session-persistence` | `exec --ephemeral --sandbox read-only` |
+| `write` | Writer | `--permission-mode auto --strict-mcp-config`, plus `--mcp-config .mcp.json` when the project has one | `app-server`, thread with `sandbox: workspace-write`, `approvalPolicy: never` |
+
+The person's own connectors go into no session Bridge starts. Claude Code gets `--strict-mcp-config` in every call; a project's `.mcp.json` reaches its writer only. A translation whose own `init` event still lists an `mcp__` tool, or lists no tools, is not used: the run stops as `policy_failure`, after that call. Codex gets `--disable apps --disable plugins` in every call, and each MCP server still in `codex mcp list` is turned off by name (`-c mcp_servers.<name>.enabled=false`; `-c mcp_servers={}` merges and removes nothing). The plan reads that list once and seals it; a list it cannot read refuses the start. The policy's `reviewer.mcp_allow` (default empty) names servers to let through as they are, not checked to be read-only (RC3-MCP-01): Codex leaves them on in the reviewer's calls only, the writer and the translation keep nothing, and a Claude reviewer loads them from the project's `.mcp.json`. A Codex that is not installed or signed in is said first, as that; a run with no Codex in it reads no list. The card, the run's row and the result name what the reviewer was given.
+
+Each role is its own CLI process and session, also when one provider fills both; each usage record names the session the CLI reported.
+
+The reviewer's read-only check proves the flags its reviews run with, one proof per provider, held in the page service's memory. The proofs differ in strength: Codex shows a write that was attempted and denied by an OS sandbox; Claude Code's session is shown by its own `init` event to be in plan mode and to hold nothing beyond the three read tools, with the sentinel file absent and the CLI run to its end. A tool beyond those, an MCP server's included, fails the check.
+
+Measured on Windows with Codex 0.166: `npm test` fails inside the writer's sandbox with `spawn EPERM` and passes only with `--configLoader native --pool threads`. Bridge runs the tests outside the sandbox, so a condition whose `verify` is `test` is not the writer's to prove.
+
+Limits: the Codex writer has no `max-turns` (the token and time ceilings hold it) and no disallowed tools (a policy that sets them refuses the start). The record keeps the model the run was told to use, so with `null` it does not say which model the CLI chose. A work order may lower the reviewer's effort below the policy's table, which a project override may not.
 
 ## 8. Sub-agents and usage
 

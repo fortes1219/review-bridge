@@ -50,7 +50,7 @@ async function projectWithRun() {
   const order = ".review-bridge/work-packages/greeting.md";
   await fsp.writeFile(path.join(root, order), ORDER);
   const planArg = ".review-bridge/review-queue/greeting.plan.json";
-  const planned = bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", "greeting", "--breakpoint", "return after review",
+  const planned = bridge(["work-plan", "--fake-cli", "--task-file", order, "--owner", "Fortes", "--work-package", "greeting", "--breakpoint", "return after review",
     "--rounds", "1", "--call-timeout", "120000", "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(root, planArg));

@@ -238,6 +238,7 @@ test("V3 maintenance blocks new work, and a run claimed as the marker appears is
   const { readRun } = await import(pathToFileURL(path.join(packageRoot, "review-bridge", "service", "records", "runStore.mjs")).href);
   const paths = getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" });
   const makePlan = async (id) => createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths, task: "Update package.json only.", owner: "o", workPackage: id, breakpoint: "b",
     allowedPaths: "package.json", rounds: 1, callTimeout: 60_000, outPath: path.join(paths.privateRoot, id + ".plan.json"),
   });
