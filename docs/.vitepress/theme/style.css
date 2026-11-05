@@ -1,0 +1,30 @@
+/* Bridge palette: a bridge at night. Deep sea blue, bronze instruments, phosphor green for "proven". */
+:root {
+  --vp-c-brand-1: #b8803a;
+  --vp-c-brand-2: #d19a4f;
+  --vp-c-brand-3: #e3b36b;
+  --vp-c-brand-soft: rgba(184, 128, 58, 0.14);
+  --rb-ink: #0b1623;
+  --rb-ink-2: #11233a;
+  --rb-line: rgba(227, 179, 107, 0.35);
+  --rb-glow: #e3b36b;
+  --rb-proven: #6fd3a0;
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #e3b36b 10%, #f3d9a6 50%, #b8803a 90%);
+  --vp-home-hero-image-background-image: none;
+  --vp-home-hero-image-filter: none;
+}
+.dark {
+  --vp-c-bg: #0b1623;
+  --vp-c-bg-alt: #0e1c2d;
+  --vp-c-bg-elv: #11233a;
+  --vp-c-bg-soft: #122640;
+  --vp-c-brand-1: #e3b36b;
+  --vp-c-brand-2: #d19a4f;
+  --vp-c-brand-3: #b8803a;
+  --vp-c-brand-soft: rgba(227, 179, 107, 0.16);
+}
+.VPHero .name { letter-spacing: -0.01em; }
+.VPFeature { border: 1px solid var(--rb-line); }
+.VPFeature .icon { background: var(--rb-ink-2); color: var(--rb-glow); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+html:not(.dark) .VPFeature .icon { background: #f3ead9; color: #8a5f24; }
