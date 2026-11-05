@@ -28,10 +28,11 @@ async function tempDir(t, prefix) {
   return dir;
 }
 
-// A stand-in for @clack/prompts that records every call. A select is answered from `answers` in
-// order; `undefined` (or running out) is Enter on the preselected option, and CANCEL is Ctrl+C.
-// Any prompt the Guide must never show (confirm, text) fails the test.
+// A stand-in for @clack/prompts that records every call. A select or confirm is answered from
+// `answers` in order; `undefined` (or running out) is Enter on the preselected option, and CANCEL is
+// Ctrl+C. A prompt the Guide must never show (text) fails the test.
 const CANCEL = Symbol("cancel");
+const VSCODE_QUESTION = { confirm: "Add VS Code tasks to this project's .vscode/tasks.json?", initialValue: false };
 function recordingUi(answers = []) {
   const calls = [];
   return {
@@ -45,7 +46,11 @@ function recordingUi(answers = []) {
       const answer = answers.shift();
       return answer === undefined ? initialValue : answer;
     },
-    async confirm() { throw new Error("the Guide asked for a confirmation"); },
+    async confirm({ message, initialValue }) {
+      calls.push({ confirm: message, initialValue });
+      const answer = answers.shift();
+      return answer === undefined ? initialValue : answer;
+    },
     async text() { throw new Error("the Guide asked for typed text"); },
     spinner() {
       return {
@@ -78,7 +83,10 @@ function stubSetup({ fail = null } = {}) {
 
 async function guide(t, options, { answers, interactive = true, files = {}, saved = null, asRoot = false, fail = null, setUp = true } = {}) {
   const project = await tempDir(t, "review-bridge-guide-project-");
-  for (const [name, text] of Object.entries(files)) await fsp.writeFile(path.join(project, name), text);
+  for (const [name, text] of Object.entries(files)) {
+    await fsp.mkdir(path.dirname(path.join(project, name)), { recursive: true });
+    await fsp.writeFile(path.join(project, name), text);
+  }
   const dataHome = await tempDir(t, "review-bridge-guide-home-");
   if (saved) await saveDefaultRoles(saved, { dataHome });
   const ui = recordingUi(answers);
@@ -106,6 +114,7 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
       options: [...profiles.map((id) => id + (id === "node-backend" ? " (detected)" : "")), "none (no project type)"],
       initialValue: "node-backend",
     },
+    VSCODE_QUESTION,
     { start: "Setting up .review-bridge/" }, { done: "Setting up .review-bridge/" },
     { start: "Checking the setup" }, { done: "Checking the setup" },
     { start: "Running the four fake self-tests" }, { done: "Running the four fake self-tests" },
@@ -117,6 +126,60 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
   assert.equal(result.ok, true);
   assert.equal(result.printed, true);
   assert.equal(run.written(), "");
+});
+
+// RC3-VSCODE-01: the last question, before any work; nothing outside .review-bridge/ without a yes.
+test("answering no, or Enter, to the VS Code question leaves no .vscode/", async (t) => {
+  for (const answers of [[], [undefined, undefined, undefined, false]]) {
+    const run = await guide(t, {}, { answers });
+    await run.run;
+    assert.equal(fsSync.existsSync(path.join(run.project, ".vscode")), false);
+    assert.doesNotMatch(run.ui.calls.at(-1).outro, /VS Code \(/);
+    const question = run.ui.calls.findIndex((call) => call.confirm);
+    const firstStep = run.ui.calls.findIndex((call) => call.start);
+    assert.ok(question >= 0 && question < firstStep, "asked before any work");
+  }
+});
+
+test("answering yes writes the tasks after the setup, and the Done message says how to call them; Git sees the file", async (t) => {
+  const run = await guide(t, {}, { answers: [undefined, undefined, undefined, true] });
+  const result = await run.run;
+  assert.equal(result.ok, true);
+  const tasks = JSON.parse(await fsp.readFile(path.join(run.project, ".vscode", "tasks.json"), "utf8"));
+  assert.deepEqual(tasks.tasks.map((task) => task.label), ["start", "stop", "resume", "clean", "status", "logs"].map((action) => "review-bridge: " + action));
+  assert.ok(tasks.inputs.length > 0);
+  const steps = run.ui.calls.filter((call) => call.start).map((call) => call.start);
+  assert.equal(steps.at(-1), "Adding VS Code tasks");
+  assert.match(run.ui.calls.at(-1).outro, /in VS Code \(\.vscode\/tasks\.json\): open Quick Open and type: task review-bridge/);
+  const git = (...args) => spawnSync("git", args, { cwd: run.project, encoding: "utf8", windowsHide: true });
+  assert.equal(git("init", "--quiet").status, 0);
+  assert.match(git("status", "--porcelain", "--untracked-files=all").stdout, /\?\? \.vscode\/tasks\.json/);
+});
+
+test("Ctrl+C at the VS Code question stops before any work", async (t) => {
+  const run = await guide(t, {}, { answers: [undefined, undefined, undefined, CANCEL], setUp: false });
+  const result = await run.run;
+  assert.equal(result.cancelled, true);
+  assert.equal(fsSync.existsSync(path.join(run.project, ".vscode")), false);
+});
+
+test("without a terminal, or with --yes, the VS Code question is not asked and nothing is written", async (t) => {
+  for (const options of [{}, { yes: true }, { json: true }]) {
+    const run = await guide(t, options, { interactive: false });
+    await run.run;
+    assert.equal(run.ui.calls.some((call) => call.confirm), false);
+    assert.equal(fsSync.existsSync(path.join(run.project, ".vscode")), false);
+  }
+});
+
+test("a tasks file Bridge cannot read does not undo the setup: the file stays and the Done message says what to do", async (t) => {
+  const broken = await guide(t, {}, { answers: [undefined, undefined, undefined, true], files: { ".vscode/tasks.json": "{ broken" } });
+  const file = path.join(broken.project, ".vscode", "tasks.json");
+  const result = await broken.run;
+  assert.equal(result.ok, true);
+  assert.equal(await fsp.readFile(file, "utf8"), "{ broken");
+  assert.deepEqual(broken.ui.calls.find((call) => call.failed), { failed: "Adding VS Code tasks" });
+  assert.match(broken.ui.calls.at(-1).outro, /VS Code tasks were not added: .*cannot be read as a tasks file.* Fix it, then run: review-bridge vscode/);
 });
 
 test("an empty folder preselects none, and none is set up as a project without a type", async (t) => {

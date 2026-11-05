@@ -25,7 +25,7 @@ Then it sets the current folder up and prints the next commands:
 - starts the local page on `127.0.0.1`;
 - adds Bridge's own entry outside the project, where each agent looks for yours, so every project sees it: the command `~/.claude/commands/review-bridge.md` for Claude Code (`/review-bridge`; `CLAUDE_CONFIG_DIR` is honoured) and the skill `~/.agents/skills/review-bridge/SKILL.md` for Codex (`$review-bridge`). A file of yours already at that path is left alone. `uninstall` of the last project set up removes them unless you edited them.
 
-Nothing outside `.review-bridge/` changes in the project: no application file, no `.gitignore`, `AGENTS.md`, `CLAUDE.md` or `.claude/`, so `git status` shows nothing. Options answer the questions instead (`--writer`, `--reviewer`, `--profile <type|none>`, `--target <folder>`); without a terminal, or with `--yes`, nothing is asked and the defaults are used.
+Nothing outside `.review-bridge/` changes in the project: no application file, no `.gitignore`, `AGENTS.md`, `CLAUDE.md` or `.claude/`, so `git status` shows nothing. The one exception is yours to choose: the last question offers to add [VS Code tasks](#in-vs-code) to `.vscode/tasks.json`, and the answer is no unless you say yes. Options answer the questions instead (`--writer`, `--reviewer`, `--profile <type|none>`, `--target <folder>`); without a terminal, or with `--yes`, nothing is asked and the defaults are used.
 
 The project type only picks the verification command Bridge runs after every writer call (for example `npm test`). With `none`, or when the project has no such command, the work still starts; the card, the run's records and the result all say the tests are not configured.
 
@@ -52,6 +52,19 @@ Then, in Claude Code, type:
 In Codex the same thing is `$review-bridge start .review-bridge/work-packages/add-readme.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, checks once per page session that the reviewer cannot write files, prints a card with what you are authorizing and stops with `Needs authorization`. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. Your yes is the only authorization, and the authorization records that it came through an agent. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in the work order's own folder, `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. Beside it is the sealed contract the result names, `contract.v<version>.<short SHA-256>.json`. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
 
 `/review-bridge` takes the same four actions as the commands below: `start <file>`, `stop <run_id>`, `resume <run_id>` and `clean [<run_id>]`.
+
+### In VS Code
+
+Bridge's commands can be VS Code tasks: open Quick Open and type `task review-bridge`, or use `Terminal > Run Task`. There are six, `review-bridge: start`, `stop`, `resume`, `clean`, `status` and `logs`. `start` runs on the file open in the editor; the others ask for a run id or a file. They run the same commands in the integrated terminal, and you answer the card there.
+
+| Where | How | Who sees them |
+|---|---|---|
+| This project, `.vscode/tasks.json` | Say yes to the last question of `init`, or run `review-bridge vscode` | This project |
+| Your user tasks (`Tasks: Open User Tasks`) | `review-bridge vscode --user` | All your projects |
+
+Whether `.vscode/tasks.json` goes into Git is your choice: Bridge neither adds it nor excludes it. Until it is committed or ignored, Git counts it as a change, so a run's result says the commit had changes. Only tasks labelled `review-bridge:` and inputs with an id starting `review-bridge-` are Bridge's; everything else in the file, comments and layout included, stays as it is. `uninstall` takes them out again, and removes the file only if nothing else is in it; your user tasks stay until the last project set up is uninstalled. A file Bridge cannot read, or one that does not use tasks version 2.0.0, is left alone and Bridge says so.
+
+The user tasks are those of VS Code's default profile. A profile with its own tasks, VS Code Insiders, VSCodium and a portable install keep theirs elsewhere; use `review-bridge vscode` in the project for those. In a workspace with several folders, a user task runs in the first folder, not necessarily the one holding your work order.
 
 ### At a terminal (advanced use and CI)
 
@@ -417,6 +430,22 @@ Options:
       Print the result as JSON (boolean)
 
 1 more option(s) for tests and agents: review-bridge uninstall --help --all
+```
+
+### vscode
+
+```text
+Usage: review-bridge vscode [options]
+
+Add Bridge's tasks to VS Code's task list, in this project's .vscode/tasks.json; with --user, in your user tasks for all projects
+
+Options:
+  --user
+      Write to your VS Code user tasks instead of this project (boolean)
+  --target <folder>
+      Write to this set-up folder instead (string; default: the current folder)
+  --json
+      Print the result as JSON (boolean)
 ```
 
 ### doctor

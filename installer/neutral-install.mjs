@@ -22,6 +22,7 @@ import {
 } from "./agent-files.mjs";
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
+import { releaseAllVscodeTasks, vscodeTasksState } from "./vscode-tasks.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const privateName = ".review-bridge";
@@ -1028,6 +1029,7 @@ async function planFreshUninstall(root, backupRootOverride) {
   installed.add(layout.manifest + "\0" + sha256(manifestBytes));
   const userFiles = persistent.filter(([name, hash]) => !installed.has(name + "\0" + hash)).map(([name]) => name);
   const backupRoot = await resolveBackupRoot(root, backupRootOverride);
+  const inUse = await anotherProjectInstalled(layout.stateRoot);
   return sealPlan({
     schema_version: 1,
     operation: "uninstall_neutral",
@@ -1047,7 +1049,8 @@ async function planFreshUninstall(root, backupRootOverride) {
     agent_files: manifest.agent_files || null,
     agent_files_state: await agentFilesState(root, manifest.agent_files || null),
     // What this uninstall does with the entries outside the project.
-    agent_entries: await agentEntriesState({ inUse: await anotherProjectInstalled(layout.stateRoot) }),
+    agent_entries: await agentEntriesState({ inUse }),
+    vscode_tasks: await vscodeTasksState(root, { inUse }),
     backup_root: backupRoot,
     backup_root_custom: Boolean(backupRootOverride),
     service_running: await pageServiceRunning(root),
@@ -1482,13 +1485,15 @@ async function applyFreshUninstall(plan, hooks) {
   const exclusion = await restoreExclusion(plan.git_exclusion);
   await journalWrite(context, { step: "f_exclusion", exclusion });
   const agentFiles = await undoAgentFiles(root, plan.agent_files || null);
-  const agentEntries = await releaseAgentEntries({ inUse: await anotherProjectInstalled(plan.state_root) });
-  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles, agent_entries_outcome: agentEntries });
+  const inUse = await anotherProjectInstalled(plan.state_root);
+  const agentEntries = await releaseAgentEntries({ inUse });
+  const vscodeTasks = await releaseAllVscodeTasks(root, { inUse });
+  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles, agent_entries_outcome: agentEntries, vscode_tasks_outcome: vscodeTasks });
   if (hooks.beforeVerify) await hooks.beforeVerify(context);
   await finishTransaction(context, exclusion);
   return {
     ok: true, operation: "uninstall", target: root, backup_dir: context.journal.backup_dir,
-    file_count: backup.manifest.files.length, user_file_count: plan.user_file_count, exclusion, agent_files: agentFiles, agent_entries: agentEntries,
+    file_count: backup.manifest.files.length, user_file_count: plan.user_file_count, exclusion, agent_files: agentFiles, agent_entries: agentEntries, vscode_tasks: vscodeTasks,
   };
 }
 
@@ -1535,10 +1540,12 @@ async function applyResumeUninstall(plan, hooks) {
   const exclusion = await restoreExclusion(journal.git_exclusion);
   await journalWrite(context, { step: "f_exclusion", exclusion });
   const agentFiles = await undoAgentFiles(root, journal.agent_files || null);
-  const agentEntries = await releaseAgentEntries({ inUse: await anotherProjectInstalled(journal.state_root) });
-  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles, agent_entries_outcome: agentEntries });
+  const inUse = await anotherProjectInstalled(journal.state_root);
+  const agentEntries = await releaseAgentEntries({ inUse });
+  const vscodeTasks = await releaseAllVscodeTasks(root, { inUse });
+  await journalWrite(context, { step: "f_agent_files", agent_files_outcome: agentFiles, agent_entries_outcome: agentEntries, vscode_tasks_outcome: vscodeTasks });
   await finishTransaction(context, exclusion);
-  return { ok: true, operation: "uninstall", kind: plan.kind, target: root, backup_dir: journal.backup_dir, exclusion, agent_files: agentFiles, agent_entries: agentEntries };
+  return { ok: true, operation: "uninstall", kind: plan.kind, target: root, backup_dir: journal.backup_dir, exclusion, agent_files: agentFiles, agent_entries: agentEntries, vscode_tasks: vscodeTasks };
 }
 
 // U1.4 / U2.1: approval binds the exact plan; it is rebuilt under the install lock before acting.

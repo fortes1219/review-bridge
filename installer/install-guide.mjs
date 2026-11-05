@@ -13,6 +13,7 @@ import * as clack from "@clack/prompts";
 import { readDefaultRoles, saveDefaultRoles } from "./personal-settings.mjs";
 import { listProfiles, matchingProfiles } from "./project-profile.mjs";
 import { PROVIDERS, validateRoles } from "./role-readiness.mjs";
+import { PROJECT_TASKS_RELATIVE, projectTasksFile, writeVscodeTasks } from "./vscode-tasks.mjs";
 
 const GUIDE_OPTIONS = new Set(["target", "writer", "reviewer", "profile", "port", "yes", "json", "fake-cli"]);
 const BUILT_IN_ROLES = Object.freeze({ writer: "claude", reviewer: "codex" });
@@ -42,7 +43,8 @@ export function databaseLines(database) {
   ];
 }
 
-export function doneMessage(target, cwd, url, database) {
+// `vscodeTasks`: added to the project (`true`), or why that failed. Setup is done either way.
+export function doneMessage(target, cwd, url, database, vscodeTasks = null) {
   const lines = ["Done. Now:", ""];
   const relative = path.relative(cwd, target);
   if (relative) lines.push("  cd " + (relative.includes(" ") ? "\"" + relative + "\"" : relative));
@@ -51,6 +53,8 @@ export function doneMessage(target, cwd, url, database) {
   lines.push("    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)");
   lines.push("  at a terminal, for advanced use and CI:");
   lines.push("    review-bridge start .review-bridge/work-packages/<file>.md");
+  if (vscodeTasks === true) lines.push("  in VS Code (" + PROJECT_TASKS_RELATIVE + "): open Quick Open and type: task review-bridge");
+  else if (vscodeTasks) lines.push("  VS Code tasks were not added: " + vscodeTasks + " Fix it, then run: review-bridge vscode");
   lines.push("  page: " + (url || "not running; start it with review-bridge up"));
   lines.push("", ...databaseLines(database));
   return lines.join("\n");
@@ -119,12 +123,27 @@ export async function runGuide(options, {
     } else profileId = preset;
   }
 
+  // The last question, still before any work. Writing into the project outside .review-bridge/ is the
+  // person's yes to give, so nothing is written without one: no terminal, or --yes, means no.
+  let addVscodeTasks = false;
+  if (interactive) {
+    const answer = await ui.confirm({ message: "Add VS Code tasks to this project's " + PROJECT_TASKS_RELATIVE + "?", initialValue: false });
+    if (ui.isCancel(answer)) return cancel(ui);
+    addVscodeTasks = answer;
+  }
+
   const step = interactive ? spinnerStep(ui) : options.json ? (label, work) => work() : lineStep(write);
   const result = await setUpProject({
     target, roles, profileId, watchPort: options.port === undefined ? undefined : Number(options.port), fakeCli: Boolean(options["fake-cli"]),
   }, step);
   await saveDefaultRoles(roles, { dataHome });
-  const message = doneMessage(target, cwd, result.url, result.database);
+  // The project is set up by now; a tasks file Bridge cannot read does not undo that.
+  let vscodeTasks = null;
+  if (addVscodeTasks) {
+    vscodeTasks = await step("Adding VS Code tasks", () => writeVscodeTasks(projectTasksFile(target)))
+      .then(() => true, (error) => error.message);
+  }
+  const message = doneMessage(target, cwd, result.url, result.database, vscodeTasks);
   if (interactive) ui.outro(message);
   else if (!options.json) write(message + "\n");
   return { ...result, printed: !options.json };

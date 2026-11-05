@@ -9,3 +9,5 @@ coverage/
 .claude/
 .review-bridge/
 _fable-inbox/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

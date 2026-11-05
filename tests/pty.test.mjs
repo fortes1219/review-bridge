@@ -50,15 +50,16 @@ async function project(t) {
   return { root, order };
 }
 
-test("the Guide at a terminal: Enter on its three questions sets the folder up and ends with Done", { skip: ptySkip, timeout: 240_000 }, async (t) => {
+test("the Guide at a terminal: Enter on its four questions sets the folder up and ends with Done", { skip: ptySkip, timeout: 240_000 }, async (t) => {
   const root = await folder(t, "review-bridge-pty-guide-");
   const guide = terminal([bridge, "init", "--fake-cli"], { cwd: root, env: env() });
   t.after(() => guide.kill());
-  for (const question of [/Select writer:/, /Select reviewer:/, /Select project type:/]) {
+  for (const question of [/Select writer:/, /Select reviewer:/, /Select project type:/, /Add VS Code tasks/]) {
     await guide.waitFor(question);
     guide.press(KEYS.enter);
   }
   assert.equal(await guide.exited, 0, guide.text());
+  assert.equal(await fsp.stat(path.join(root, ".vscode")).catch(() => null), null, "Enter is no");
   assert.match(guide.text(), /Done\. Now:/);
   assert.match(guide.text(), /review-bridge start \.review-bridge\/work-packages\/<file>\.md/);
   const config = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));

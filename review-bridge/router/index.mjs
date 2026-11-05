@@ -190,6 +190,16 @@ export const COMMANDS = {
       "--yes": { key: "yes", type: "boolean", internal: true, help: "Refused: confirm at a terminal, or use --plan-out then --plan --approve" },
     },
   },
+  vscode: {
+    audience: "human",
+    installer: true,
+    summary: "Add Bridge's tasks to VS Code's task list, in this project's .vscode/tasks.json; with --user, in your user tasks for all projects",
+    options: {
+      "--user": { key: "user", type: "boolean", help: "Write to your VS Code user tasks instead of this project" },
+      "--target": { key: "target", type: "string", value: "<folder>", default: "the current folder", help: "Write to this set-up folder instead" },
+      "--json": { ...JSON_OUT },
+    },
+  },
   doctor: {
     audience: "human",
     configFree: true,
