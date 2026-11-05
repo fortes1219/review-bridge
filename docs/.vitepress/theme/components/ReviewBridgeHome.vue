@@ -205,7 +205,7 @@ onBeforeUnmount(() => {
     linear-gradient(90deg, rgba(5,13,25,.45), transparent 34%);
 }
 .rb-hero, .rb-features, .rb-workflow { position: relative; z-index: 1; max-width: 1360px; margin-inline: auto; }
-.rb-hero { min-height: clamp(375px, 26vw, 420px); display: flex; justify-content: space-between; align-items: flex-start; }
+.rb-hero { min-height: clamp(420px, 30vw, 520px); display: flex; justify-content: space-between; align-items: flex-start; }
 .rb-hero-copy { position: relative; z-index: 2; width: min(51%, 620px); }
 .rb-eyebrow {
   display: flex;
@@ -261,7 +261,7 @@ onBeforeUnmount(() => {
 .rb-hud-line { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(118,171,216,.13); }
 .rb-hud-line i { display: block; width: 22px; height: 2px; background: rgba(98,159,224,.5); }
 .rb-hud-line b { font-weight: 400; color: #9ddcf0; }
-.rb-features { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 18px; }
+.rb-features { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 18px; margin-block: 48px 16px; }
 .rb-feature-card {
   --rb-pointer-x: 50%; --rb-pointer-y: 50%; --rb-tilt-x: 0deg; --rb-tilt-y: 0deg;
   position: relative; min-height: 228px; padding: 26px 27px 25px; overflow: hidden; isolation: isolate;
