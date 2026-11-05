@@ -86,7 +86,7 @@ async function readRecord(dataHome) {
 }
 
 // A whole file or none: written beside its place, then renamed over it.
-async function writeWhole(file, text) {
+export async function writeWhole(file, text) {
   const temp = file + "." + randomUUID().slice(0, 8) + ".tmp";
   await fsp.writeFile(temp, text, "utf8");
   await fsp.rename(temp, file);

@@ -15,6 +15,7 @@ import {
   applyNeutralInstall, applyNeutralUninstall, defaultBackupRoot, loadInstalledServiceModules, MAINTENANCE_MARKER,
   planNeutralInstall, planNeutralUninstall,
 } from "../installer/neutral-install.mjs";
+import { projectTasksFile, userTasksFile, writeVscodeTasks } from "../installer/vscode-tasks.mjs";
 import { databaseBackupsRoot } from "../review-bridge/service/database/backup.mjs";
 import { bridgeDataHome } from "../review-bridge/service/database/dataHome.mjs";
 
@@ -829,6 +830,83 @@ test("the entries stay while another project is set up; the last uninstall takes
   assert.match(await fsp.readFile(me.claudeEntry, "utf8"), /mine\n$/);
   assert.equal(await exists(me.codexEntry), false);
   assert.equal(await exists(me.record), false, "an edited file is the person's now, and no longer recorded");
+});
+
+// RC3-VSCODE-01: a tasks file stays the person's. Only Bridge's tasks go, the same way as they came.
+const THEIR_TASKS = `{
+  // my tasks
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "build", "type": "shell", "command": "make" } // keep me
+  ]
+}
+`;
+
+test("uninstall takes Bridge's tasks out of the project's file and leaves the person's, comments included", async (t) => {
+  separatePerson(t);
+  const root = await workspace(t);
+  await install(root);
+  await fsp.mkdir(path.join(root, ".vscode"));
+  const file = projectTasksFile(root);
+  await fsp.writeFile(file, THEIR_TASKS);
+  await writeVscodeTasks(file);
+  assert.notEqual(await fsp.readFile(file, "utf8"), THEIR_TASKS);
+  const { plan, result } = await uninstall(root);
+  assert.deepEqual(plan.vscode_tasks, [
+    { scope: "project", path: file, outcome: "removed" },
+    { scope: "user", path: userTasksFile(), outcome: "absent" },
+  ]);
+  assert.deepEqual(result.vscode_tasks, plan.vscode_tasks);
+  assert.equal(await fsp.readFile(file, "utf8"), THEIR_TASKS);
+});
+
+test("uninstall removes a tasks file and a .vscode folder that hold only Bridge's, and keeps a folder with anything else", async (t) => {
+  separatePerson(t);
+  const root = await workspace(t);
+  await install(root);
+  await writeVscodeTasks(projectTasksFile(root));
+  await uninstall(root);
+  assert.equal(await exists(path.join(root, ".vscode")), false);
+
+  const other = await workspace(t);
+  await install(other);
+  await writeVscodeTasks(projectTasksFile(other));
+  await fsp.writeFile(path.join(other, ".vscode", "settings.json"), "{}\n");
+  await uninstall(other);
+  assert.equal(await exists(projectTasksFile(other)), false);
+  assert.equal(await fsp.readFile(path.join(other, ".vscode", "settings.json"), "utf8"), "{}\n");
+});
+
+test("the user tasks stay while another project is set up; the last uninstall takes them, and leaves the person's", async (t) => {
+  separatePerson(t);
+  const file = userTasksFile();
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  await fsp.writeFile(file, THEIR_TASKS);
+  const first = await workspace(t);
+  const second = await workspace(t);
+  await install(first);
+  await install(second);
+  await writeVscodeTasks(file);
+  const merged = await fsp.readFile(file, "utf8");
+  const { plan, result } = await uninstall(first);
+  assert.equal(plan.vscode_tasks.find((entry) => entry.scope === "user").outcome, "kept_in_use");
+  assert.equal(result.vscode_tasks.find((entry) => entry.scope === "user").outcome, "kept_in_use");
+  assert.equal(await fsp.readFile(file, "utf8"), merged);
+  const last = await uninstall(second);
+  assert.equal(last.result.vscode_tasks.find((entry) => entry.scope === "user").outcome, "removed");
+  assert.equal(await fsp.readFile(file, "utf8"), THEIR_TASKS);
+});
+
+test("a tasks file that cannot be read does not stop an uninstall, and stays as it is", async (t) => {
+  separatePerson(t);
+  const root = await workspace(t);
+  await install(root);
+  await fsp.mkdir(path.join(root, ".vscode"));
+  await fsp.writeFile(projectTasksFile(root), "{ broken");
+  const { plan, result } = await uninstall(root);
+  assert.equal(plan.vscode_tasks.find((entry) => entry.scope === "project").outcome, "kept_unreadable");
+  assert.equal(result.ok, true);
+  assert.equal(await fsp.readFile(projectTasksFile(root), "utf8"), "{ broken");
 });
 
 test("an uninstall that crashed after deleting finishes removing the entries under the next plan", async (t) => {

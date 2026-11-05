@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
 import { databaseLines, runGuide } from "./installer/install-guide.mjs";
+import { projectTasksFile, userTasksFile, writeVscodeTasks } from "./installer/vscode-tasks.mjs";
 import { renderCommandHelp, renderMainHelp } from "./review-bridge/router/help.mjs";
 import { COMMANDS, parseCommandLine } from "./review-bridge/router/index.mjs";
 import { inspectRoleReadiness, PROVIDERS, validateRoles } from "./installer/role-readiness.mjs";
@@ -28,7 +29,7 @@ const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 // The one runtime: every project's commands, self-tests and page service run from here.
 const runtimeRoot = path.join(packageRoot, "review-bridge");
 const bootstrapPath = path.join(runtimeRoot, "bootstrap.mjs");
-const INSTALLER_COMMANDS = new Set(["init", "roles-check", "uninstall", "upgrade"]);
+const INSTALLER_COMMANDS = new Set(["init", "roles-check", "uninstall", "upgrade", "vscode"]);
 
 function run(command, args, { cwd = packageRoot, expected = [0] } = {}) {
   const result = spawnSync(command, args, {
@@ -396,6 +397,11 @@ function formatUninstallPlan(plan) {
       kept_in_use: entry.path + " 其他專案還在用，留著",
       kept_changed: entry.path + " 你改過，留著不動",
     }[entry.outcome])),
+    ...(plan.vscode_tasks || []).filter((entry) => entry.outcome !== "absent").map((entry) => ({
+      removed: "會從 " + entry.path + " 拿掉 Bridge 的 VS Code tasks，其他內容不動",
+      kept_in_use: entry.path + " 裡的 VS Code tasks 其他專案還在用，留著",
+      kept_unreadable: entry.path + " 讀不懂，留著不動；裡面的 review-bridge: tasks 要你自己拿掉",
+    }[entry.outcome])),
   ].join("\n") + "\n";
 }
 
@@ -406,6 +412,26 @@ function formatUninstallResult(result) {
     "備份在：" + result.backup_dir + (result.file_count ? "（" + result.file_count + " 個檔，含你的 " + (result.user_file_count ?? 0) + " 個）" : ""),
     "要找回工單或結果，從備份資料夾複製回來",
   ].join("\n") + "\n";
+}
+
+// The same writing init offers. A project's tasks run against its .review-bridge/, so it must have one.
+async function vscode(options) {
+  if (options.user && options.target !== undefined) throw new Error("--user writes to your user tasks, which belong to no one folder; leave out --target.");
+  if (options.user) {
+    const file = userTasksFile();
+    return { ok: true, scope: "user", path: file, action: await writeVscodeTasks(file) };
+  }
+  const target = path.resolve(options.target ?? ".");
+  if (!fs.existsSync(path.join(target, ".review-bridge"))) {
+    throw new Error("This folder is not set up (" + target + "). Run review-bridge init here first, or use --user for all projects.");
+  }
+  const file = projectTasksFile(target);
+  return { ok: true, scope: "project", path: file, action: await writeVscodeTasks(file) };
+}
+
+function formatVscodeResult(result) {
+  const said = { added: "VS Code tasks added: ", updated: "VS Code tasks updated: ", unchanged: "VS Code tasks already in place: " }[result.action];
+  return said + result.path + "\nIn VS Code, open Quick Open and type: task review-bridge\n";
 }
 
 // Removes one project's setup. Review Bridge itself is removed by npm: npm uninstall -g review-bridge.
@@ -492,6 +518,12 @@ async function main() {
     const { options } = parseCommandLine(command, rest);
     const result = await rolesCheck(options);
     process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n" : formatRoleCheck(result));
+    return 0;
+  }
+  if (command === "vscode") {
+    const { options } = parseCommandLine(command, rest);
+    const result = await vscode(options);
+    process.stdout.write(options.json ? JSON.stringify(result, null, 2) + "\n" : formatVscodeResult(result));
     return 0;
   }
   if (command === "uninstall") {

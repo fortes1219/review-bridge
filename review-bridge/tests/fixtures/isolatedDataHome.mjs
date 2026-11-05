@@ -16,6 +16,9 @@ process.env.REVIEW_BRIDGE_DATA_HOME = dataHome;
 process.env.CLAUDE_CONFIG_DIR = path.join(dataHome, "claude-config");
 process.env.HOME = process.env.USERPROFILE = path.join(dataHome, "home");
 fs.mkdirSync(process.env.HOME);
+// VS Code's user tasks: an uninstall reads them and may edit them.
+process.env.APPDATA = path.join(dataHome, "home", "AppData", "Roaming");
+process.env.XDG_CONFIG_HOME = path.join(dataHome, "home", ".config");
 const { pg_ctl: pgCtl } = await postgresBinaries();
 
 // For a test about what belongs to the person, shared by all their projects: a machine of its own,
@@ -25,7 +28,10 @@ export function separatePerson(t) {
   const claudeHome = path.join(home, ".claude");
   const codexHome = path.join(home, ".codex");
   const skillFolder = path.join(home, ".agents", "skills", "review-bridge");
-  const env = { REVIEW_BRIDGE_DATA_HOME: path.join(home, "data"), CLAUDE_CONFIG_DIR: claudeHome, HOME: home, USERPROFILE: home };
+  const env = {
+    REVIEW_BRIDGE_DATA_HOME: path.join(home, "data"), CLAUDE_CONFIG_DIR: claudeHome, HOME: home, USERPROFILE: home,
+    APPDATA: path.join(home, "AppData", "Roaming"), XDG_CONFIG_HOME: path.join(home, ".config"),
+  };
   const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
   Object.assign(process.env, env);
   t.after(() => {
