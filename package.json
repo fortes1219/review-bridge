@@ -35,7 +35,7 @@
     "prepublishOnly": "npm test"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.8"
   },
   "dependencies": {
     "@clack/prompts": "1.8.1",

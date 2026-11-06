@@ -27,11 +27,13 @@ export const CONTRACT_SCHEMA = path.join(schemasDir, "contract.schema.json");
 export const CONTRACT_CHECK_SCHEMA = path.join(schemasDir, "contract.check.schema.json");
 export const CONTRACT_MODE_HEADER = "[REVIEW_BRIDGE_MODE: CONTRACT_TRANSLATION]";
 export const CHECK_MODE_HEADER = "[REVIEW_BRIDGE_MODE: CONTRACT_CHECK]";
-export const CONTRACT_SCHEMA_VERSION = 2;
+export const CONTRACT_SCHEMA_VERSION = 3;
 // A translation the reviewer finds wrong is redone at most this many times in all.
 export const MAX_TRANSLATION_ATTEMPTS = 2;
 // The translation reads one text and writes one object; it needs no tools and few turns.
 export const TRANSLATION_MAX_TURNS = 3;
+// Codex's request_user_input takes two or three options, recommended first; a question here shows no more.
+export const MAX_READINGS = 3;
 const LANGUAGE_RULE = "Write every statement, note and question in the language the work order itself is written in; quotes stay in the work order's own words.";
 
 export class ContractChangedError extends Error {
@@ -62,6 +64,9 @@ function acceptanceBlocks(lines, format) {
   ]);
 }
 
+// The person's answers, written back at the end of the work order. Not numbered: no condition points at them.
+const clarificationLines = (lines, format) => (format.blocks.get("clarifications")?.content || []).map((number) => lines[number - 1]);
+
 export function composeTranslationPrompt({ workPackageId, lines, format, test, attempt = 1, feedback = [] }) {
   const gateLine = test?.kind === "command"
     ? "Bridge will run this verification after the work: " + test.command + ". A condition it can show may use {\"kind\": \"test\", \"check\": null}."
@@ -81,11 +86,13 @@ export function composeTranslationPrompt({ workPackageId, lines, format, test, a
     "- " + gateLine,
     "- " + LANGUAGE_RULE,
     "- Do not read or change any file; everything you need is below.",
+    ...(clarificationLines(lines, format).length ? ["- The CLARIFICATIONS are the person's own answers about this work order. Read the blocks in their light: a statement says what its lines mean as answered there; a quote still comes only from the blocks."] : []),
     ...(feedback.length ? ["", "Your previous translation was refused for these reasons; fix them and translate again:", ...feedback.map((line) => "- " + line)] : []),
     "",
     "=== ACCEPTANCE BLOCKS (line-numbered) ===",
     ...acceptanceBlocks(lines, format),
     "=== END ACCEPTANCE BLOCKS ===",
+    ...(clarificationLines(lines, format).length ? ["", "=== CLARIFICATIONS ===", ...clarificationLines(lines, format), "=== END CLARIFICATIONS ==="] : []),
   ].join("\n");
 }
 
@@ -128,12 +135,10 @@ function acceptanceProblems(acceptance, { lines, format, test }) {
   return problems;
 }
 
-// What stops the work before any model call: the work order states no result to check, or it
-// lists open questions. Both are the human's to answer.
+// What stops the work before any model call: the questions the person wrote into the work order
+// themselves, which are theirs to answer.
 export function workOrderQuestions(format) {
-  const questions = format.open_questions.map((entry) => entry.question);
-  if (!format.acceptance.length) questions.push("The work order states no result that can be checked.");
-  return questions;
+  return format.open_questions.map((entry) => entry.question);
 }
 
 // Shape first, then the rules only code can check. `problems` refuse the translation (the model
@@ -176,7 +181,7 @@ export function buildContract({ workPackage, lines, format, translation, transla
     translated_by: translator,
     checked_by: checker,
     ticket: {
-      title: { text: format.title.text, source_refs: [{ start: format.title.line, end: format.title.line }] },
+      title: { text: format.title.text, source_refs: format.title.line === null ? [] : [{ start: format.title.line, end: format.title.line }] },
       source_id: frontmatterPart(format),
       priority: format.frontmatter.priority,
       effort: format.frontmatter.effort,
@@ -213,29 +218,48 @@ export function buildContract({ workPackage, lines, format, translation, transla
     reproduction,
     references: listOf("references"),
     open_questions: format.open_questions,
+    clarifications: part("clarifications"),
+    // What the reviewer's questions settled without asking; filled when the contract is sealed.
+    assumptions: [],
     unused_lines: rangesOf(format.unused, lines).map((ref) => ({ text: linesOf(lines, [ref]).join("\n"), source_refs: [ref] })),
   };
 }
 
 export function composeCheckPrompt({ workPackageId, lines, format, candidate, sha256, attempt }) {
+  const proposing = !format.acceptance.length;
+  const width = String(lines.length).length;
   return [
     CHECK_MODE_HEADER,
     "",
     "Injected by the local Review Bridge controller. Work package: " + workPackageId + "  Attempt: " + attempt,
     "Candidate: " + sha256,
-    "You are the independent reviewer. A writer cut the acceptance blocks of a human work order, given below, into the candidate conditions. Read both and answer with one contract.check object matching the JSON schema given to the CLI.",
+    "You are the independent reviewer. " + (proposing
+      ? "The human work order below states no acceptance conditions yet, so there is nothing to judge. Read it and answer with one contract.check object matching the JSON schema given to the CLI."
+      : "A writer cut the acceptance blocks of a human work order, given below, into the candidate conditions. Read both and answer with one contract.check object matching the JSON schema given to the CLI."),
+    "You may read the project's files to see what it already uses. A clarifications block holds answers the person already gave: never ask again what it settles.",
     "",
     "Check:",
-    "- For every condition: does its statement say what its source lines mean, no more and no less, and does its verify fit (test only where the sealed test can show it)? Answer faithful true or false for each id, with a short note when false.",
-    "- Is any result the blocks state missing from the conditions? List each under missing with its lines.",
-    "- Is anything genuinely ambiguous in the work order itself, so that only the human can decide? List it under ambiguities. A mistake in the conditions is not an ambiguity.",
+    ...(proposing ? [
+      "- Propose how to tell the work is done: one item under ambiguities with acceptance_proposal true, blocks verification and source_refs on the lines asking for the work. Each of its readings is one whole set of conditions, one condition per line, in plain words the person can check; the most usual set first.",
+    ] : [
+      "- For every condition: does its statement say what its source lines mean, as the clarifications answer them, no more and no less, and does its verify fit (test only where the sealed test can show it)? Answer faithful true or false for each id, with a short note when false.",
+      "- Is any result the acceptance blocks state missing from the conditions? List each under missing with its lines.",
+    ]),
+    "- Is anything open in the work order itself? List it under ambiguities, most important first (impact times uncertainty). A mistake in the conditions is not an ambiguity. Set blocks to:",
+    "  - verification: the work order gives no basis and no convention answers it, and two readings would make one condition pass or fail.",
+    "  - implementation: the ways of doing it clearly differ and the person would notice the difference.",
+    "  - preference: the person would not care which. It is decided for them, not asked.",
+    "- Convention first: when one reading is the ecosystem's convention (Keep a Changelog allows a title above Unreleased; npm install is not listed in scripts), put it first and set convention true. It is adopted without asking.",
+    "- readings are the ready-made ways the ecosystem already has, not a brainstorm: at most " + MAX_READINGS + ", the most mainstream first, because the first is the recommendation. Each is a whole passage in the work order's language, in words a person who does not program can follow.",
+    "- Every reading has a precedent: source project (this project already uses it; note where), lookup (you looked it up with a tool you hold; note the figures) or knowledge (from what you know; note why it is mainstream). If you can name none, set precedent to null.",
+    "- source_refs say which lines of the work order an item is about.",
     "- If you cannot judge, set cannot_confirm true and say why. Do not guess a pass.",
     "- Echo the candidate hash in candidate_sha256. " + LANGUAGE_RULE,
     "- Do not change any file.",
     "",
-    "=== ACCEPTANCE BLOCKS (line-numbered) ===",
-    ...acceptanceBlocks(lines, format),
-    "=== END ACCEPTANCE BLOCKS ===",
+    "=== WORK ORDER (line-numbered) ===",
+    ...lines.map((line, index) => String(index + 1).padStart(width, " ") + "| " + line),
+    "=== END WORK ORDER ===",
     "",
     "=== CANDIDATE CONDITIONS ===",
     JSON.stringify(candidate.acceptance, null, 2),
@@ -243,29 +267,86 @@ export function composeCheckPrompt({ workPackageId, lines, format, candidate, sh
   ].join("\n");
 }
 
-// Bridge decides from the reviewer's typed items, never from a summary verdict: every condition
-// must be judged, an ambiguity goes to the human, a mistake goes back to the writer, and
-// anything the reviewer cannot confirm stops the run.
-export async function decideCheck(value, { candidate, sha256 }) {
+const overlaps = (refs, others) => refs.some((ref) => others.some((other) => ref.start <= other.end && other.start <= ref.end));
+
+// One question as the person sees it. The first reading the reviewer gave is the recommendation, kept
+// even when it cannot be shown, because handing the question to the AI writes it. A lookup needs a tool
+// the reviewer holds; without one it is its own knowledge, however it was labelled.
+function asQuestion(item, { lookupHeld }) {
+  const readings = item.readings.map((reading, index) => ({
+    text: reading.text,
+    recommended: index === 0,
+    precedent: reading.precedent?.source === "lookup" && !lookupHeld ? { ...reading.precedent, source: "knowledge" } : reading.precedent,
+  }));
+  const shown = readings.filter((reading) => reading.precedent).slice(0, MAX_READINGS);
+  return {
+    question: item.question, source_refs: item.source_refs, blocks: item.blocks, acceptance_proposal: item.acceptance_proposal,
+    readings: shown, recommended: readings[0], no_precedent: shown.length === 0,
+  };
+}
+
+const asAssumption = (question, decidedBy) => ({
+  question: question.question, adopted: question.recommended.text, precedent: question.recommended.precedent, decided_by: decidedBy, source_refs: question.source_refs,
+});
+
+// Which of the reviewer's items reach the person and which are settled here (RC3-ASK-01 sections 1
+// and 3). Code decides, from the plan's clarify record; the model is never told the round. A person who
+// handed the work order to the AI is not asked again. After the first round only what the person said in
+// their own words may come back, recognised by the lines it is about: each round is a new session with no
+// ids, and the work order only grows at its end, so the lines stay where they are. A proposal of
+// acceptance has nothing to fall back on, so it is always asked.
+export function sortQuestions(items, { clarify = null, maxQuestions, lookupHeld = false }) {
+  const askable = [];
+  const assumptions = [];
+  for (const item of items) {
+    const question = asQuestion(item, { lookupHeld });
+    if (item.acceptance_proposal) { askable.push(question); continue; }
+    if (clarify?.ai_decides) { assumptions.push(asAssumption(question, "ai")); continue; }
+    if (item.convention && question.recommended.precedent) { assumptions.push(asAssumption(question, "convention")); continue; }
+    if (item.blocks === "preference" || (clarify && !overlaps(item.source_refs, clarify.open_refs))) { assumptions.push(asAssumption(question, "suggested")); continue; }
+    askable.push(question);
+  }
+  for (const question of askable.slice(maxQuestions)) assumptions.push(asAssumption(question, "suggested"));
+  return { questions: askable.slice(0, maxQuestions), assumptions };
+}
+
+function itemProblems(items, { lineCount, proposing }) {
+  const problems = [];
+  for (const [index, item] of items.entries()) {
+    const at = "$.ambiguities[" + index + "]";
+    if (item.source_refs.some((ref) => ref.start > ref.end || ref.end > lineCount)) problems.push(at + ".source_refs: not lines of the work order");
+    if (item.acceptance_proposal && !proposing) problems.push(at + ".acceptance_proposal: this work order states its acceptance");
+  }
+  if (proposing && items.filter((item) => item.acceptance_proposal).length !== 1) problems.push("$.ambiguities: a work order with no acceptance needs exactly one acceptance proposal");
+  return problems;
+}
+
+// Bridge decides from the reviewer's typed items, never from a summary verdict: every condition must be
+// judged, a question goes to the human or is settled by sortQuestions, a mistake goes back to the writer,
+// anything the reviewer cannot confirm stops the run, and an answer in the wrong shape is asked for again.
+export async function decideCheck(value, { candidate, sha256, lineCount = Infinity, proposing = false, clarify = null, maxQuestions = 3, lookupHeld = false }) {
+  const none = { problems: [], feedback: [], questions: [], assumptions: [] };
   const problems = value && typeof value === "object" && !Array.isArray(value)
     ? validateAgainstSchema(value, await loadSchema(CONTRACT_CHECK_SCHEMA))
     : ["$: not an object"];
-  if (problems.length) return { decision: "unconfirmed", problems, feedback: [], questions: [] };
+  if (problems.length) return { ...none, decision: "malformed", problems };
   if (value.candidate_sha256 !== sha256) problems.push("$.candidate_sha256: expected " + sha256);
   const expected = candidate.acceptance.map((item) => item.id);
   const judged = value.acceptance.map((item) => item.id);
   if (judged.length !== new Set(judged).size || judged.length !== expected.length || expected.some((id) => !judged.includes(id))) {
     problems.push("$.acceptance: must judge exactly " + (expected.join(", ") || "no conditions"));
   }
-  if (problems.length) return { decision: "unconfirmed", problems, feedback: [], questions: [] };
-  if (value.ambiguities.length) return { decision: "needs_human", problems: [], feedback: [], questions: value.ambiguities.map((entry) => entry.question) };
-  if (value.cannot_confirm) return { decision: "unconfirmed", problems: [value.cannot_confirm_reason || "the reviewer could not confirm the translation"], feedback: [], questions: [] };
+  problems.push(...itemProblems(value.ambiguities, { lineCount, proposing }));
+  if (problems.length) return { ...none, decision: "malformed", problems };
+  const { questions, assumptions } = sortQuestions(value.ambiguities, { clarify, maxQuestions, lookupHeld });
+  if (questions.length) return { ...none, decision: "needs_human", questions, assumptions };
+  if (value.cannot_confirm) return { ...none, decision: "unconfirmed", problems: [value.cannot_confirm_reason || "the reviewer could not confirm the translation"] };
   const feedback = [
     ...value.acceptance.filter((item) => !item.faithful).map((item) => item.id + " does not match its lines" + (item.note ? ": " + item.note : "")),
     ...value.missing.map((entry) => "missing condition at lines " + entry.source_refs.map((ref) => ref.start + "-" + ref.end).join(", ") + ": " + entry.note),
   ];
-  if (feedback.length) return { decision: "retranslate", problems: [], feedback, questions: [] };
-  return { decision: "pass", problems: [], feedback: [], questions: [] };
+  if (feedback.length) return { ...none, decision: "retranslate", feedback };
+  return { ...none, decision: "pass", assumptions };
 }
 
 export function contractPath(paths, sha256) {
@@ -295,7 +376,7 @@ export async function sealContract(paths, contract) {
 }
 
 // Every read goes through here: the file must still hash to the name the run recorded and
-// still match the formal schema. A contract an older Bridge sealed (schema version 1) belongs to
+// still match the formal schema. A contract an older Bridge sealed (a lower schema version) belongs to
 // an old run and is not read again.
 export async function loadContract(paths, sha256) {
   const text = await fsp.readFile(contractPath(paths, sha256), "utf8").catch(() => null);
@@ -303,7 +384,7 @@ export async function loadContract(paths, sha256) {
   let contract;
   try { contract = JSON.parse(text); } catch { throw new ContractChangedError(sha256, "is not valid JSON"); }
   if (digest(contract) !== sha256) throw new ContractChangedError(sha256, "was changed after it was sealed");
-  if (contract?.schema_version === 1) throw new ContractChangedError(sha256, "was made by an older Bridge and is not read again; run: review-bridge clean");
+  if (contract?.schema_version < CONTRACT_SCHEMA_VERSION) throw new ContractChangedError(sha256, "was made by an older Bridge and is not read again; run: review-bridge clean");
   if ((await schemaProblems(contract)).length) throw new ContractChangedError(sha256, "does not match the contract schema");
   return contract;
 }

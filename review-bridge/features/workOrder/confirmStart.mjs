@@ -43,9 +43,9 @@ export function budgetLine(plan) {
   return BUDGET_KEYS.map((key) => key + " " + plan.budget[key] + " (" + SOURCE[plan.budget_source[key]] + ")").join(", ");
 }
 
-// start's card: what the answer authorizes, in the words a person checks it by. Every line comes
-// from the sealed plan. The numbered acceptance conditions are written only after the answer (the
-// translation is part of the authorized work), so the card shows the work order as it is sealed.
+// start's two cards: what the answer authorizes, in the words a person checks it by. Every line comes
+// from the sealed plan. The first card's yes pays for the translation and the questions, so its
+// contract line names those calls; the second's opens the run, and names the contract they sealed.
 export async function startCard(paths, plan) {
   const replaced = await runningVersions(paths, plan);
   const gate = plan.test?.kind === "command" ? "runs " + plan.test.command + " after each writer call" : "not configured (no test rule matched; the work starts without tests)";
@@ -54,7 +54,9 @@ export async function startCard(paths, plan) {
     : "the whole project except protected files (" + plan.scope.forbidden_paths.length + " patterns)";
   return [
     "Work order:   " + plan.task_file,
-    ...(plan.work_order ? ["              " + decisionLine(plan.work_order)] : []),
+    ...(plan.contract_sha256
+      ? ["              \"" + plan.work_order.title + "\", version " + plan.work_order.to_version]
+      : plan.work_order ? ["              " + decisionLine(plan.work_order)] : []),
     "Stops:        " + plan.breakpoint,
     "Scope:        " + scope,
     "Tests:        " + gate,
@@ -63,13 +65,15 @@ export async function startCard(paths, plan) {
     "Reviewer:     " + roleLine(plan.reviewer),
     "Reviewer MCP: " + reviewerMcpLine(plan),
     "Budget:       " + budgetLine(plan),
-    ...(plan.contract_steps ? ["Contract:     " + contractStepsLine(plan.contract_steps).replace(/^Before the work: /, "")] : []),
+    ...(plan.contract_sha256
+      ? ["Contract:     sealed, sha256 " + plan.contract_sha256]
+      : plan.contract_steps ? ["Contract:     " + contractStepsLine(plan.contract_steps).replace(/^Before the work: /, ""), "Next:         it is turned into a contract and you are asked what it leaves open. A second card comes before any work."] : []),
     "Valid until:  " + plan.authorization_expires_at,
     ...replaced.map(({ runId, unchanged }) => (unchanged
       ? "This work order is already running unchanged as run " + runId + "; this start will be refused."
       : "Starting stops the version still running from this work order: run " + runId)),
     "",
-    "The work order, as it will be sealed:",
+    plan.contract_sha256 ? "The work order, as sealed:" : "The work order, as it will be sealed:",
     ...plan.task.trimEnd().split(/\r?\n/).map((line) => "  │ " + line),
     "",
   ].join("\n");

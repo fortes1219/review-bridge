@@ -25,6 +25,7 @@ import {
 import { parseWorkOrder } from "../features/workOrder/workOrderFormat.mjs";
 import { canonical, digest } from "../utils/digest.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
+import { fakeQuestion } from "./fixtures/fakeAnswers.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -83,7 +84,7 @@ test("Bridge fills every field from its block, as written; headings and markers 
   assert.deepEqual(contract.ticket, { title: { text: "Work order: farm", source_refs: [{ start: 1, end: 1 }] }, source_id: null, priority: null, effort: null, budget: null });
   assert.deepEqual(contract.unused_lines, [{ text: "A note before any block.", source_refs: [{ start: 3, end: 3 }] }]);
   assert.deepEqual([contract.context, contract.run_plan, contract.reproduction, contract.verification_hints, contract.references, contract.open_questions], [null, null, null, [], [], []]);
-  assert.equal(contract.schema_version, 2);
+  assert.equal(contract.schema_version, 3);
   assert.equal(contract.event, undefined);
   assert.deepEqual(contract.checked_by, checker);
 });
@@ -127,7 +128,7 @@ test("the translation writes conditions only: no field text, command, path, budg
   assert.deepEqual(vague.problems, ["$.acceptance[0].verify[0].check: say what the reviewer checks"]);
 });
 
-test("an open question or a work order with nothing to check stops before any model call", () => {
+test("an open question stops before any model call; a work order with nothing to check does not, the reviewer proposes", () => {
   assert.deepEqual(workOrderQuestions(format), []);
   const asked = parseWorkOrder(TEXT + "\n\n<!-- bridge:open_questions -->\n## Open questions\nWhich barn colour?\nHow many trees?");
   assert.deepEqual(workOrderQuestions(asked), ["Which barn colour?", "How many trees?"]);
@@ -135,11 +136,11 @@ test("an open question or a work order with nothing to check stops before any mo
     assert.deepEqual(workOrderQuestions(parseWorkOrder(TEXT + "\n\n<!-- bridge:open_questions -->\n## Open questions\n" + none)), [], JSON.stringify(none));
   }
   const empty = parseWorkOrder("# farm\n\n<!-- bridge:requested_work -->\nBuild it.\n\n<!-- bridge:acceptance -->\n## Acceptance\n");
-  assert.deepEqual(workOrderQuestions(empty), ["The work order states no result that can be checked."]);
-  assert.deepEqual(workOrderQuestions(parseWorkOrder("# farm\n\n<!-- bridge:requested_work -->\nBuild it.")), ["The work order states no result that can be checked."]);
+  assert.deepEqual(workOrderQuestions(empty), []);
+  assert.deepEqual(workOrderQuestions(parseWorkOrder("# farm\n\n<!-- bridge:requested_work -->\nBuild it.")), []);
 });
 
-test("the prompts show only the acceptance blocks with the work order's own line numbers, in the work order's language", () => {
+test("the translation sees only the acceptance blocks, the reviewer the whole work order, both with its own line numbers and in its language", () => {
   const prompt = composeTranslationPrompt({ workPackageId: "farm-1", lines, format, test: GATE, attempt: 2, feedback: ["AC1 does not match its lines"] });
   assert.equal(prompt.split("\n")[0], CONTRACT_MODE_HEADER);
   assert.match(prompt, /^--- acceptance ---\n17\| 1\. Trees and a barn show/m);
@@ -155,7 +156,9 @@ test("the prompts show only the acceptance blocks with the work order's own line
   assert.match(checkPrompt, new RegExp("Candidate: " + digest(candidate)));
   assert.match(checkPrompt, /^18\| 2\. The cart stops at the barn\./m);
   assert.match(checkPrompt, /=== CANDIDATE CONDITIONS ===\n\[\n  \{\n    "id": "AC1"/);
-  assert.doesNotMatch(checkPrompt, /"unused_lines"|Payment work/);
+  assert.doesNotMatch(checkPrompt, /"unused_lines"/);
+  // A reviewer that sees only the conditions cannot ask how the work should be done.
+  assert.match(checkPrompt, /\| .*Build a small farm/);
   assert.match(checkPrompt, /in the language the work order itself is written in/);
 });
 
@@ -170,17 +173,18 @@ test("Bridge decides from every condition the reviewer judged: a mistake is redo
   const decide = (value) => decideCheck(value, { candidate, sha256 });
   assert.equal((await decide(answer())).decision, "pass");
   const wrong = await decide(answer({ acceptance: [{ id: "AC1", faithful: false, note: "adds a barn colour" }, { id: "AC2", faithful: true, note: null }, { id: "AC3", faithful: true, note: null }] }));
-  assert.deepEqual(wrong, { decision: "retranslate", problems: [], feedback: ["AC1 does not match its lines: adds a barn colour"], questions: [] });
+  assert.deepEqual(wrong, { decision: "retranslate", problems: [], feedback: ["AC1 does not match its lines: adds a barn colour"], questions: [], assumptions: [] });
   const missing = await decide(answer({ missing: [{ source_refs: [{ start: 17, end: 17 }], note: "the barn itself" }] }));
   assert.deepEqual(missing.feedback, ["missing condition at lines 17-17: the barn itself"]);
-  const unclear = await decide(answer({ ambiguities: [{ question: "Which page?", source_refs: [] }] }));
-  assert.deepEqual(unclear, { decision: "needs_human", problems: [], feedback: [], questions: ["Which page?"] });
+  const unclear = await decide(answer({ ambiguities: [fakeQuestion({ question: "Which page?" })] }));
+  assert.equal(unclear.decision, "needs_human");
+  assert.deepEqual(unclear.questions.map((entry) => entry.question), ["Which page?"]);
   assert.equal((await decide(answer({ cannot_confirm: true, cannot_confirm_reason: "design not given" }))).decision, "unconfirmed");
-  // A reviewer that skips a condition, judges another hash, or answers off-schema has not confirmed anything.
+  // A reviewer that skips a condition, judges another hash, or answers off-schema is asked again; the run counts it.
   assert.deepEqual((await decide(answer({ acceptance: answer().acceptance.slice(0, 2) }))).problems, ["$.acceptance: must judge exactly AC1, AC2, AC3"]);
   assert.deepEqual((await decide(answer({ candidate_sha256: "0".repeat(64) }))).problems, ["$.candidate_sha256: expected " + sha256]);
-  assert.equal((await decide(answer({ fields: [] }))).decision, "unconfirmed");
-  assert.equal((await decide({ event: "contract.check", verdict: "PASS" })).decision, "unconfirmed");
+  assert.equal((await decide(answer({ fields: [] }))).decision, "malformed");
+  assert.equal((await decide({ event: "contract.check", verdict: "PASS" })).decision, "malformed");
 });
 
 test("a sealed contract matches its schema, is stored once under its hash, and any change is caught on the next read", async (t) => {
@@ -217,7 +221,7 @@ test("a contract an older Bridge sealed is refused by name, and the person is to
 });
 
 test("a stop between two contract calls is honoured before the next call starts", async (t) => {
-  const { establishContract } = await import("../features/workOrder/translation.mjs");
+  const { establishContract, runTrail } = await import("../features/workOrder/translation.mjs");
   const { createFakeAdapter } = await import("../service/agentCli/fakeAdapter.mjs");
   const { readIoEvents } = await import("../service/records/ioEvents.mjs");
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-stop-"));
@@ -230,7 +234,7 @@ test("a stop between two contract calls is honoured before the next call starts"
   // Not stopped before the translation; stopped by the time the check would start.
   const isStopped = async () => (calls++ > 0);
   const result = await establishContract({
-    paths, runId: "run-stop-between-calls", workPackage: { ...workPackage, test: GATE, contract_steps: steps },
+    paths, trail: runTrail(paths, "run-stop-between-calls"), workPackage: { ...workPackage, test: GATE, contract_steps: steps },
     adapter: createFakeAdapter(bridgeRoot, "PASS"), limits, effort: "low", translateEffort: "low", executionMode: "fake_cli", isStopped, onSpawn: async () => {},
   });
   assert.equal(result.status, "stopped");
@@ -242,7 +246,7 @@ test("a stop between two contract calls is honoured before the next call starts"
 // Codex review 2026-10-18, round 3: a stop that lands after the check before a call but before
 // the call has recorded its pid. The call must find the stop once it has its pid and kill itself.
 test("a stop between the pre-call check and the pid record kills the call that just started", { timeout: 30_000 }, async (t) => {
-  const { establishContract } = await import("../features/workOrder/translation.mjs");
+  const { establishContract, runTrail } = await import("../features/workOrder/translation.mjs");
   const { createFakeAdapter } = await import("../service/agentCli/fakeAdapter.mjs");
   const { readIoEvents } = await import("../service/records/ioEvents.mjs");
   const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-race-"));
@@ -259,7 +263,7 @@ test("a stop between the pre-call check and the pid record kills the call that j
   const recorded = [];
   const startedAt = Date.now();
   const result = await establishContract({
-    paths, runId: "run-stop-race-0001", workPackage: { ...workPackage, test: GATE, contract_steps: steps },
+    paths, trail: runTrail(paths, "run-stop-race-0001"), workPackage: { ...workPackage, test: GATE, contract_steps: steps },
     adapter: createFakeAdapter(bridgeRoot, "PASS"), limits: { tokens_per_call: 1e7, tokens: 1e7 }, effort: "low", translateEffort: "low",
     executionMode: "fake_cli", isStopped, onSpawn: async (pid, role) => { recorded.push(role); },
   });

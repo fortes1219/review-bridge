@@ -353,6 +353,9 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     ...(input.test !== undefined ? { test: structuredClone(input.test) } : {}),
     ...(input.task_file !== undefined ? { task_file: input.task_file } : {}),
     ...(input.contract_steps ? { contract_steps: structuredClone(input.contract_steps) } : {}),
+    ...(input.clarify ? { clarify: structuredClone(input.clarify) } : {}),
+    // The contract the yes covered, when it was sealed before the run.
+    ...(input.contract_sha256 ? { contract_sha256: input.contract_sha256 } : {}),
     // The priority this work runs at, and each role's model and effort, as the plan settled them.
     ...(input.priority ? { priority: input.priority, writer: structuredClone(input.writer), reviewer: structuredClone(input.reviewer) } : {}),
     created_at: nowIso(clock),

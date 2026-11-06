@@ -167,6 +167,7 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     ...(contract ? [
       "Contract: " + contract.sha256 + ". It is the work order as sealed when the human started the work; it is read-only.",
       "Answer with this contract_sha256. If the contract looks wrong, ask through needs_human; never edit it or work from another version.",
+      "The contract's clarifications are the person's own answers and its assumptions are what was settled for them; both bind the work as the rest of the contract does.",
       "In criteria, report every acceptance condition of the contract by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done, apart from the ones the project's tests decide.",
     ] : ["There is no contract for this task; leave criteria empty."]),
     ...(workPackage.test?.kind === "command" ? [

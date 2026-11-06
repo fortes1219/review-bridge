@@ -22,6 +22,12 @@ async function loadPack(locale) {
   return cache.get(locale);
 }
 
+// One key's text in every language Bridge has: what it wrote in one language is still read in another.
+export async function inEveryLocale(key) {
+  const packs = await Promise.all((await availableLocales()).map(loadPack));
+  return packs.map((pack) => pack?.[key]).filter(Boolean);
+}
+
 // The locale named in bridge.json, or the default; an unknown name falls back to the default.
 export async function resolveLocale(paths) {
   const config = await fsp.readFile(paths.bridgeConfigPath, "utf8").then((text) => JSON.parse(text), () => ({}));

@@ -264,6 +264,8 @@ test("--writer and --reviewer fill the roles for one run; beside --yes they must
   assert.match(card.stdout, /^Reviewer: +codex \(flag\)/m);
   const other = rt.bridge(["start", order, "--writer", "claude", "--yes", "--fake-cli"]);
   assert.match(other.stdout, /--writer is not what the card showed/);
+  const gathered = rt.bridge(["start", order, "--writer", "codex", "--yes", "--fake-cli"]);
+  assert.equal(gathered.status, 1, gathered.stderr + gathered.stdout);
   const yes = rt.bridge(["start", order, "--writer", "codex", "--yes", "--fake-cli"]);
   assert.equal(yes.status, 0, yes.stderr + yes.stdout);
   assert.deepEqual((await rt.calls()).map((call) => call.cli), ["codex", "codex", "codex", "codex"]);
@@ -376,8 +378,13 @@ test("at the command line: a missing Codex is said as such in the role it fills;
   // No Codex role: nothing about Codex or its list, even with Codex absent. Its check stops at Claude's own CLI.
   const noCodex = rt.bridge(["start", order, "--writer", "claude", "--reviewer", "claude"], absent);
   assert.equal(noCodex.status, 1, noCodex.stderr);
-  assert.match(noCodex.stdout, /Reviewer read-only check: not passed/);
-  assert.doesNotMatch(noCodex.stdout + noCodex.stderr, /MCP|codex/i);
+  assert.match(noCodex.stdout, /Needs authorization/);
+  assert.doesNotMatch(noCodex.stdout, /Reviewer read-only check/, "no model call before a yes, the check's among them");
+  const checked = rt.bridge(["start", order, "--writer", "claude", "--reviewer", "claude", "--yes"], absent);
+  assert.equal(checked.status, 1, checked.stderr);
+  assert.match(checked.stdout, /Reviewer read-only check: not passed/);
+  // The card's own line is the one place MCP is named, and it says none.
+  assert.doesNotMatch((checked.stdout + checked.stderr).replace("Reviewer MCP: none", ""), /MCP|codex/i);
 });
 
 test("a Claude reviewer: nothing on the list, no server at all; on the list, only those from .mcp.json; the writer's rule does not change", { timeout: 240_000 }, async (t) => {

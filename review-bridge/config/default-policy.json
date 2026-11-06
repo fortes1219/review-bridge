@@ -4,6 +4,8 @@
   "package_policy_id": "review-bridge-default",
   "limits": {
     "rounds": 2,
+    "clarify_questions": 3,
+    "clarify_rounds": 3,
     "call_timeout": 900000,
     "max_turns": 20,
     "tokens_per_call": 1500000,

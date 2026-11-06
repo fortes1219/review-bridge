@@ -55,7 +55,7 @@ import { priorityChoice } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
 import { acceptanceRows, decideAcceptance, sameVersion, workVersion, testsDecideBlockedWriter } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
-import { establishContract } from "./translation.mjs";
+import { establishContract, runTrail } from "./translation.mjs";
 import { callStamp, callTimeLeft, clearProcess, killConfirmed, processFile, recordProcess, recordProcessOrKill, runMustStop, runStopped, workLockFile } from "./processRecords.mjs";
 
 export { recordProcessOrKill, runMustStop } from "./processRecords.mjs";
@@ -177,24 +177,30 @@ async function checkedContract({ paths, runtimeState, control, contractSha256, s
 // sysexits' EX_UNAVAILABLE: something the run needs is gone (the database, the change list).
 const UNAVAILABLE_EXIT = 69;
 
-const CONTRACT_EXIT_CODES = Object.freeze({
+export const CONTRACT_EXIT_CODES = Object.freeze({
   needs_human: 0, contract_unconfirmed: 0, writer_failed: 1, reviewer_failed: 1, policy_failure: 1, rate_limited: 75, token_limit: 76, usage_unknown: 76,
   // The status could not be read when a stop check failed closed; the run is closed as stopped.
   stopped: 130,
   writer_timeout: 77, contract_rejected: MALFORMED_EXIT_CODE,
 });
 
-// A work-order run gets its contract once, before the writer's first call; a resumed run keeps it.
+// A work-order run gets its contract once, before the writer's first call. One a start gathered came
+// sealed with the yes that opened the run (gather.mjs), so nothing is translated here; only the low-level
+// work-start still translates inside its run. A resumed run keeps its own.
 async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep, onContractSealed }) {
   const workPackage = control.run.work_package;
   if (!workPackage.task_file) return { sha256: null, exitCode: null };
   if (control.run.contract_sha256) return { sha256: control.run.contract_sha256, exitCode: null };
+  if (workPackage.contract_sha256) {
+    await runtimeState.recordContract(workPackage.contract_sha256);
+    return { sha256: workPackage.contract_sha256, exitCode: null };
+  }
   if (!workPackage.contract_steps) throw new Error("The work package names no contract steps; build a new plan.");
   const runId = runtimeState.runId;
   onStep("Writer (" + workPackage.contract_steps.translate.provider + ") turns the work order into a contract; reviewer ("
     + workPackage.contract_steps.check.provider + ") checks it");
   const translated = await establishContract({
-    paths, runId, workPackage, adapter, limits: effectiveLimits(control),
+    paths, trail: runTrail(paths, runId), workPackage, adapter, limits: effectiveLimits(control),
     isStopped: () => runMustStop(paths, runId),
     effort: control.reviewer_policy?.effort || "medium",
     model: control.reviewer_policy?.model ?? null,
@@ -222,11 +228,13 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
 // T0-04 D4.1: the token and test ceilings are the run's budget, which the plan settled from the
 // work order and the policy; max_turns comes from the policy snapshot. Missing ones use the package
 // defaults. test_timeout was missing here until RC3-BLOCKER-00, which left the tests with no limit.
-export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, tokens_per_call: 1_500_000, tokens: 4_000_000, max_output_chars: 4_000, test_timeout: 600_000 });
+export const DEFAULT_LIMITS = Object.freeze({ clarify_questions: 3, clarify_rounds: 3, max_turns: 20, tokens_per_call: 1_500_000, tokens: 4_000_000, max_output_chars: 4_000, test_timeout: 600_000 });
 export function effectiveLimits(control) {
   const limits = control?.run?.policy_snapshot?.effective_policy?.limits || {};
   const budget = control?.run?.work_package?.budget || {};
   return {
+    clarify_questions: limits.clarify_questions ?? DEFAULT_LIMITS.clarify_questions,
+    clarify_rounds: limits.clarify_rounds ?? DEFAULT_LIMITS.clarify_rounds,
     max_turns: limits.max_turns ?? DEFAULT_LIMITS.max_turns,
     tokens_per_call: budget.tokens_per_call ?? limits.tokens_per_call ?? DEFAULT_LIMITS.tokens_per_call,
     tokens: budget.tokens ?? limits.tokens ?? DEFAULT_LIMITS.tokens,

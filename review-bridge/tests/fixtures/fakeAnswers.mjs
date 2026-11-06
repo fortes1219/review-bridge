@@ -144,6 +144,21 @@ export function writerAnswer(prompt) {
   };
 }
 
+// One question as the reviewer gives it.
+export const fakeQuestion = ({ question = "Which page should show the farm?", refs = [{ start: 1, end: 1 }], blocks = "verification", convention = false, acceptance_proposal = false, readings = ["The home page", "A page of its own"] } = {}) => ({
+  question, source_refs: refs, blocks, convention, acceptance_proposal,
+  readings: readings.map((text) => (typeof text === "string" ? { text, precedent: { source: "knowledge", note: "the usual way" } } : text)),
+});
+
+// FAKE_CHECK_SCRIPT=<file>: an array of { when, unless, ambiguities }; the first whose `when` the prompt
+// holds and whose `unless` it does not gives this check's questions, so a test can script the rounds.
+// `malformed` leaves the answer's shape broken (a missing field).
+function scriptedCheck(prompt) {
+  if (!process.env.FAKE_CHECK_SCRIPT) return null;
+  const script = JSON.parse(fs.readFileSync(process.env.FAKE_CHECK_SCRIPT, "utf8"));
+  return script.find((entry) => (!entry.when || prompt.includes(entry.when)) && (!entry.unless || !prompt.includes(entry.unless))) || { ambiguities: [] };
+}
+
 // The contract check: every condition judged faithful unless FAKE_CONTRACT_CHECK asks for one
 // of the other outcomes the harness must handle. "_first" outcomes apply to attempt 1 only.
 export function checkAnswer(prompt) {
@@ -155,6 +170,8 @@ export function checkAnswer(prompt) {
   const conditions = JSON.parse(prompt.slice(open + "=== CANDIDATE CONDITIONS ===".length, close));
   const wrong = mode === "unfaithful_always" || (mode === "unfaithful_first" && attempt === 1);
   const ids = conditions.map((item) => item.id);
+  const scripted = scriptedCheck(prompt);
+  if (scripted?.malformed) return { event: "contract.check", candidate_sha256: sha256, acceptance: ids.map((id) => ({ id, faithful: true, note: null })), missing: [], ambiguities: scripted.malformed, cannot_confirm: false, cannot_confirm_reason: null };
   return {
     event: "contract.check",
     candidate_sha256: sha256,
@@ -162,7 +179,7 @@ export function checkAnswer(prompt) {
       id, faithful: !(wrong && index === 0), note: wrong && index === 0 ? "says more than its lines" : null,
     })),
     missing: mode === "missing_first" && attempt === 1 ? [{ source_refs: [{ start: 1, end: 1 }], note: "fake: a stated requirement was left out" }] : [],
-    ambiguities: mode === "ambiguous" ? [{ question: "Which page should show the farm?", source_refs: [] }] : [],
+    ambiguities: scripted ? scripted.ambiguities : mode === "ambiguous" ? [fakeQuestion()] : [],
     cannot_confirm: mode === "cannot_confirm",
     cannot_confirm_reason: mode === "cannot_confirm" ? "fake: the work order refers to a design not given" : null,
   };

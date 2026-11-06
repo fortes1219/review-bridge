@@ -45,6 +45,8 @@ Rules of evidence (fixed):
     `test_result.work_version`, and you read `work_version`. `gate` is PASS only when no
     condition fails. Bridge decides from the verdicts: a condition that is not shown to pass is
     not delivered as passed. With no contract, `verdicts` is empty.
+12. The contract's `clarifications` are the person's own answers and its `assumptions` are what
+    was settled for them. Judge the work by them; a choice they settle is not a finding.
 
 Rules the owner set for this workspace:
 {{RULES}}

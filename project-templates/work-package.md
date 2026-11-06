@@ -49,7 +49,7 @@
 [Files or modules likely to be touched, if known]
 
 <!-- bridge:acceptance -->
-## Acceptance
+## Acceptance (cannot say yet? delete this block: Bridge will propose some for you to choose from)
 1. [Result one, with the situations or limits it applies to]
 2. [Result two, with the situations or limits it applies to]
 

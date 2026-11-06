@@ -80,6 +80,7 @@ export const COMMANDS = {
     options: {
       ...WORK_ORDER_OPTIONS,
       "--yes": YES,
+      "--answer": { key: "answer", type: "string", multiple: true, value: "<n|ai|text>", default: "asked at a terminal", help: "The person's answer to the question the work order stopped on: one per question, in order; a reading's number, ai to hand the work order to the AI, or their own words" },
       "--fake-cli": FAKE_CLI,
       "--fake-scenario": FAKE_SCENARIO,
     },

@@ -83,6 +83,7 @@ test("a work order named in any language goes from its card through its yes to a
     assert.equal(card.status, 1, name + ": " + card.stdout + card.stderr);
     assert.ok(card.stdout.includes("Work order:   " + file), name + ": " + card.stdout);
     assert.match(card.stdout, /Needs authorization/);
+    assert.equal(rt.bridge(["start", file, "--fake-cli", "--yes"]).status, 1, name + ": the first yes ends at the sealed card");
     const ran = rt.bridge(["start", file, "--fake-cli", "--yes"]);
     assert.equal(ran.status, 0, name + ": " + ran.stdout + ran.stderr);
     const entries = await rt.results(name);
@@ -97,6 +98,7 @@ test("one name in NFD and in NFC is one work order, with one results folder", LI
   const decomposed = JAPANESE.normalize("NFD");
   await rt.write(decomposed);
   assert.equal(rt.bridge(["start", WORK_ORDERS + decomposed + ".md", "--fake-cli"]).status, 1);
+  assert.equal(rt.bridge(["start", WORK_ORDERS + decomposed + ".md", "--fake-cli", "--yes"]).status, 1);
   const first = rt.bridge(["start", WORK_ORDERS + decomposed + ".md", "--fake-cli", "--yes"]);
   assert.equal(first.status, 0, first.stdout + first.stderr);
   const [{ work_order_id: id, last_file_name: recorded }] = await queryRecords("select work_order_id, last_file_name from work_orders where project_id = $1", [rt.projectId]);
@@ -114,6 +116,7 @@ test("one name in NFD and in NFC is one work order, with one results folder", LI
   await rt.write(JAPANESE);
   const again = rt.bridge(["start", WORK_ORDERS + JAPANESE + ".md", "--fake-cli"]);
   assert.match(again.stdout, /still version 1/, again.stdout);
+  assert.equal(rt.bridge(["start", WORK_ORDERS + JAPANESE + ".md", "--fake-cli", "--yes"]).status, 1);
   assert.equal(rt.bridge(["start", WORK_ORDERS + JAPANESE + ".md", "--fake-cli", "--yes"]).status, 0);
   const rows = await queryRecords("select work_order_id from runs where project_id = $1", [rt.projectId]);
   assert.deepEqual(rows.map((row) => row.work_order_id), [id, id]);
@@ -127,6 +130,7 @@ test("in a directory, delivered holds across the two forms, and both forms side 
   const decomposed = "01-" + JAPANESE.normalize("NFD");
   await fsp.writeFile(path.join(rt.root, dir, decomposed + ".md"), order(JAPANESE));
   assert.equal(rt.bridge(["start", dir, "--fake-cli"]).status, 1);
+  assert.equal(rt.bridge(["start", dir, "--fake-cli", "--yes"]).status, 1);
   assert.equal(rt.bridge(["start", dir, "--fake-cli", "--yes"]).status, 0);
   await fsp.rm(path.join(rt.root, dir, decomposed + ".md"));
   await fsp.writeFile(path.join(rt.root, dir, "01-" + JAPANESE + ".md"), order(JAPANESE));

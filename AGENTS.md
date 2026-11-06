@@ -15,6 +15,7 @@ This private repository is the canonical source for the generic review bridge ru
 - Do not weaken Windows safety or claim Darwin/Linux native support without native evidence and human approval.
 - Installer changes require install, reinstall/upgrade, verify, uninstall, stale-plan, rollback, settings-merge, and private-boundary evidence.
 - Structural code claims require `sg`; symbol references require the language server. Text search is evidence only for text/configuration claims.
+- Locate before reading: start from the Codemap in `ARCHITECTURE.md`, list a file's declarations with `rg`, take one function with `sg`, and read a whole file only when the change needs it. These locate code; they do not prove that nothing else calls it.
 
 ## Repository Layout
 

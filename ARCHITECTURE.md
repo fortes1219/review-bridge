@@ -2,6 +2,38 @@
 
 This document describes how the Review Bridge source is organized today: the runtime that is installed into a target project, the installer that puts it there, and the rules that keep the parts apart. It describes the code as it is, including the parts that are not finished.
 
+## Codemap
+
+Where to start for a change. This names things and gives no line numbers: search for the names. The numbered sections say how each part behaves. Paths are under `review-bridge/` unless they start at the repository root; `workOrder/` is `features/workOrder/`.
+
+| To change | Start at |
+|---|---|
+| A command, its options or its wiring | `router/index.mjs` (command table), `router/args.mjs`, `router/help.mjs` |
+| `start` and `resume` of one work order | `workOrder/commands.mjs`: `startWorkOrder`, `startFile`, `resumeWorkOrder`, `runAuthorized` |
+| A directory of work orders | `workOrder/line.mjs`: `startDirectory`, `runLine` |
+| Translating, checking and asking, before any run | `workOrder/gather.mjs` (`gatherContracts`), `workOrder/translation.mjs` (`establishContract`), `workOrder/contract.mjs`, `workOrder/clarify.mjs` |
+| What a card says | `workOrder/confirmStart.mjs` (`startCard`); a directory's card in `workOrder/line.mjs` (`cardLines`) |
+| Reading a work order, planning and sealing | `workOrder/workOrderFormat.mjs`, `workOrder/workPackage.mjs` (`sealPlan`) |
+| Which work order a file is, and its versions | `workOrder/workOrderRecords.mjs` |
+| The writer's turns | `workOrder/writerLoop.mjs`, `workOrder/writerPrompt.mjs`, `workOrder/budget.mjs` |
+| The test step | `workOrder/test.mjs` |
+| The review | `workOrder/review.mjs`, `workOrder/reviewQueue.mjs`, `workOrder/typedResults.mjs`, `review-prompt.md` |
+| Whether a condition is proven | `workOrder/acceptance.mjs` (`workVersion`) |
+| The work proof | `workOrder/workspaceEvidence.mjs`, `workOrder/gitWorkspace.mjs` |
+| Stopping, pids and locks | `workOrder/commands.mjs` (`stopWork`), `workOrder/writerLoop.mjs` (`stopRun`), `workOrder/processRecords.mjs`, `service/agentCli/process.mjs` |
+| The result file and `logs` | `workOrder/delivery.mjs` (`deliverOutcome`), `workOrder/runLogs.mjs` (`showLogs`) |
+| A message a person reads | `workOrder/i18n.mjs`, `workOrder/locales/` |
+| A provider's flags and output, MCP | `service/agentCli/calls.mjs`, `service/agentCli/claude.mjs`, `service/agentCli/codex.mjs`, `service/agentCli/mcp.mjs` |
+| The reviewer's read-only proof, the setup page | `features/setupCheck/reviewerProbe.mjs`, `features/setupCheck/reviewerCheck.mjs`, `ui/` |
+| A table | `service/database/migrations/`; a run's rows in `service/records/runRecords.mjs`; a work order's in `workOrder/workOrderRecords.mjs` |
+| The database server and backup | `service/database/postgresServer.mjs`, `service/database/backup.mjs` |
+| Policy defaults and rules | `config/default-policy.json`, `policy/policyRules.mjs` |
+| An operating system's adapter | `platforms/`, `router/platform.mjs` |
+| `init`, `upgrade`, `uninstall` | `installer/install-guide.mjs`, `installer/neutral-install.mjs`, `installer/agent-files.mjs` (at the repository root) |
+| Tests | Runtime in `tests/`, its fake CLIs in `tests/fixtures/`; installer in `tests/` at the repository root |
+
+Many tests start the CLI as a process, so imports do not show which tests cover a file.
+
 ## 1. Two packages in one repository
 
 | Package | Location | Runs where | Job |
@@ -33,7 +65,8 @@ review-bridge/
 ├── service/               boundaries shared by more than one feature
 │   ├── index.mjs          the only way in
 │   ├── agentCli/          child processes and the writer/reviewer CLIs
-│   └── records/           everything persisted under the project's private root
+│   ├── database/          the person's embedded PostgreSQL: server, migrations, backup
+│   └── records/           run records and the files under the project's private root
 ├── policy/                pure rules
 └── utils/                 pure helpers
 ```
@@ -56,13 +89,13 @@ Each feature exposes only what its `index.mjs` exports. Everything else in the f
 
 | Feature | Public entries | Internal modules |
 |---|---|---|
-| `workOrder` | `planWork`, `startWork`, `workStatus`, `cancelWork`, `stopWork`, `reviewWork`, `resumeWork`, `reviewQueueStatus`, `waitForReview`, `deliverOutcome` | `workPackage`, `contract`, `translation`, `confirmStart`, `writerLoop`, `writerPrompt`, `test`, `review`, `reviewQueue`, `typedResults` and `schemas/`, `workspaceEvidence`, `delivery`, `budget`, `i18n` and `locales/` |
-| `setupCheck` | `startWatch`, `upService`, `downService`, `showService`, `checkService` | `watchServer`, `pageService`, `reviewerProbe` |
+| `workOrder` | `planWork`, `startWork`, `workStatus`, `cancelWork`, `stopWork`, `reviewWork`, `resumeWork`, `reviewQueueStatus`, `waitForReview`, `deliverOutcome` | `commands`, `line`, `gather`, `clarify`, `workPackage`, `workOrderFormat`, `workOrderRecords`, `contract`, `translation`, `confirmStart`, `writerLoop`, `writerPrompt`, `test`, `review`, `reviewQueue`, `acceptance`, `typedResults` and `schemas/`, `workspaceEvidence`, `gitWorkspace`, `processRecords`, `runLogs`, `delivery`, `budget`, `i18n` and `locales/` |
+| `setupCheck` | `startWatch`, `upService`, `downService`, `showService`, `checkService` | `commands`, `watchServer`, `pageService`, `reviewerCheck`, `reviewerProbe` |
 | `records` | `runPrune`, `removeRecord` | `retention` |
 | `doctor` | `inspectDoctor` | — |
 | `backup` | `backupDatabase` | — |
 
-**Work-order contract.** A work order is a Markdown file under `.review-bridge/work-packages/`, in any language and any heading layout. `work-plan` seals its text and records the contract steps the human approves with the plan: the configured writer translates, the configured reviewer checks, at most two attempts, each call held to the plan's `call_timeout`. Starting the work authorizes that sealed text; there is no second human approval.
+**Work-order contract.** A work order is a Markdown file under `.review-bridge/work-packages/`, in any language and any heading layout. `work-plan` seals its text and records the contract steps the human approves with the plan: the configured writer translates, the configured reviewer checks, at most two attempts, each call held to the plan's `call_timeout`. `start` and `resume` take two yeses, both before any work (DECISIONS 2026-11-06): the first pays for the translation and the questions, which happen outside any run and are recorded in `contract_gatherings`, a table of Bridge's own with no counterpart elsewhere (the nearest is Terraform's saved plan). The second is to the card that names the sealed contract, whose SHA-256 is in what its plan's hash covers, and it opens the run. A directory does the same for all its work orders: every contract sealed and every question asked at once, then one yes and the runs in order, asking nothing. A work order that cannot be sealed keeps every one from working. The low-level `work-start` still translates inside its run, on its one approval.
 
 **Versions of a work order.** Saving the work order file changes nothing that is running: the run keeps its sealed text, and its result shows the lines added or removed since the start and says the work was judged on the sealed version. A work order is its id in the person's database, made by Bridge when the work order is first started and never written into the Markdown; its path, file name and file id are not its identity (decisions 2026-10-23 and 2026-10-24). `start`, `resume` and `work-plan` decide which work order a file is, without a model: the work order whose last file has this name; otherwise one whose last file is gone and whose text keeps more than half of its lines (a renamed file); otherwise a new one. A copy is a new work order, even with the same text, because its original's file is still there. A new title or file name keeps the work order; edited text started again is its next version. The card shows the decision (new, the same version, or version n → n+1 with the lines changed); the person's yes settles it, and `--update <work_order_id>` or `--as-new` prints another card that says otherwise. One start of a work order file runs at a time: from looking for its running version until the new run exists, the start holds a start lock keyed by the file's place, and a second start meanwhile is refused and creates nothing; a start already under way goes on with the plan it sealed even if the file is saved again. A work order deleted or moved while a start runs fails that start, and its run, if made, is closed. Under that lock, a run of the same work order still running with the same text is not an older version: the start is refused and that run goes on. Otherwise the start first stops any running run of the same work order id, or one stopped with a kill not yet confirmed, and waits for that run's work-start to let go of the run; only then is anything of the new version made. A stop that cannot be confirmed, an old work-start that does not let go within 30 seconds, or a running run whose record cannot be read refuses the start, and starting again retries. Every refusal before that step leaves the old version running, and the card names the version a start would stop. The old run ends with status `completed`, conclusion `cancelled` and closed reason `superseded`; the new run has its own authorization, contract and verdicts, and nothing of the old run is carried into it. Another work order's start stops nothing.
 
@@ -93,7 +126,7 @@ Features never import each other. When one flow needs another feature's capabili
 
 | Command | Wiring done by the router | Order owned by |
 |---|---|---|
-| `start` | Passes the start gate (reviewer read-only proof in the running page) as `guard`, and the setup check's `ensureReviewerChecked` (start the page if needed; run the check there, as the page's button does) as `reviewerCheck` | `workOrder.startWorkOrder`: plan → `reviewerCheck()` unless already proven in this page session → card → without a terminal and without `--yes`, stop at `Needs authorization` → `guard()` → the person's yes (asked at a terminal, or `--yes` relayed by an agent; `authorized_via` is `terminal` or `agent`) → authorize → writer loop, one line per step → deliver |
+| `start` | Passes the start gate (reviewer read-only proof in the running page) as `guard`, and the setup check's `ensureReviewerChecked` (start the page if needed; run the check there, as the page's button does) as `reviewerCheck` | `workOrder.startWorkOrder`: plan → card → without a terminal and without `--yes`, stop at `Needs authorization` → the person's first yes (asked at a terminal, or `--yes` relayed by an agent) → `reviewerCheck()` unless already proven in this page session → `guard()` → the gathering (`gather`: translate, check, ask, write back, only what was answered again, no run) → the sealed card, with the contract's SHA-256 in what the yes covers → the second yes (`authorized_via` is `terminal` or `agent`) → authorize → writer loop, one line per step → deliver. A text already sealed under the same settings goes straight to the sealed card |
 | `resume` | The same `guard` and `reviewerCheck` | `workOrder.resumeWorkOrder`: a stopped run is closed, so its work order is planned again with that run's breakpoint and scope (priority, effort and budget come from the work order again), then the same steps as `start` |
 | `clean` | Passes `deliver` | `records.removeRecord` with a run id, `records.runPrune` without |
 | `status` | Passes the setup check's `checkService` as `page` | `workOrder.statusOverview`: the page, the latest runs, the review queue |

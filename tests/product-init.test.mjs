@@ -479,12 +479,17 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(start("--fake-cli", "--breakpoint", "after the review").status, 1, "the card --yes is for");
+  const gathered = start("--fake-cli", "--yes", "--breakpoint", "after the review");
+  assert.equal(gathered.status, 1, gathered.stdout + gathered.stderr);
+  assert.match(gathered.stdout, /^Plan from the card: .+[\\/]hello\.plan\.json\n/);
+  assert.match(gathered.stdout, /\nReviewer read-only check: not needed with the fake CLI \(no model is called\)\nhello\.md: turning it into a contract\nhello\.md: contract sealed, sha256 [0-9a-f]{4}…\n/);
+  assert.match(gathered.stdout, /\nContract: {5}sealed, sha256 [0-9a-f]{64}\n/);
   const done = start("--fake-cli", "--yes", "--breakpoint", "after the review");
   assert.equal(done.status, 0, done.stderr);
   const lines = done.stdout.trimEnd().split(/\r?\n/);
   assert.match(lines[0], /^Plan from the card: .+[\\/]hello\.plan\.json$/);
   assert.ok(lines[0].slice("Plan from the card: ".length).startsWith(projectPaths(root).logRoot), lines[0]);
-  assert.equal(lines[1], "Reviewer read-only check: not needed with the fake CLI (no model is called)");
+  assert.ok(lines.includes("Reviewer read-only check: not needed with the fake CLI (no model is called)"));
   for (const line of ["Work order:   " + order, "Stops:        after the review", "Tests:        not configured (no test rule matched; the work starts without tests)",
     "Priority:     medium (config)",
     "Writer:       claude (config), model the CLI's default (priority table), effort medium (priority table)",
@@ -495,14 +500,21 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   }
   const steps = lines.filter((line) => /^ {2}[A-Z]/.test(line));
   assert.deepEqual(steps, [
-    "  Writer (claude) turns the work order into a contract; reviewer (codex) checks it",
-    "  Contract sealed",
     "  Writer working (call 1 of 2)",
     "  Tests: not configured for this project",
     "  Reviewer checking the work",
   ]);
   assert.match(done.stdout, /\nDelivered: .*\nResult file: .*[\\/]\.review-bridge[\\/]results[\\/]hello[\\/]hello \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md\nTokens: /);
 });
+
+// An agent's two yeses: to the first card, which gathers the contract and stops at the sealed card, and to
+// that, which runs it. Returns the second.
+function bothYes(cli, order, args = [], env = {}) {
+  const first = cli(["start", order, "--fake-cli", ...args, "--yes"], env);
+  assert.equal(first.status, 1, first.stdout + first.stderr);
+  assert.match(first.stdout, /Needs authorization/);
+  return cli(["start", order, "--fake-cli", ...args, "--yes"], env);
+}
 
 // E: four actions for people (start, stop, resume, clean) on three routes: a person at a terminal
 // (the pty acceptance run), VS Code's terminal (the same CLI) and an agent with no terminal. An
@@ -525,7 +537,7 @@ async function fourActionsProject(t, prefix) {
   return { root, order, cli, queue, listed };
 }
 
-test("an agent's start prints the card and stops; with --yes it runs and records the yes as the agent's", async (t) => {
+test("an agent's start prints the card and stops; with --yes it gathers, with --yes again it runs, and records the yes as the agent's", async (t) => {
   const { root, order, cli, queue, listed } = await fourActionsProject(t, "review-bridge-agent-start-");
   const card = cli(["start", order, "--fake-cli"]);
   assert.equal(card.status, 1);
@@ -539,7 +551,7 @@ test("an agent's start prints the card and stops; with --yes it runs and records
   assert.deepEqual(await listed("runs"), [], "nothing started");
   assert.deepEqual(await listed("authorizations"), [], "nothing authorized");
 
-  const yes = cli(["start", order, "--fake-cli", "--yes"]);
+  const yes = bothYes(cli, order);
   assert.equal(yes.status, 0, yes.stderr);
   assert.match(yes.stdout, /\nDelivered: .*\nResult file: /);
   const [authorizationFile] = await listed("authorizations");
@@ -570,7 +582,7 @@ test("an agent's start --yes runs the project's tests when its rules give a comm
   const card = cli(["start", order, "--fake-cli"]);
   assert.equal(card.status, 1, card.stderr);
   assert.ok(card.stdout.split(/\r?\n/).includes("Tests:        runs npm test after each writer call"), card.stdout);
-  const yes = cli(["start", order, "--fake-cli", "--yes"]);
+  const yes = bothYes(cli, order);
   assert.equal(yes.status, 0, yes.stdout + yes.stderr);
   assert.match(yes.stdout, /\n {2}Tests: running npm test\n {2}Tests passed\n/);
   const [runFile] = (await fsp.readdir(projectPaths(root).runsDir)).filter((name) => name.endsWith(".json"));
@@ -604,7 +616,7 @@ test("--yes is refused when the work order changed after the card, when no card 
   const other = cli(["start", order, "--fake-cli", "--yes", "--rounds", "1"]);
   assert.equal(other.status, 1, other.stderr);
   assert.equal(other.stdout, "--rounds is not what the card showed. Run: review-bridge start " + order + " --fake-cli --yes without it, or review-bridge start " + order + " --fake-cli to show the person a new card.\n");
-  const yes = cli(["start", order, "--fake-cli", "--yes", "--rounds", "2"]);
+  const yes = bothYes(cli, order, ["--rounds", "2"]);
   assert.equal(yes.status, 0, yes.stdout + yes.stderr);
   assert.match(yes.stdout, /^Plan from the card: .*hello\.plan\.json\n/);
   assert.match(yes.stdout, /\nDelivered: .*\nResult file: /);
@@ -626,13 +638,14 @@ test("the card names the work order: new, then updated, renamed or copied; the r
     assert.equal(card.status, 1, card.stderr);
     return card.stdout.split(/\r?\n/)[card.stdout.split(/\r?\n/).findIndex((line) => line.startsWith("Work order:   ")) + 1].trim();
   };
-  const yes = (file) => assert.equal(cli(["start", file, "--fake-cli", "--yes"]).status, 0);
+  const yes = (file) => assert.equal(bothYes(cli, file).status, 0);
   assert.equal(decision([order]), "New work order \"工單：新增 README\"");
   yes(order);
   await fsp.appendFile(path.join(root, order), "2. README 有專案名稱。\n");
   assert.equal(decision([order]), "Updates \"工單：新增 README\": version 1 → 2, 1 line(s) changed");
   yes(order);
-  assert.equal(decision([order]), "Updates \"工單：新增 README\": still version 2, with new run settings");
+  // Its contract is sealed already: nothing to pay for, so the sealed card comes first.
+  assert.equal(decision([order]), "\"工單：新增 README\", version 2");
   // A copy beside the original is a new work order, even with the same text; --update says otherwise.
   const copy = ".review-bridge/work-packages/hello-copy.md";
   await fsp.copyFile(path.join(root, order), path.join(root, copy));
@@ -652,7 +665,7 @@ test("the card names the work order: new, then updated, renamed or copied; the r
   assert.deepEqual((await rows("select last_file_name from work_orders where project_id = $1")).map((row) => row.last_file_name), [renamed], "one work order, renamed");
   assert.deepEqual((await rows("select v.version_no from work_order_versions v join work_orders w using (work_order_id) where w.project_id = $1 order by 1"))
     .map((row) => row.version_no), [1, 2, 3]);
-  assert.equal((await rows("select count(*)::int as n from plans where project_id = $1"))[0].n, 7, "one plan per card");
+  assert.equal((await rows("select count(*)::int as n from plans where project_id = $1"))[0].n, 11, "one plan per card, the sealed ones among them");
   const claims = await rows("select c.run_id from authorization_claims c join authorizations a using (authorization_id) join plans p using (plan_sha256) where p.project_id = $1");
   assert.equal(claims.length, 3, "one claim per yes");
   const authorizations = await rows("select a.authorized_via, p.content_sha256 from authorizations a join plans p using (plan_sha256) where p.project_id = $1");
@@ -669,6 +682,7 @@ test("two --yes to one card at once start one run; clean --all clears the projec
   const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-two-yes-");
   const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 1, "the first card's yes, to the sealed card");
   const { spawn } = await import("node:child_process");
   const yes = () => new Promise((resolve) => {
     const child = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: root, env: isolatedEnv(), windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -685,7 +699,7 @@ test("two --yes to one card at once start one run; clean --all clears the projec
 
   const cleared = cli(["clean", "--all"]);
   assert.equal(cleared.status, 0, cleared.stderr);
-  assert.match(cleared.stdout, /^Cleared this project's records: 1 work order\(s\), 1 version\(s\), 1 plan\(s\), 1 authorization\(s\), 1 contract\(s\), 1 run\(s\)\.\n/);
+  assert.match(cleared.stdout, /^Cleared this project's records: 1 work order\(s\), 1 version\(s\), 2 plan\(s\), 1 authorization\(s\), 1 contract\(s\), 1 run\(s\)\.\n/);
   assert.equal((await queryRecords("select count(*)::int as n from plans where project_id = $1", [projectId]))[0].n, 0);
   assert.ok((await queryRecords("select cleared_at from projects where project_id = $1", [projectId]))[0].cleared_at);
   const after = cli(["start", order, "--fake-cli"]);
@@ -703,7 +717,7 @@ test("two --yes to one card at once start one run; clean --all clears the projec
 test("a run's events, verdicts, tests and delivery are in the database; stop and clean <run_id> follow", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-run-records-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  assert.equal(bothYes(cli, order).status, 0);
   const [runFile] = (await fsp.readdir(path.join(queue, "runs"))).filter((name) => name.endsWith(".json"));
   const runId = runFile.slice(0, -5);
   const file = JSON.parse(await fsp.readFile(path.join(queue, "runs", runFile), "utf8"));
@@ -760,6 +774,7 @@ test("a run's events, verdicts, tests and delivery are in the database; stop and
 test("a run whose database goes away stops as database_unavailable; reads without a database say why", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-database-gone-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 1, "the first card's yes, to the sealed card");
   const { spawn } = await import("node:child_process");
   const child = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], { cwd: root, env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "6000" }), windowsHide: true, stdio: "ignore" });
   const exited = new Promise((resolve) => child.once("close", resolve));
@@ -853,7 +868,7 @@ const eventValues = (text) => (text === null ? null : text.split("\n").filter(Bo
 test("a run's files are written again from the database when they are missing or behind, and refused when they are ahead", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-files-copy-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  assert.equal(bothYes(cli, order).status, 0);
   const [name] = (await fsp.readdir(path.join(queue, "runs"))).filter((entry) => entry.endsWith(".json"));
   const runId = name.slice(0, -5);
   const runFile = path.join(queue, "runs", name);
@@ -940,7 +955,7 @@ test("a run's files are written again from the database when they are missing or
 test("an ended, undelivered run without its I/O event file is delivered in full from the database, and a file with a line more is refused", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-io-copy-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  assert.equal(bothYes(cli, order).status, 0);
   const [name] = (await fsp.readdir(path.join(queue, "runs"))).filter((entry) => entry.endsWith(".json"));
   const runId = name.slice(0, -5);
   const runFile = path.join(queue, "runs", name);
@@ -1003,6 +1018,7 @@ test("without the database a running run is stopped and delivered from its files
   t.after(() => leaveBrokenHome(broken));
   const unavailable = /^Review bridge failed closed: Bridge's database at .*postgres is not available: /;
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 1, "the first card's yes, to the sealed card");
   const { spawn } = await import("node:child_process");
   // The runtime's bootstrap itself, not bridge.mjs: that is a launcher that hands start to it
   // (bridge.mjs spawnSync), and killing the launcher leaves the start's loop running on Linux.
@@ -1049,15 +1065,8 @@ test("without the database a running run is stopped and delivered from its files
 // E10: a card never shown because the reviewer check did not pass is withdrawn in the records, so no
 // later --yes can start it (a card answered no at a terminal is withdrawn the same way; the pty run
 // shows it). The card's "Valid until" is the plan's, as recorded.
-test("a card not shown takes no later --yes; a card past its Valid until is refused", async (t) => {
-  const { order, cli, listed } = await fourActionsProject(t, "review-bridge-card-once-");
-  // Claude in both roles: no Codex list to read, so this start gets as far as the reviewer's check.
-  const notShown = cli(["start", order, "--writer", "claude", "--reviewer", "claude"]);
-  assert.equal(notShown.status, 1, notShown.stderr);
-  assert.match(notShown.stdout, /\nReviewer read-only check: not passed /);
-  const [withdrawn] = await queryRecords("select shown_at, withdrawn_at from plans order by created_at desc limit 1");
-  assert.equal(withdrawn.shown_at, null, "the card was never shown");
-  assert.ok(withdrawn.withdrawn_at, "and it is withdrawn");
+test("a card past its Valid until is refused, and the first card's yes is taken once", async (t) => {
+  const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-card-once-");
   assert.match(cli(["start", order, "--fake-cli", "--yes"]).stdout, /^No card was shown /);
 
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
@@ -1067,11 +1076,22 @@ test("a card not shown takes no later --yes; a card past its Valid until is refu
   assert.match(old.stdout, /^The card was valid until .*\. Run: review-bridge start .* and show the person the new card\.\n$/);
   assert.deepEqual(await listed("runs"), []);
   assert.deepEqual(await listed("authorizations"), []);
+
+  // The sealed card taken back, the first card's yes is not there to say again.
+  const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 1);
+  await queryRecords("update plans set withdrawn_at = now() where project_id = $1 and body ? 'contract_sha256'", [projectId]);
+  const spent = cli(["start", order, "--fake-cli", "--yes"]);
+  assert.equal(spent.status, 1, spent.stderr);
+  assert.match(spent.stdout, /This card was already said yes to/);
+  assert.deepEqual(await listed("runs"), []);
 });
 
 test("stop pauses a run and keeps its records, resume carries the work order on, clean clears records and refuses a running run", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-four-actions-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1, "the card the yes below is for");
+  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 1, "the first card's yes, to the sealed card");
   const { spawn } = await import("node:child_process");
   const child = spawn(process.execPath, [bridge, "start", order, "--fake-cli", "--yes"], {
     cwd: root, env: isolatedEnv({ FAKE_CLAUDE_SLEEP_MS: "30000" }), windowsHide: true, stdio: "ignore",
@@ -1151,11 +1171,12 @@ test("without the reviewer proof a real start is refused before any model call, 
   assert.equal(noCli.status, 1, noCli.stderr);
   assert.match(noCli.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\n(?:Install the codex CLI and sign it in|Sign the reviewer in) \(codex login\), then run: review-bridge start /m);
   assert.doesNotMatch(noCli.stdout + noCli.stderr, /MCP/);
-  // And without --yes: refused at the check too.
+  // And without --yes: the card, and no model call, the check's among them, before a yes.
   cli(["up", "--fake-cli"]);
   const asked = cli(["start", order, "--writer", "claude", "--reviewer", "claude"]);
   assert.equal(asked.status, 1, asked.stderr);
-  assert.match(asked.stdout, fakePage);
+  assert.match(asked.stdout, /Needs authorization/);
+  assert.doesNotMatch(asked.stdout, /Reviewer read-only check|Checking that the reviewer/);
   assert.deepEqual(await listed("runs"), []);
   assert.deepEqual(await listed("authorizations"), []);
 });
@@ -1298,9 +1319,11 @@ function localName(at) {
 test("each run's result is its own file in .review-bridge/results/, never in work-packages/; clean keeps them and takes refused events", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-results-");
   const { resultCopies } = await import("../review-bridge/tests/fixtures/resultCopies.mjs");
+  // Once its contract is sealed, the card is the sealed one: one yes.
   const runOnce = () => {
-    assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-    const started = cli(["start", order, "--fake-cli", "--yes"]);
+    const card = cli(["start", order, "--fake-cli"]);
+    assert.equal(card.status, 1);
+    const started = /A second card comes before any work/.test(card.stdout) ? bothYes(cli, order) : cli(["start", order, "--fake-cli", "--yes"]);
     assert.equal(started.status, 0, started.stderr);
     return started;
   };
@@ -1333,7 +1356,7 @@ test("a result is named by its source_id and opens with who it is about, as the 
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-result-identity-");
   await fsp.writeFile(path.join(root, order), "---\nsource_id: CANARY-1\n---\n" + await fsp.readFile(path.join(root, order), "utf8"));
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-  const started = cli(["start", order, "--fake-cli", "--yes"]);
+  const started = bothYes(cli, order);
   assert.equal(started.status, 0, started.stderr);
   const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   const [row] = await queryRecords("select r.run_id, r.closed_at, r.conclusion, r.contract_sha256, v.version_no, v.title, p.source_file,"
@@ -1406,9 +1429,11 @@ test("after a run the project holds only its settings, work orders and results/<
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "---\nsource_id: SHOP-412\n---\n# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const cli = (args) => spawnSync(process.execPath, [bridge, ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  // Once its contract is sealed, the card is the sealed one: one yes.
   const runOnce = () => {
-    assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-    const started = cli(["start", order, "--fake-cli", "--yes"]);
+    const card = cli(["start", order, "--fake-cli"]);
+    assert.equal(card.status, 1);
+    const started = /A second card comes before any work/.test(card.stdout) ? bothYes(cli, order) : cli(["start", order, "--fake-cli", "--yes"]);
     assert.equal(started.status, 0, started.stdout + started.stderr);
   };
   runOnce();
@@ -1492,7 +1517,7 @@ test("after a run the project holds only its settings, work orders and results/<
 test("the budget check asks the database for one number by primary key, equal to the sum of the run's usage events", async (t) => {
   const { root, order, cli } = await fourActionsProject(t, "review-bridge-usage-total-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-  assert.equal(cli(["start", order, "--fake-cli", "--yes"]).status, 0);
+  assert.equal(bothYes(cli, order).status, 0);
   const [{ run_id: runId }] = await queryRecords("select run_id from runs order by created_at desc limit 1");
   const { getBridgePaths } = await import("../review-bridge/utils/paths.mjs");
   const service = await import("../review-bridge/service/index.mjs");

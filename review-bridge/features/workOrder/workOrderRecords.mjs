@@ -10,7 +10,7 @@ import { insertRun, runRecorder } from "../../service/index.mjs";
 import { canonical, digest } from "../../utils/digest.mjs";
 import { nfc } from "../../utils/workOrderName.mjs";
 import { workOrderChange } from "./delivery.mjs";
-import { parseWorkOrder } from "./workOrderFormat.mjs";
+import { parseWorkOrder, UNTITLED } from "./workOrderFormat.mjs";
 
 // "Content close enough" for a renamed file (spec 2026-10-24, numbers set by Opus and kept by Fable
 // 2026-10-25): the unchanged lines are more than half of the longer version, among at most 50 work
@@ -80,10 +80,10 @@ export async function resultIdentity(db, runId) {
   return { ...row, source_id: parseWorkOrder(sourceText).frontmatter.source_id };
 }
 
-// The work order's title: its first Markdown heading, else the file name.
-export function titleOf(text, fileName) {
+// The work order's title: its first Markdown heading, else untitled.
+export function titleOf(text) {
   const heading = String(text).split(/\r?\n/).find((line) => /^#\s+\S/.test(line));
-  return heading ? heading.replace(/^#\s+/, "").trim() : path.basename(fileName, path.extname(fileName));
+  return heading ? heading.replace(/^#\s+/, "").trim() : UNTITLED;
 }
 
 async function latestVersion(db, workOrderId) {
@@ -135,7 +135,7 @@ async function renameCandidates(db, { projectId, repoRoot, memo }) {
 }
 
 async function decide(db, { projectId, fileName, text, repoRoot, update = null, asNew = false, memo = null }) {
-  const title = titleOf(text, fileName);
+  const title = titleOf(text);
   if (asNew) return decided("new", null, title, null, text);
   if (update) {
     const { rows } = await db.query("select work_order_id from work_orders where work_order_id = $1 and project_id = $2", [update, projectId]);
@@ -189,7 +189,7 @@ export async function markCardShown(db, planSha256) {
   await db.query("update plans set shown_at = coalesce(shown_at, now()) where plan_sha256 = $1", [planSha256]);
 }
 
-// E10: a card never shown (the reviewer check refused) or answered no takes no later --yes.
+// E10: a card answered no, or that the reviewer check refused after its yes at a terminal, takes no later --yes.
 export async function withdrawCard(db, planSha256) {
   await db.query("update plans set withdrawn_at = now() where plan_sha256 = $1 and withdrawn_at is null", [planSha256]);
 }
@@ -273,6 +273,132 @@ export async function recordDirectoryYes(db, authorizations) {
 // run is closed by the caller. An earlier version it stopped stays stopped, as GitHub Actions cancels
 // a run in progress for a newer one of its concurrency group (DECISIONS 2026-11-03): that stop was
 // recorded when it happened, and only its link to this run, which did not exist then, is written here.
+// One start of a file, and of a work order, at a time (PostgreSQL's advisory lock, released when the
+// transaction ends). A second start meanwhile is refused at once, as the start lock always refused it
+// (design step 3: not queued); once the first ends, a new card sees what it made.
+async function lockWorkOrder(tx, { projectId, plan, file }) {
+  const keys = [projectId + ":file:" + file, ...(plan.work_order?.work_order_id ? [projectId + ":order:" + plan.work_order.work_order_id] : [])].sort();
+  for (const key of keys) {
+    const { rows: [{ locked }] } = await tx.query("select pg_try_advisory_xact_lock(hashtextextended($1, 0)) as locked", [key]);
+    if (!locked) throw new Error("Another start of " + file + " is in progress; nothing was created. Try again in a moment.");
+  }
+  // A card that said "new work order" is out of date once its file became a work order after it
+  // was shown (another card for the same file was said yes to first); --as-new is meant new.
+  if (plan.work_order?.decision === "new" && !plan.work_order.as_new) {
+    const owner = await workOrderOfFile(tx, { projectId, fileName: file });
+    if (owner) throw new Error("This card was made before " + file + " became work order " + owner + "; nothing was created. Run: review-bridge start " + file + " again to see the card as it is now");
+  }
+}
+
+// The work order a card names (new, or the card's) and this version of it, as the yes makes them.
+async function writeWorkOrderVersion(tx, { projectId, plan, file, now }) {
+  const workOrder = plan.work_order || { decision: "new", title: titleOf(plan.task) };
+  let workOrderId = workOrder.work_order_id;
+  if (workOrder.decision === "new") {
+    workOrderId = randomUUID();
+    await tx.query(
+      "insert into work_orders (work_order_id, project_id, last_file_name, created_at, last_activity_at) values ($1, $2, $3, $4, $4)",
+      [workOrderId, projectId, file, now],
+    );
+  } else {
+    const updated = await tx.query(
+      "update work_orders set last_file_name = $3, last_activity_at = $4 where work_order_id = $1 and project_id = $2",
+      [workOrderId, projectId, file, now],
+    );
+    if (!updated.rowCount) throw new Error("The work order " + workOrderId + " this card updates is no longer in Bridge's records. Run: review-bridge start <file> again");
+  }
+  const version = await tx.query(
+    "insert into work_order_versions (work_order_id, content_sha256, version_no, title, source_text, source_file, sealed_at, source_id)"
+    + " select $1, $2, coalesce(max(version_no), 0) + 1, $3, $4, $5, $6, $7 from work_order_versions where work_order_id = $1"
+    + " on conflict (work_order_id, content_sha256) do update set content_sha256 = excluded.content_sha256"
+    + " returning version_no",
+    [workOrderId, plan.task_sha256, workOrder.title, plan.task, file, now, parseWorkOrder(plan.task).frontmatter.source_id],
+  );
+  return { workOrderId, versionNo: version.rows[0].version_no };
+}
+
+// The first yes, or an answer that makes a new version under it: for each plan its work order and version
+// exist from here, and a gathering is opened for it, in one transaction. `yes` is who said it, how, when.
+export async function openGatherings(db, { projectId, items, yes }) {
+  return await db.transaction(async (tx) => {
+    const opened = [];
+    for (const { plan, settingsSha256, yesPlanSha256 } of items) {
+      const file = plan.work_order?.file ?? plan.task_file;
+      await lockWorkOrder(tx, { projectId, plan, file });
+      const now = new Date().toISOString();
+      const { workOrderId, versionNo } = await writeWorkOrderVersion(tx, { projectId, plan, file, now });
+      await tx.query(
+        "insert into contract_gatherings (plan_sha256, yes_plan_sha256, work_order_id, content_sha256, settings_sha256, authorized_by, authorized_via, authorized_at, created_at, status)"
+        + " values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'translating')",
+        [plan.plan_sha256, yesPlanSha256, workOrderId, plan.task_sha256, settingsSha256, yes.by, yes.via, yes.at, now],
+      );
+      opened.push({ workOrderId, versionNo });
+    }
+    await tx.query("update projects set last_activity_at = $2 where project_id = $1", [projectId, new Date().toISOString()]);
+    return opened;
+  });
+}
+
+export async function recordGatheringEvent(db, { planSha256, sequence, event }) {
+  const occurredAt = new Date().toISOString();
+  await db.query(
+    "insert into contract_gathering_events (plan_sha256, sequence, occurred_at, event) values ($1, $2, $3, $4)",
+    [planSha256, sequence, occurredAt, { occurred_at: occurredAt, ...event }],
+  );
+}
+
+export async function closeGathering(db, { planSha256, status, contractSha256 = null, outcome = null }) {
+  await db.query("update contract_gatherings set status = $2, contract_sha256 = $3, outcome = $4 where plan_sha256 = $1", [planSha256, status, contractSha256, outcome]);
+}
+
+// The contract this very text was sealed into under these settings, if any: one probe of
+// contract_gatherings_sealed, whatever the history holds.
+export async function sealedGathering(db, { workOrderId, contentSha256, settingsSha256 }) {
+  const { rows } = await db.query(
+    "select g.plan_sha256, g.contract_sha256, v.version_no from contract_gatherings g"
+    + " join work_order_versions v on v.work_order_id = g.work_order_id and v.content_sha256 = g.content_sha256"
+    + " where g.work_order_id = $1 and g.content_sha256 = $2 and g.settings_sha256 = $3 and g.status = 'sealed'"
+    + " order by g.created_at desc limit 1",
+    [workOrderId, contentSha256, settingsSha256],
+  );
+  return rows[0] || null;
+}
+
+// This file's work order's latest gathering, with its plan, for --answer.
+export async function latestGathering(db, { projectId, fileName }) {
+  const workOrderId = await workOrderOfFile(db, { projectId, fileName });
+  if (!workOrderId) return null;
+  const { rows } = await db.query(
+    "select g.plan_sha256, g.yes_plan_sha256, g.authorized_by, g.authorized_via, g.authorized_at, g.status, g.outcome, p.body as plan"
+    + " from contract_gatherings g join plans p on p.plan_sha256 = g.plan_sha256"
+    + " where g.work_order_id = $1 order by g.created_at desc limit 1",
+    [workOrderId],
+  );
+  return rows[0] || null;
+}
+
+// Whether these cards were said yes to as first cards: one card, one yes.
+export async function anyCardGathered(db, planShas) {
+  const { rows } = await db.query("select 1 from contract_gatherings where plan_sha256 = any($1::text[]) limit 1", [planShas]);
+  return rows.length > 0;
+}
+
+// The events of the gathering a run opens on, for the run's own record (bounded by that one gathering).
+// The first run on a contract takes them all, its tokens among them; a later run on the same contract spent
+// none of those, so it takes only the line that says what was sealed.
+export async function takeGatheringEvents(db, planSha256) {
+  const first = await db.query("update contract_gatherings set events_taken_at = now() where plan_sha256 = $1 and events_taken_at is null", [planSha256]);
+  const { rows } = await db.query("select event from contract_gathering_events where plan_sha256 = $1 order by sequence", [planSha256]);
+  const events = rows.map((row) => row.event);
+  return first.rowCount ? events : events.filter((event) => event.event === "contract.sealed");
+}
+
+// The folder a gathering's calls wrote to: its plan's, by primary key.
+export async function gatheringFolderOf(db, planSha256) {
+  const { rows } = await db.query("select proposed_run_id from plans where plan_sha256 = $1", [planSha256]);
+  return rows[0].proposed_run_id;
+}
+
 export async function recordStart(db, { planSha256, authorize }) {
   const recorder = runRecorder();
   if (!recorder) throw new Error("This process keeps no run records; a start is refused.");
@@ -284,45 +410,11 @@ export async function recordStart(db, { planSha256, authorize }) {
     if (used.rows.length) throw new Error("This card was already said yes to; one card starts one run. Run: review-bridge start <file> again");
     const { project_id: projectId, body: plan } = rows[0];
     const file = plan.work_order?.file ?? plan.task_file;
-    // One start of a file, and of a work order, at a time (PostgreSQL's advisory lock, released when
-    // this transaction ends). A second start meanwhile is refused at once, as the start lock always
-    // refused it (design step 3: not queued); once the first ends, a new card sees what it made.
-    const keys = [projectId + ":file:" + file, ...(plan.work_order?.work_order_id ? [projectId + ":order:" + plan.work_order.work_order_id] : [])].sort();
-    for (const key of keys) {
-      const { rows: [{ locked }] } = await tx.query("select pg_try_advisory_xact_lock(hashtextextended($1, 0)) as locked", [key]);
-      if (!locked) throw new Error("Another start of " + file + " is in progress; nothing was created. Try again in a moment.");
-    }
-    // A card that said "new work order" is out of date once its file became a work order after it
-    // was shown (another card for the same file was said yes to first); --as-new is meant new.
-    if (plan.work_order?.decision === "new" && !plan.work_order.as_new) {
-      const owner = await workOrderOfFile(tx, { projectId, fileName: file });
-      if (owner) throw new Error("This card was made before " + file + " became work order " + owner + "; nothing was created. Run: review-bridge start " + file + " again to see the card as it is now");
-    }
+    await lockWorkOrder(tx, { projectId, plan, file });
     recorder.hold(plan.proposed_run_id);
     const started = await authorize();
     const now = new Date().toISOString();
-    const workOrder = plan.work_order || { decision: "new", title: titleOf(plan.task, plan.task_file) };
-    let workOrderId = workOrder.work_order_id;
-    if (workOrder.decision === "new") {
-      workOrderId = randomUUID();
-      await tx.query(
-        "insert into work_orders (work_order_id, project_id, last_file_name, created_at, last_activity_at) values ($1, $2, $3, $4, $4)",
-        [workOrderId, projectId, file, now],
-      );
-    } else {
-      const updated = await tx.query(
-        "update work_orders set last_file_name = $3, last_activity_at = $4 where work_order_id = $1 and project_id = $2",
-        [workOrderId, projectId, file, now],
-      );
-      if (!updated.rowCount) throw new Error("The work order " + workOrderId + " this card updates is no longer in Bridge's records. Run: review-bridge start <file> again");
-    }
-    const version = await tx.query(
-      "insert into work_order_versions (work_order_id, content_sha256, version_no, title, source_text, source_file, sealed_at, source_id)"
-      + " select $1, $2, coalesce(max(version_no), 0) + 1, $3, $4, $5, $6, $7 from work_order_versions where work_order_id = $1"
-      + " on conflict (work_order_id, content_sha256) do update set content_sha256 = excluded.content_sha256"
-      + " returning version_no",
-      [workOrderId, plan.task_sha256, workOrder.title, plan.task, file, now, parseWorkOrder(plan.task).frontmatter.source_id],
-    );
+    const { workOrderId, versionNo } = await writeWorkOrderVersion(tx, { projectId, plan, file, now });
     const authorization = started.authorization;
     // A directory's yes wrote it already (recordDirectoryYes); its id is the plan's, so it is this one.
     await insertStartAuthorization(tx, planSha256, authorization);
@@ -336,7 +428,7 @@ export async function recordStart(db, { planSha256, authorize }) {
     if (started.superseded?.length) {
       await tx.query("update runs set superseded_by = $1 where run_id = any($2::uuid[])", [started.run.run_id, started.superseded]);
     }
-    return { ...started, workOrderId, versionNo: version.rows[0].version_no };
+    return { ...started, workOrderId, versionNo };
   }).catch((error) => {
     recorder.drop();
     throw error;
@@ -365,6 +457,7 @@ export async function clearProject(db, projectId) {
     await remove("runs", "delete from runs where project_id = $1");
     await remove("authorization_claims", "delete from authorization_claims where authorization_id in (select authorization_id from authorizations where plan_sha256 in (" + plans + "))");
     await remove("authorizations", "delete from authorizations where plan_sha256 in (" + plans + ")");
+    await remove("contract_gatherings", "delete from contract_gatherings where work_order_id in (" + orders + ")");
     await remove("contracts", "delete from contracts where work_order_id in (" + orders + ")");
     await remove("plans", "delete from plans where project_id = $1");
     await remove("work_order_versions", "delete from work_order_versions where work_order_id in (" + orders + ")");

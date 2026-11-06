@@ -1,11 +1,13 @@
-// The model calls between the human starting the work and the writer's first call, all named in
-// the plan the human approved: Bridge splits the sealed work order into its marked blocks, the
+// The model calls between the person's yes and the writer's first call, all named in
+// the card the person said yes to: Bridge splits the sealed work order into its marked blocks, the
 // writer's provider cuts the acceptance blocks into conditions (no write access), code checks them, the
 // reviewer's provider reads them against those blocks in its own read-only session, and only then
-// is the contract sealed. A work order that states no result, or lists open questions, stops before
-// any model call. A translation mistake is sent back
-// to the writer a bounded number of times; a real ambiguity or anything the reviewer cannot
-// confirm stops the run for the human. There is no second human approval.
+// is the contract sealed. A work order that lists open questions stops before any model call; one that
+// states no acceptance has nothing to cut, so the reviewer proposes some. A translation mistake is sent
+// back to the writer a bounded number of times, and an answer in the wrong shape is asked of the reviewer
+// again under the same count. A question only the human can answer, or anything the reviewer cannot
+// confirm, comes back to whoever called: a start asks the person before any run exists (gather.mjs); the
+// low-level work-start closes its run on it. Which of them is calling is its `trail`.
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -36,9 +38,9 @@ import {
 import { parseWorkOrder } from "./workOrderFormat.mjs";
 
 // A provider failure is reported as one, like the writer's or reviewer's own.
-async function providerStop({ paths, runId, stamp, role, provider, phase, processResult, texts, evidence }) {
+async function providerStop({ paths, trail, stamp, role, provider, phase, processResult, texts, evidence }) {
   const classified = classifyProviderFailure({ role, provider, phase, exitCode: processResult.exitCode, timedOut: processResult.timedOut, code: processResult.failureCode, texts });
-  const written = await writeFailureRecord(paths, paths.runLogDir(runId), stamp + "-" + phase, classified, evidence);
+  const written = await writeFailureRecord(paths, trail.logs, stamp + "-" + phase, classified, evidence);
   const status = processResult.timedOut ? (role === "translator" ? "writer_timeout" : "reviewer_failed")
     : classified.reason === "provider_usage_limit" ? "rate_limited"
       : role === "translator" ? "writer_failed" : "reviewer_failed";
@@ -47,22 +49,22 @@ async function providerStop({ paths, runId, stamp, role, provider, phase, proces
 
 // The same ceilings the writer and reviewer are held to, checked before anything else starts.
 // Usage Bridge could not read is not zero: the ceiling cannot be shown to hold, so the run stops.
-async function ceilingStop({ paths, runId, usage, limits }) {
+async function ceilingStop({ trail, usage, limits }) {
   if (usage.parse_error || usage.partial) return { status: "usage_unknown", detail: usage.role, token_limit_role: usage.role, missing: usage.missing || [] };
   const callTotal = tokenTotal(usage.tokens);
-  const runTotal = await usageTotalForRun(paths, runId);
+  const runTotal = await trail.usageTotal();
   if (callTotal <= limits.tokens_per_call && runTotal <= limits.tokens) return null;
   const which = callTotal > limits.tokens_per_call ? "per_call" : "per_run";
   return { status: "token_limit", detail: which, token_limit: which, token_limit_role: usage.role, tokens_this_call: callTotal, tokens_this_run: runTotal };
 }
 
-async function translateOnce({ paths, runId, workPackage, adapter, steps, lines, format, attempt, feedback, effort, onSpawn }) {
+async function translateOnce({ paths, trail, workPackage, adapter, steps, lines, format, attempt, feedback, effort, onSpawn }) {
   // The call's own limit, cut to what is left of the run's time; nothing is left: no call.
-  const timeoutMs = await callTimeLeft(paths, runId, steps.call_timeout);
+  const timeoutMs = await trail.timeLeft(steps.call_timeout);
   if (timeoutMs === null) return { timedOut: true };
   const prompt = composeTranslationPrompt({ workPackageId: workPackage.work_package_id, lines, format, test: workPackage.test, attempt, feedback });
-  const stamp = callStamp(runId);
-  const logs = paths.runLogDir(runId);
+  const stamp = callStamp(trail.id);
+  const { logs } = trail;
   const streamPath = path.join(logs, stamp + "-contract.stream.jsonl");
   const stderrPath = path.join(logs, stamp + "-contract.stderr.log");
   const resultPath = path.join(logs, stamp + "-contract.result.json");
@@ -74,10 +76,10 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
     sessionId: randomUUID(), maxTurns: TRANSLATION_MAX_TURNS, mcpOff: workPackage.writer?.mcp_off, stdoutPath: streamPath, stderrPath, answerPath: resultPath, timeoutMs, onSpawn,
   });
   const usage = { ...called.usage, attempt };
-  await appendIoEvent(paths, runId, usage);
+  await trail.record(usage);
   if (called.failed) {
     return { usage, stop: await providerStop({
-      paths, runId, stamp, role: "translator", provider, phase: "translate", processResult: called,
+      paths, trail, stamp, role: "translator", provider, phase: "translate", processResult: called,
       texts: await called.failureTexts(), evidence: { stdout_path: streamPath, stderr_path: stderrPath },
     }) };
   }
@@ -94,12 +96,12 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
   return { usage, translation: called.answer, resultPath };
 }
 
-async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, maxTurns, onSpawn }) {
-  const timeoutMs = await callTimeLeft(paths, runId, steps.call_timeout);
+async function checkOnce({ paths, trail, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, maxTurns, onSpawn }) {
+  const timeoutMs = await trail.timeLeft(steps.call_timeout);
   if (timeoutMs === null) return { timedOut: true };
   const prompt = composeCheckPrompt({ workPackageId: workPackage.work_package_id, lines, format, candidate, sha256, attempt });
-  const stamp = callStamp(runId);
-  const logs = paths.runLogDir(runId);
+  const stamp = callStamp(trail.id);
+  const { logs } = trail;
   const stdoutPath = path.join(logs, stamp + "-contract-check.stdout.log");
   const stderrPath = path.join(logs, stamp + "-contract-check.stderr.log");
   const resultPath = path.join(logs, stamp + "-contract-check.result.json");
@@ -112,10 +114,10 @@ async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, for
     stdoutPath, stderrPath, answerPath: resultPath, timeoutMs, onSpawn,
   });
   const usage = { ...called.usage, attempt };
-  await appendIoEvent(paths, runId, usage);
+  await trail.record(usage);
   if (called.failed) {
     return { usage, stop: await providerStop({
-      paths, runId, stamp, role: "contract_checker", provider, phase: "contract_check", processResult: called,
+      paths, trail, stamp, role: "contract_checker", provider, phase: "contract_check", processResult: called,
       texts: await called.failureTexts(), evidence: { stdout_path: stdoutPath, stderr_path: stderrPath },
     }) };
   }
@@ -132,11 +134,20 @@ function guardedSpawn({ onSpawn, isStopped, role, provider }) {
   };
 }
 
+// Where a run's translation leaves its records: its log folder and its events, under its deadline.
+export const runTrail = (paths, runId) => ({
+  id: runId,
+  logs: paths.runLogDir(runId),
+  record: (event) => appendIoEvent(paths, runId, event),
+  usageTotal: () => usageTotalForRun(paths, runId),
+  timeLeft: (timeoutMs) => callTimeLeft(paths, runId, timeoutMs),
+});
+
 // Returns { status: "sealed", sha256 } or { status, ... } for the run to stop with. The stop
 // state is read before every model call and again once each call has its pid, retries included.
 // `effort` and `model` are the reviewer's and `translateEffort` the writer's, from the policy's
 // priority table; a model of null leaves the choice to the CLI.
-export async function establishContract({ paths, runId, workPackage, adapter, limits, effort, model = null, translateEffort, isStopped, onSpawn }) {
+export async function establishContract({ paths, trail, workPackage, adapter, limits, effort, model = null, translateEffort, isStopped, onSpawn }) {
   const steps = workPackage.contract_steps;
   // The same split the plan made; the human answers what the work order leaves open, not a model.
   const format = parseWorkOrder(workPackage.task);
@@ -146,51 +157,75 @@ export async function establishContract({ paths, runId, workPackage, adapter, li
   const stopped = { status: "stopped", detail: "stopped around a contract call" };
   const translatorSpawn = guardedSpawn({ onSpawn, isStopped, role: "translator", provider: steps.translate.provider });
   const checkerSpawn = guardedSpawn({ onSpawn, isStopped, role: "contract_checker", provider: steps.check.provider });
+  const clarify = workPackage.clarify || null;
+  const proposing = !format.acceptance.length;
+  const translator = (attempt) => ({ role: "writer", provider: steps.translate.provider, model: steps.translate.model, attempt });
+  const checker = { role: "reviewer", provider: steps.check.provider };
   let feedback = [];
   let lastProblems = [];
+  // The candidate of an answer in the wrong shape: the fault is the reviewer's, so the writer is not
+  // called again and gets no feedback about it.
+  let unchecked = null;
   for (let attempt = 1; attempt <= steps.max_attempts; attempt += 1) {
     if (await isStopped()) return stopped;
-    const translated = await translateOnce({ paths, runId, workPackage, adapter, steps, lines, format, attempt, feedback, effort: translateEffort, onSpawn: translatorSpawn });
-    if (await isStopped() || translated.timedOut) return stopped;
-    if (translated.stop) return translated.stop;
-    const overTranslation = await ceilingStop({ paths, runId, usage: translated.usage, limits });
-    if (overTranslation) return overTranslation;
-    const checked = await checkTranslation(translated.translation, { lines, format, test: workPackage.test });
-    await appendIoEvent(paths, runId, {
-      event: "contract.translation", attempt, ok: checked.ok, problems: checked.problems.slice(0, 20), result_path: translated.resultPath,
-    });
-    if (!checked.ok) {
-      lastProblems = checked.problems;
-      feedback = checked.problems.slice(0, 20);
-      continue;
+    let candidate = unchecked;
+    if (!candidate && proposing) candidate = buildContract({ workPackage, lines, format, translation: { acceptance: [] }, translator: translator(attempt), checker });
+    if (!candidate) {
+      const translated = await translateOnce({ paths, trail, workPackage, adapter, steps, lines, format, attempt, feedback, effort: translateEffort, onSpawn: translatorSpawn });
+      if (await isStopped() || translated.timedOut) return stopped;
+      if (translated.stop) return translated.stop;
+      const overTranslation = await ceilingStop({ trail, usage: translated.usage, limits });
+      if (overTranslation) return overTranslation;
+      const checked = await checkTranslation(translated.translation, { lines, format, test: workPackage.test });
+      await trail.record({
+        event: "contract.translation", attempt, ok: checked.ok, problems: checked.problems.slice(0, 20), result_path: translated.resultPath,
+      });
+      if (!checked.ok) {
+        lastProblems = checked.problems;
+        feedback = checked.problems.slice(0, 20);
+        continue;
+      }
+      candidate = buildContract({ workPackage, lines, format, translation: translated.translation, translator: translator(attempt), checker });
     }
-    const candidate = buildContract({
-      workPackage, lines, format, translation: translated.translation,
-      translator: { role: "writer", provider: steps.translate.provider, model: steps.translate.model, attempt },
-      checker: { role: "reviewer", provider: steps.check.provider },
-    });
     const sha256 = digest(candidate);
     if (await isStopped()) return stopped;
-    const review = await checkOnce({ paths, runId, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, maxTurns: limits.max_turns, onSpawn: checkerSpawn });
+    const review = await checkOnce({ paths, trail, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, maxTurns: limits.max_turns, onSpawn: checkerSpawn });
     if (await isStopped() || review.timedOut) return stopped;
     if (review.stop) return review.stop;
-    const overCheck = await ceilingStop({ paths, runId, usage: review.usage, limits });
+    const overCheck = await ceilingStop({ trail, usage: review.usage, limits });
     if (overCheck) return overCheck;
-    const decided = await decideCheck(review.answer, { candidate, sha256 });
-    await appendIoEvent(paths, runId, {
-      event: "contract.check", attempt, candidate_sha256: sha256, decision: decided.decision,
-      problems: decided.problems.slice(0, 20), feedback: decided.feedback.slice(0, 20), questions: decided.questions, result_path: review.resultPath,
+    const decided = await decideCheck(review.answer, {
+      candidate, sha256, lineCount: lines.length, proposing, clarify,
+      maxQuestions: limits.clarify_questions, lookupHeld: Boolean(workPackage.reviewer?.mcp?.length),
     });
-    if (decided.decision === "needs_human") return { status: "needs_human", detail: "ambiguous_work_order", questions: decided.questions };
+    await trail.record({
+      event: "contract.check", attempt, candidate_sha256: sha256, decision: decided.decision,
+      problems: decided.problems.slice(0, 20), feedback: decided.feedback.slice(0, 20), questions: decided.questions.map((entry) => entry.question), result_path: review.resultPath,
+    });
+    if (decided.decision === "malformed") {
+      unchecked = candidate;
+      lastProblems = decided.problems;
+      continue;
+    }
+    unchecked = null;
+    if (decided.decision === "needs_human") {
+      // Every round was asked and it still cannot be settled: the record of them goes to the person.
+      if (clarify && clarify.round > limits.clarify_rounds) return { status: "needs_human", detail: "clarify_rounds", clarify_exhausted: true };
+      return { status: "needs_human", detail: "ambiguous_work_order", clarify_questions: decided.questions };
+    }
     if (decided.decision === "unconfirmed") return { status: "contract_unconfirmed", detail: decided.problems[0], problems: decided.problems };
     if (decided.decision === "retranslate") {
       lastProblems = decided.feedback;
       feedback = decided.feedback;
       continue;
     }
-    const sealed = await sealContract(paths, candidate);
-    await appendIoEvent(paths, runId, { event: "contract.sealed", contract_sha256: sealed.sha256, attempt });
+    // What the reviewer checked is the candidate; the assumptions are its own answer, so the sealed hash
+    // differs from the candidate's when there are any, and the event names both.
+    const sealed = await sealContract(paths, { ...candidate, assumptions: decided.assumptions });
+    await trail.record({ event: "contract.sealed", contract_sha256: sealed.sha256, candidate_sha256: sha256, attempt });
     return { status: "sealed", sha256: sealed.sha256 };
   }
+  // The reviewer's answer never came in the right shape: as when it says it cannot confirm.
+  if (unchecked) return { status: "contract_unconfirmed", detail: lastProblems[0], problems: lastProblems };
   return { status: "contract_rejected", detail: lastProblems[0] || "translation refused", problems: lastProblems };
 }

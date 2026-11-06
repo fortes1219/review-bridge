@@ -96,7 +96,11 @@
         "additionalProperties": false,
         "required": [
           "question",
-          "source_refs"
+          "source_refs",
+          "blocks",
+          "convention",
+          "acceptance_proposal",
+          "readings"
         ],
         "properties": {
           "question": {
@@ -106,6 +110,7 @@
           },
           "source_refs": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -121,6 +126,63 @@
                 "end": {
                   "type": "integer",
                   "minimum": 1
+                }
+              }
+            }
+          },
+          "blocks": {
+            "enum": [
+              "verification",
+              "implementation",
+              "preference"
+            ]
+          },
+          "convention": {
+            "type": "boolean"
+          },
+          "acceptance_proposal": {
+            "type": "boolean"
+          },
+          "readings": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text",
+                "precedent"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "precedent": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": false,
+                  "required": [
+                    "source",
+                    "note"
+                  ],
+                  "properties": {
+                    "source": {
+                      "enum": [
+                        "project",
+                        "lookup",
+                        "knowledge"
+                      ]
+                    },
+                    "note": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  }
                 }
               }
             }

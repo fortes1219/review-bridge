@@ -83,8 +83,12 @@ async function card(t, answer) {
   t.after(() => start.kill());
   await start.waitFor(/Where should the work stop/);
   start.press(KEYS.enter);
-  await start.waitFor(/Start this work\? \[y\/N\]/);
+  await start.waitFor(/Turn it into a contract and ask what it leaves open\? \[y\/N\]/);
   start.press(answer + KEYS.enter);
+  if (answer === "y") {
+    await start.waitFor(/Start this work\? \[y\/N\]/);
+    start.press(answer + KEYS.enter);
+  }
   const code = await start.exited;
   const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   return { code, text: start.text(), projectId };

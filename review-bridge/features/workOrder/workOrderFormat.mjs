@@ -28,12 +28,14 @@ export const BLOCK_KEYS = Object.freeze([
   "scope_notes.include", "scope_notes.exclude", "scope_notes.must_keep", "scope_notes.expected_locations",
   "acceptance", "verification_hints",
   "reproduction.environment", "reproduction.steps", "reproduction.actual", "reproduction.expected", "reproduction.frequency",
-  "references", "open_questions",
+  "references", "open_questions", "clarifications",
 ]);
 const RUN_KEYS = Object.freeze(["effort", "budget", "depends_on", "acceptance"]);
 // The shortest call timeout a work order or a flag may ask for, as before.
 export const MIN_CALL_TIMEOUT = 60_000;
 
+// What a work order with no "# " line is called (Owner 2026-11-06): one sentence is a work order.
+export const UNTITLED = "untitled";
 const FENCE = "---";
 const MARKER = /^<!--\s*bridge:(\S*?)\s*-->$/;
 const TITLE = /^# \S/;
@@ -305,7 +307,9 @@ export function parseWorkOrder(text) {
     if (current) current.content.push(number);
     else unused.push(number);
   }
-  if (!title) problems.push("line " + (frontmatter.end + 1) + ": the work order has no title; its first line starting with \"# \" is the title");
+  // Only a work order that says nothing at all is refused; one sentence is enough, and has no title line.
+  if (!lines.slice(frontmatter.end).some((line) => !isBlank(line))) problems.push("line " + (frontmatter.end + 1) + ": the work order says nothing; write what you want done");
+  title ??= { line: null, text: UNTITLED };
   // An empty run_plan block, as the template ships it, is no run plan.
   const runPlan = blocks.get("run_plan");
   const planned = runPlan && (runPlan.content.length || runPlan.all.some((number) => RUN_HEADING.test(lines[number - 1])));

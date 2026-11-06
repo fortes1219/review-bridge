@@ -14,7 +14,7 @@ try {
 
 // `skip` for node:test: false when a terminal is available, else the reason.
 export const ptySkip = pty ? false : unavailable;
-export const KEYS = Object.freeze({ enter: "\r", ctrlC: "\x03" });
+export const KEYS = Object.freeze({ enter: "\r", ctrlC: "\x03", down: "\x1b[B" });
 
 // The screen's text without colours and cursor moves.
 const plain = (raw) => raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]/g, "");
@@ -29,6 +29,7 @@ export function terminal(args, { cwd, env, cols = 120, rows = 40, timeoutMs = 12
   const text = () => plain(raw);
   return {
     text,
+    raw: () => raw,
     exited,
     press: (keys) => child.write(keys),
     // Always called when a test ends: on Windows the pseudo-console is released only by kill, even

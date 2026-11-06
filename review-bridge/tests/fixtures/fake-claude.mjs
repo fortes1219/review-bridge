@@ -25,9 +25,12 @@ if (!sessionId || !mode) {
   process.stderr.write("writer-only resume contract missing\n");
   process.exit(2);
 }
+// FAKE_WRITER_ONLY=1 keeps the failures and the token count below to the writer's calls, for a test of the
+// runs after the contracts were gathered.
+const applies = process.env.FAKE_WRITER_ONLY !== "1" || mode === "writer";
 // FAKE_ON_SIGNED_OUT, FAKE_ON_OUT_OF_USAGE: the CLI's own typed error for this work order, as 2.1.280's
 // stream carries it: an assistant line with `error` beside `message`, then an error result.
-const typedError = fakeOn(prompt, "SIGNED_OUT") ? ["authentication_failed", "Not logged in · Please run /login"]
+const typedError = !applies ? null : fakeOn(prompt, "SIGNED_OUT") ? ["authentication_failed", "Not logged in · Please run /login"]
   : fakeOn(prompt, "OUT_OF_USAGE") ? ["billing_error", "You're out of usage credits"] : null;
 if (typedError) {
   const [error, text] = typedError;
@@ -49,7 +52,7 @@ const injected = /^=== (.+?) \([0-9a-f]{12}\) ===$/m.exec(prompt);
 const firstRead = mode === "review" ? reviewInput(prompt).delta?.[0]?.path || "README.md" : injected ? injected[1] : "README.md";
 const resultMode = process.env.FAKE_CLAUDE_RESULT || "OK";
 const rateLimited = resultMode === "RATE_LIMIT";
-const cacheRead = Number(process.env.FAKE_CLAUDE_TOKENS || 150_346);
+const cacheRead = Number((applies && process.env.FAKE_CLAUDE_TOKENS) || 150_346);
 const streamMode = process.argv.includes("stream-json");
 const typed = process.argv.includes("--json-schema");
 

@@ -1,7 +1,9 @@
 // A directory of work orders is one line (RC3-PIPE-01, Owner 2026-11-06). The file names say the order
 // and the records say what is left, as migration tools scan a folder and run what has not run (Flyway's
-// V2__, Knex); one work order failing does not stop the next, and a table of every one closes it, as
-// Playwright runs its files; a second Ctrl+C ends it at once, as Playwright's SigIntWatcher does. The
+// V2__, Knex). A line gathers before it works (RC3-ASK-01, gather.mjs): a first card and yes, every
+// contract sealed and every question asked, a second card and yes; only then the runs, one after another,
+// asking nothing. One work order failing its work does not stop the next, and a table of every one closes it,
+// as Playwright runs its files; a second Ctrl+C ends it at once, as Playwright's SigIntWatcher does. The
 // line is the process in this terminal: nothing keeps running or waiting behind it, and nothing of it is
 // stored except each plan's place on the card (`plan.line`), so a later start works out what is pending
 // from the records again.
@@ -9,20 +11,24 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import readline from "node:readline/promises";
 
-import { acquireLock, activeLineSteps, inspectProvider, isPidAlive, readJson, readRun, SIGN_IN_COMMANDS, writeJson } from "../../service/index.mjs";
+import { acquireLock, activeLineSteps, inspectProvider, isPidAlive, readJson, readRun, writeJson } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { workOrderDirectory } from "../../utils/paths.mjs";
 import { nfc } from "../../utils/workOrderName.mjs";
 import { deliverOutcome } from "./delivery.mjs";
+import { askYes, gatherContracts, interruptWatcher, readiness, sealedContractOf, stoppedLine, stopOfRun, yesOf } from "./gather.mjs";
+import { createTranslator, resolveLocale } from "./i18n.mjs";
 import {
-  anyCardUsed, canonicalTaskFile, latestCardsOfFiles, latestRunsOfFiles, markCardsShown, recordDirectoryYes, withdrawCards,
+  anyCardGathered, anyCardUsed, canonicalTaskFile, latestCardsOfFiles, latestRunsOfFiles, markCardsShown, recordDirectoryYes, withdrawCards,
 } from "./workOrderRecords.mjs";
+import { parseWorkOrder } from "./workOrderFormat.mjs";
 import { authorizeCard, optionAgainstCard, planFilePath, PLAN_SCHEMA_VERSION, workLockReleased, workOrderChecker } from "./workPackage.mjs";
 import { uncommittedNow } from "./workspaceEvidence.mjs";
 import { stopRun } from "./writerLoop.mjs";
+
+export { stopOfRun };
 
 const write = (line) => process.stdout.write(line + "\n");
 
@@ -148,9 +154,15 @@ function cardLines({ directory, rows, place, uncommitted }) {
     if (rowKind(row) === "delivered") return "delivered " + localTimestamp(row.deliveredAt).slice(0, 16) + "   (skip)";
     if (rowKind(row) === "appeared") return "appeared after the card   (skip)";
     const before = toRun[toRun.indexOf(row) - 1];
+    if (row.plan.contract_sha256) {
+      const version = row.plan.work_order?.to_version;
+      return "contract sha256 " + row.plan.contract_sha256.slice(0, 4) + "…" + (version ? "   version " + version : "") + (row.interrupted ? "   (interrupted last time; starts a new run)" : "");
+    }
     const notes = [
+      ...(row.reused ? ["contract sealed earlier; not translated again"] : []),
       ...(row.step !== null && before?.step === row.step ? ["same number as " + before.name + "; runs after it, by name"] : []),
       ...(row.interrupted ? ["interrupted last time; starts a new run"] : []),
+      ...(!parseWorkOrder(row.plan.task).acceptance.length ? ["no acceptance yet: the reviewer proposes some and you choose"] : []),
       ...(row.plan.work_order?.renamed_from ? ["reads as " + row.plan.work_order.renamed_from + " renamed; recorded as the same work order"] : []),
     ];
     return "sha256 " + row.plan.task_sha256.slice(0, 4) + "…" + notes.map((note) => "   (" + note + ")").join("");
@@ -164,6 +176,7 @@ function cardLines({ directory, rows, place, uncommitted }) {
     "",
     ...(toRun.length ? [
       ...place.cardLines,
+      ...(toRun.some((row) => !row.plan.contract_sha256) ? ["Next: each is turned into a contract and you are asked what they leave open. A second card comes before any work."] : []),
       ...(uncommitted?.length ? ["Working tree has " + uncommitted.length + " uncommitted file(s); they will be listed in each result's third list."] : []),
     ] : ["Nothing to run."]),
   ];
@@ -193,7 +206,8 @@ async function cardForYes({ paths, records, directory, rows, options, again }) {
     if (option) return refuse(option + " is not what the card showed. Run: " + again + " --yes without it, or " + again + " to show the person a new card.");
     if (!(card.authorization_expires_at > new Date())) return refuse("The card was valid until " + card.authorization_expires_at.toISOString() + ". Run: " + again + " and show the person the new card.");
   }
-  if (await anyCardUsed(records.db, onCard.map((card) => card.plan_sha256))) return refuse("This card was already said yes to; one card starts its line once. Run: " + again + " and show the person the new card.");
+  const shas = onCard.map((card) => card.plan_sha256);
+  if (await anyCardUsed(records.db, shas) || await anyCardGathered(records.db, shas)) return refuse("This card was already said yes to; one card starts its line once. Run: " + again + " and show the person the new card.");
   const plans = [];
   for (const card of [...onCard].sort((left, right) => left.body.line.position - right.body.line.position)) {
     const planPath = planFilePath(paths, card.body);
@@ -205,14 +219,6 @@ async function cardForYes({ paths, records, directory, rows, options, again }) {
   return plans;
 }
 
-// Provider words a run stopped on that the next work order would die of too; a person's stop; or null.
-export function stopOfRun(run) {
-  const failure = run?.last_state?.failure;
-  if (failure?.reason === "provider_signed_out") return { kind: "signed_out", provider: failure.provider };
-  if (failure?.reason === "provider_usage_limit") return { kind: "usage_limit", provider: failure.provider, resetHint: failure.reset_hint };
-  return run?.closed_reason === "stopped" ? { kind: "stopped" } : null;
-}
-
 // Before each step, without a model call: a provider of its roles the CLI says is signed out. "unknown"
 // is not "out": the step runs, and its own call says.
 export async function signedOutProvider(plan, inspect) {
@@ -220,35 +226,6 @@ export async function signedOutProvider(plan, inspect) {
     if ((await inspect(provider)).next_action === "sign_in") return provider;
   }
   return null;
-}
-
-// Playwright's SigIntWatcher: the first signal is a request to stop; the handler goes after a second, so
-// the next Ctrl+C ends the process at once, and a package runner's duplicate of the first does not.
-function interruptWatcher(onInterrupt) {
-  let had = false;
-  let timer = null;
-  const handler = () => {
-    if (had) return;
-    had = true;
-    timer = setTimeout(disarm, 1_000);
-    onInterrupt();
-  };
-  function disarm() {
-    clearTimeout(timer);
-    process.off("SIGINT", handler);
-    process.off("SIGTERM", handler);
-  }
-  process.on("SIGINT", handler);
-  process.on("SIGTERM", handler);
-  return { hadSignal: () => had, disarm };
-}
-
-function stoppedLine(stop, position, notRun) {
-  const rest = notRun.length ? "; " + notRun.join(", ") + " did not run" : "";
-  const again = "run start on this directory again: only what is pending runs.";
-  if (stop.kind === "signed_out") return "Stopped at step " + position + ": " + stop.provider + " needs signing in again (" + SIGN_IN_COMMANDS[stop.provider] + ")" + rest + ". After signing in, " + again;
-  if (stop.kind === "usage_limit") return "Stopped at step " + position + ": " + stop.provider + " is out of quota" + (stop.resetHint ? " until " + stop.resetHint : "") + rest + ". When it is back, " + again;
-  return "Stopped at step " + position + rest + ". To carry on, " + again;
 }
 
 // Runs the plans of a card in order, to the end or to the first stop, and prints the table. One yes
@@ -304,9 +281,7 @@ async function runLine({ paths, records, directory, rows, plans, authorizedVia, 
   const widest = Math.max(...outcomes.map((outcome) => outcome.conclusion.length)) + 2;
   write("");
   write("Line " + directory.shown + ":");
-  for (const outcome of outcomes) {
-    write("  " + outcome.name.padEnd(width) + outcome.conclusion.padEnd(widest) + (outcome.result ? tools.shownPath(outcome.result) : outcome.why || ""));
-  }
+  for (const outcome of outcomes) write("  " + outcome.name.padEnd(width) + outcome.conclusion.padEnd(widest) + (outcome.result ? tools.shownPath(outcome.result) : outcome.why || ""));
   if (stop) write(stoppedLine(stop, stop.position, outcomes.filter((outcome) => outcome.conclusion === "not run").map((outcome) => outcome.plan.line.position)));
   if (appeared) write(appeared + " file(s) appeared after the plan and did not run; run start on this directory again.");
   if (stop?.kind === "stopped") return 130;
@@ -314,22 +289,15 @@ async function runLine({ paths, records, directory, rows, plans, authorizedVia, 
   return outcomes.every((outcome) => outcome.conclusion === "success") ? 0 : 1;
 }
 
-async function askYes(question) {
-  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return /^y(?:es)?$/i.test((await terminal.question(question)).trim());
-  } finally {
-    terminal.close();
-  }
-}
-
-// `start <directory>`. `tools` are the steps it shares with a single start, given by commands.mjs.
+// `start <directory>`: the gathering, then the line. `tools` are the steps it shares with a single start,
+// given by commands.mjs. --yes says yes to the card printed last, whichever of the two that was.
 export async function startDirectory({ paths, options, adapter, loadAdapter, guard, reviewerCheck, directory, tools }) {
   if (options.update !== undefined || options.asNew || options.workPackage !== undefined) {
     throw new Error("--update, --as-new and --work-package are about one work order: give its file, not a directory.");
   }
   // As the disk spells it and pasted into any shell, as a single start's: a name may hold a space.
-  const again = "review-bridge start " + tools.shownPath(directory.absolute).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
+  const fake = options.fakeCli ? " --fake-cli" : "";
+  const again = "review-bridge start " + tools.shownPath(directory.absolute).replaceAll("\\", "/") + fake;
   const records = await tools.openRecords(paths);
   const refused = await lineRunningLine(paths, records, directory.name);
   if (refused) { write(refused); return 1; }
@@ -339,13 +307,14 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
     write(busy.map(({ name, runId }) => name + " is running (run " + runId + ")").join("; ") + ". Stop it or wait for it, then run: " + again);
     return 1;
   }
+  const newBatch = () => ({ records, cache: {}, memo: { candidates: null, taken: new Set() } });
   let plans;
   if (options.yes) {
     plans = await cardForYes({ paths, records, directory, rows, options, again });
     if (!plans) return 1;
   } else {
     const pending = rows.filter((row) => !row.problem && !row.deliveredAt);
-    const batch = { records, cache: {}, memo: { candidates: null, taken: new Set() } };
+    const batch = newBatch();
     const id = randomUUID();
     plans = [];
     for (const [index, row] of pending.entries()) {
@@ -357,37 +326,34 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
   }
   const place = whereLineRuns();
   const first = plans[0];
-  if (first && !options.fakeCli) {
-    const answer = await reviewerCheck({
-      reviewer: first.reviewer.provider,
-      mcp: { off: first.reviewer.mcp_off, allow: first.reviewer.mcp },
-      onStart: (reviewer) => write("Checking that the reviewer (" + reviewer + ") cannot write files: one model call..."),
-    });
-    if (!answer.ok) {
-      for (const line of tools.checkFailureLines(answer, again)) write(line);
-      if (!options.yes) await withdrawCards(records.db, plans.map((plan) => plan.plan_sha256));
-      return 1;
+  const uncommitted = first ? uncommittedNow(paths.repoRoot) : null;
+  const card = () => {
+    write("");
+    for (const line of cardLines({ directory, rows, place, uncommitted })) write(line);
+  };
+  if (!first) { card(); return 0; }
+  const withdraw = (list) => withdrawCards(records.db, list.map((plan) => plan.plan_sha256));
+  const needsAuthorization = () => write("Needs authorization. If the person says yes, run again: " + again + " --yes");
+  const ready = readiness({ options, adapter, loadAdapter, guard, reviewerCheck, plan: first, again, checkFailureLines: tools.checkFailureLines });
+  const sealedCard = Boolean(first.contract_sha256);
+  if (!sealedCard) {
+    for (const row of rows) if (row.plan) row.reused = await sealedContractOf(records.db, paths, row.plan);
+  }
+  // No model call before a yes (Owner 2026-11-06): the read-only check counts, so it comes after this one.
+  const translates = !sealedCard && rows.some((row) => row.plan && !row.reused);
+  if (translates) {
+    card();
+    await markCardsShown(records.db, plans.map((plan) => plan.plan_sha256));
+    if (!options.yes) {
+      if (!tools.interactive()) { needsAuthorization(); return 1; }
+      if (!(await askYes("Turn these " + plans.length + " into contracts and ask what they leave open? [y/N] "))) {
+        await withdraw(plans);
+        write("Not started. Nothing was authorized.");
+        return 1;
+      }
     }
-    write("Reviewer read-only check: passed" + (answer.already ? " (earlier in this page session)" : ""));
-  } else if (first) {
-    write("Reviewer read-only check: not needed with the fake CLI (no model is called)");
+    write("");
   }
-  write("");
-  for (const line of cardLines({ directory, rows, place, uncommitted: first ? uncommittedNow(paths.repoRoot) : null })) write(line);
-  if (!first) return 0;
-  await markCardsShown(records.db, plans.map((plan) => plan.plan_sha256));
-  if (!options.yes && !tools.interactive()) {
-    write("Needs authorization. If the person says yes, run again: " + again + " --yes");
-    return 1;
-  }
-  await guard(first.reviewer.provider, { off: first.reviewer.mcp_off, allow: first.reviewer.mcp });
-  const runAdapter = adapter || await loadAdapter();
-  if (!options.yes && !(await askYes("Run these " + plans.length + " in this order? [y/N] "))) {
-    await withdrawCards(records.db, plans.map((plan) => plan.plan_sha256));
-    write("Not started. Nothing was authorized.");
-    return 1;
-  }
-  write("");
   let release;
   try {
     release = await acquireLock(lineLockFile(paths, directory.name));
@@ -396,6 +362,47 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
     return 1;
   }
   try {
+    const t = await createTranslator(await resolveLocale(paths));
+    if (!sealedCard) {
+      const prepared = translates ? await ready() : null;
+      if (translates && !prepared) {
+        if (!options.yes) await withdraw(plans);
+        return 1;
+      }
+      const items = rows.filter((row) => row.plan).map((row) => ({
+        row, plan: row.plan, name: row.name, absolute: row.absolute, reused: row.reused,
+        label: "[" + row.plan.line.position + "/" + row.plan.line.total + "] " + row.name,
+        yesPlanSha256: row.plan.plan_sha256,
+      }));
+      const gathered = await gatherContracts({
+        t, paths, records, items, adapter: prepared?.adapter,
+        yes: yesOf(options.yes ? "agent" : "terminal"),
+        interactive: tools.interactive(), isLine: true,
+        answerCommand: (item) => "review-bridge start " + tools.shownPath(item.absolute).replaceAll("\\", "/") + fake,
+        planAnswered: (item, clarify) => tools.planOne({ row: item.row, batch: newBatch(), line: item.plan.line, clarify }),
+        // The fake CLI has nothing to sign in to, as at the plan.
+        inspect: options.fakeCli || !prepared ? null : (plan) => signedOutProvider(plan, (provider) => inspectProvider(provider, { adapter: prepared.adapter })),
+      });
+      if (gathered.code !== null) return gathered.code;
+      plans = gathered.plans;
+      for (const item of items) item.row.plan = item.plan;
+    }
+    card();
+    await markCardsShown(records.db, plans.map((plan) => plan.plan_sha256));
+    if (!(sealedCard && options.yes)) {
+      if (!tools.interactive()) { needsAuthorization(); return 1; }
+      if (!(await askYes("Run these " + plans.length + " in this order? [y/N] "))) {
+        await withdraw(plans);
+        write(t("gather.kept"));
+        return 1;
+      }
+    }
+    const prepared = await ready();
+    if (!prepared) {
+      if (!(sealedCard && options.yes)) await withdraw(plans);
+      return 1;
+    }
+    write("");
     // A person may answer long after the card. Whatever ran since (another terminal's line, say) was not
     // on it, and a work order it delivered must not run a second time on this yes.
     const toRun = rows.filter((row) => row.plan);
@@ -406,10 +413,10 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
     }
     return await runLine({
       paths, records, directory, rows, plans,
-      authorizedVia: options.yes ? "agent" : "terminal",
+      authorizedVia: sealedCard && options.yes ? "agent" : "terminal",
       // The fake CLI has nothing to sign in to, as at the plan.
-      inspect: options.fakeCli ? null : (provider) => inspectProvider(provider, { adapter: runAdapter }),
-      tools: { ...tools, runPlan: (step) => tools.runPlan({ ...step, adapter: runAdapter }) },
+      inspect: options.fakeCli ? null : (provider) => inspectProvider(provider, { adapter: prepared.adapter }),
+      tools: { ...tools, runPlan: (step) => tools.runPlan({ ...step, adapter: prepared.adapter }) },
     });
   } finally {
     await release();

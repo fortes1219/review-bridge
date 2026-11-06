@@ -26,7 +26,9 @@ import { workOrderDirectory } from "../../utils/paths.mjs";
 import { nfc } from "../../utils/workOrderName.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
 import { contractPath, loadContract } from "./contract.mjs";
+import { assumptionLines, exhaustedLines, questionLines } from "./clarify.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
+import { parseWorkOrder, UNTITLED } from "./workOrderFormat.mjs";
 import { resultIdentity } from "./workOrderRecords.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
@@ -240,6 +242,11 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
       why.push(t("result.why.contract.questions"));
       for (const question of state.contract_questions) why.push("- " + question);
     }
+    if (state.clarify_questions?.length) {
+      why.push(t("clarify.stopped", { name }));
+      why.push(...questionLines(t, state.clarify_questions));
+    }
+    if (state.clarify_exhausted) why.push(...exhaustedLines(t, workPackage?.clarify?.history));
     if (run.closed_reason === "contract_unconfirmed") {
       why.push(t("result.why.contract.unconfirmed"));
       for (const line of (state.contract_problems || []).slice(0, 10)) why.push("- " + line);
@@ -319,7 +326,7 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
 
   // Every way a run ends short of success is met by starting the work order again, said in one line
   // with no command; the closed reason only picks what to do first (Owner 2026-11-04).
-  const next = [t(kind === "success" ? "result.next.success" : NEXT_STEP[run.closed_reason] || "result.next.start_again")];
+  const next = [t(kind === "success" ? "result.next.success" : state.clarify_questions?.length ? "result.next.answer" : NEXT_STEP[run.closed_reason] || "result.next.start_again")];
 
   // The changed list is computed at delivery time. A late delivery (prune after a crash, days on)
   // would otherwise present the owner's later edits as the run's work; it says so instead.
@@ -369,7 +376,7 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
   }
 
   const line = oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run });
-  return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, claimed, startUncommitted, tokens, line, calls };
+  return { name, head, acceptance, assumptions: assumptionLines(t, contract?.assumptions), orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, claimed, startUncommitted, tokens, line, calls };
 }
 
 // RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
@@ -449,6 +456,7 @@ export function renderResult({ t, sections, identity = [] }) {
       ...why,
       ...(trimmed ? [t("result.content_trimmed")] : []),
       "",
+      ...((sections.assumptions || []).length ? ["## " + t("result.section.assumptions"), ...(trimmed ? [] : sections.assumptions.map((line) => clipLine(line, clip))), ...(trimmed ? [t("result.content_trimmed")] : []), ""] : []),
       "## " + t("result.section.next"),
       ...sections.next,
       "",
@@ -544,14 +552,20 @@ const two = (number) => String(number).padStart(2, "0");
 // In NFC, as the records name it, so one work order has one folder on every machine.
 const fileNamePart = (text) => nfc(text).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
 
+const isUntitled = (task) => {
+  try { return task ? parseWorkOrder(task).title.line === null : false; } catch { return false; }
+};
+
 // The work order's own folder for the person's copies: .review-bridge/results/<work order file>/, one
 // folder per work order as Playwright keeps test-results/<test>/ (DECISIONS 2026-11-04). A work order in
-// a directory of work-packages/ has it under that directory's name, one level, as the directory is.
+// a directory of work-packages/ has it under that directory's name, one level, as the directory is. One
+// with no title goes under untitled/ (Owner 2026-11-06); its files keep the work package's name, so such
+// work orders share the folder without meeting.
 function resultFolder(paths, { identity, workPackage, plan }) {
   const taskFile = !identity.unavailable ? identity.source_file : plan?.task_file || workPackage?.task_file || null;
   const name = taskFile ? path.basename(taskFile).replace(/\.md$/i, "") : workPackage.work_package_id;
   const directory = taskFile ? workOrderDirectory(taskFile) : null;
-  return { name, folder: path.join(paths.resultsDir, ...(directory ? [fileNamePart(directory)] : []), fileNamePart(name)) };
+  return { name, folder: path.join(paths.resultsDir, ...(directory ? [fileNamePart(directory)] : []), fileNamePart(taskFile && isUntitled(workPackage?.task) ? UNTITLED : name)) };
 }
 
 // The person's copy of a run's result (DECISIONS 2026-11-03, RC3-FIX-01 round 2): one file per run in

@@ -198,7 +198,7 @@ test("an ambiguity in the work order goes to the human; a reviewer that cannot c
   const unclear = await planWork(rt, "unclear", SINGLE);
   assert.equal(start(rt, unclear, { FAKE_CONTRACT_CHECK: "ambiguous" }).status, 0);
   assert.equal((await runOf(rt, unclear)).closed_reason, "needs_human");
-  assert.match(await resultOf(rt, "unclear"), /- Which page should show the farm\?/);
+  assert.match(await resultOf(rt, "unclear"), /1\. Which page should show the farm\?\n   1\) The home page/);
   const doubtful = await planWork(rt, "doubtful", SINGLE);
   assert.equal(start(rt, doubtful, { FAKE_CONTRACT_CHECK: "cannot_confirm" }).status, 0);
   const unconfirmed = await runOf(rt, doubtful);
