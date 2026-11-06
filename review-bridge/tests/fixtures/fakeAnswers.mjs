@@ -198,9 +198,14 @@ export async function reviewWork() {
   }
 }
 
+// FAKE_ON_<what>=<text>: this behaviour only for a work order whose text carries <text>, so one work
+// order of a directory can differ from the others.
+export const fakeOn = (prompt, what) => Boolean(process.env["FAKE_ON_" + what]) && prompt.includes(process.env["FAKE_ON_" + what]);
+
 export function reviewAnswer(prompt) {
   const input = reviewInput(prompt);
-  const gate = process.env.FAKE_CODEX_GATE || "PASS";
+  // FAKE_ON_REVIEW_FAIL: the reviewer fails this one work order.
+  const gate = fakeOn(prompt, "REVIEW_FAIL") ? "FAIL" : process.env.FAKE_CODEX_GATE || "PASS";
   const deltaPath = input.delta?.[0]?.path || input.read_list?.[0]?.path || "README.md";
   const openIds = (input.open_findings || []).map((finding) => finding.id);
   const keep = process.env.FAKE_CODEX_KEEP || "";

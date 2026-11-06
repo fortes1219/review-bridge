@@ -1,7 +1,9 @@
 Review Bridge runs a work order with a writer and a read-only reviewer. The person asks for one of
 four actions ({{args}}):
 
-- `start <file>`: start a work order from `.review-bridge/work-packages/`
+- `start <file>`: start a work order from `.review-bridge/work-packages/`. To run several one after
+  another, they go in one subdirectory there with file names starting `01-`, `02-`, and `start` takes
+  that directory.
 - `stop <run_id>`: pause a running work order; its records are kept
 - `resume <run_id>`: carry a stopped work order on
 - `clean [<run_id>]`: clear finished records; with a run id, that one run

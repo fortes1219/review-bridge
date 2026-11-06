@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { insertRun, runRecorder } from "../../service/index.mjs";
 import { canonical, digest } from "../../utils/digest.mjs";
+import { nfc } from "../../utils/workOrderName.mjs";
 import { workOrderChange } from "./delivery.mjs";
 import { parseWorkOrder } from "./workOrderFormat.mjs";
 
@@ -24,10 +25,25 @@ const sameLinesShare = (change, left, right) => {
 const changedLines = (change) => (change ? Math.max(change.removed.length, change.added.length) : 0);
 
 // The work order's file as the records name it: its path in the project, spelled the way the file
-// system spells it (where names ignore case, farm.md and FARM.md are one file, so one name).
+// system spells it (where names ignore case, farm.md and FARM.md are one file, so one name), in NFC (a
+// macOS disk hands the same name back decomposed). Never used to open the file: plan.task_file does that.
 export function canonicalTaskFile(repoRoot, file) {
   const real = (target) => { try { return realpathSync.native(target); } catch { return path.resolve(target); } };
-  return path.relative(real(repoRoot), real(path.resolve(repoRoot, file))).split(path.sep).join("/");
+  return nfc(path.relative(real(repoRoot), real(path.resolve(repoRoot, file))).split(path.sep).join("/"));
+}
+
+// Whether a file the records name is there, however the disk spells that name: a disk that keeps names
+// as they were written has the decomposed one under its own bytes, and it is not gone.
+async function recordedFileThere(repoRoot, relative) {
+  if (await fsp.stat(path.join(repoRoot, ...relative.split("/"))).then(() => true, () => false)) return true;
+  if (/^[\x00-\x7f]*$/.test(relative)) return false;
+  let folder = repoRoot;
+  for (const part of relative.split("/")) {
+    const entry = (await fsp.readdir(folder).catch(() => [])).find((name) => nfc(name) === part);
+    if (entry === undefined) return false;
+    folder = path.join(folder, entry);
+  }
+  return true;
 }
 
 // The work order this file belongs to now in the project, or null.
@@ -98,7 +114,27 @@ export async function identifyWorkOrder(db, options) {
   return { ...decision, file: options.fileName, ...(options.asNew ? { as_new: true } : {}) };
 }
 
-async function decide(db, { projectId, fileName, text, repoRoot, update = null, asNew = false }) {
+// A renamed file: the work orders whose last file is gone, newest first; a copy keeps its original,
+// so the original is never a candidate and the copy is a new work order. `memo` (one card's worth of
+// files) reads them once, and lets each be taken by one file of that card.
+async function renameCandidates(db, { projectId, repoRoot, memo }) {
+  if (memo?.candidates) return memo.candidates;
+  const { rows } = await db.query(
+    "select w.work_order_id, w.last_file_name, v.version_no, v.content_sha256, v.source_text"
+    + " from work_orders w cross join lateral (select version_no, content_sha256, source_text from work_order_versions"
+    + " where work_order_id = w.work_order_id order by version_no desc limit 1) v"
+    + " where w.project_id = $1 order by w.last_activity_at desc, w.work_order_id desc limit $2",
+    [projectId, RENAME_CANDIDATES],
+  );
+  const gone = [];
+  for (const row of rows) {
+    if (!(await recordedFileThere(repoRoot, row.last_file_name))) gone.push(row);
+  }
+  if (memo) memo.candidates = gone;
+  return gone;
+}
+
+async function decide(db, { projectId, fileName, text, repoRoot, update = null, asNew = false, memo = null }) {
   const title = titleOf(text, fileName);
   if (asNew) return decided("new", null, title, null, text);
   if (update) {
@@ -108,24 +144,15 @@ async function decide(db, { projectId, fileName, text, repoRoot, update = null, 
   }
   const named = await workOrderOfFile(db, { projectId, fileName });
   if (named) return decided("update", named, title, await latestVersion(db, named), text);
-  // A renamed file: the work orders whose last file is gone, newest first; a copy keeps its original,
-  // so the original is never a candidate and the copy is a new work order.
-  const { rows } = await db.query(
-    "select w.work_order_id, w.last_file_name, v.version_no, v.content_sha256, v.source_text"
-    + " from work_orders w cross join lateral (select version_no, content_sha256, source_text from work_order_versions"
-    + " where work_order_id = w.work_order_id order by version_no desc limit 1) v"
-    + " where w.project_id = $1 order by w.last_activity_at desc, w.work_order_id desc limit $2",
-    [projectId, RENAME_CANDIDATES],
-  );
   let best = null;
-  for (const row of rows) {
-    const there = await fsp.stat(path.join(repoRoot, ...row.last_file_name.split("/"))).then(() => true, () => false);
-    if (there) continue;
+  for (const row of await renameCandidates(db, { projectId, repoRoot, memo })) {
+    if (memo?.taken.has(row.work_order_id)) continue;
     const share = sameLinesShare(workOrderChange(row.source_text, text), row.source_text, text);
     if (share > 0.5 && (!best || share > best.share)) best = { share, row };
   }
   if (!best) return decided("new", null, title, null, text);
-  return decided("update", best.row.work_order_id, title, best.row, text);
+  memo?.taken.add(best.row.work_order_id);
+  return { ...decided("update", best.row.work_order_id, title, best.row, text), renamed_from: best.row.last_file_name };
 }
 
 // A project is recorded at its first use and found again by its id wherever its folder is now.
@@ -181,6 +208,60 @@ export async function cardFor(db, { projectId, fileName }) {
 export async function cardUsed(db, planSha256) {
   const { rows } = await db.query("select 1 from authorization_claims where claim_key = $1", ["plan-" + planSha256]);
   return rows.length > 0;
+}
+
+// What a directory's card shows beside each file, for that directory's files only: the work order that
+// file is now (by its exact name, never a guess at a rename) and that work order's latest run. One probe
+// of work_orders_by_file and one of runs_by_work_order per file, whatever the history holds.
+export async function latestRunsOfFiles(db, { projectId, files }) {
+  const { rows } = await db.query(
+    "select f.file, w.work_order_id, r.run_id, r.status, r.conclusion, r.closed_reason, r.closed_at"
+    + " from unnest($2::text[]) as f(file)"
+    + " cross join lateral (select work_order_id from work_orders where project_id = $1 and last_file_name = f.file order by last_activity_at desc limit 1) w"
+    + " left join lateral (select run_id, status, conclusion, closed_reason, closed_at from runs where work_order_id = w.work_order_id order by created_at desc, run_id desc limit 1) r on true",
+    [projectId, files],
+  );
+  return new Map(rows.map((row) => [row.file, row]));
+}
+
+// The latest printed, not withdrawn plan of each of these files (Q14 for many): one probe of
+// plans_shown_by_file per file.
+export async function latestCardsOfFiles(db, { projectId, files }) {
+  const { rows } = await db.query(
+    "select f.file, p.plan_sha256, p.content_sha256, p.authorization_expires_at, p.shown_at, p.body"
+    + " from unnest($2::text[]) as f(file) cross join lateral (select plan_sha256, content_sha256, authorization_expires_at, shown_at, body from plans"
+    + " where project_id = $1 and source_file = f.file and shown_at is not null and withdrawn_at is null order by shown_at desc limit 1) p",
+    [projectId, files],
+  );
+  return rows;
+}
+
+export async function markCardsShown(db, planShas) {
+  await db.query("update plans set shown_at = coalesce(shown_at, now()) where plan_sha256 = any($1::text[])", [planShas]);
+}
+
+export async function withdrawCards(db, planShas) {
+  await db.query("update plans set withdrawn_at = now() where plan_sha256 = any($1::text[]) and withdrawn_at is null", [planShas]);
+}
+
+export async function anyCardUsed(db, planShas) {
+  const { rows } = await db.query("select 1 from authorization_claims where claim_key = any($1::text[]) limit 1", [planShas.map((sha) => "plan-" + sha)]);
+  return rows.length > 0;
+}
+
+const insertStartAuthorization = (tx, planSha256, authorization) => tx.query(
+  "insert into authorizations (authorization_id, kind, plan_sha256, authorized_by, authorized_via, authorized_at, expires_at, authorization_sha256, body)"
+  + " values ($1, 'start', $2, $3, $4, $5, $6, $7, $8) on conflict (authorization_id) do nothing",
+  [authorization.authorization_id, planSha256, authorization.authorized_by, authorization.authorized_via,
+    authorization.authorized_at, authorization.expires_at, authorization.authorization_sha256, authorization],
+);
+
+// One yes to a directory's card: one authorization for each plan on it, in one transaction, so a yes
+// is recorded whole or not at all. Each plan's own start claims its authorization later (recordStart).
+export async function recordDirectoryYes(db, authorizations) {
+  await db.transaction(async (tx) => {
+    for (const { planSha256, authorization } of authorizations) await insertStartAuthorization(tx, planSha256, authorization);
+  });
 }
 
 // The start, in one transaction with the file authorization `authorize` makes: the card is locked,
@@ -243,12 +324,8 @@ export async function recordStart(db, { planSha256, authorize }) {
       [workOrderId, plan.task_sha256, workOrder.title, plan.task, file, now, parseWorkOrder(plan.task).frontmatter.source_id],
     );
     const authorization = started.authorization;
-    await tx.query(
-      "insert into authorizations (authorization_id, kind, plan_sha256, authorized_by, authorized_via, authorized_at, expires_at, authorization_sha256, body)"
-      + " values ($1, 'start', $2, $3, $4, $5, $6, $7, $8)",
-      [authorization.authorization_id, planSha256, authorization.authorized_by, authorization.authorized_via,
-        authorization.authorized_at, authorization.expires_at, authorization.authorization_sha256, authorization],
-    );
+    // A directory's yes wrote it already (recordDirectoryYes); its id is the plan's, so it is this one.
+    await insertStartAuthorization(tx, planSha256, authorization);
     await tx.query(
       "insert into authorization_claims (claim_key, authorization_id, run_id, claim_kind, claimed_at) values ($1, $2, $3, 'start', $4)",
       ["plan-" + planSha256, authorization.authorization_id, started.run.run_id, started.run.created_at],

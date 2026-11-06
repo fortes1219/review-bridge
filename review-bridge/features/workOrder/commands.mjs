@@ -6,13 +6,14 @@ import path from "node:path";
 import readline from "node:readline/promises";
 
 import {
-  activeRuns, assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
+  activeLineSteps, activeRuns, assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
   inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, writeJson,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
 import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
 import { loadContract } from "./contract.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
+import { directoryOfTarget, fileLineRunning, startDirectory } from "./line.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
 import { queueStatus, waitForPending } from "./reviewQueue.mjs";
 import {
@@ -71,7 +72,10 @@ async function openRecords(paths) {
 // The work order's path in the project, spelled as the file system spells it (the records' key).
 const taskFileOf = (paths, file) => canonicalTaskFile(paths.repoRoot, path.resolve(file));
 
-async function planFromOptions({ paths, options, command, adapter, inspectionAdapter }) {
+// `batch` is one card's worth of plans (a directory's): its records are opened once, and what does not
+// change from file to file (the CLI's state, its list of MCP servers) is asked once.
+async function planFromOptions({ paths, options, command, adapter, inspectionAdapter, batch = null, line = null }) {
+  const once = (key, work) => (batch ? (batch.cache[key] ??= work()) : work());
   const named = workPackageName(options);
   if (!options.outPath && !(options.taskFile && named)) throw new Error(command + " needs a work order. Run: review-bridge " + command + " .review-bridge/work-packages/<file>.md");
   if (options.update !== undefined && options.asNew) throw new Error("Give --update <work_order_id> or --as-new, not both.");
@@ -90,10 +94,10 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
   const text = options.taskFile ? await fsp.readFile(path.resolve(options.taskFile), "utf8").catch(() => null) : null;
   // A work order Bridge cannot split is refused, with its lines, before anything about it is recorded.
   if (text !== null) parseWorkOrder(text.trim());
-  const records = text !== null ? await openRecords(paths) : null;
+  const records = text !== null ? batch?.records ?? await openRecords(paths) : null;
   const workOrder = records ? await identifyWorkOrder(records.db, {
     projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), repoRoot: paths.repoRoot,
-    update: options.update, asNew: Boolean(options.asNew),
+    update: options.update, asNew: Boolean(options.asNew), memo: batch?.memo ?? null,
   }) : null;
   // Calls no model, so it uses the adapter for model-free checks; a fake run's is the fake CLI.
   const modelFree = async () => (adapter?.resolveExecutable ? adapter : await inspectionAdapter());
@@ -110,12 +114,13 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
     callTimeout: options.callTimeout,
     writer: options.writer,
     reviewer: options.reviewer,
-    listCodexMcp: async () => await listCodexMcpServers(await modelFree()),
+    listCodexMcp: () => once("mcp", async () => await listCodexMcpServers(await modelFree())),
     // The fake CLI has nothing to install or sign in to.
-    checkCodex: options.fakeCli ? null : async () => (await inspectProvider("codex", { adapter: await modelFree() })).next_action,
+    checkCodex: options.fakeCli ? null : () => once("codex", async () => (await inspectProvider("codex", { adapter: await modelFree() })).next_action),
     outPath: options.outPath,
     planName: options.planName,
     workOrder,
+    line,
   });
   if (records) await recordCard(records.db, { projectId: records.projectId, plan, snapshot: (await loadOrCreatePolicySnapshot(paths)).snapshot, shown: false });
   return { plan, records };
@@ -378,6 +383,8 @@ async function cardForYes({ paths, planName = null, taskFile, options, again }) 
   const card = await cardFor(db, { projectId, fileName: taskFileOf(paths, taskFile) });
   const refuse = (line) => { write(line); return null; };
   if (!card) return refuse("No card was shown for this work order, so there is no yes to run on. Run: " + again + " and show the person the card.");
+  // A directory's card printed no work order's text, so its yes is not a yes to this one alone.
+  if (card.body.line) return refuse("The last card shown for this work order was its directory's (" + card.body.line.directory + "/), which says yes to the whole list. Run: " + again + " to show the person this one, or start the directory with --yes.");
   if (card.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse("This card was made by an older Bridge and is not read again. Run: " + again + " and show the person the new card.");
   if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) return refuse("The work order changed after you saw the card. Run: " + again + " and look again.");
   const option = optionAgainstCard(card.body, options);
@@ -403,25 +410,45 @@ function notReadyLines(error, again) {
   ];
 }
 
-async function planOrSay({ paths, options, command, adapter, inspectionAdapter, again }) {
+async function planOrSay({ paths, options, command, adapter, inspectionAdapter, again, batch = null, line = null }) {
   let planned;
   try {
-    planned = await planFromOptions({ paths, options, command, adapter, inspectionAdapter });
+    planned = await planFromOptions({ paths, options, command, adapter, inspectionAdapter, batch, line });
   } catch (error) {
     if (!(error instanceof RoleCliNotReadyError)) throw error;
     for (const line of notReadyLines(error, again)) write(line);
     return null;
   }
-  if (planned.plan) write("Plan written to " + shownPath(planned.plan.plan_path));
+  if (planned.plan && !batch) write("Plan written to " + shownPath(planned.plan.plan_path));
   return planned.plan || null;
 }
 
-// `start <file>`: the person's one command from a work order to its result.
+// `start <file>`: the person's one command from a work order to its result. `start <directory>`: the
+// same for every work order in a directory of work-packages/, one after another, on one yes.
 export async function startWorkOrder({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck }) {
   if (!options.taskFile) throw new Error("start needs a work order. Run: review-bridge start .review-bridge/work-packages/<file>.md");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
+  const directory = await directoryOfTarget(paths, options.taskFile);
+  if (directory) {
+    return await startDirectory({
+      paths, options, adapter, loadAdapter, guard, reviewerCheck, directory,
+      tools: {
+        openRecords, interactive, shownPath, checkFailureLines,
+        // A role's CLI not ready is said once and ends the card; no card was shown yet to take back.
+        planOne: async ({ row, batch, line }) => (await planOrSay({
+          paths, command: "start", adapter, inspectionAdapter, batch, line, again: "review-bridge start " + shownPath(directory.absolute).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : ""),
+          options: { ...options, taskFile: row.absolute, breakpoint: options.breakpoint || DEFAULT_BREAKPOINT },
+        })),
+        runPlan: ({ plan, adapter: runAdapter, authorizedVia, onStep }) => runAuthorized({
+          paths, options: { ...options, planPath: plan.plan_path }, adapter: runAdapter, approval: plan.plan_sha256, authorizedVia, onStep,
+        }),
+      },
+    });
+  }
+  const running = await fileLineRunning(paths, openRecords, path.resolve(options.taskFile));
+  if (running) { write(running); return 1; }
   // Forward slashes: the command is pasted into any shell, bash included, and Windows takes them.
   const again = "review-bridge start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
   const plan = options.yes
@@ -446,8 +473,11 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
   if (control.authorization_status === "active") throw new Error("Run " + runId + " is still running. Pause it first: review-bridge stop " + runId);
   const workPackage = control.run.work_package;
   if (!workPackage.task_file) throw new Error("Run " + runId + " was not started from a work order file. Run: review-bridge start <file>");
-  write("Carrying on run " + runId + " (" + workPackage.task_file + ") as a new run");
   const taskFile = path.join(paths.repoRoot, ...workPackage.task_file.split("/"));
+  // resume saves one work order and has nothing to do with its directory's line; it waits for that line.
+  const running = await fileLineRunning(paths, openRecords, taskFile);
+  if (running) { write(running); return 1; }
+  write("Carrying on run " + runId + " (" + workPackage.task_file + ") as a new run");
   // One plan per stopped run, so the card and its --yes name the same one.
   const planName = workPackage.work_package_id + ".resume-" + runId;
   const again = "review-bridge resume " + runId + (options.fakeCli ? " --fake-cli" : "");
@@ -505,8 +535,9 @@ export async function statusRecords(paths, { after = null } = {}) {
     step = "runs";
     const { runs, more } = await projectRuns(db, projectId, { limit: STATUS_RUNS, after });
     const active = await activeRuns(db, projectId);
+    const lines = active.length ? await activeLineSteps(db, projectId) : [];
     step = "logs";
-    return { db, projectId, runs, more, active, logs: paths.logRoot };
+    return { db, projectId, runs, more, active, lines, logs: paths.logRoot };
   } catch (error) {
     error.status_step = step;
     throw error;
@@ -519,7 +550,7 @@ export async function statusOverview({ paths, options, page }) {
     return 0;
   }
   const service = await page();
-  const { db, projectId, runs, more, active, logs } = await statusRecords(paths, { after: options.after || null });
+  const { db, projectId, runs, more, active, lines, logs } = await statusRecords(paths, { after: options.after || null });
   const queue = await queueStatus(paths);
   // Who the next start uses, from the one place that says it; a run keeps what its card showed.
   const { roles: configured } = await readJson(paths.bridgeConfigPath);
@@ -527,7 +558,7 @@ export async function statusOverview({ paths, options, page }) {
   if (options.json) {
     write(JSON.stringify({
       page: { running: service.running, url: service.url, reason: service.reason },
-      roles, project_id: projectId, active_runs: active.length, runs, more, review_queue: queue, logs, database: db.connection,
+      roles, project_id: projectId, active_runs: active.length, lines, runs, more, review_queue: queue, logs, database: db.connection,
     }, null, 2));
     return 0;
   }
@@ -536,6 +567,9 @@ export async function statusOverview({ paths, options, page }) {
     write("Work: none yet. Put a work order in .review-bridge/work-packages/ and run: review-bridge start <file>");
   } else {
     write("Work: " + active.length + " running");
+    for (const { line, source_file: sourceFile, run_id: runId, created_at: startedAt } of lines) {
+      write("  " + line.directory + "/ step " + line.position + " of " + line.total + ": " + path.posix.basename(sourceFile) + " running (run " + runId + "), started " + localTimestamp(startedAt));
+    }
     for (const run of runs) {
       write("  " + [run.run_id, run.status.padEnd(11), (run.conclusion || "-").padEnd(15), (run.closed_reason || "-").padEnd(20), run.source_file, localTimestamp(run.created_at)].join("  "));
     }

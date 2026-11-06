@@ -211,6 +211,7 @@ export async function runReviewWorker({
         let reads = [];
         let controllerDecided = false;
         let failureTexts = async () => [];
+        let failureCode = null;
         if (dryRun) {
           await writeText(resultPath, [
             "# Review Bridge Dry Run",
@@ -268,6 +269,7 @@ export async function runReviewWorker({
           exitCode = called.exitCode;
           timedOut = called.timedOut;
           failureTexts = called.failureTexts;
+          failureCode = called.failureCode ?? null;
           usage = called.usage;
           reads = reviewerReadEvents(called.reads, reviewInput.read_list, paths.repoRoot);
           if (runId) {
@@ -293,6 +295,7 @@ export async function runReviewWorker({
             phase: "review",
             exitCode,
             timedOut,
+            code: failureCode,
             texts: await failureTexts(),
           });
           const written = await writeFailureRecord(paths, paths.reviewsRoot, jobId, classified, {

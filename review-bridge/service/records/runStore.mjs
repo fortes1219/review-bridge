@@ -16,6 +16,7 @@ import {
 } from "./fileStore.mjs";
 import { priorityChoice, reviewerPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { digest } from "../../utils/digest.mjs";
+import { nfc, workOrderNameProblem } from "../../utils/workOrderName.mjs";
 import { loadOrCreatePolicySnapshot } from "./policySnapshots.mjs";
 import {
   activeRuns, DatabaseUnavailableError, eventLine, eventRecordsAfter, lastEventSequence, numberedLine, projectRuns, recordsDatabase,
@@ -90,8 +91,15 @@ function assertId(value, label) {
   return text;
 }
 
+// The one id that is a person's word, not a hash or a uuid: the work order's file name.
+function assertWorkPackageId(value) {
+  const problem = workOrderNameProblem(String(value || ""));
+  if (problem || !value) throw new Error("Work package id " + (problem || "is required") + ": " + JSON.stringify(value));
+  return nfc(value);
+}
+
 function workPackageFile(paths, id, sha256) {
-  return path.join(paths.workPackagesDir, assertId(id, "Work package id"), sha256 + ".json");
+  return path.join(paths.workPackagesDir, assertWorkPackageId(id), sha256 + ".json");
 }
 
 function authorizationFile(paths, authorizationId) {
@@ -332,7 +340,7 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
   await assertNoMaintenance(paths);
   const record = {
     schema_version: 4,
-    work_package_id: assertId(input.work_package_id, "Work package id"),
+    work_package_id: assertWorkPackageId(input.work_package_id),
     source: input.source || null,
     task: String(input.task || ""),
     acceptance_criteria: input.acceptance_criteria || [],

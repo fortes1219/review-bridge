@@ -22,6 +22,8 @@ import {
   tokenTotal,
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
+import { workOrderDirectory } from "../../utils/paths.mjs";
+import { nfc } from "../../utils/workOrderName.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
 import { contractPath, loadContract } from "./contract.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
@@ -539,14 +541,17 @@ function identityLines(t, identity) {
 
 const two = (number) => String(number).padStart(2, "0");
 // A file name holds no \ / : * ? " < > | or control characters on Windows, nor a trailing dot or space.
-const fileNamePart = (text) => String(text).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+// In NFC, as the records name it, so one work order has one folder on every machine.
+const fileNamePart = (text) => nfc(text).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
 
 // The work order's own folder for the person's copies: .review-bridge/results/<work order file>/, one
-// folder per work order as Playwright keeps test-results/<test>/ (DECISIONS 2026-11-04).
+// folder per work order as Playwright keeps test-results/<test>/ (DECISIONS 2026-11-04). A work order in
+// a directory of work-packages/ has it under that directory's name, one level, as the directory is.
 function resultFolder(paths, { identity, workPackage, plan }) {
   const taskFile = !identity.unavailable ? identity.source_file : plan?.task_file || workPackage?.task_file || null;
   const name = taskFile ? path.basename(taskFile).replace(/\.md$/i, "") : workPackage.work_package_id;
-  return { name, folder: path.join(paths.resultsDir, fileNamePart(name)) };
+  const directory = taskFile ? workOrderDirectory(taskFile) : null;
+  return { name, folder: path.join(paths.resultsDir, ...(directory ? [fileNamePart(directory)] : []), fileNamePart(name)) };
 }
 
 // The person's copy of a run's result (DECISIONS 2026-11-03, RC3-FIX-01 round 2): one file per run in

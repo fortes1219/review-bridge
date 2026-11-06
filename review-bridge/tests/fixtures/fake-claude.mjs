@@ -3,7 +3,7 @@
 // outside it), and a result line carrying usage and, when the CLI was asked for a
 // schema, the role's answer in `structured_output`. A session in the reviewer's seat must carry the
 // reviewer's read-only flags, or this CLI refuses it. No model is involved.
-import { checkAnswer, logCall, modeOf, reviewAnswer, reviewInput, reviewWork, translationAnswer, writerAnswer } from "./fakeAnswers.mjs";
+import { checkAnswer, fakeOn, logCall, modeOf, reviewAnswer, reviewInput, reviewWork, translationAnswer, writerAnswer } from "./fakeAnswers.mjs";
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -25,10 +25,21 @@ if (!sessionId || !mode) {
   process.stderr.write("writer-only resume contract missing\n");
   process.exit(2);
 }
+// FAKE_ON_SIGNED_OUT, FAKE_ON_OUT_OF_USAGE: the CLI's own typed error for this work order, as 2.1.280's
+// stream carries it: an assistant line with `error` beside `message`, then an error result.
+const typedError = fakeOn(prompt, "SIGNED_OUT") ? ["authentication_failed", "Not logged in · Please run /login"]
+  : fakeOn(prompt, "OUT_OF_USAGE") ? ["billing_error", "You're out of usage credits"] : null;
+if (typedError) {
+  const [error, text] = typedError;
+  process.stdout.write(JSON.stringify({ type: "assistant", session_id: sessionId, parent_tool_use_id: null, error, message: { id: "m0", content: [{ type: "text", text }] } }) + "\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, session_id: sessionId, result: text, num_turns: 1 }) + "\n");
+  process.exit(1);
+}
 const maxTurns = flag("--max-turns") === null ? null : Number(flag("--max-turns"));
 const sleepMs = Number(process.env.FAKE_CLAUDE_SLEEP_MS || 0);
 // The sleep stands for a long writer call; the translation before it answers at once.
-if (sleepMs > 0 && mode === "writer") await new Promise((resolve) => setTimeout(resolve, sleepMs));
+// FAKE_ON_WRITER_SLEEP: only for this work order.
+if (sleepMs > 0 && mode === "writer" && (!process.env.FAKE_ON_WRITER_SLEEP || fakeOn(prompt, "WRITER_SLEEP"))) await new Promise((resolve) => setTimeout(resolve, sleepMs));
 // FAKE_CONTRACT_SLEEP_MS slows the translation instead, so a test can stop the run during it.
 const contractSleepMs = Number(process.env.FAKE_CONTRACT_SLEEP_MS || 0);
 if (contractSleepMs > 0 && translating) await new Promise((resolve) => setTimeout(resolve, contractSleepMs));

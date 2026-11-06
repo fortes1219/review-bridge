@@ -37,7 +37,7 @@ import { parseWorkOrder } from "./workOrderFormat.mjs";
 
 // A provider failure is reported as one, like the writer's or reviewer's own.
 async function providerStop({ paths, runId, stamp, role, provider, phase, processResult, texts, evidence }) {
-  const classified = classifyProviderFailure({ role, provider, phase, exitCode: processResult.exitCode, timedOut: processResult.timedOut, texts });
+  const classified = classifyProviderFailure({ role, provider, phase, exitCode: processResult.exitCode, timedOut: processResult.timedOut, code: processResult.failureCode, texts });
   const written = await writeFailureRecord(paths, paths.runLogDir(runId), stamp + "-" + phase, classified, evidence);
   const status = processResult.timedOut ? (role === "translator" ? "writer_timeout" : "reviewer_failed")
     : classified.reason === "provider_usage_limit" ? "rate_limited"

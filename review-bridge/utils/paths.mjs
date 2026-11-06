@@ -59,6 +59,13 @@ export function readProjectId(bridgeConfigPath) {
   return String(config.project_id).toLowerCase();
 }
 
+// The directory of work-packages/<directory>/<file>.md that holds a work order, or null for one
+// elsewhere: a directory is a line of work orders, and its results mirror it.
+export function workOrderDirectory(taskFile) {
+  const parts = String(taskFile).split("/");
+  return parts.length === 4 && parts[0] === PRIVATE_ROOT_NAME && parts[1] === "work-packages" ? parts[2] : null;
+}
+
 export function projectStateRoot(projectId, { env = process.env } = {}) {
   return path.join(bridgeDataHome({ env }), "projects", projectId);
 }

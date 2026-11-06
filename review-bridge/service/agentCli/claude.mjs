@@ -10,6 +10,9 @@ import { readEvidenceTail } from "./providerFailure.mjs";
 const finite = (value) => (Number.isFinite(value) ? value : 0);
 const emptyTokens = () => ({ input: 0, cache_write: 0, cache_read: 0, output: 0 });
 
+const assistantText = (record) => (Array.isArray(record.message?.content) ? record.message.content : [])
+  .filter((block) => block?.type === "text").map((block) => String(block.text || "")).join("\n");
+
 // D3.2: one JSON object per line from `--output-format stream-json`; a single JSON
 // object (legacy `--output-format json`, fakes) is accepted as the result alone.
 export function parseClaudeStream(text) {
@@ -18,6 +21,8 @@ export function parseClaudeStream(text) {
   let result = null;
   let init = null;
   let unparsable = 0;
+  // The CLI's own typed error on the session's latest assistant line, with the words it came with.
+  let apiError = null;
   // Per-message usage, kept for a call that ends without a final result (stopped, timed out).
   // The CLI repeats an assistant message once per content block, so a message id counts once.
   const messageUsage = new Map();
@@ -34,6 +39,7 @@ export function parseClaudeStream(text) {
     if (record?.type === "system" && record.subtype === "init") { init = record; continue; }
     if (record?.type === "assistant") {
       const subagent = Boolean(record.parent_tool_use_id);
+      if (!subagent) apiError = record.error ? { code: String(record.error), text: assistantText(record) } : null;
       if (record.message?.usage && !messageUsage.has(record.message.id ?? messageUsage.size)) {
         messageUsage.set(record.message.id ?? messageUsage.size, { subagent, usage: record.message.usage });
       }
@@ -63,7 +69,7 @@ export function parseClaudeStream(text) {
     streamUsage.tokens.cache_read += finite(usage.cache_read_input_tokens);
     streamUsage.tokens.output += finite(usage.output_tokens);
   }
-  return { result, init, reads, streamUsage, unparsable_lines: unparsable };
+  return { result, init, reads, streamUsage, apiError, unparsable_lines: unparsable };
 }
 
 // The four token fields Claude Code 2.1.280 was verified to put in result.usage (2026-10-13).
@@ -225,9 +231,11 @@ export async function callClaude({
     maxTurnsReached: stream.result?.subtype === "error_max_turns",
     // The MCP tools its own init event says the session held; null when the stream shows no list.
     mcpToolsHeld: Array.isArray(stream.init?.tools) ? stream.init.tools.filter((tool) => String(tool).startsWith("mcp__")) : null,
+    failureCode: stream.apiError?.code ?? null,
     // The CLI marks its own error with is_error; only then is `result` its message (a usage limit is
     // reported there). Otherwise `result` is the model's text and is not read.
     failureTexts: async () => [
+      stream.apiError?.text || "",
       stream.result?.is_error === true ? String(stream.result.result || "") : "",
       await readEvidenceTail(stderrPath),
       stream.result ? "" : await readEvidenceTail(stdoutPath),

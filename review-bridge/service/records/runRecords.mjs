@@ -290,6 +290,17 @@ export async function activeRuns(db, projectId) {
   return (await db.query("select run_id, work_order_id, content_sha256, status from runs where project_id = $1 and status = 'in_progress' order by created_at", [projectId])).rows;
 }
 
+// The project's running runs that belong to a directory's line, with where they are in it (runs_active,
+// then each one's plan by its key).
+export async function activeLineSteps(db, projectId) {
+  const { rows } = await db.query(
+    "select r.run_id, r.created_at, p.source_file, p.body->'line' as line from runs r join plans p using (plan_sha256)"
+    + " where r.project_id = $1 and r.status = 'in_progress' and p.body ? 'line' order by r.created_at",
+    [projectId],
+  );
+  return rows;
+}
+
 // The running runs of one work order (a start replaces them; an unchanged one refuses the start).
 export async function activeRunsOfWorkOrder(db, workOrderId) {
   return (await db.query("select run_id, content_sha256 from runs where work_order_id = $1 and status = 'in_progress'", [workOrderId])).rows;

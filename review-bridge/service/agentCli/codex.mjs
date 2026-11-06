@@ -11,11 +11,21 @@ import { parseReviewerUsage } from "./usage.mjs";
 
 const normalizePath = (value) => String(value || "").replaceAll("\\", "/").replace(/^\.\//, "");
 
+// How many distinct errors a stream keeps: one of nothing but errors stays this long.
+const MAX_STREAM_FAILURES = 20;
+
 // D5.1 / D5.2: `codex exec --json` prints one event per line; usage and commands are taken from it.
+// So are its errors, which 0.166 writes there and not to stderr (exec/src/event_processor_with_jsonl_output.rs):
+// only these two event types, never an item, so words a tool printed are not read as Codex's own.
+// "Reconnecting..." is an error event too, and only says it is trying again.
 export function parseCodexJsonl(text) {
   let usage = null;
   let threadId = null;
   const commands = [];
+  const failures = [];
+  const noteFailure = (message) => {
+    if (typeof message === "string" && message && !/^Reconnecting\.\.\./.test(message) && !failures.includes(message) && failures.length < MAX_STREAM_FAILURES) failures.push(message);
+  };
   let unparsable = 0;
   for (const line of String(text || "").split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -23,11 +33,13 @@ export function parseCodexJsonl(text) {
     try { record = JSON.parse(line); } catch { unparsable += 1; continue; }
     if (record?.type === "thread.started" && record.thread_id) threadId = String(record.thread_id);
     if (record?.type === "turn.completed" && record.usage && typeof record.usage === "object") usage = record.usage;
+    if (record?.type === "error") noteFailure(record.message);
+    if (record?.type === "turn.failed") noteFailure(record.error?.message);
     if (record?.type === "item.completed" && record.item?.type === "command_execution" && record.item.command) {
       commands.push(String(record.item.command).slice(0, 200));
     }
   }
-  return { usage, thread_id: threadId, commands, unparsable_lines: unparsable };
+  return { usage, thread_id: threadId, commands, failures, unparsable_lines: unparsable };
 }
 
 // A path the command names, when one can be read off mechanically; otherwise null.
@@ -146,7 +158,9 @@ async function callExec({ adapter, role, call, prompt, schemaPath, model, effort
     finalRecord: null,
     reportedSession: null,
     maxTurnsReached: false,
-    failureTexts: async () => [codexDiagnosticTrailer(stderr)],
+    // Exec gives no code: its events carry only a message.
+    failureCode: null,
+    failureTexts: async () => [...stream.failures, codexDiagnosticTrailer(stderr)],
   };
 }
 
@@ -200,6 +214,7 @@ async function callWriter({ adapter, role, call, prompt, schemaPath, model, effo
     finalRecord: { thread_id: threadId, status: result.status, final_message: result.finalMessage },
     reportedSession: null,
     maxTurnsReached: false,
+    failureCode: result.errorCode,
     failureTexts: async () => [...result.errors, result.error?.message || "", codexDiagnosticTrailer(await readEvidenceTail(stderrPath))],
   };
 }

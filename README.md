@@ -73,6 +73,7 @@ The four actions are also commands. At a terminal, `start` asks where the work s
 | You want to | Command |
 |---|---|
 | start a work order | `review-bridge start <file>` |
+| run a directory of work orders, one after another | `review-bridge start .review-bridge/work-packages/<directory>/` |
 | pause it (its records are kept) | `review-bridge stop <run_id>` |
 | carry it on | `review-bridge resume <run_id>` |
 | clear finished records | `review-bridge clean [<run_id>]` |
@@ -172,21 +173,21 @@ Add the cart.
 Usage: review-bridge <command> [options]
 
 Commands:
-  init                Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
-  start <file>        Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
-  stop <run_id>       Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
-  resume <run_id>     Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them
-  clean [<run_id>]    Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
-  status              Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
-  logs <run_id|file>  Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
-  up                  Start the local page service in the background
-  down                Stop the local page service
-  ps                  Show whether the local page service is running, and its address
-  watch               Run the local page in this terminal until Ctrl+C
-  upgrade             Move this folder's setup to the installed Review Bridge version, with a backup
-  uninstall           Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
-  doctor              Check which platform adapter this machine uses, without running any work
-  backup              Copy your database, for all your projects, with the database stopped (refused while a run is running)
+  init                    Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
+  start <file|directory>  Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+  stop <run_id>           Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
+  resume <run_id>         Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them
+  clean [<run_id>]        Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
+  status                  Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
+  logs <run_id|file>      Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
+  up                      Start the local page service in the background
+  down                    Stop the local page service
+  ps                      Show whether the local page service is running, and its address
+  watch                   Run the local page in this terminal until Ctrl+C
+  upgrade                 Move this folder's setup to the installed Review Bridge version, with a backup
+  uninstall               Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
+  doctor                  Check which platform adapter this machine uses, without running any work
+  backup                  Copy your database, for all your projects, with the database stopped (refused while a run is running)
 
 Options:
   -v, --version   Print the version
@@ -228,9 +229,9 @@ Options:
 ### start
 
 ```text
-Usage: review-bridge start <file> [options]
+Usage: review-bridge start <file|directory> [options]
 
-Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
 
 Options:
   --writer <claude|codex>

@@ -1,4 +1,5 @@
 ---
+# To run this one after another, put them in one subdirectory of work-packages/ with file names starting 01-, 02-.
 # Every key is optional; delete what you do not need. Any other key is refused.
 # priority: medium        # low / medium / high / urgent; picks the models and effort from the policy's table
 # writer: { model: gpt-5.6-sol, effort: high }   # over the priority table; the model must be the writer's CLI's

@@ -1,4 +1,5 @@
 ---
+# 要接著跑：放進 work-packages/ 底下同一個子目錄，檔名用 01-、02- 開頭。
 # 每一個 key 都可以不寫；用不到的就刪掉。這裡以外的 key 會被拒絕。
 # priority: medium        # low / medium / high / urgent；照 policy 的表決定模型和 effort
 # writer: { model: gpt-5.6-sol, effort: high }   # 蓋過 priority 的表；model 要是 writer 那個 CLI 的

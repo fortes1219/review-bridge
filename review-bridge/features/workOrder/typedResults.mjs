@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { nfc } from "../../utils/workOrderName.mjs";
 import { criteriaProblems, verdictProblems } from "./acceptance.mjs";
 
 export { CODEX_USAGE_FIELDS, parseCodexJsonl, pathFromCommand, reviewerUsageEvent } from "../../service/agentCli/codex.mjs";
@@ -97,7 +98,7 @@ export async function validateWriterResult(value, { workOrder, call, contractSha
     ? validateAgainstSchema(value, await loadSchema(WRITER_RESULT_SCHEMA))
     : ["$: not an object"];
   if (!errors.length) {
-    if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
+    if (nfc(value.work_order) !== nfc(workOrder)) errors.push("$.work_order: expected " + workOrder);
     if (value.call !== call) errors.push("$.call: expected " + call);
     errors.push(...contractEchoErrors(value, contractSha256));
     errors.push(...criteriaProblems(value, contract));
@@ -150,7 +151,7 @@ export async function validateReviewResult(value, { workOrder, call, repoRoot, p
     ? validateAgainstSchema(value, await loadSchema(REVIEW_RESULT_SCHEMA))
     : ["$: not an object"];
   if (errors.length) return { ok: false, errors };
-  if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
+  if (nfc(value.work_order) !== nfc(workOrder)) errors.push("$.work_order: expected " + workOrder);
   if (value.call !== call) errors.push("$.call: expected " + call);
   errors.push(...contractEchoErrors(value, contractSha256));
   errors.push(...verdictProblems(value, contract));

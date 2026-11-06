@@ -551,6 +551,7 @@ export async function runBoundedResume({
           provider: writerProvider,
           phase: "write",
           exitCode: called.exitCode,
+          code: called.failureCode,
           texts: await called.failureTexts(),
         });
         const written = await writeFailureRecord(paths, logs, stamp + "-writer", classified, {

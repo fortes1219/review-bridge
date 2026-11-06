@@ -3,6 +3,7 @@ import { fileExists } from "../records/fileStore.mjs";
 
 export const failureReasons = Object.freeze([
   "provider_usage_limit",
+  "provider_signed_out",
   "work_package_call_budget",
   "timeout",
   "provider_error",
@@ -19,7 +20,28 @@ const USAGE_LIMIT = [
   /\brate limit(?:ed| reached| exceeded)\b/i,
   /\b429 Too Many Requests\b/i,
   /\bquota exceeded\b/i,
+  // Strings in claude.exe 2.1.280 and codex-rs 0.166's protocol/src/error.rs; none was measured.
+  /you(?:'|’)ve hit your monthly spend limit/i,
+  /you(?:'|’)ve reached your Fable limit/i,
+  /you(?:'|’)re out of usage credits/i,
+  /\byour org is out of usage\b/i,
+  /\byour workspace is out of credits\b/i,
 ];
+// What a CLI's own typed error says, where it has one: Claude's `error` on an assistant line, Codex's
+// `codexErrorInfo` on the app server's error. Only these two kinds stop a line of work orders: the next
+// one would die the same way.
+const SIGNED_OUT_CODES = new Set(["authentication_failed", "oauth_org_not_allowed", "unauthorized"]);
+const USAGE_LIMIT_CODES = new Set(["rate_limit", "billing_error", "usageLimitExceeded"]);
+// The same, from a CLI that gives only words. Claude's are strings in claude.exe 2.1.280, not measured;
+// each is a whole line of the CLI's own, never a phrase inside a stream it echoes. Codex's are
+// login/src/auth/manager.rs of rust-v0.166.0; `exec --json` carries only the message.
+const SIGNED_OUT_TEXT = [
+  /^(?:Not logged in|Login expired|OAuth token revoked|Invalid API key|Invalid auth token|API Error: 401 Invalid API key) · /m,
+  /^(?:ERROR: )?Your access token could not be refreshed\b/m,
+];
+// A moment's trouble that says nothing about the next work order: another Claude process holds the
+// login refresh; Codex is reconnecting (measured 2026-11-06 with 0.166 and no network).
+const PASSING_TEXT = [/\banother Claude Code process\b/i, /^(?:ERROR: )?Reconnecting\.\.\./m];
 const CODEX_ERROR_LINE = /^ERROR: \S/;
 const CODEX_TRAILER_FILLER = /^(?:tokens used|[\d,]+|)$/;
 const RESET_HINTS = [
@@ -102,20 +124,21 @@ export function classifyProviderFailure({
   phase,
   exitCode = null,
   timedOut = false,
+  code = null,
   texts = [],
   observedAt = new Date().toISOString(),
 }) {
   let reason = "provider_error";
   let resetHint = null;
+  const says = (patterns) => texts.some((text) => patterns.some((pattern) => pattern.test(String(text || ""))));
   if (timedOut) reason = "timeout";
+  else if (says(PASSING_TEXT)) reason = "provider_error";
+  else if (SIGNED_OUT_CODES.has(code) || says(SIGNED_OUT_TEXT)) reason = "provider_signed_out";
   else {
-    for (const text of texts) {
-      const line = usageLimitLine(text);
-      if (line) {
-        reason = "provider_usage_limit";
-        resetHint = explicitResetHint(line);
-        break;
-      }
+    const line = texts.map(usageLimitLine).find(Boolean) ?? null;
+    if (line || USAGE_LIMIT_CODES.has(code)) {
+      reason = "provider_usage_limit";
+      resetHint = explicitResetHint(line);
     }
   }
   return {

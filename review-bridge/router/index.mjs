@@ -75,8 +75,8 @@ export const COMMANDS = {
   start: {
     audience: "human",
     positional: "taskFile",
-    usage: "<file>",
-    summary: "Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it",
+    usage: "<file|directory>",
+    summary: "Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it",
     options: {
       ...WORK_ORDER_OPTIONS,
       "--yes": YES,
