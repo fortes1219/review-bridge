@@ -14,4 +14,5 @@ import ReviewBridgeHome from './.vitepress/theme/components/ReviewBridgeHome.vue
   guide-href="/guide/install"
   github-href="https://github.com/fortes1219/review-bridge"
   npm-href="https://www.npmjs.com/package/review-bridge"
+  article-href="https://hackmd.io/@FortesHuang/HJnWgQGJMx"
 />

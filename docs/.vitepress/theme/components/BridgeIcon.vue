@@ -33,6 +33,9 @@ defineProps<{ name: FeatureIcon | StepIcon | 'arrow' | 'play' | 'github' | 'box'
     <template v-else-if="name === 'database'">
       <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>
     </template>
+    <template v-else-if="name === 'gauge'">
+      <path d="M4 15a8 8 0 0 1 16 0"/><path d="M12 15l4-5"/><path d="M3 19h18"/><circle cx="12" cy="15" r="1.2"/>
+    </template>
     <template v-else-if="name === 'play'">
       <path d="m8 5 11 7-11 7V5Z" fill="currentColor" stroke="none"/>
     </template>

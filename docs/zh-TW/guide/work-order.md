@@ -183,7 +183,7 @@ frontmatter 是檔案開頭的 YAML 設定，格式參考 Astro content collecti
 ---
 priority: high              # low / medium / high / urgent；預設是 policy 的 priority.default
 writer:                     # writer 的模型與 effort，蓋過 policy 的 priority 表
-  model: gpt-5.6-sol        # 必須是 writer 那個 CLI 的模型；null 是該 CLI 自己的預設
+  model: gpt-6.1-sol        # 必須是 writer 那個 CLI 的模型；null 是該 CLI 自己的預設
   effort: high              # low / medium / high
 reviewer: { model: opus, effort: medium }   # reviewer 同理
 budget:                     # 每一項都可以不寫；預設是 policy 同名的上限

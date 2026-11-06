@@ -4,15 +4,17 @@ Review Bridge 透過兩個獨立的 AI 代理執行工單：**實作代理（wri
 
 文件沿用幾個常見術語：**run** 是一次執行，**session** 是 agent 的工作階段，**provider** 是角色使用的 CLI（`claude` 或 `codex`），**policy** 是 Bridge 以程式檢查的執行規則。
 
+> 這套做法為什麼長這樣，背景在這篇：[AI 導入後，工程團隊真正要管理的是交付鏈路與驗證責任](https://hackmd.io/@FortesHuang/HJnWgQGJMx)（HackMD）。
+
 ## 一次執行的生命週期
 
 ```text
 工單 .md
   → 封存成計畫（範圍、預算、驗證指令、停點）
   → 顯示授權卡片，由你確認
-  → writer 轉換驗收條件，reviewer 核對，Bridge 封存合約
+  → writer 把工單翻成合約，reviewer 核對，Bridge 封存合約
   → writer 實作（最多 rounds 輪）；每輪完成後由 Bridge 執行測試
-  → reviewer 審查，Bridge 逐條判定驗收結果
+  → reviewer 審查、逐條判定驗收；Bridge 記下每一條
   → 產生結果檔
   → 你檢查成果，決定是否 commit
 ```
