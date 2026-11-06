@@ -1,12 +1,15 @@
 import { defineConfig } from 'vitepress'
+import { withMermaid } from 'vitepress-plugin-mermaid'
 
 // Three locales with one structure: the language menu swaps the prefix and keeps the page path.
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: 'Review Bridge',
   description: 'Work orders in, evidence out.',
   cleanUrls: true,
   appearance: 'dark',
   lastUpdated: true,
+  // mermaid pulls in CommonJS packages (fastdom); Vite pre-bundles mermaid whole, or the dev server fails on their default imports.
+  vite: { optimizeDeps: { include: ['mermaid'] } },
   locales: {
     "root": {
       "label": "English",
@@ -20,6 +23,10 @@ export default defineConfig({
           {
             "text": "Concepts",
             "link": "/concepts/"
+          },
+          {
+            "text": "Design principles",
+            "link": "/principles/architecture"
           },
           {
             "text": "Reference",
@@ -40,7 +47,7 @@ export default defineConfig({
               "text": "Guide",
               "items": [
                 {
-                  "text": "Install and init",
+                  "text": "Install and set up",
                   "link": "/guide/install"
                 },
                 {
@@ -52,11 +59,11 @@ export default defineConfig({
                   "link": "/guide/start"
                 },
                 {
-                  "text": "Results, logs and the database",
+                  "text": "Results, logs, and the database",
                   "link": "/guide/results"
                 },
                 {
-                  "text": "Upgrade, back up, remove",
+                  "text": "Upgrade, back up, and uninstall",
                   "link": "/guide/maintenance"
                 }
               ]
@@ -69,6 +76,25 @@ export default defineConfig({
                 {
                   "text": "Concepts",
                   "link": "/concepts/"
+                }
+              ]
+            }
+          ],
+          "/principles/": [
+            {
+              "text": "Design principles",
+              "items": [
+                {
+                  "text": "Architecture and roadmap",
+                  "link": "/principles/architecture"
+                },
+                {
+                  "text": "Design decisions",
+                  "link": "/principles/why"
+                },
+                {
+                  "text": "Design references",
+                  "link": "/principles/references"
                 }
               ]
             }
@@ -105,8 +131,12 @@ export default defineConfig({
             "link": "/ja/guide/install"
           },
           {
-            "text": "概念",
+            "text": "基本概念",
             "link": "/ja/concepts/"
+          },
+          {
+            "text": "設計方針",
+            "link": "/ja/principles/architecture"
           },
           {
             "text": "リファレンス",
@@ -127,7 +157,7 @@ export default defineConfig({
               "text": "ガイド",
               "items": [
                 {
-                  "text": "インストールと init",
+                  "text": "インストールと初期設定",
                   "link": "/ja/guide/install"
                 },
                 {
@@ -135,7 +165,7 @@ export default defineConfig({
                   "link": "/ja/guide/work-order"
                 },
                 {
-                  "text": "run を開始する",
+                  "text": "作業を実行する",
                   "link": "/ja/guide/start"
                 },
                 {
@@ -151,11 +181,30 @@ export default defineConfig({
           ],
           "/ja/concepts/": [
             {
-              "text": "概念",
+              "text": "基本概念",
               "items": [
                 {
-                  "text": "概念",
+                  "text": "基本概念",
                   "link": "/ja/concepts/"
+                }
+              ]
+            }
+          ],
+          "/ja/principles/": [
+            {
+              "text": "設計方針",
+              "items": [
+                {
+                  "text": "アーキテクチャとロードマップ",
+                  "link": "/ja/principles/architecture"
+                },
+                {
+                  "text": "設計の理由",
+                  "link": "/ja/principles/why"
+                },
+                {
+                  "text": "設計の参考資料",
+                  "link": "/ja/principles/references"
                 }
               ]
             }
@@ -197,7 +246,11 @@ export default defineConfig({
             "link": "/zh-TW/concepts/"
           },
           {
-            "text": "參考",
+            "text": "設計原理",
+            "link": "/zh-TW/principles/architecture"
+          },
+          {
+            "text": "參考文件",
             "link": "/zh-TW/reference/cli"
           },
           {
@@ -215,7 +268,7 @@ export default defineConfig({
               "text": "指南",
               "items": [
                 {
-                  "text": "安裝與 init",
+                  "text": "安裝與初始化",
                   "link": "/zh-TW/guide/install"
                 },
                 {
@@ -223,7 +276,7 @@ export default defineConfig({
                   "link": "/zh-TW/guide/work-order"
                 },
                 {
-                  "text": "開工",
+                  "text": "開始執行",
                   "link": "/zh-TW/guide/start"
                 },
                 {
@@ -248,9 +301,28 @@ export default defineConfig({
               ]
             }
           ],
+          "/zh-TW/principles/": [
+            {
+              "text": "設計原理",
+              "items": [
+                {
+                  "text": "架構與里程碑",
+                  "link": "/zh-TW/principles/architecture"
+                },
+                {
+                  "text": "為什麼這麼設計",
+                  "link": "/zh-TW/principles/why"
+                },
+                {
+                  "text": "設計參考",
+                  "link": "/zh-TW/principles/references"
+                }
+              ]
+            }
+          ],
           "/zh-TW/reference/": [
             {
-              "text": "參考",
+              "text": "參考文件",
               "items": [
                 {
                   "text": "指令",
@@ -276,4 +348,4 @@ export default defineConfig({
     search: { provider: 'local' },
     socialLinks: [{ icon: 'github', link: 'https://github.com/fortes1219/review-bridge' }, { icon: 'npm', link: 'https://www.npmjs.com/package/review-bridge' }],
   },
-})
+}))

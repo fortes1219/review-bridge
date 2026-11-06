@@ -1,13 +1,13 @@
-# 安裝與 init
+# 安裝與初始化
 
-Review Bridge 是一個全域安裝的命令列工具。裝一次，之後每個專案各跑一次 `init`。
+Review Bridge 是全域安裝的命令列工具。安裝一次後，在各專案執行 `init` 完成初始化即可使用。
 
 ## 需求
 
 - Node.js 22 以上，含 npm。
-- Git。沒有 Git 也能跑，但**工作證明**需要它：有 Git 時 Bridge 記下 run 開始的 commit、從 Git 讀出改了哪些檔；沒有 Git 時結果檔會寫「沒有工作證明」。
-- 你要用的角色各自的 CLI，已安裝並登入：`claude`（Claude Code）和／或 `codex`。
-- Bridge 的狀態要放在本機磁碟：同步資料夾與網路磁碟（OneDrive、Dropbox、iCloud Drive、UNC、NFS、SMB）會被拒絕。
+- Git。未使用 Git 的專案也能執行工單，但無法提供**工作證明**。有 Git 時，Bridge 會記錄執行開始時的 commit，並讀取實際修改的檔案；沒有 Git 時，結果檔會明確標示此限制。
+- 依 writer 與 reviewer 的角色設定，安裝並登入所需的 CLI：`claude`（Claude Code）、`codex`，或兩者皆安裝。
+- Bridge 的狀態必須存放於本機磁碟。不支援同步資料夾與網路磁碟，包括 OneDrive、Dropbox、iCloud Drive、UNC、NFS、SMB。
 
 ## 安裝
 
@@ -15,7 +15,7 @@ Review Bridge 是一個全域安裝的命令列工具。裝一次，之後每個
 npm i -g review-bridge@next
 ```
 
-rc 版本在 `next` 標籤上；正式版之後用 `npm i -g review-bridge`。
+候選發行版（rc）使用 `next` 標籤。正式版發布後，可使用 `npm i -g review-bridge` 安裝。
 
 ## init
 
@@ -24,27 +24,27 @@ cd your-project
 review-bridge init
 ```
 
-`init` 問三個問題，每題都有預設值，按 Enter 就是接受：
+`init` 會先詢問三項設定。每項都有預設值，按 Enter 即可採用：
 
-1. **writer**：`claude` 或 `codex`（你存過的預設，否則 `claude`）。
-2. **reviewer**：你存過的預設，否則 `codex`。
-3. **專案類型**：偵測到的類型，否則 `none`。類型只決定一件事——每次 writer 做完後 Bridge 自己跑哪個驗證指令（例如 `npm test`）。選 `none`、或專案沒有那個指令，工作照樣開始，卡片、紀錄和結果都會寫「tests: not configured」。
+1. **writer**：`claude` 或 `codex`（採用已儲存的預設值；若未設定，則使用 `claude`）。
+2. **reviewer**：採用已儲存的預設值；若未設定，則使用 `codex`。
+3. **專案類型**：採用偵測到的類型，未偵測到則使用 `none`。這項設定決定每輪 writer 完成後，由 Bridge 執行的驗證指令，例如 `npm test`。選擇 `none`，或專案未提供對應指令時，仍可執行工單；卡片、紀錄與結果檔會標示「tests: not configured」。
 
-最後一題問要不要把 VS Code tasks 寫進這個專案的 `.vscode/tasks.json`，預設是 **N**（見 [開工](./start#在-vs-code-裡)）。
+接著會詢問是否將 VS Code 工作（tasks）寫入專案的 `.vscode/tasks.json`，預設為 **N**（見 [開工](./start#在-vs-code-裡)）。
 
-用選項代替回答：`--writer`、`--reviewer`、`--profile <type|none>`、`--target <folder>`；沒有終端機、或加 `--yes`，就全部用預設值不問。
+也可以使用 `--writer`、`--reviewer`、`--profile <type|none>`、`--target <folder>` 直接指定設定。在非互動式環境中，或加上 `--yes` 時，未指定的項目會採用預設值，不再詢問。
 
 ### init 做了什麼
 
 - 建立 `.review-bridge/`：專案設定 `bridge.json`、`policy.override.json`、`rules.md`，以及工單範本 `work-packages/TEMPLATE.md`（英文）與 `TEMPLATE.zh-TW.md`（繁中）。
-- 在 Git 專案裡，整個 `.review-bridge/`（含結果）用 `.git/info/exclude` 擋在 Git 外。**不會改你的 `.gitignore`。**
-- 跑四個不叫模型的假自測（`PASS`、`FAIL_THEN_PASS`、`HARD_STOP`、`RATE_LIMIT`）。
-- 在 `127.0.0.1` 起本機頁面服務。
-- 在**專案外**、各 agent 找自訂指令的地方放 Bridge 的入口，所有專案共用：Claude Code 的 `~/.claude/commands/review-bridge.md`（叫法 `/review-bridge`；尊重 `CLAUDE_CONFIG_DIR`），Codex 的 `~/.agents/skills/review-bridge/SKILL.md`（叫法 `$review-bridge`）。那個位置已經有你自己的檔就不動。
+- 在 Git 專案中，透過 `.git/info/exclude` 排除整個 `.review-bridge/`，包含結果檔。**不會修改 `.gitignore`。**
+- 使用模擬 CLI 執行四項自我測試，不呼叫模型（`PASS`、`FAIL_THEN_PASS`、`HARD_STOP`、`RATE_LIMIT`）。
+- 在 `127.0.0.1` 啟動本機頁面服務。
+- 在**專案外**安裝代理指令入口，供所有專案共用。Claude Code 使用 `~/.claude/commands/review-bridge.md`，以 `/review-bridge` 呼叫；若設定了 `CLAUDE_CONFIG_DIR`，則依該目錄安裝。Codex 使用 `~/.agents/skills/review-bridge/SKILL.md`，以 `$review-bridge` 呼叫。若目標位置已有你自行建立的檔案，Bridge 會保留原檔。
 
-專案裡除了 `.review-bridge/` 什麼都不碰：沒有應用程式檔、`.gitignore`、`AGENTS.md`、`CLAUDE.md`、`.claude/` 的改動，`init` 之後 `git status` 是空的。唯一例外是你自己選的 `.vscode/tasks.json`。
+初始化不會修改應用程式檔案、`.gitignore`、`AGENTS.md`、`CLAUDE.md` 或 `.claude/`。若初始化前工作區沒有改動，且未選擇寫入 `.vscode/tasks.json`，初始化後的 `git status` 也不會出現新增改動。
 
-### init 印的東西
+### init 的輸出
 
 ```text
 Setting up .review-bridge/...
@@ -65,8 +65,8 @@ Done. Now:
     Password: copy it from <data home>/postgres/secret
 ```
 
-最後四格是連資料庫用的，`review-bridge status` 隨時會再印一次；見 [結果、紀錄與資料庫](./results#在-vs-code-看資料庫)。
+輸出末尾列出資料庫連線資訊，也可以隨時執行 `review-bridge status` 查閱；見 [結果、紀錄與資料庫](./results#在-vs-code-看資料庫)。
 
 ## 下一步
 
-寫[第一張工單](./work-order)，然後[開工](./start)。
+建立[第一張工單](./work-order)，接著[開始執行](./start)。

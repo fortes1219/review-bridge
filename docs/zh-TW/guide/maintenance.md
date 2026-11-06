@@ -8,18 +8,18 @@ cd your-project
 review-bridge upgrade              # 把這個專案的設定搬到新版，先備份
 ```
 
-`upgrade` 是一條固定的流水線，整條 Bridge 自己做完：停舊服務 → 備份 → 遷移 → 完整性檢查 → 清舊檔 → 啟動 → 健康檢查。中途被切斷就再跑一次，它會做完。
+`upgrade` 會依序停止舊服務、備份、遷移、檢查完整性、清理舊檔、重新啟動並執行健康檢查。流程由 Bridge 處理，中斷後可再次執行。
 
-- 舊版專案的東西搬一次：設定往上搬到 `.review-bridge/` 第一層，舊的執行狀態（`review-queue/`、`reviews/`、`archive/`）搬進 data home 的 `projects/<project_id>/`，舊的呼叫 log、計畫、卡片搬進 log 目錄，每個檔保留原名、以 SHA-256 核對；保留期已經過的 run 的 log 直接去掉。舊版直接放在 `results/` 裡的結果檔留在原地，那是你的副本。
-- `.review-bridge/` 裡 Bridge 不認得的檔（作業系統的垃圾檔、你自己的檔）一律不管、不搬、不刪、不擋。只有目的地已經有同名但內容不同的檔才拒絕，並列出檔名。
+- 舊版目錄會進行一次性遷移：設定移到 `.review-bridge/` 第一層；執行狀態（`review-queue/`、`reviews/`、`archive/`）移到 data home 的 `projects/<project_id>/`；呼叫日誌、計畫與卡片移到日誌目錄。檔案保留原名，並以 SHA-256 核對內容。超過保留期限的執行日誌會清除；舊版直接存放於 `results/` 的結果副本則保留原位。
+- Bridge 無法辨識的檔案，例如作業系統產生的暫存檔或你自行建立的檔案，會保留原狀，不影響升級。若遷移目的地已有同名但內容不同的檔案，則會拒絕遷移並列出檔名。
 - `bridge.json` 裡你改過的角色會保留。
-- `--rollback` 從上一次的備份退回。
+- 使用 `--rollback` 可從上一次升級的備份還原。
 - 備份放 data home 的 `backups/installer`，或 `--backup-root <folder>`。
-- 給腳本用：`--plan-out <file>` 只寫計畫不問；`--plan <file> --approve <sha>` 套用那份計畫，`<sha>` 是 `--plan-out` 印出的 SHA-256。
+- 供腳本使用：`--plan-out <file>` 會將計畫寫入檔案，不進行互動確認；`--plan <file> --approve <sha>` 則套用該計畫，`<sha>` 為 `--plan-out` 顯示的 SHA-256。
 
 ## 備份
 
-見 [結果、紀錄與資料庫 → 備份](./results#備份)：`review-bridge backup` 複製整個資料庫（所有專案），有 run 在跑會拒絕。
+見 [結果、紀錄與資料庫 → 備份](./results#備份)：`review-bridge backup` 複製整個資料庫（所有專案），若有工作仍在執行，會拒絕備份。
 
 ## 移除
 
@@ -28,20 +28,22 @@ review-bridge uninstall --target .   # 先把專案的設定移掉，有備份
 npm uninstall -g review-bridge       # 再移掉 Bridge 本體
 ```
 
-- `uninstall` 只拿掉 Bridge 自己放的東西：`.review-bridge/`（結果檔是你的副本，一樣在備份裡）、`.vscode/tasks.json` 裡 `review-bridge:` 的 task 與 `review-bridge-` 的 input（檔裡沒別的才刪檔）。
-- agent 入口（`~/.claude/commands/review-bridge.md`、`~/.agents/skills/review-bridge/SKILL.md`）和你的使用者 tasks 是所有專案共用的，**最後一個**設定過的專案 `uninstall` 時才移除；你自己改過的檔不動。
+- `uninstall` 僅移除 Bridge 建立的內容：`.review-bridge/`（結果副本也會納入備份）、`.vscode/tasks.json` 裡 `review-bridge:` 的 task 與 `review-bridge-` 的 input（僅在檔案不含其他內容時刪除檔案）。
+- 代理入口（`~/.claude/commands/review-bridge.md`、`~/.agents/skills/review-bridge/SKILL.md`）與使用者 tasks 由所有專案共用，只有在**最後一個**已設定專案執行 `uninstall` 時才移除。你自行修改過的檔案會保留。
 - `--plan-out`、`--plan`、`--approve`、`--backup-root`、`--json` 和 `upgrade` 相同。
 
 ## 平台
 
-Windows x64 是原生驗證過的。Apple Silicon macOS 可以選但沒有原生驗證。Linux 是實驗性的，原生模型工作會 fail closed。
+Windows x64 已通過原生環境驗證。Apple Silicon macOS 可選用，但尚未完成原生驗證。Linux 仍屬實驗階段，原生模型工作預設拒絕執行（fail closed）。
 
 ### Windows
 
-Codex 用 Windows PowerShell 跑指令，會載入你的 `$PROFILE`。中文版 Windows（或任何非 UTF-8 code page）的 PowerShell 用那個 code page 輸出，Codex 當 UTF-8 讀，中文會變亂碼。在 profile 加一行（PowerShell 裡 `notepad $PROFILE`，檔不存在就建）：
+Codex 使用 Windows PowerShell 執行指令時，會載入你的 `$PROFILE`。若 PowerShell 使用非 UTF-8 字碼頁輸出，例如中文版 Windows 的預設字碼頁，Codex 以 UTF-8 讀取時就可能出現亂碼。
+
+可在 PowerShell 中執行 `notepad $PROFILE`，加入以下設定；若檔案不存在，請先建立：
 
 ```powershell
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 ```
 
-或改用 PowerShell 7（`pwsh`），它本來就輸出 UTF-8。`review-bridge doctor` 會告訴你 PowerShell 現在是不是 UTF-8；它不會改你的 profile。
+也可以改用預設輸出 UTF-8 的 PowerShell 7（`pwsh`）。`review-bridge doctor` 會顯示目前 PowerShell 是否使用 UTF-8，不會修改你的 profile。

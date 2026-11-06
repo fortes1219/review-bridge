@@ -1,31 +1,31 @@
 # 指令
 
-這一頁由 `review-bridge <指令> --help` 的實際輸出整理，每段的 `--help` 原文照貼，不另外改寫選項。`review-bridge --help --all` 另列給 agent 與腳本用的指令（`work-plan`、`work-start`、`work-status`、`work-cancel`、`wait`、`prune`、`rm`、`roles-check`；`start` 一次做完 `work-plan` 加 `work-start`）。
+本頁整理 `review-bridge <指令> --help` 的實際輸出，各段保留原文與選項。供 agent 與腳本使用的底層指令，可透過 `review-bridge --help --all` 查看，包括 `work-plan`、`work-start`、`work-status`、`work-cancel`、`wait`、`prune`、`rm`、`roles-check`。一般使用 `start` 即可完成 `work-plan` 與 `work-start` 兩個步驟。
 
-| 指令 | 做什麼 |
+| 指令 | 用途 |
 |---|---|
-| `init` | 在這個資料夾設定 Review Bridge：問 writer、reviewer、專案類型。 |
-| `start` | 跑一張工單：封存計畫、確認 reviewer 只能讀、印出你要授權的內容、問一次、然後跑。 |
-| `stop` | 暫停一條正在跑的工單：停掉它的模型程序，紀錄保留（`resume <run_id>` 接著做）。 |
-| `resume` | 接著做一條停掉的工單：同一張工單的新 run，停點與範圍相同；角色、模型、effort、預算重新決定，印同樣的卡、要同樣的 y。 |
-| `clean` | 清紀錄：不帶 run id 時把做完的 run 收進日檔、丟掉過保留期的；帶 run id 時移除那條做完的 run（正在跑的拒絕）。 |
-| `status` | Bridge 現在在做什麼：頁面、這個專案的 run、review 佇列、怎麼看資料庫。 |
-| `logs` | 一條 run 的 log 資料夾與每個檔是什麼；給工單（檔或 `source_id`）時列它的 run，最新在上。 |
-| `vscode` | 把 Bridge 的 tasks 加進 VS Code 的 task 清單：這個專案的 `.vscode/tasks.json`，或 `--user` 寫進你的使用者 tasks、所有專案都有。 |
-| `up` | 在背景起本機頁面服務。 |
-| `down` | 停本機頁面服務。 |
-| `ps` | 本機頁面服務有沒有在跑、網址是什麼。 |
-| `watch` | 在這個終端機跑本機頁面，直到 Ctrl+C。 |
-| `upgrade` | 把這個資料夾的設定搬到已安裝的 Review Bridge 版本，先備份。 |
-| `uninstall` | 從一個資料夾移除 Review Bridge 的設定，先備份（Bridge 本體：`npm uninstall -g review-bridge`）。 |
-| `doctor` | 檢查這台機器用哪個平台 adapter，不跑任何工作。 |
-| `backup` | 複製你的資料庫（所有專案），資料庫停著時做；有 run 在跑會拒絕。 |
+| `init` | 初始化目前資料夾，設定 writer、reviewer 與專案類型。 |
+| `start` | 執行工單：封存計畫、檢查 reviewer 的唯讀限制、顯示卡片，取得人工授權後開始執行。 |
+| `stop` | 停止指定執行的模型程序並保留紀錄，可透過 `resume <run_id>` 重新執行該工單。 |
+| `resume` | 為已停止的工單建立新的 run，保留停點與範圍；重新決定角色、模型、effort 與預算，並再次顯示卡片、要求人工授權。 |
+| `clean` | 清理紀錄：不帶 run ID 時，將已結束紀錄彙整成每日檔案，並刪除超過保留期限的內容；帶 run ID 時，移除指定的已結束紀錄。執行中的工作不能清除。 |
+| `status` | 顯示本機頁面、專案的執行狀態、審查佇列與資料庫連線資訊。 |
+| `logs` | 查看指定 run 的日誌目錄與各檔案用途；傳入工單檔案或 `source_id` 時，按時間由新到舊列出歷次執行。 |
+| `vscode` | 將 Bridge 工作加入專案的 `.vscode/tasks.json`；使用 `--user` 則寫入所有專案共用的使用者 tasks。 |
+| `up` | 在背景啟動本機頁面服務。 |
+| `down` | 停止本機頁面服務。 |
+| `ps` | 顯示本機頁面服務的運作狀態與網址。 |
+| `watch` | 在目前終端機執行本機頁面服務，按 Ctrl+C 結束。 |
+| `upgrade` | 先備份，再將專案設定升級至目前安裝的 Review Bridge 版本。 |
+| `uninstall` | 先備份，再從指定資料夾移除 Review Bridge 設定。移除 Bridge 本體請使用 `npm uninstall -g review-bridge`。 |
+| `doctor` | 檢查本機使用的平台 adapter，不執行工單。 |
+| `backup` | 停止資料庫後備份所有專案的資料，再重新啟動。若有工作仍在執行，會拒絕備份。 |
 
-每個指令都收 `--project <folder>`（預設目前資料夾）或 `--target <folder>`，見各段。
+各指令使用 `--project <folder>` 或 `--target <folder>` 指定專案，預設為目前資料夾。支援的選項見各段說明。
 
 ## init
 
-在這個資料夾設定 Review Bridge：問 writer、reviewer、專案類型。
+初始化目前資料夾，設定 writer、reviewer 與專案類型。
 
 ```text
 Usage: review-bridge init [options]
@@ -55,7 +55,7 @@ Options:
 
 ## start
 
-跑一張工單：封存計畫、確認 reviewer 只能讀、印出你要授權的內容、問一次、然後跑。
+執行工單：封存計畫、檢查 reviewer 的唯讀限制、顯示卡片，取得人工授權後開始執行。
 
 ```text
 Usage: review-bridge start <file> [options]
@@ -93,7 +93,7 @@ Options:
 
 ## stop
 
-暫停一條正在跑的工單：停掉它的模型程序，紀錄保留（`resume <run_id>` 接著做）。
+停止指定執行的模型程序並保留紀錄，可透過 `resume <run_id>` 重新執行該工單。
 
 ```text
 Usage: review-bridge stop <run_id> [options]
@@ -107,7 +107,7 @@ Options:
 
 ## resume
 
-接著做一條停掉的工單：同一張工單的新 run，停點與範圍相同；角色、模型、effort、預算重新決定，印同樣的卡、要同樣的 y。
+為已停止的工單建立新的 run，保留停點與範圍；重新決定角色、模型、effort 與預算，並再次顯示卡片、要求人工授權。
 
 ```text
 Usage: review-bridge resume <run_id> [options]
@@ -129,7 +129,7 @@ Options:
 
 ## clean
 
-清紀錄：不帶 run id 時把做完的 run 收進日檔、丟掉過保留期的；帶 run id 時移除那條做完的 run（正在跑的拒絕）。
+清理紀錄：不帶 run ID 時，將已結束紀錄彙整成每日檔案，並刪除超過保留期限的內容；帶 run ID 時，移除指定的已結束紀錄。執行中的工作不能清除。
 
 ```text
 Usage: review-bridge clean [<run_id>] [options]
@@ -147,7 +147,7 @@ Options:
 
 ## status
 
-Bridge 現在在做什麼：頁面、這個專案的 run、review 佇列、怎麼看資料庫。
+顯示本機頁面、專案的執行狀態、審查佇列與資料庫連線資訊。
 
 ```text
 Usage: review-bridge status [options]
@@ -165,7 +165,7 @@ Options:
 
 ## logs
 
-一條 run 的 log 資料夾與每個檔是什麼；給工單（檔或 `source_id`）時列它的 run，最新在上。
+查看指定 run 的日誌目錄與各檔案用途；傳入工單檔案或 `source_id` 時，按時間由新到舊列出歷次執行。
 
 ```text
 Usage: review-bridge logs <run_id|file> [options]
@@ -183,7 +183,7 @@ Options:
 
 ## vscode
 
-把 Bridge 的 tasks 加進 VS Code 的 task 清單：這個專案的 `.vscode/tasks.json`，或 `--user` 寫進你的使用者 tasks、所有專案都有。
+將 Bridge 工作加入專案的 `.vscode/tasks.json`；使用 `--user` 則寫入所有專案共用的使用者 tasks。
 
 ```text
 Usage: review-bridge vscode [options]
@@ -201,7 +201,7 @@ Options:
 
 ## up
 
-在背景起本機頁面服務。
+在背景啟動本機頁面服務。
 
 ```text
 Usage: review-bridge up [options]
@@ -217,7 +217,7 @@ Options:
 
 ## down
 
-停本機頁面服務。
+停止本機頁面服務。
 
 ```text
 Usage: review-bridge down [options]
@@ -231,7 +231,7 @@ Options:
 
 ## ps
 
-本機頁面服務有沒有在跑、網址是什麼。
+顯示本機頁面服務的運作狀態與網址。
 
 ```text
 Usage: review-bridge ps [options]
@@ -245,7 +245,7 @@ Options:
 
 ## watch
 
-在這個終端機跑本機頁面，直到 Ctrl+C。
+在目前終端機執行本機頁面服務，按 Ctrl+C 結束。
 
 ```text
 Usage: review-bridge watch [options]
@@ -263,7 +263,7 @@ Options:
 
 ## upgrade
 
-把這個資料夾的設定搬到已安裝的 Review Bridge 版本，先備份。
+先備份，再將專案設定升級至目前安裝的 Review Bridge 版本。
 
 ```text
 Usage: review-bridge upgrade [options]
@@ -291,7 +291,7 @@ Options:
 
 ## uninstall
 
-從一個資料夾移除 Review Bridge 的設定，先備份（Bridge 本體：`npm uninstall -g review-bridge`）。
+先備份，再從指定資料夾移除 Review Bridge 設定。移除 Bridge 本體請使用 `npm uninstall -g review-bridge`。
 
 ```text
 Usage: review-bridge uninstall [options]
@@ -317,7 +317,7 @@ Options:
 
 ## doctor
 
-檢查這台機器用哪個平台 adapter，不跑任何工作。
+檢查本機使用的平台 adapter，不執行工單。
 
 ```text
 Usage: review-bridge doctor [options]
@@ -333,7 +333,7 @@ Options:
 
 ## backup
 
-複製你的資料庫（所有專案），資料庫停著時做；有 run 在跑會拒絕。
+停止資料庫後備份所有專案的資料，再重新啟動。若有工作仍在執行，會拒絕備份。
 
 ```text
 Usage: review-bridge backup [options]

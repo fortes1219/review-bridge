@@ -1,10 +1,10 @@
 # 結果、紀錄與資料庫
 
-一條 run 結束，你拿到三樣東西：專案裡的**結果檔**、log 目錄裡的**整條紀錄**、資料庫裡的**每一筆事件**。三者對得起來，靠的是結果檔開頭那幾個 id。
+每次執行結束後，你可以從三個地方查看結果：專案中的**結果檔**、日誌目錄中的**執行紀錄**，以及資料庫中的**事件與判定**。結果檔開頭的 ID 可以用來核對這些資料。
 
 ## 結果檔
 
-每條 run 一個檔，放在工單自己的資料夾：
+每次執行產生一個結果檔，存放在該工單的資料夾中：
 
 ```text
 .review-bridge/results/<工單檔名>/
@@ -14,9 +14,9 @@
 
 - 檔名是 `<source_id> <工單檔名> <本地日期> <hh-mm-ss> <結論>.md`；工單沒有 `source_id` 就沒有前面那段。**永不覆寫**。
 - 旁邊的 `contract.v<版本>.<SHA-256 前七碼>.json` 是結果所指的那份封存合約。
-- 這兩個是給你的副本，Bridge 自己另有紀錄，想刪就刪。
+- 結果檔與合約檔都是供你閱讀的副本；刪除副本不會刪除 Bridge 資料庫中的紀錄。
 
-結果檔開頭是它在講誰（來自 Bridge 的資料庫），接著是結論：
+結果檔開頭列出來自資料庫的工單、版本與角色資訊，接著說明結論：
 
 ```markdown
 ---
@@ -69,7 +69,7 @@ Work proof from Git, checked against the records Bridge wrote; …
 | writer | 1 | … |
 ```
 
-各段怎麼讀見 [結果檔](../reference/result-file)。重點兩個：`version_no` 是**封存的那個版本**，不是現在磁碟上的 `.md`；「Files changed」第一份清單是 Git 的證據，writer 自己宣稱改了什麼另列一份、沒和 Git 對過。
+各段說明見[結果檔參考](../reference/result-file)。閱讀時請留意：`version_no` 指**執行時封存的工單版本**；「Files changed」中的第一份清單來自 Git，writer 回報但未經 Git 核對的修改會另外列出。
 
 ## status
 
@@ -86,18 +86,18 @@ Database in VS Code: install Microsoft's PostgreSQL extension and add a connecti
   Password: copy it from <data home>/postgres/secret
 ```
 
-一行一條 run：run id、狀態、結論、原因、工單、本地時間。`--after <run_id>` 看下一頁十條；`--json` 給程式讀。
+每行列出一次執行的 run ID、狀態、結論、原因、工單與本地時間。使用 `--after <run_id>` 查看下一頁十筆，或加上 `--json` 取得供程式使用的輸出。
 
 ## logs
 
-給工單檔（或它的 `source_id`）列它的 run，最新在上：
+傳入工單檔案或 `source_id`，可列出該工單的歷次執行，最新一筆在最上方：
 
 ```text
 Runs of .review-bridge/work-packages/add-readme.md, newest first:
   2eb9dc50-f49d-4eae-95ed-e503a2fa5531  2026-11-06 07:31:29 +0800  success          <log 目錄>/<project_id>/2eb9dc50-…
 ```
 
-給 run id 列那條 run 的 log 資料夾裡每個檔是什麼：
+傳入 run ID，則會列出該次執行的日誌資料夾與各檔案的用途：
 
 ```text
 Logs of run 2eb9dc50-… (success): <log 目錄>/<project_id>/2eb9dc50-…
@@ -115,22 +115,22 @@ Logs of run 2eb9dc50-… (success): <log 目錄>/<project_id>/2eb9dc50-…
                        start           authorization_card  authorized-plan-….txt
 ```
 
-每一次模型呼叫的 prompt、串流、stderr，測試輸出，計畫，和你按 y 的那張卡，全部在這裡。這些檔放在作業系統的 log 目錄，不在專案裡；過了保留期（`bridge.json` 的 `retention.days`，預設 15 天）或 `clean <run_id>` 時刪掉。
+這個目錄包含每次模型呼叫的 prompt、串流與 stderr，以及測試輸出、計畫和你確認的授權卡片。檔案存放於作業系統的日誌目錄，與專案分開。超過保留期限（`bridge.json` 的 `retention.days`，預設 15 天）或執行 `clean <run_id>` 時，會清除對應檔案。
 
-## 東西放在哪
+## 資料存放位置
 
-| 什麼 | 哪裡 |
+| 資料 | 位置 |
 |---|---|
-| 你寫、你讀的：設定、工單、結果 | 專案的 `.review-bridge/` |
-| 你的設定（`settings.json`）、資料庫、每個專案的執行狀態 `projects/<project_id>/` | data home：Windows `%LOCALAPPDATA%\ReviewBridge`、macOS `~/Library/Application Support/ReviewBridge`、Linux `~/.local/share/review-bridge`；`REVIEW_BRIDGE_DATA_HOME` 可以搬 |
-| 每條 run 的 log `<project_id>/<run_id>/` | Windows `%LOCALAPPDATA%\ReviewBridge\Log`、macOS `~/Library/Logs/ReviewBridge`、Linux `$XDG_STATE_HOME/review-bridge`（`~/.local/state/review-bridge`）；設了 `REVIEW_BRIDGE_DATA_HOME` 就是它底下的 `logs/` |
+| 專案設定、工單與結果副本 | 專案的 `.review-bridge/` |
+| 你的設定（`settings.json`）、資料庫、每個專案的執行狀態 `projects/<project_id>/` | data home：Windows `%LOCALAPPDATA%\ReviewBridge`、macOS `~/Library/Application Support/ReviewBridge`、Linux `~/.local/share/review-bridge`；可用 `REVIEW_BRIDGE_DATA_HOME` 指定其他位置 |
+| 每次執行的日誌 `<project_id>/<run_id>/` | Windows `%LOCALAPPDATA%\ReviewBridge\Log`、macOS `~/Library/Logs/ReviewBridge`、Linux `$XDG_STATE_HOME/review-bridge`（`~/.local/state/review-bridge`）；設了 `REVIEW_BRIDGE_DATA_HOME` 就是它底下的 `logs/` |
 | 備份 | data home 的 `backups/database`（`review-bridge backup`）與 `backups/installer`（`upgrade`、`uninstall` 留的）；裡面可能有私人工作資料，不要公開 |
 
-**資料庫是紀錄**；`projects/<project_id>/` 是執行中的副本；log 和結果檔刪了不會丟任何東西。每張工單、每個版本、每張卡（計畫）、每筆授權、合約、run、事件、判定、交付，都是資料庫裡的一列。伺服器只聽 `127.0.0.1`，指令之間一直開著。
+**資料庫是執行紀錄的唯一權威來源**，`projects/<project_id>/` 則保存執行中的副本。刪除日誌或結果檔，不會刪除資料庫中的工單版本、計畫、授權、合約、run、事件、判定與交付紀錄；日誌原檔仍會依保留規則清除。資料庫僅監聽 `127.0.0.1`，目前會在指令結束後持續運作。
 
 ## 在 VS Code 看資料庫
 
-裝 Microsoft 的 PostgreSQL 擴充（或 SQLTools 加它的 PostgreSQL driver），新增連線：
+安裝 Microsoft 的 PostgreSQL 擴充套件，或 SQLTools 與其 PostgreSQL driver，再新增連線：
 
 - Server：`127.0.0.1`
 - Port：`5432`（PostgreSQL 的預設；被占用時往上找下一個空的，每次啟動重找）
@@ -138,8 +138,10 @@ Logs of run 2eb9dc50-… (success): <log 目錄>/<project_id>/2eb9dc50-…
 - Database：`bridge`
 - Password：從密碼檔複製，data home 底下的 `postgres/secret`（Windows 是 `%LOCALAPPDATA%\ReviewBridge\postgres\secret`）；只有你的使用者讀得到。
 
-`init` 和 `review-bridge status` 結尾印的就是這四格加當下的埠和密碼檔位置。要從別的埠開始，在同一個資料夾的 `settings.json` 加 `"database": { "port": 5440 }`，下次資料庫啟動時生效（電腦重開後，或立刻用 `review-bridge backup`——它會停再起）。
+`init` 與 `review-bridge status` 的輸出末尾會顯示目前的連線資訊及密碼檔位置。若要從其他埠開始尋找，在 data home 的 `settings.json` 加入 `"database": { "port": 5440 }`，下次資料庫啟動時就會生效。重新開機，或執行會停止再啟動資料庫的 `review-bridge backup`，都會使用新設定。
 
 ## 備份
 
-`review-bridge backup` 是 PostgreSQL 的檔案層級備份：有 run 在跑會拒絕；停資料庫、整個資料夾（資料與密碼檔）複製一份、再啟動。還原：把那份 `postgres` 資料夾複製進一個空資料夾，把 `REVIEW_BRIDGE_DATA_HOME` 指到那裡，在那裡跑 Bridge。
+`review-bridge backup` 使用 PostgreSQL 的檔案層級備份：先停止資料庫，複製完整資料夾（包含資料與密碼檔），再重新啟動。若有工作仍在執行，會拒絕備份。
+
+還原時，將備份的 `postgres` 資料夾複製到一個空資料夾，將 `REVIEW_BRIDGE_DATA_HOME` 指向該空資料夾，再啟動 Bridge。

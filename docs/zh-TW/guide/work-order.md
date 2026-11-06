@@ -1,6 +1,8 @@
 # 第一張工單
 
-工單是一個 Markdown 檔，放在 `.review-bridge/work-packages/`。Bridge 只讀這個格式：它自己切區塊、把每個區塊的原文放進合約同名的欄位；模型只負責把驗收區塊切成一條條編號的條件。如果你用別的工具產生工單，這一頁就是完整的介面。
+工單是放在 `.review-bridge/work-packages/` 的 Markdown 檔案。Bridge 依區塊標記解析內容，將原文填入合約的對應欄位；模型只負責把驗收區塊整理成編號條件。
+
+如果你用其他工具產生工單，請讓輸出符合本頁的固定格式。
 
 ## 從範本開始
 
@@ -8,9 +10,9 @@
 cp .review-bridge/work-packages/TEMPLATE.zh-TW.md .review-bridge/work-packages/add-readme.md
 ```
 
-填你需要的區塊，用不到的整塊刪掉。`##` 小標題是給人看的，用什麼語言都可以，Bridge 不讀。
+填寫需要的區塊，用不到的可以整段刪除。`##` 小標題供人閱讀，可以使用任何語言；Bridge 依 `<!-- bridge:… -->` 標記辨識區塊。
 
-## 最小的工單
+## 最小範例
 
 一個標題、一個 `requested_work` 區塊、一個 `acceptance` 區塊：
 
@@ -38,11 +40,11 @@ source_id: DOC-1
 無
 ```
 
-沒有任何驗收條件的工單會在叫模型之前停下，要你補一條可以查驗的結果。
+工單至少要有一項可驗證的條件。若未提供，Bridge 會在呼叫模型前停止，提示你補上。
 
 ## 完整的工單
 
-一張把所有區塊都用上的工單，拿來對照範本。這張用的是缺陷修正的情境，所以五個 `reproduction.*` 區塊都有東西；功能類的工單把它們整塊刪掉就好。這份內容經過 Bridge 的解析，卡片上 `Priority: high (work order)`、`rounds 2 (work order)`——括號裡寫的就是值從工單來。
+以下以缺陷修正為例，展示全部區塊。功能開發的工單可以刪除五個 `reproduction.*` 區塊。範例經 Bridge 解析後，卡片會顯示 `Priority: high (work order)` 與 `rounds 2 (work order)`，括號表示設定來自工單。
 
 ```markdown
 ---
@@ -150,32 +152,32 @@ API 回 200，總價仍顯示 1000。
 無
 ```
 
-每個區塊給誰看、Bridge 怎麼用：
+各區塊的用途如下：
 
-| 區塊 | 給誰 | Bridge 怎麼用 |
+| 區塊 | 使用者 | 用途 |
 |---|---|---|
-| `context`、`outcome` | writer、reviewer | 原文進合約；writer 理解為什麼做、做到什麼程度 |
-| `requested_work` | writer | 要做的事本身；必填 |
-| `run_plan` | Bridge | 兩個以上 run 才寫；記進合約，整張工單仍開一條 run |
-| `scope_notes.include` / `exclude` / `must_keep` | writer、reviewer | reviewer 用它判定有沒有做過頭、有沒有弄壞不該動的 |
-| `scope_notes.expected_locations` | writer | 只是提示，**不是授權**；授權的範圍是卡片上的 `Scope` |
-| `acceptance` | reviewer、Bridge | 必填；模型切成 AC1、AC2…，結果檔逐條寫 proven／failed |
-| `verification_hints` | writer、reviewer | 測試資料、既有測試名；實際跑哪個測試指令由專案類型決定 |
-| `reproduction.*` | writer、reviewer | 缺陷的環境、步驟、實際、預期、頻率；功能類整塊刪 |
-| `references` | writer | 連結、路徑、相關單 |
-| `open_questions` | Bridge | 除了 `無` 的每一行都會讓工作停下來等你 |
+| `context`、`outcome` | writer、reviewer | 原文填入合約，說明工作背景與預期成果 |
+| `requested_work` | writer | 具體工作內容，必填 |
+| `run_plan` | Bridge | 描述兩個以上的計畫步驟；會記入合約，目前仍以一次 run 執行整張工單 |
+| `scope_notes.include` / `exclude` / `must_keep` | writer、reviewer | 供 reviewer 核對修改是否超出範圍，以及必須保留的行為是否受損 |
+| `scope_notes.expected_locations` | writer | 提示可能修改的位置；**不代表修改授權**，實際範圍以卡片的 `Scope` 為準 |
+| `acceptance` | reviewer、Bridge | 必填；模型整理成 AC1、AC2…，結果檔逐條列出驗收判定 |
+| `verification_hints` | writer、reviewer | 提供測試資料與既有測試名稱；實際測試指令由專案類型決定 |
+| `reproduction.*` | writer、reviewer | 描述缺陷的環境、重現步驟、實際結果、預期結果與頻率；功能工單可省略 |
+| `references` | writer | 連結、檔案路徑與相關工單 |
+| `open_questions` | Bridge | 列出尚待回答的問題；除 `無`、`none` 或空白外，其他內容都會使工作停下，等待你回答 |
 
-## 區塊
+## 區塊格式
 
-- 第一行以 `# ` 開頭的是標題。
-- 一個區塊從它的 `<!-- bridge:<key> -->` 那一行開始，到下一個標記或檔尾為止。
-- key 就是合約的 17 個欄位：`context`、`outcome`、`requested_work`、`run_plan`、`scope_notes.include`、`scope_notes.exclude`、`scope_notes.must_keep`、`scope_notes.expected_locations`、`acceptance`、`verification_hints`、`reproduction.environment`、`reproduction.steps`、`reproduction.actual`、`reproduction.expected`、`reproduction.frequency`、`references`、`open_questions`。不認得的 key、或同一個 key 出現兩次，會連行號一起被拒絕。
-- `open_questions`：只有 `無`（或 `none`）、或空的，就是沒有問題。其他每一行都是一個問題，工作會在叫模型之前停下，等你在工單裡回答。
-- frontmatter、標題、標記、`##`／`###` 小標題和空行是結構；區塊外的其他行會以「未使用的行」保留在合約裡。
+- 第一個以 `# ` 開頭的行是工單標題。
+- 每個區塊從 `<!-- bridge:<key> -->` 標記開始，到下一個標記或檔案結尾為止。
+- 區塊 key 對應合約的 17 個欄位：`context`、`outcome`、`requested_work`、`run_plan`、`scope_notes.include`、`scope_notes.exclude`、`scope_notes.must_keep`、`scope_notes.expected_locations`、`acceptance`、`verification_hints`、`reproduction.environment`、`reproduction.steps`、`reproduction.actual`、`reproduction.expected`、`reproduction.frequency`、`references`、`open_questions`。未知 key 或重複 key 都會被拒絕，錯誤訊息會列出行號。
+- `open_questions`：填入 `無`、`none` 或留空，表示沒有待決問題。其他每一行都視為問題；Bridge 會在呼叫模型前停止，等待你在工單中回答。
+- frontmatter、標題、區塊標記、`##`／`###` 小標題與空行屬於文件結構。區塊外的其他內容會以「未使用的行」保留在合約中。
 
 ## frontmatter
 
-frontmatter 是資料，規劃時當 YAML 讀（Astro content collections 的讀法）：第一行 `---`，到下一個只有 `---` 的行結束。每個 key 都可以不寫；沒有 frontmatter 的檔也合法。
+frontmatter 是檔案開頭的 YAML 設定，格式參考 Astro content collections：第一行為 `---`，到下一個只含 `---` 的行結束。所有欄位都是選填，也可以完全省略 frontmatter。
 
 ```yaml
 ---
@@ -195,45 +197,47 @@ source_id: SHOP-412         # 你自己系統的單號；Bridge 只存不讀
 ---
 ```
 
-- 其他 key 一律拒絕，連行號。超出範圍的值也是：不在上面清單裡的 priority 或 effort、不是正整數的 budget、超過 policy 上限的值（拒絕訊息會印上限）。
-- `writer` 作用在每一次 writer 呼叫：做工、每次修正、合約翻譯。`reviewer` 作用在每一次 reviewer 呼叫：合約檢查、每次 review。沒寫的 key 從 policy 的 priority 表來。**誰當 writer、誰當 reviewer不在這裡**——那是 `bridge.json`，或單次的 `--writer`／`--reviewer`，卡片會寫出來。
-- `model` 必須屬於那個角色的 CLI，否則在印卡之前就被拒絕。Bridge 只檢查名字的形狀（`claude`：別名 `fable`、`opus`、`sonnet`、`haiku`，可加 `[1m]`，或含 `claude-` 的名字；`codex`：`gpt-`、`codex-` 開頭，或 `o` 加數字開頭），**名字存不存在由那家 CLI 決定**，寫錯會在第一次呼叫時由 CLI 報錯。目前（2026-11-06 查）各家文件列的名字：
+- 未知 key 與不合法的值都會被拒絕，並列出行號。例如 priority 或 effort 不在允許清單中、budget 不是正整數，或設定超過 policy 上限。超出上限時，訊息也會顯示允許的上限。
+- `writer` 套用於實作、修正與合約翻譯的每次呼叫；`reviewer` 套用於合約檢查與每次審查。省略的欄位採用 policy 中 priority 表的設定。角色使用的 provider 由 `bridge.json` 或單次執行的 `--writer`／`--reviewer` 決定，並顯示在卡片上。
+- `model` 必須符合該角色 CLI 接受的命名格式，否則會在顯示卡片前被拒絕。Bridge 只檢查名稱格式（`claude`：別名 `fable`、`opus`、`sonnet`、`haiku`，可加 `[1m]`，或含 `claude-` 的名字；`codex`：`gpt-`、`codex-` 開頭，或 `o` 加數字開頭），**模型名稱是否存在，仍由該 CLI 確認**；名稱有誤時，CLI 會在第一次呼叫回報錯誤。以下保留文件在 2026-11-06 整理的名稱，使用時請以連結中的最新說明為準：
 
   | 角色的 CLI | 可以寫的值 | 來源 |
   |---|---|---|
   | `claude` | 別名：`fable`、`opus`、`sonnet`、`haiku`、`sonnet[1m]`、`opus[1m]`、`fable[1m]`。完整名稱：`claude-fable-5-1`、`claude-fable-5`、`claude-opus-5-5`、`claude-opus-5`、`claude-sonnet-5`、`claude-haiku-5-5`（更舊的 4.x 名稱該頁也還列著）。Claude Code 另有 `best`、`opusplan`、`default`，Bridge 的形狀檢查**不收**這三個 | [Claude Code：Model configuration](https://code.claude.com/docs/en/model-config) |
   | `codex` | `gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-astra`、`gpt-6-luna`；舊的 `gpt-5.5` 只剩 API key 登入能用，`gpt-5.4`、`gpt-5.3-codex` 等已退役 | [Codex：Models](https://learn.chatgpt.com/docs/models) |
 
-  不寫 `model`（或寫 `null`）就是那家 CLI 當下的預設模型，結果檔會記 `model: null`。名字會隨兩家改版變動，以上面兩個連結當下的內容為準；`claude --help` 與 `codex --help` 也查得到。自訂 Codex provider 的模型寫在 Codex 自己的設定裡，這裡不寫 `model`。
-- `effort` 只收 `low`、`medium`、`high` 三個值，兩個角色都一樣。Claude Code 自己的 `--effort` 還有 `xhigh`、`max`，Codex 的介面還有 Extra High、Max、Ultra，Bridge 這一版不開放。
-- 頂層 `effort` 仍然認，當成 `writer.effort`；兩個都寫會被拒絕。
-- 每個值照固定順序決定：終端機旗標（`--rounds`、`--call-timeout`）→ 工單 → policy 的 priority 表（effort 與 model）→ policy 的 limits。計畫記下每個值和它來自哪一層（`cli`、`work_order`、`priority`、`config`），卡片兩個都印。
-- `run_timeout` 是整條 run 的時間上限（預設 6 小時），像 GitHub Actions job 的 `timeout-minutes`。到時的 run 以 `timed_out` 收掉，原因 `run_timeout`；每次呼叫都被裁到剩下的時間。
+  省略 `model` 或設為 `null` 時，採用該 CLI 當下的預設模型，結果檔會記錄 `model: null`。模型名稱可能隨版本變動，請查閱上方連結及 CLI 說明。若使用自訂 Codex provider，請在 Codex 設定中指定模型，此處省略 `model`。
+- `effort` 僅接受 `low`、`medium`、`high` 三個值，兩個角色都一樣。Claude Code 自己的 `--effort` 還有 `xhigh`、`max`，Codex 的介面還有 Extra High、Max、Ultra，本版 Bridge 尚未支援這些值。
+- 仍支援頂層 `effort`，其意義等同 `writer.effort`；同時填寫兩者會被拒絕。
+- 設定值依以下優先順序決定：終端機旗標（`--rounds`、`--call-timeout`）→ 工單 → policy 的 priority 表（effort 與 model）→ policy 的 limits。計畫會記錄各值及其來源（`cli`、`work_order`、`priority`、`config`），卡片也會一併顯示。
+- `run_timeout` 是整次執行的時間上限，預設 6 小時，概念與 GitHub Actions job 的 `timeout-minutes` 相同。逾時後以 `timed_out` 結束，原因記為 `run_timeout`；每次呼叫的可用時間也受剩餘總時間限制。
 
 ## 執行計畫（run plan）
 
-只有一件工作要拆成兩個以上的 run 才需要。每一行 `### ` 開一個 run，名字就是那行的文字；run 裡四個固定 key 當 YAML 讀，其他行是那個 run 的工作：
+需要將工單描述為兩個以上的計畫步驟時，才使用 run plan。每個 `### ` 標題定義一個計畫中的 run，名稱取自標題文字。各 run 中的四種固定 key 以 YAML 解析，其餘內容則描述該步驟的工作。
+
+**目前 run plan 只會記入合約，不會自動拆成多次執行。**以下範例說明兩個相依的文件撰寫步驟：
 
 ```markdown
 <!-- bridge:run_plan -->
 ## 執行計畫
 ### RUN A
-把樹種上。
+撰寫安裝說明。
 - effort: low
 - acceptance:
-  - 地圖上看得到樹。
+  - README 包含安裝步驟。
 
 ### RUN B
-加購物車。
+補上啟動說明。
 - depends_on: RUN A
 - budget: { rounds: 1, call_timeout: 600000 }
 - acceptance:
-  - 購物車可以用方向鍵開。
+  - README 包含啟動指令。
 ```
 
-- `effort`、`budget` 的值和 frontmatter 相同。`depends_on` 是一個 run 名字或清單 `[RUN A, RUN B]`；指到不存在的 run、或繞成圈，會被拒絕。
-- `acceptance` 底下縱排的行是這個 run 自己的條件；工單的 `acceptance` 區塊是跨 run 的結果。只有一個 run 的執行計畫會被拒絕。
-- Bridge 把執行計畫記進合約；**整張工單仍然只開一條 run**。
+- `effort`、`budget` 採用與 frontmatter 相同的值。`depends_on` 可以是一個 run 名稱，或名稱清單 `[RUN A, RUN B]`；不存在的相依項目或循環相依都會被拒絕。
+- 各 run 的 `acceptance` 清單描述該步驟的驗收條件；工單的 `acceptance` 區塊則描述整體成果。run plan 至少要有兩個 run，只有一個時會被拒絕。
+- Bridge 會將 run plan 記入合約；**目前仍以一次 run 執行整張工單**。
 
 ## 下一步
 
