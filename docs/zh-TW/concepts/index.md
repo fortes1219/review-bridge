@@ -4,6 +4,8 @@ Review Bridge 透過兩個獨立的 AI 代理執行工單：**實作代理（wri
 
 文件沿用幾個常見術語：**run** 是一次執行，**session** 是 agent 的工作階段，**provider** 是角色使用的 CLI（`claude` 或 `codex`），**policy** 是 Bridge 以程式檢查的執行規則。
 
+> 這套做法為什麼長這樣，背景在這篇：[AI 導入後，工程團隊真正要管理的是交付鏈路與驗證責任](https://hackmd.io/@FortesHuang/HJnWgQGJMx)（HackMD）。
+
 ## 一次執行的生命週期
 
 ```text

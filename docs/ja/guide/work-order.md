@@ -181,7 +181,7 @@ frontmatter はファイル先頭の YAML 設定です。Astro content collectio
 ---
 priority: high              # low / medium / high / urgent。既定は policy の priority.default
 writer:                     # モデルと effort。policy の priority テーブルより優先
-  model: gpt-5.6-sol        # writer の CLI に対応する名前。null は CLI の既定値
+  model: gpt-6.1-sol        # writer の CLI に対応する名前。null は CLI の既定値
   effort: high              # low / medium / high
 reviewer: { model: opus, effort: medium }   # reviewer も同じ設定
 budget:                     # すべて任意。既定は同名の policy 上限

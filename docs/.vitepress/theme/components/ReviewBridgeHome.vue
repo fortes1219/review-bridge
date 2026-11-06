@@ -4,12 +4,17 @@ import { withBase } from 'vitepress'
 import BridgeIcon from './BridgeIcon.vue'
 import { HOME_CONTENT, type HomeLocale } from './homeContent'
 import bridgeImage from '../assets/bridge-command-deck.webp'
+import pkg from '../../../../package.json'
+
+const version = (pkg as { version: string }).version
+const installTag = version.includes('-') ? 'next' : 'latest'
 
 interface Props {
   locale?: HomeLocale
   guideHref?: string
   githubHref?: string
   npmHref?: string
+  articleHref?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -106,16 +111,19 @@ onBeforeUnmount(() => {
             <a v-if="props.npmHref" class="rb-action rb-action-secondary" :href="props.npmHref" target="_blank" rel="noopener noreferrer"><BridgeIcon name="box" />npm</a>
             <span v-else class="rb-action rb-action-secondary rb-action-placeholder" aria-disabled="true" title="TEMP: Connect your actual npm URL"><BridgeIcon name="box" />npm</span>
           </div>
+          <p v-if="props.articleHref" class="rb-article">
+            {{ copy.articleLead }}<a :href="props.articleHref" target="_blank" rel="noopener noreferrer">{{ copy.articleTitle }}</a>
+          </p>
         </div>
         <div class="rb-hero-hud" aria-hidden="true">
-          <span class="rb-hud-heading">COMMAND / TEMP</span>
-          <span class="rb-hud-line"><i /> <b>00 — 00</b></span>
-          <span class="rb-hud-line"><i /> <b>···</b></span>
-          <span class="rb-hud-line"><i /> <b>—</b></span>
+          <span class="rb-hud-heading">REVIEW BRIDGE</span>
+          <span class="rb-hud-line"><i /> <b>v{{ version }}</b></span>
+          <span class="rb-hud-line"><i /> <b>npm i -g review-bridge@{{ installTag }}</b></span>
+          <span class="rb-hud-line"><i /> <b>writer · reviewer</b></span>
         </div>
       </section>
 
-      <section class="rb-features" aria-label="Feature placeholders">
+      <section class="rb-features" aria-label="Features">
         <div
           v-for="(feature, i) in copy.features"
           :key="feature.id"
@@ -126,7 +134,7 @@ onBeforeUnmount(() => {
           <div class="rb-card-sweep" aria-hidden="true" />
           <div class="rb-card-top">
             <BridgeIcon :name="feature.icon" class="rb-card-icon" />
-            <span class="rb-card-num">0{{ i + 1 }} / 04</span>
+            <span class="rb-card-num">0{{ i + 1 }} / 0{{ copy.features.length }}</span>
           </div>
           <div class="rb-card-copy">
             <p class="rb-card-kicker">{{ feature.kicker }}</p>
@@ -234,6 +242,10 @@ onBeforeUnmount(() => {
 .rb-short-rule { display: block; width: 52px; height: 3px; margin: 26px 0 19px; background: #438be4; }
 .rb-lead { max-width: 510px; margin: 0; color: #c3d0e0; font-size: clamp(16px, 1.32vw, 18px); line-height: 1.85; text-wrap: pretty; }
 .rb-actions { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 30px; }
+.rb-article { max-width: 560px; margin: 18px 0 0; color: #93a5bb; font-size: 13px; line-height: 1.7; }
+.rb-article a { color: #9ddcf0; text-decoration: underline; text-underline-offset: 3px; }
+.rb-article a:hover { color: #fff; }
+.rb-hud-line b { white-space: nowrap; }
 .rb-action {
   display: inline-flex;
   align-items: center;
@@ -256,12 +268,12 @@ onBeforeUnmount(() => {
 .rb-action-placeholder { opacity: .73; cursor: not-allowed; }
 .rb-action:not(.rb-action-placeholder):is(:hover,:focus-visible) { transform: translateY(-2px); border-color: #91c4ff; background-color: #24466f; box-shadow: 0 7px 20px rgba(73,124,211,.18); }
 .rb-action:focus-visible { outline: 2px solid #a4d7ff; outline-offset: 4px; }
-.rb-hero-hud { position: absolute; z-index: 1; top: 35%; right: 13%; width: 160px; height: 92px; display: grid; align-content: space-evenly; padding: 10px 15px; color: rgba(188,220,255,.7); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; letter-spacing: .09em; pointer-events: none; }
+.rb-hero-hud { position: absolute; z-index: 1; top: 35%; right: 13%; width: 230px; height: 92px; display: grid; align-content: space-evenly; padding: 10px 15px; color: rgba(188,220,255,.7); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; letter-spacing: .09em; pointer-events: none; }
 .rb-hud-heading { font-size: 9px; color: #94bce9; letter-spacing: .12em; }
 .rb-hud-line { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(118,171,216,.13); }
 .rb-hud-line i { display: block; width: 22px; height: 2px; background: rgba(98,159,224,.5); }
 .rb-hud-line b { font-weight: 400; color: #9ddcf0; }
-.rb-features { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 18px; margin-block: 48px 16px; }
+.rb-features { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 18px; margin-block: 48px 16px; }
 .rb-feature-card {
   --rb-pointer-x: 50%; --rb-pointer-y: 50%; --rb-tilt-x: 0deg; --rb-tilt-y: 0deg;
   position: relative; min-height: 228px; padding: 26px 27px 25px; overflow: hidden; isolation: isolate;

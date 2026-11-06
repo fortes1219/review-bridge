@@ -181,7 +181,7 @@ Frontmatter is YAML at the start of the file, following the Astro content collec
 ---
 priority: high              # low / medium / high / urgent; default: policy priority.default
 writer:                     # Model and effort override the policy's priority table
-  model: gpt-5.6-sol        # Must belong to the writer CLI; null uses its default
+  model: gpt-6.1-sol        # Must belong to the writer CLI; null uses its default
   effort: high              # low / medium / high
 reviewer: { model: opus, effort: medium }   # Same settings for the reviewer
 budget:                     # All optional; defaults come from the matching policy limits

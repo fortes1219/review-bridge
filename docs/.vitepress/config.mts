@@ -1,5 +1,24 @@
 import { defineConfig } from 'vitepress'
 import { withMermaid } from 'vitepress-plugin-mermaid'
+import type { HeadConfig } from 'vitepress'
+import pkg from '../../package.json' with { type: 'json' }
+
+const SITE = 'https://review-bridge.akasa-lab.dev'
+const VERSION = (pkg as { version: string }).version
+const LOCALES = { root: { prefix: '', lang: 'en', description: 'Review Bridge runs AI coding agents under a sealed contract, a human authorization, a budget the harness holds, and an independent read-only reviewer, and records every step in PostgreSQL.' }, ja: { prefix: 'ja/', lang: 'ja', description: 'Review Bridge は AI コーディングエージェントを、封印された契約、人の承認、ハーネスが管理する予算、独立した読み取り専用レビュアーのもとで実行し、すべての段階を PostgreSQL に記録します。' }, 'zh-TW': { prefix: 'zh-TW/', lang: 'zh-TW', description: 'Review Bridge 讓 AI coding agent 在封存的合約、人的授權、harness 控制的預算、獨立唯讀 reviewer 之下工作，每一步都記進 PostgreSQL。' } } as const
+
+// The page path every locale shares: 'zh-TW/guide/install.md' -> 'guide/install'; 'index.md' -> ''.
+function sharedPath(relativePath: string) {
+  const noExt = relativePath.replace(/\.md$/, '').replace(/(^|\/)index$/, '$1')
+  return noExt.replace(/^(ja|zh-TW)\/?/, '')
+}
+function localeOf(relativePath: string): keyof typeof LOCALES {
+  if (relativePath.startsWith('ja/')) return 'ja'
+  if (relativePath.startsWith('zh-TW/')) return 'zh-TW'
+  return 'root'
+}
+const url = (prefix: string, shared: string) => SITE + '/' + prefix + shared
+
 
 // Three locales with one structure: the language menu swaps the prefix and keeps the page path.
 export default withMermaid(defineConfig({
@@ -8,6 +27,52 @@ export default withMermaid(defineConfig({
   cleanUrls: true,
   appearance: 'dark',
   lastUpdated: true,
+  sitemap: { hostname: SITE },
+  head: [
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'Review Bridge' }],
+    ['meta', { property: 'og:image', content: SITE + '/og.png' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: SITE + '/og.png' }],
+  ],
+  // Per page: canonical, og:title/description/url, hreflang for the three locales, and JSON-LD on the home pages.
+  transformHead({ pageData }) {
+    const locale = localeOf(pageData.relativePath)
+    const shared = sharedPath(pageData.relativePath)
+    const self = url(LOCALES[locale].prefix, shared)
+    const description = pageData.description || LOCALES[locale].description
+    const title = pageData.title ? `${pageData.title} | Review Bridge` : 'Review Bridge'
+    const head: HeadConfig[] = [
+      ['link', { rel: 'canonical', href: self }],
+      ['meta', { property: 'og:title', content: title }],
+      ['meta', { property: 'og:description', content: description }],
+      ['meta', { property: 'og:url', content: self }],
+      ['meta', { property: 'og:locale', content: LOCALES[locale].lang.replace('-', '_') }],
+      ['meta', { name: 'description', content: description }],
+    ]
+    for (const [key, l] of Object.entries(LOCALES)) {
+      head.push(['link', { rel: 'alternate', hreflang: l.lang, href: url(l.prefix, shared) }])
+      if (key === 'root') head.push(['link', { rel: 'alternate', hreflang: 'x-default', href: url(l.prefix, shared) }])
+    }
+    if (shared === '') {
+      head.push(['script', { type: 'application/ld+json' }, JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareApplication',
+        name: 'Review Bridge',
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Windows, macOS, Linux',
+        softwareVersion: VERSION,
+        url: self,
+        inLanguage: LOCALES[locale].lang,
+        description,
+        downloadUrl: 'https://www.npmjs.com/package/review-bridge',
+        codeRepository: 'https://github.com/fortes1219/review-bridge',
+        license: 'https://opensource.org/licenses/MIT',
+        offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      })])
+    }
+    return head
+  },
   // mermaid pulls in CommonJS packages (fastdom); Vite pre-bundles mermaid whole, or the dev server fails on their default imports.
   vite: { optimizeDeps: { include: ['mermaid'] } },
   locales: {
@@ -25,7 +90,7 @@ export default withMermaid(defineConfig({
             "link": "/concepts/"
           },
           {
-            "text": "Design principles",
+            "text": "Principles",
             "link": "/principles/architecture"
           },
           {
@@ -38,6 +103,10 @@ export default withMermaid(defineConfig({
           },
           {
             "text": "Release notes",
+            "link": "/release-notes"
+          },
+          {
+            "text": "v" + VERSION,
             "link": "/release-notes"
           }
         ],
@@ -59,11 +128,11 @@ export default withMermaid(defineConfig({
                   "link": "/guide/start"
                 },
                 {
-                  "text": "Results, logs, and the database",
+                  "text": "Results, logs and the database",
                   "link": "/guide/results"
                 },
                 {
-                  "text": "Upgrade, back up, and uninstall",
+                  "text": "Upgrade, back up, remove",
                   "link": "/guide/maintenance"
                 }
               ]
@@ -82,19 +151,23 @@ export default withMermaid(defineConfig({
           ],
           "/principles/": [
             {
-              "text": "Design principles",
+              "text": "Principles",
               "items": [
                 {
-                  "text": "Architecture and roadmap",
+                  "text": "Architecture and milestones",
                   "link": "/principles/architecture"
                 },
                 {
-                  "text": "Design decisions",
+                  "text": "Why it is built this way",
                   "link": "/principles/why"
                 },
                 {
                   "text": "Design references",
                   "link": "/principles/references"
+                },
+                {
+                  "text": "Asking the person",
+                  "link": "/principles/asking"
                 }
               ]
             }
@@ -114,6 +187,10 @@ export default withMermaid(defineConfig({
                 {
                   "text": "Result file",
                   "link": "/reference/result-file"
+                },
+                {
+                  "text": "Integrating your systems",
+                  "link": "/reference/integration"
                 }
               ]
             }
@@ -131,11 +208,11 @@ export default withMermaid(defineConfig({
             "link": "/ja/guide/install"
           },
           {
-            "text": "基本概念",
+            "text": "概念",
             "link": "/ja/concepts/"
           },
           {
-            "text": "設計方針",
+            "text": "設計原理",
             "link": "/ja/principles/architecture"
           },
           {
@@ -148,6 +225,10 @@ export default withMermaid(defineConfig({
           },
           {
             "text": "リリースノート",
+            "link": "/ja/release-notes"
+          },
+          {
+            "text": "v" + VERSION,
             "link": "/ja/release-notes"
           }
         ],
@@ -181,10 +262,10 @@ export default withMermaid(defineConfig({
           ],
           "/ja/concepts/": [
             {
-              "text": "基本概念",
+              "text": "概念",
               "items": [
                 {
-                  "text": "基本概念",
+                  "text": "概念",
                   "link": "/ja/concepts/"
                 }
               ]
@@ -192,19 +273,23 @@ export default withMermaid(defineConfig({
           ],
           "/ja/principles/": [
             {
-              "text": "設計方針",
+              "text": "設計原理",
               "items": [
                 {
-                  "text": "アーキテクチャとロードマップ",
+                  "text": "アーキテクチャとマイルストーン",
                   "link": "/ja/principles/architecture"
                 },
                 {
-                  "text": "設計の理由",
+                  "text": "なぜこの設計なのか",
                   "link": "/ja/principles/why"
                 },
                 {
                   "text": "設計の参考資料",
                   "link": "/ja/principles/references"
+                },
+                {
+                  "text": "人に確認するとき",
+                  "link": "/ja/principles/asking"
                 }
               ]
             }
@@ -224,6 +309,10 @@ export default withMermaid(defineConfig({
                 {
                   "text": "結果ファイル",
                   "link": "/ja/reference/result-file"
+                },
+                {
+                  "text": "システム連携",
+                  "link": "/ja/reference/integration"
                 }
               ]
             }
@@ -246,11 +335,11 @@ export default withMermaid(defineConfig({
             "link": "/zh-TW/concepts/"
           },
           {
-            "text": "設計原理",
+            "text": "技術原理",
             "link": "/zh-TW/principles/architecture"
           },
           {
-            "text": "參考文件",
+            "text": "參考",
             "link": "/zh-TW/reference/cli"
           },
           {
@@ -260,6 +349,10 @@ export default withMermaid(defineConfig({
           {
             "text": "發行紀錄",
             "link": "/zh-TW/release-notes"
+          },
+          {
+            "text": "v" + VERSION,
+            "link": "/zh-TW/release-notes"
           }
         ],
         "sidebar": {
@@ -268,7 +361,7 @@ export default withMermaid(defineConfig({
               "text": "指南",
               "items": [
                 {
-                  "text": "安裝與初始化",
+                  "text": "安裝與 init",
                   "link": "/zh-TW/guide/install"
                 },
                 {
@@ -276,7 +369,7 @@ export default withMermaid(defineConfig({
                   "link": "/zh-TW/guide/work-order"
                 },
                 {
-                  "text": "開始執行",
+                  "text": "開工",
                   "link": "/zh-TW/guide/start"
                 },
                 {
@@ -303,7 +396,7 @@ export default withMermaid(defineConfig({
           ],
           "/zh-TW/principles/": [
             {
-              "text": "設計原理",
+              "text": "技術原理",
               "items": [
                 {
                   "text": "架構與里程碑",
@@ -314,15 +407,19 @@ export default withMermaid(defineConfig({
                   "link": "/zh-TW/principles/why"
                 },
                 {
-                  "text": "設計參考",
+                  "text": "參考了誰",
                   "link": "/zh-TW/principles/references"
+                },
+                {
+                  "text": "何時需要你決定",
+                  "link": "/zh-TW/principles/asking"
                 }
               ]
             }
           ],
           "/zh-TW/reference/": [
             {
-              "text": "參考文件",
+              "text": "參考",
               "items": [
                 {
                   "text": "指令",
@@ -335,6 +432,10 @@ export default withMermaid(defineConfig({
                 {
                   "text": "結果檔",
                   "link": "/zh-TW/reference/result-file"
+                },
+                {
+                  "text": "串接既有系統",
+                  "link": "/zh-TW/reference/integration"
                 }
               ]
             }
