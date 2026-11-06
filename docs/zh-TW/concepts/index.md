@@ -12,9 +12,9 @@ Review Bridge 透過兩個獨立的 AI 代理執行工單：**實作代理（wri
 工單 .md
   → 封存成計畫（範圍、預算、驗證指令、停點）
   → 顯示授權卡片，由你確認
-  → writer 把工單翻成合約，reviewer 核對，Bridge 封存合約
+  → writer 轉換驗收條件，reviewer 核對，Bridge 封存合約
   → writer 實作（最多 rounds 輪）；每輪完成後由 Bridge 執行測試
-  → reviewer 審查、逐條判定驗收；Bridge 記下每一條
+  → reviewer 審查，Bridge 逐條判定驗收結果
   → 產生結果檔
   → 你檢查成果，決定是否 commit
 ```

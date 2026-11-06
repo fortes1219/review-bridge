@@ -116,7 +116,7 @@ export default withMermaid(defineConfig({
               "text": "Guide",
               "items": [
                 {
-                  "text": "Install and init",
+                  "text": "Install and set up",
                   "link": "/guide/install"
                 },
                 {
@@ -162,8 +162,12 @@ export default withMermaid(defineConfig({
                   "link": "/principles/why"
                 },
                 {
-                  "text": "What it follows",
+                  "text": "Design references",
                   "link": "/principles/references"
+                },
+                {
+                  "text": "Asking the person",
+                  "link": "/principles/asking"
                 }
               ]
             }
@@ -183,6 +187,10 @@ export default withMermaid(defineConfig({
                 {
                   "text": "Result file",
                   "link": "/reference/result-file"
+                },
+                {
+                  "text": "Integrating your systems",
+                  "link": "/reference/integration"
                 }
               ]
             }
@@ -230,7 +238,7 @@ export default withMermaid(defineConfig({
               "text": "ガイド",
               "items": [
                 {
-                  "text": "インストールと init",
+                  "text": "インストールと初期設定",
                   "link": "/ja/guide/install"
                 },
                 {
@@ -238,7 +246,7 @@ export default withMermaid(defineConfig({
                   "link": "/ja/guide/work-order"
                 },
                 {
-                  "text": "run を開始する",
+                  "text": "作業を実行する",
                   "link": "/ja/guide/start"
                 },
                 {
@@ -276,8 +284,12 @@ export default withMermaid(defineConfig({
                   "link": "/ja/principles/why"
                 },
                 {
-                  "text": "参考にしたもの",
+                  "text": "設計の参考資料",
                   "link": "/ja/principles/references"
+                },
+                {
+                  "text": "人に確認するとき",
+                  "link": "/ja/principles/asking"
                 }
               ]
             }
@@ -297,6 +309,10 @@ export default withMermaid(defineConfig({
                 {
                   "text": "結果ファイル",
                   "link": "/ja/reference/result-file"
+                },
+                {
+                  "text": "システム連携",
+                  "link": "/ja/reference/integration"
                 }
               ]
             }
@@ -393,6 +409,10 @@ export default withMermaid(defineConfig({
                 {
                   "text": "參考了誰",
                   "link": "/zh-TW/principles/references"
+                },
+                {
+                  "text": "何時需要你決定",
+                  "link": "/zh-TW/principles/asking"
                 }
               ]
             }
@@ -412,6 +432,10 @@ export default withMermaid(defineConfig({
                 {
                   "text": "結果檔",
                   "link": "/zh-TW/reference/result-file"
+                },
+                {
+                  "text": "串接既有系統",
+                  "link": "/zh-TW/reference/integration"
                 }
               ]
             }

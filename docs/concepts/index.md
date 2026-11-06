@@ -10,9 +10,9 @@ This documentation uses a few common terms: a **run** is one execution, a **sess
 Work order .md
   → Seal the plan: scope, budget, verification command, breakpoint
   → Show the card for your approval
-  → Writer translates the work order into the contract; reviewer checks it; Bridge seals it
+  → Writer extracts criteria; reviewer checks; Bridge seals the contract
   → Writer implements (up to rounds); Bridge runs tests after each round
-  → Reviewer reviews and judges each acceptance criterion; Bridge records each
+  → Reviewer checks; Bridge decides each acceptance criterion
   → Write the result file
   → You inspect the work and decide whether to commit
 ```

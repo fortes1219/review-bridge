@@ -10,9 +10,9 @@ Review Bridge は、独立した 2 つの AI エージェントで作業指示�
 作業指示 .md
   → 実行計画を固定（範囲・予算・検証コマンド・停止位置）
   → カードを表示し、あなたが承認
-  → writer が作業指示をコントラクトに変換、reviewer が確認、Bridge が固定
+  → writer が条件を整理、reviewer が確認、Bridge がコントラクトを固定
   → writer が実装（最大 rounds 回）、各回の後に Bridge がテストを実行
-  → reviewer が審査し受け入れ条件を一つずつ判定、Bridge が記録
+  → reviewer が審査、Bridge が条件ごとの受け入れを判定
   → 結果ファイルを出力
   → あなたが成果を確認し、コミットするか判断
 ```
