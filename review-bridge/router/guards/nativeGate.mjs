@@ -41,8 +41,8 @@ export function assertNativeAllowed(input) {
 // service recomputes its configuration fingerprint on every status call, so a changed CLI, adapter
 // or probe turns the proof stale. This is an operating restriction: an agent under the same
 // OS account could stand up a look-alike service.
-export async function checkReviewerProof(paths, { check = checkService } = {}) {
-  const service = await check(paths);
+export async function checkReviewerProof(paths, { check = checkService, reviewer = null, mcp = null } = {}) {
+  const service = await check(paths, { reviewer, mcp });
   if (!service.running) {
     return { ok: false, reason: "watch_not_running", detail: service.reason, message: PREFIX + ": the Bridge page service is not running (" + service.reason + "). Run: review-bridge start <file> (it starts the page and runs the check first)" };
   }

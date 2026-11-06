@@ -25,9 +25,9 @@ const forgetRunRecords = () => async (runId) => {
 const deliverQuietly = ({ paths, adapter }) => (runId) => workOrder.deliverOutcome({ paths, runId, adapter, notify: false });
 
 // T0-08: the same gate as bootstrap again, because dispatchCommand can be called without it.
-const startGate = ({ command, args, paths, options }) => async () => {
+const startGate = ({ command, args, paths, options }) => async (reviewer, mcp) => {
   assertNativeAllowed({ command, args });
-  if (!options.fakeCli) await assertReviewerProof(paths);
+  if (!options.fakeCli) await assertReviewerProof(paths, { reviewer, mcp });
 };
 
 const PROVIDER = "<claude|codex>";
@@ -40,8 +40,10 @@ const AFTER = { key: "after", type: "string", value: "<run_id>", default: "the n
 // The person's yes to the card, relayed by an agent: without a terminal start and resume print the
 // card and stop, and the agent runs the same command again with --yes once the person said yes.
 const YES = { key: "yes", type: "boolean", help: "The person said yes to the card; an agent adds this after showing them the card" };
-const reviewerCheckFor = (context) => ({ onStart }) => setupCheck.ensureReviewerChecked({ paths: context.paths, onStart });
+const reviewerCheckFor = (context) => ({ onStart, reviewer, mcp }) => setupCheck.ensureReviewerChecked({ paths: context.paths, onStart, reviewer, mcp });
 const WORK_ORDER_OPTIONS = {
+  "--writer": { key: "writer", type: "string", value: PROVIDER, default: "the writer in bridge.json", help: "Writer for this run only; the card shows it" },
+  "--reviewer": { key: "reviewer", type: "string", value: PROVIDER, default: "the reviewer in bridge.json", help: "Reviewer for this run only; the card shows it" },
   "--breakpoint": { key: "breakpoint", type: "string", value: "<text>", default: "after the review, asked at a terminal", help: "Where the work stops and comes back to you" },
   "--allow-paths": { key: "allowedPaths", type: "string", value: "<list>", default: "the whole project except protected files", help: "Limit the work to these paths, comma-separated" },
   "--owner": { key: "owner", type: "string", value: "<name>", default: "your OS user name", help: "Who owns the work" },
@@ -95,8 +97,8 @@ export const COMMANDS = {
     audience: "human",
     takesRunId: true,
     usage: "<run_id>",
-    summary: "Carry on a stopped work order: a new run of the same work order with the same stop point, changes, scope and budget, after the same card and yes as start",
-    options: { "--yes": YES, "--fake-cli": FAKE_CLI, "--fake-scenario": FAKE_SCENARIO },
+    summary: "Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them",
+    options: { "--writer": WORK_ORDER_OPTIONS["--writer"], "--reviewer": WORK_ORDER_OPTIONS["--reviewer"], "--yes": YES, "--fake-cli": FAKE_CLI, "--fake-scenario": FAKE_SCENARIO },
     run: (context) => workOrder.resumeWorkOrder({ ...context, guard: startGate(context), reviewerCheck: reviewerCheckFor(context) }),
   },
   clean: {
@@ -225,6 +227,7 @@ export const COMMANDS = {
       "--out": { key: "outPath", type: "string", value: "<file>", default: "<name>.plan.json in the run's log folder", help: "Where the plan is written" },
       "--plain": { key: "plain", type: "boolean", help: "Print a short summary of the plan" },
       "--json": { ...JSON_OUT },
+      "--fake-cli": FAKE_CLI,
     },
     run: (context) => workOrder.planWork(context),
   },
@@ -363,7 +366,7 @@ async function recordRunsOf(paths) {
 
 // `loadAdapter` is how start and resume take the platform adapter when it was not given: only after
 // the reviewer check and the yes.
-export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, loadAdapter = null, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
+export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, adapter, loadAdapter = null, inspectionAdapter = null, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
   const entry = COMMANDS[command];
   if (!entry?.run) throw new Error("Unknown command: " + command + "." + helpHint(null));
@@ -372,5 +375,5 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
     throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
   }
   await recordRunsOf(paths);
-  return await entry.run({ command, args, paths, options, runId, adapter, loadAdapter, adapterId, adapterDefinition, adapterSource });
+  return await entry.run({ command, args, paths, options, runId, adapter, loadAdapter, inspectionAdapter, adapterId, adapterDefinition, adapterSource });
 }

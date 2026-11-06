@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   acquireLock,
   appendIoEvent,
+  callRole,
   classifyProviderFailure,
   fileExists,
   isActiveRun,
@@ -12,13 +13,12 @@ import {
   killProcessTree,
   listJson,
   parseJson,
-  readEvidenceTail,
   readIoEvents,
   readJson,
   readRun,
+  roleProvider,
   RunEndedError,
   RunFilesAheadError,
-  runProcess,
   STOP_REASONS,
   stopRunRecord,
   DatabaseUnavailableError,
@@ -37,28 +37,23 @@ import {
   buildTaskInput,
   composeWriterPrompt,
   isInReadList,
-  parseClaudeStream,
   ReferenceChangedError,
-  partialUsageFromStream,
-  usageFromResult,
   verifyAndLoadReferences,
 } from "./writerPrompt.mjs";
 import {
-  loadSchema,
   MALFORMED_EXIT_CODE,
   recheckFindings,
   unknownAddressedFindings,
   validateReviewResult,
   validateWriterResult,
   WRITER_RESULT_SCHEMA,
-  writerResultFromClaudeResult,
 } from "./typedResults.mjs";
 import { runTest, sameDelta } from "./test.mjs";
 import { createWorkspaceDelta, EvidenceChangedError, EvidenceUnavailableError, recordWindow, sealEvidence, snapshotWorkspace, startPointStatus, verifySealedEvidence } from "./workspaceEvidence.mjs";
 import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
 import { priorityChoice } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
-import { acceptanceRows, decideAcceptance, sameVersion, workVersion } from "./acceptance.mjs";
+import { acceptanceRows, decideAcceptance, sameVersion, workVersion, testsDecideBlockedWriter } from "./acceptance.mjs";
 import { ContractChangedError, loadContract } from "./contract.mjs";
 import { establishContract } from "./translation.mjs";
 import { callStamp, callTimeLeft, clearProcess, killConfirmed, processFile, recordProcess, recordProcessOrKill, runMustStop, runStopped, workLockFile } from "./processRecords.mjs";
@@ -96,15 +91,13 @@ async function loadLiveControl(paths, runtimeState) {
   return await runtimeState.loadControl();
 }
 
-export const DEFAULT_WRITER_MODEL = "opus";
-
-// The plan settled the writer's model from the work order's priority; a run from before that uses
-// the policy's default priority, and a snapshot without a priority table the package default.
+// The plan settled the writer's model from the work order and its priority; a run from before that
+// uses the policy's default priority. A snapshot without a priority table names no model: the CLI's.
 export function writerModelFor(control) {
   const workPackage = control?.run?.work_package;
   if (workPackage?.priority) return workPackage.writer.model;
   const policy = control?.run?.policy_snapshot?.effective_policy;
-  return policy?.priority ? priorityChoice(policy).writer.model : DEFAULT_WRITER_MODEL;
+  return policy?.priority ? priorityChoice(policy).writer.model : null;
 }
 
 async function writeBoundedState(paths, runtimeState, state) {
@@ -201,7 +194,7 @@ async function sealedContractFor({ paths, runtimeState, control, adapter, writer
   onStep("Writer (" + workPackage.contract_steps.translate.provider + ") turns the work order into a contract; reviewer ("
     + workPackage.contract_steps.check.provider + ") checks it");
   const translated = await establishContract({
-    paths, runId, workPackage, adapter, limits: effectiveLimits(control), executionMode: control.execution_mode,
+    paths, runId, workPackage, adapter, limits: effectiveLimits(control),
     isStopped: () => runMustStop(paths, runId),
     effort: control.reviewer_policy?.effort || "medium",
     model: control.reviewer_policy?.model ?? null,
@@ -342,9 +335,11 @@ export async function validateBoundedResume({
     }
     if (owner === runId) throw new Error("This run's review queue must be idle before bounded resume.");
   }
-  await adapter.resolveExecutable("claude");
+  const provider = roleProvider(control.run?.work_package, "writer");
+  await adapter.resolveExecutable(provider);
   return {
     valid: true,
+    provider,
     session_id: String(control.active_writer_session),
     transport: control.dispatch_transport,
     disallowed_tools: [...(control.token_policy?.writer_disallowed_tools || [])],
@@ -383,7 +378,8 @@ export async function runBoundedResume({
     validation = await validateBoundedResume({
       paths, control, adapter, promptPath, rounds, callTimeout,
     });
-    const claude = await adapter.resolveExecutable("claude");
+    const writerProvider = validation.provider;
+    const reviewerProvider = roleProvider(control.run?.work_package, "reviewer");
     let sessionId = validation.session_id;
     const writerModel = validation.model;
     let currentControl = control;
@@ -393,7 +389,6 @@ export async function runBoundedResume({
     let lastTestResult = null;
     let lastTestDelta = null;
     let handoffReason = "correction";
-    const writerSchemaArg = JSON.stringify(await loadSchema(WRITER_RESULT_SCHEMA));
     const unconfirmable = await unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId });
     if (unconfirmable !== null) return unconfirmable;
     const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep, onContractSealed });
@@ -461,36 +456,30 @@ export async function runBoundedResume({
       });
       await writeText(effectivePromptPath, effectivePrompt);
 
-      const claudeArgs = [
-        "-p",
-        "--session-id", sessionId,
-        "--permission-mode", "auto",
-        // Sub-agents are allowed for implementation; a project override can still disallow tools.
-        ...(validation.disallowed_tools.length ? ["--disallowedTools", validation.disallowed_tools.join(",")] : []),
-        // A model of null leaves the choice to the CLI.
-        ...(writerModel ? ["--model", writerModel] : []),
-        "--effort", validation.effort,
-        "--max-turns", String(limits.max_turns),
-        "--output-format", "stream-json",
-        "--verbose",
-        // T0-05 D1.1: the CLI is asked for a writer.result-shaped answer.
-        "--json-schema", writerSchemaArg,
-      ];
-      const invocation = adapter.buildInvocation("claude", claude, claudeArgs);
       // The call's own limit, cut to what is left of the run's time; nothing is left: no call.
       const writerTimeout = await callTimeLeft(paths, runId, callTimeout);
       if (writerTimeout === null) return 130;
       onStep("Writer working (call " + call + " of " + rounds + ")");
-      const callStartedAt = Date.now();
       const baselinePath = currentControl.workspace_evidence?.baseline_path || null;
-      const processResult = await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "writer" }, () => runProcess({
-        invocation,
+      const called = await inWindow(paths, baselinePath, evidenceSeal, { runId, call, phase: "writer" }, () => callRole(writerProvider, {
+        adapter,
+        access: "write",
+        role: "writer",
+        call,
+        prompt: effectivePrompt,
+        // T0-05 D1.1: the CLI is asked for a writer.result-shaped answer.
+        schemaPath: WRITER_RESULT_SCHEMA,
+        model: writerModel,
+        effort: validation.effort,
         cwd: paths.repoRoot,
-        input: effectivePrompt,
+        sessionId,
+        maxTurns: limits.max_turns,
+        disallowedTools: validation.disallowed_tools,
+        mcpOff: workPackage.writer?.mcp_off,
         stdoutPath: streamPath,
         stderrPath,
         timeoutMs: writerTimeout,
-        onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "writer", provider: "claude", call }),
+        onSpawn: (pid) => recordProcessOrKill(paths, runId, { pid, role: "writer", provider: writerProvider, call }),
       }));
       await clearProcess(paths, runId);
       // Checked at the call's common exit, before any success or failure path returns: a call that
@@ -499,24 +488,21 @@ export async function runBoundedResume({
       const proofState = { writer_model: writerModel, session_id: sessionId, call, writer_stdout_path: stdoutPath };
       const afterWriterProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "writer" });
       if (afterWriterProof !== null) return afterWriterProof;
-      // D3.3: the final result object keeps the legacy single-JSON file for everything downstream.
-      const stream = parseClaudeStream(await fsp.readFile(streamPath, "utf8").catch(() => ""));
       // Tokens spent by a call with no final result still count; the record says it is partial.
-      if (!stream.result || processResult.timedOut) {
-        await recordIo(paths, runId, partialUsageFromStream(stream.streamUsage, { call, durationMs: Date.now() - callStartedAt }));
-      }
+      if (!called.complete) await recordIo(paths, runId, called.usage);
       // D5.3: stopped from outside; nothing more is classified (the spent tokens above are accounting).
       if (await runStopped(paths, runId)) return 130;
-      if (stream.result) await writeJson(stdoutPath, stream.result);
-      for (const read of stream.reads) {
+      // D3.3: the final result object keeps the legacy single-JSON file for everything downstream.
+      if (called.finalRecord) await writeJson(stdoutPath, called.finalRecord);
+      for (const read of called.reads) {
         await recordIo(paths, runId, {
           event: "read", call, ...read,
           ...(read.path ? { outside_list: readList.length ? !isInReadList(read.path, readList) : null } : {}),
         });
       }
       let writerUsage = null;
-      if (stream.result && !processResult.timedOut) {
-        const usage = usageFromResult(stream.result, { call, durationMs: Date.now() - callStartedAt });
+      if (called.complete) {
+        const usage = called.usage;
         writerUsage = usage;
         await recordIo(paths, runId, usage);
         const callTotal = tokenTotal(usage.tokens);
@@ -528,19 +514,19 @@ export async function runBoundedResume({
             token_limit: which, tokens_this_call: callTotal, tokens_this_run: runTotal, writer_stdout_path: stdoutPath,
           });
           await recordIo(paths, runId, {
-            event: "stop", status: "token_limit", role: "writer", provider: "claude",
+            event: "stop", status: "token_limit", role: "writer", provider: writerProvider,
             detail_ref: which + ":" + (which === "per_call" ? callTotal : runTotal),
           });
           await consumeAuthorization(paths, control, "token_limit");
           return 76;
         }
-        if (stream.result.subtype === "error_max_turns") {
-          await recordIo(paths, runId, { event: "stop", status: "max_turns", role: "writer", provider: "claude", detail_ref: String(limits.max_turns) });
+        if (called.maxTurnsReached) {
+          await recordIo(paths, runId, { event: "stop", status: "max_turns", role: "writer", provider: writerProvider, detail_ref: String(limits.max_turns) });
         }
       }
-      if (processResult.timedOut) {
+      if (called.timedOut) {
         const timeout = await writeFailureRecord(paths, logs, stamp + "-writer", classifyProviderFailure({
-          role: "writer", provider: "claude", phase: "write", exitCode: processResult.exitCode, timedOut: true,
+          role: "writer", provider: writerProvider, phase: "write", exitCode: called.exitCode, timedOut: true,
         }), { stdout_path: stdoutPath, stderr_path: stderrPath });
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel,
@@ -556,30 +542,16 @@ export async function runBoundedResume({
         await consumeAuthorization(paths, control, "writer_timeout");
         return 77;
       }
-      let claudeResult = null;
-      if (await fileExists(stdoutPath) && (await fsp.stat(stdoutPath)).size > 0) {
-        try {
-          claudeResult = parseJson(await fsp.readFile(stdoutPath, "utf8"));
-        } catch {
-          claudeResult = null;
-        }
-      }
-      if (claudeResult && String(claudeResult.session_id) !== sessionId) {
+      if (called.reportedSession && called.reportedSession !== sessionId) {
         throw new Error("Writer session drift detected.");
       }
-      if (!claudeResult || claudeResult.is_error === true || processResult.exitCode !== 0) {
+      if (called.failed) {
         const classified = classifyProviderFailure({
           role: "writer",
-          provider: "claude",
+          provider: writerProvider,
           phase: "write",
-          exitCode: processResult.exitCode,
-          texts: [
-            // The CLI marks its own error with is_error; only then is `result` its message (a usage
-            // limit is reported there). Otherwise `result` is the model's text and is not read.
-            claudeResult?.is_error === true ? String(claudeResult.result || "") : "",
-            await readEvidenceTail(stderrPath),
-            claudeResult ? "" : await readEvidenceTail(stdoutPath),
-          ],
+          exitCode: called.exitCode,
+          texts: await called.failureTexts(),
         });
         const written = await writeFailureRecord(paths, logs, stamp + "-writer", classified, {
           stdout_path: stdoutPath,
@@ -592,8 +564,8 @@ export async function runBoundedResume({
           session_id: sessionId,
           call,
           updated_at: new Date().toISOString(),
-          writer_exit_code: processResult.exitCode,
-          writer_json_valid: Boolean(claudeResult),
+          writer_exit_code: called.exitCode,
+          writer_json_valid: Boolean(called.finalRecord),
           failure: failureSummary(classified, written.record_path),
           stdout_path: stdoutPath,
           stderr_path: stderrPath,
@@ -607,7 +579,7 @@ export async function runBoundedResume({
           writer_model: writerModel, status: "usage_unknown", session_id: sessionId, call, updated_at: new Date().toISOString(),
           token_limit_role: "writer", missing: writerUsage?.missing || [], writer_stdout_path: stdoutPath,
         });
-        await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "writer", provider: "claude", detail_ref: "usage" });
+        await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "writer", provider: writerProvider, detail_ref: "usage" });
         await consumeAuthorization(paths, control, "usage_unknown");
         return 76;
       }
@@ -615,25 +587,27 @@ export async function runBoundedResume({
       const afterWriter = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
       if (afterWriter.exitCode !== null) return afterWriter.exitCode;
       // T0-05 D1: the typed answer is checked by the harness; prose is never read.
-      const writerResult = writerResultFromClaudeResult(claudeResult);
+      const writerResult = called.answer;
       const writerCheck = await validateWriterResult(writerResult, { workOrder: workPackage.work_package_id, call, contractSha256, contract: afterWriter.contract?.contract || null });
       if (!writerCheck.ok) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "malformed_writer_result", session_id: sessionId, call,
           updated_at: new Date().toISOString(), errors: writerCheck.errors.slice(0, 20), writer_stdout_path: stdoutPath,
         });
-        await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "writer", provider: "claude", detail_ref: writerCheck.errors[0] || "writer.result" });
+        await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "writer", provider: writerProvider, detail_ref: writerCheck.errors[0] || "writer.result" });
         await consumeAuthorization(paths, control, "malformed_writer_result");
         return MALFORMED_EXIT_CODE;
       }
       await recordIo(paths, runId, { ...writerResult, unknown_addressed_findings: unknownAddressedFindings(writerResult, lastFindings) });
-      if (writerResult.needs_human.length || writerResult.status !== "done") {
+      const testsDecide = testsDecideBlockedWriter(writerResult, afterWriter.contract?.contract || null, workPackage.test);
+      if (testsDecide) onStep("Writer could not check the conditions the tests decide; Bridge's tests and the reviewer judge the work");
+      if (!testsDecide && (writerResult.needs_human.length || writerResult.status !== "done")) {
         // D1.4: the writer asked for a decision or declared itself blocked; no review, back to the owner.
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "needs_human", session_id: sessionId, call, updated_at: new Date().toISOString(),
           writer_status: writerResult.status, needs_human: writerResult.needs_human, writer_stdout_path: stdoutPath,
         });
-        await recordIo(paths, runId, { event: "stop", status: "needs_human", role: "writer", provider: "claude", detail_ref: writerResult.status });
+        await recordIo(paths, runId, { event: "stop", status: "needs_human", role: "writer", provider: writerProvider, detail_ref: writerResult.status });
         await consumeAuthorization(paths, control, "needs_human");
         return 0;
       }
@@ -814,7 +788,7 @@ export async function runBoundedResume({
           writer_model: writerModel, status: "malformed_review_result", session_id: sessionId, call,
           updated_at: new Date().toISOString(), errors: check.errors.slice(0, 20), review_path: latestReviewPath, writer_stdout_path: stdoutPath,
         });
-        await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "reviewer", provider: "codex", detail_ref: check.errors[0] || "review.result" });
+        await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "reviewer", provider: reviewerProvider, detail_ref: check.errors[0] || "review.result" });
         await consumeAuthorization(paths, control, "malformed_review_result");
         return MALFORMED_EXIT_CODE;
       }
@@ -825,7 +799,7 @@ export async function runBoundedResume({
           writer_model: writerModel, status: "usage_unknown", session_id: sessionId, call, updated_at: new Date().toISOString(),
           token_limit_role: "reviewer", missing: ownOutcome.usage?.missing || [], review_path: latestReviewPath, writer_stdout_path: stdoutPath,
         });
-        await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "reviewer", provider: "codex", detail_ref: "usage" });
+        await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "reviewer", provider: reviewerProvider, detail_ref: "usage" });
         await consumeAuthorization(paths, control, "usage_unknown");
         return 76;
       }
@@ -841,7 +815,7 @@ export async function runBoundedResume({
             review_path: latestReviewPath, writer_stdout_path: stdoutPath,
           });
           await recordIo(paths, runId, {
-            event: "stop", status: "token_limit", role: "reviewer", provider: "codex",
+            event: "stop", status: "token_limit", role: "reviewer", provider: reviewerProvider,
             detail_ref: which + ":" + (which === "per_call" ? callTotal : runTotal),
           });
           await consumeAuthorization(paths, control, "token_limit");

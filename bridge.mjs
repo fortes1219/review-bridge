@@ -98,6 +98,7 @@ async function runFakeScenarios(target, privateName) {
     const planned = jsonOutput(run(process.execPath, [
       bootstrap,
       "work-plan",
+      "--fake-cli",
       "--task-file", taskPath,
       "--owner", "Review Bridge init",
       "--work-package", id,

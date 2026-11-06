@@ -179,8 +179,15 @@ function writerCalls(run, events) {
   return fromEvents || Number(run.last_state?.call || 0) || 0;
 }
 
+// A heading and its lines, when there are any, cut to the same limit as the changed list.
+function listSection(title, lines = [], limit, clip, t) {
+  if (!lines.length) return [];
+  return ["", "### " + title, ...lines.slice(0, limit).map((line) => clipLine(line, clip)),
+    ...(lines.length > limit ? [t("result.changed.more", { count: lines.length - limit })] : [])];
+}
+
 // V2.2–V2.6: the sections, as arrays of lines, from typed records only.
-export function composeSections({ t, run, workPackage, plan, events, delta, contract = null, orderChange = null, successorExists = false, limits = {}, deliveredAt = Date.now() }) {
+export function composeSections({ t, run, workPackage, plan, events, delta, uncommittedAtStart = [], contract = null, orderChange = null, successorExists = false, limits = {}, deliveredAt = Date.now() }) {
   const name = workPackage?.task_file || workPackage?.work_package_id || run.work_package_id || run.run_id;
   const state = run.last_state || {};
   const calls = writerCalls(run, events);
@@ -240,6 +247,17 @@ export function composeSections({ t, run, workPackage, plan, events, delta, cont
       for (const item of writer.needs_human) why.push("- " + t("result.why.needs_human.question", { question: item.question, options: (item.options || []).join(" / ") }));
     }
     if (writer && writer.status && writer.status !== "done") why.push(t("result.why.needs_human.writer_status", { status: writer.status }));
+    // Why the writer stopped, in its own words; what is true of the work is in the sections around this.
+    if (writer && (writer.status !== "done" || writer.needs_human?.length)) {
+      if (writer.unverified?.length) {
+        why.push(t("result.why.writer.unverified"));
+        for (const line of writer.unverified) why.push("- " + line);
+      }
+      if (writer.criteria?.length) {
+        why.push(t("result.why.writer.criteria"));
+        for (const item of writer.criteria) why.push("- " + item.id + " " + item.status + (item.note ? ": " + item.note : ""));
+      }
+    }
     if (stop?.detail_ref?.startsWith("loop:")) why.push(t("result.why.needs_human.loop", { id: stop.detail_ref.slice(5) }));
     else if (stop?.detail_ref === "test_loop") why.push(t("result.why.needs_human.gate_loop"));
     else if (state.hard_stop_reason || review?.hard_stop_reason) {
@@ -327,6 +345,12 @@ export function composeSections({ t, run, workPackage, plan, events, delta, cont
     else if ((delta.scope_unverified || []).includes(entry.path)) unverified.push(line);
     else changed.push(line);
   }
+  // What the writer says it changed, every call's, the latest word on each path. Only Git's list above
+  // is proof; a writer can claim a file that was already there as it is.
+  const claimedByPath = new Map();
+  for (const event of events) if (event.event === "writer.result") for (const entry of event.changed || []) claimedByPath.set(entry.path, entry.action);
+  const claimed = [...claimedByPath].map(([file, action]) => "- " + file + "（" + t("result.change." + action) + "）");
+  const startUncommitted = uncommittedAtStart.map((file) => "- " + file);
   // Without a work proof "nothing changed" cannot be said.
   const noProof = !delta || ["none", "changed", "unconfirmed"].includes(delta.mode) || delta.start_point === "lost";
 
@@ -343,7 +367,7 @@ export function composeSections({ t, run, workPackage, plan, events, delta, cont
   }
 
   const line = oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run });
-  return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, tokens, line, calls };
+  return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, claimed, startUncommitted, tokens, line, calls };
 }
 
 // RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
@@ -434,6 +458,8 @@ export function renderResult({ t, sections, identity = [] }) {
       ...(sections.violations.length ? ["", "### " + t("result.section.violations"), ...violationLines,
         ...(sections.violations.length > changed ? [t("result.violations.more", { count: sections.violations.length - changed })] : [])] : []),
       ...((sections.unverified || []).length ? ["", "### " + t("result.section.unverified"), ...sections.unverified.slice(0, changed).map((line) => clipLine(line, clip))] : []),
+      ...listSection(t("result.section.claimed"), sections.claimed, changed, clip, t),
+      ...listSection(t("result.section.start_uncommitted"), sections.startUncommitted, changed, clip, t),
       "",
       "## " + t("result.section.tokens"),
       ...sections.tokens,
@@ -486,6 +512,13 @@ function identityLines(t, identity) {
   const commitNote = !known ? null
     : version?.kind === "git" ? (version.dirty ? t("result.identity.commit.dirty") : null)
       : version ? t("result.identity.commit.no_git") : t("result.identity.commit.none");
+  // Each role as a work order writes it, plus who filled it; the model the run was told to use.
+  const role = (name) => [
+    name + ":",
+    "  " + line("provider", value(name + "_provider")),
+    "  " + line("model", value(name + "_model"), known && value(name + "_provider") && value(name + "_model") === null ? t("result.identity.model.cli_default") : null),
+    "  " + line("effort", value(name + "_effort")),
+  ];
   return [
     "---",
     ...(known ? [] : ["# " + t("result.identity.unavailable." + identity.unavailable, { reason: identity.reason || "" })]),
@@ -496,6 +529,9 @@ function identityLines(t, identity) {
     line("contract_sha256", value("contract_sha256"), known && !identity.contract_sha256 ? t("result.identity.contract.none") : null),
     line("run_id", value("run_id")),
     line("commit", commit, commitNote),
+    ...role("writer"),
+    ...role("reviewer"),
+    "  mcp: " + JSON.stringify(value("reviewer_mcp")),
     "---",
     "",
   ];
@@ -583,6 +619,7 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   const plan = await planForRun(paths, runId);
   const events = await readIoEvents(paths, runId);
   let delta = null;
+  let uncommittedAtStart = [];
   if (control.workspace_evidence?.baseline_path) {
     // A delivery may run in another process, where the controller's in-memory seal is gone; the
     // baseline is then checked against the hash on the run record, and the result says so.
@@ -593,6 +630,7 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
     } else if (run.closed_reason === "evidence_unconfirmable") {
       delta = { mode: "unconfirmed", changed_files: [], scope_violations: [], scope_unverified: [] };
     } else {
+      uncommittedAtStart = Array.isArray(baseline.uncommitted_at_start) ? baseline.uncommitted_at_start : [];
       // One delta per attempt: concurrent deliverers must not race on the same file name.
       const evidence = await createWorkspaceDelta({ paths, baselinePath: control.workspace_evidence.baseline_path, deltaId: "result-" + runId + "-" + randomUUID().slice(0, 8) }).catch(() => null);
       if (evidence) delta = await readJson(evidence.delta_path).catch(() => null);
@@ -604,7 +642,7 @@ export async function deliverOutcome({ paths, runId, adapter = null, notify = tr
   const current = workPackage?.task_file ? await currentWorkOrder(paths, workPackage.task_file) : undefined;
   const orderChange = current === undefined ? null : current?.unreadable ? current : workOrderChange(workPackage.task, current);
   const successorExists = run.superseded_by ? await readRun(paths, run.superseded_by).then(() => true, () => false) : false;
-  const sections = composeSections({ t, run, workPackage, plan, events, delta, contract, orderChange, successorExists, limits: control.run.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
+  const sections = composeSections({ t, run, workPackage, plan, events, delta, uncommittedAtStart, contract, orderChange, successorExists, limits: control.run.policy_snapshot?.effective_policy?.limits || {}, deliveredAt: now() });
   const runPath = path.join(paths.runLogDir(runId), runId + ".result.md");
   const identity = await readIdentity(runId);
   const copyPath = resultCopyPath(paths, { identity, run, workPackage, plan });

@@ -3,15 +3,13 @@ import path from "node:path";
 import {
   acquireLock,
   appendIoEvent,
+  callRole,
   classifyProviderFailure,
-  codexDiagnosticTrailer,
   ensureDir,
   fileExists,
   listJson,
-  parseReviewerUsage,
-  readEvidenceTail,
   readJson,
-  runProcess,
+  roleProvider,
   writeFailureRecord,
   writeJson,
   writeText,
@@ -24,10 +22,7 @@ import { loadContract } from "./contract.mjs";
 import { callTimeLeft, clearProcess, recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 import {
   controllerScopeResult,
-  parseCodexJsonl,
-  pathFromCommand,
   REVIEW_RESULT_SCHEMA,
-  reviewerUsageEvent,
   writerClaimMismatch,
 } from "./typedResults.mjs";
 
@@ -52,7 +47,7 @@ export async function validateReviewWorker({ paths, control, adapter }) {
   if (!(await fileExists(reviewPromptPath))) {
     throw new Error("Review prompt template is missing.");
   }
-  const reviewerExecutable = await adapter.resolveExecutable("codex");
+  const reviewerExecutable = await adapter.resolveExecutable(roleProvider(control.run?.work_package, "reviewer"));
   return {
     valid: true,
     repo_root: paths.repoRoot,
@@ -116,11 +111,13 @@ export async function buildReviewInput({ paths, job, control }) {
   };
 }
 
-function reviewerReadEvents(commands, readList) {
-  return commands.map((command) => {
-    const relative = pathFromCommand(command);
+// What the reviewer read, whichever way its CLI reports it (a command, or a Read with a path that
+// may be absolute), against the read list.
+function reviewerReadEvents(reads, readList, repoRoot) {
+  return reads.map(({ path: named, ...read }) => {
+    const relative = named ? path.relative(repoRoot, path.resolve(repoRoot, named)).split(path.sep).join("/") : null;
     const inList = relative ? readList.some((entry) => relative === entry.path || relative.startsWith(entry.path + "/")) : null;
-    return { tool: "command", command, ...(relative ? { path: relative } : {}), outside_list: relative ? !inList : null };
+    return { ...read, ...(relative ? { path: relative } : {}), outside_list: relative ? !inList : null };
   });
 }
 
@@ -147,7 +144,8 @@ export async function runReviewWorker({
   if (!(await fileExists(reviewPromptPath))) {
     throw new Error("Review prompt template is missing.");
   }
-  const reviewerExecutable = await adapter.resolveExecutable("codex");
+  const provider = roleProvider(control.run?.work_package, "reviewer");
+  await adapter.resolveExecutable(provider);
   // A run reviewing its own job takes no project lock: claiming the job by moving it from pending to
   // running is atomic, so other runs' reviews go on beside it. The review command, which works
   // through every pending job, still runs one at a time.
@@ -212,7 +210,7 @@ export async function runReviewWorker({
         let usage = null;
         let reads = [];
         let controllerDecided = false;
-        const startedAt = Date.now();
+        let failureTexts = async () => [];
         if (dryRun) {
           await writeText(resultPath, [
             "# Review Bridge Dry Run",
@@ -233,23 +231,6 @@ export async function runReviewWorker({
             contractSha256: reviewInput.contract_sha256,
           }));
         } else {
-          const reviewerArgs = [
-            "--ask-for-approval", "never",
-            "-c", "model_reasoning_effort=\"" + job.reasoning_effort + "\"",
-            // A model of null leaves the choice to the CLI.
-            ...(control.reviewer_policy?.model ? ["--model", control.reviewer_policy.model] : []),
-            "exec",
-            "--ephemeral",
-            // A project without Git is still reviewed (Owner 2026-10-17); Codex otherwise refuses an
-            // untrusted folder. The session stays read-only.
-            "--skip-git-repo-check",
-            "--sandbox", "read-only",
-            "--cd", paths.repoRoot,
-            "--output-schema", REVIEW_RESULT_SCHEMA, "--json",
-            "--output-last-message", resultPath,
-            "-",
-          ];
-          const invocation = adapter.buildInvocation("codex", reviewerExecutable, reviewerArgs);
           // The review has no limit of its own; it is cut to what is left of the run's time. With
           // nothing left the run is closed as timed out and the job as stopped, before any call.
           const reviewTimeout = await callTimeLeft(paths, runId, undefined);
@@ -262,25 +243,33 @@ export async function runReviewWorker({
             continue;
           }
           // The reviewer's pid is recorded like the writer's, so a stop during the review reaches it.
-          const processResult = await runProcess({
-            invocation,
+          // A project without Git is still reviewed (Owner 2026-10-17); the session stays read-only.
+          const called = await callRole(provider, {
+            adapter,
+            access: "read",
+            role: "reviewer",
+            call: job.call,
+            prompt,
+            schemaPath: REVIEW_RESULT_SCHEMA,
+            // A model of null leaves the choice to the CLI.
+            model: control.reviewer_policy?.model ?? null,
+            effort: job.reasoning_effort,
             cwd: paths.repoRoot,
-            input: prompt,
+            maxTurns: control.run?.policy_snapshot?.effective_policy?.limits?.max_turns ?? null,
+            mcp: control.run?.work_package?.reviewer?.mcp,
+            mcpOff: control.run?.work_package?.reviewer?.mcp_off,
             stdoutPath,
             stderrPath,
+            answerPath: resultPath,
             timeoutMs: reviewTimeout,
-            onSpawn: runId ? (pid) => recordProcessOrKill(paths, runId, { pid, role: "reviewer", provider: "codex", job_id: jobId, call: job.call }) : null,
+            onSpawn: runId ? (pid) => recordProcessOrKill(paths, runId, { pid, role: "reviewer", provider, job_id: jobId, call: job.call }) : null,
           });
           await clearProcess(paths, runId);
-          exitCode = processResult.exitCode;
-          timedOut = Boolean(processResult.timedOut);
-          // D5: usage and commands from the JSONL stream; the stderr trailer is the fallback.
-          const stream = parseCodexJsonl(await fsp.readFile(stdoutPath, "utf8").catch(() => ""));
-          const trailer = parseReviewerUsage(await fsp.readFile(stderrPath, "utf8").catch(() => ""), { jobId });
-          usage = reviewerUsageEvent({
-            usage: stream.usage, trailerTokens: trailer.tokens_used, call: job.call, durationMs: Date.now() - startedAt,
-          });
-          reads = reviewerReadEvents(stream.commands, reviewInput.read_list);
+          exitCode = called.exitCode;
+          timedOut = called.timedOut;
+          failureTexts = called.failureTexts;
+          usage = called.usage;
+          reads = reviewerReadEvents(called.reads, reviewInput.read_list, paths.repoRoot);
           if (runId) {
             for (const read of reads) await appendIoEvent(paths, runId, { event: "read", role: "reviewer", call: job.call, ...read });
             await appendIoEvent(paths, runId, usage);
@@ -300,11 +289,11 @@ export async function runReviewWorker({
         if (exitCode !== 0 || !(await fileExists(resultPath)) || (await fsp.stat(resultPath)).size === 0) {
           const classified = classifyProviderFailure({
             role: "reviewer",
-            provider: "codex",
+            provider,
             phase: "review",
             exitCode,
             timedOut,
-            texts: [codexDiagnosticTrailer(await readEvidenceTail(stderrPath))],
+            texts: await failureTexts(),
           });
           const written = await writeFailureRecord(paths, paths.reviewsRoot, jobId, classified, {
             stdout_path: stdoutPath,

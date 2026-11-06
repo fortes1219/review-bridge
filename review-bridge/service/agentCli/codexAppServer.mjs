@@ -135,12 +135,25 @@ export function writerUsageFromThreads(summary, { call, durationMs }) {
 // command for `codex app-server`.
 export async function runCodexAppServerTurn({
   invocation, cwd, prompt, thread = {}, effort = null, outputSchema = null,
-  timeoutMs = 0, signal = null, eventsPath = null, onSpawn = null,
+  timeoutMs = 0, signal = null, eventsPath = null, stderrPath = null, onSpawn = null,
 }) {
   const server = spawn(invocation.command, invocation.args, {
     cwd, env: invocation.env || process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
   });
   const log = eventsPath ? fs.createWriteStream(eventsPath) : null;
+  // stderr is always read: an unread pipe fills up and the server stalls on its next write.
+  const stderrLog = stderrPath ? fs.createWriteStream(stderrPath) : null;
+  if (stderrLog) {
+    stderrLog.on("error", () => {});
+    server.stderr.pipe(stderrLog);
+  } else {
+    server.stderr.resume();
+  }
+  // What the server said went wrong, in its own typed messages, for the caller to classify.
+  const errors = [];
+  const noteError = (message) => {
+    if (typeof message === "string" && message && !errors.includes(message)) errors.push(message);
+  };
   const pending = new Map();
   let nextId = 1;
   let tracker = null;
@@ -192,6 +205,8 @@ export async function runCodexAppServerTurn({
       send({ id: message.id, error: { code: -32000, message: "Review Bridge does not grant requests from the writer." } });
       return;
     }
+    if (message.method === "error") noteError(message.params?.error?.message);
+    if (message.method === "turn/completed") noteError(message.params?.turn?.error?.message);
     tracker?.observe(message);
     if (tracker) settle();
   });
@@ -244,13 +259,22 @@ export async function runCodexAppServerTurn({
     await Promise.race([Promise.all(interrupts), new Promise((resolve) => setTimeout(resolve, INTERRUPT_GRACE_MS))]);
     treeKill = await killProcessTree(server.pid);
   }
-  log?.end();
+  // Both files are closed before the caller reads them. The pipe closes stderr's itself when the
+  // server's stderr ends, which may already have happened; a process left holding that pipe is cut
+  // off here, so nothing is written to a closed file.
+  if (stderrLog) server.stderr.unpipe(stderrLog);
+  const closed = (stream) => (stream && !stream.closed ? new Promise((resolve) => {
+    stream.once("close", resolve);
+    stream.end();
+  }) : null);
+  await Promise.all([closed(log), closed(stderrLog)]);
   const summary = tracker
     ? tracker.summary()
     : { threads: [], tokens: { input: 0, cache_write: 0, cache_read: 0, output: 0 }, total_tokens: 0, complete: false, missing: ["root"], running: [], ended_early: [] };
   return {
     status: outcome.status,
     error: outcome.error || null,
+    errors,
     finalMessage: tracker?.finalMessage() ?? null,
     summary,
     tree_kill: treeKill,

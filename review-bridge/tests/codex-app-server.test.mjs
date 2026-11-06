@@ -94,6 +94,57 @@ test("interrupted root: the running sub-agent has no usage yet, so the record is
   assert.deepEqual(usage.missing, ["thread:thread-sleep_task", "running:thread-sleep_task", "interrupted:thread-root"]);
 });
 
+test("the server's stderr is always read: a flood neither stalls it nor is lost", async (t) => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-app-server-"));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
+  const stderrPath = path.join(dir, "stderr.log");
+  const bytes = 1024 * 1024;
+  const flooding = (file) => ({ command: process.execPath, args: ["-e", [
+    "process.stderr.write('x'.repeat(" + bytes + "), () => {",
+    "  const rl = require('node:readline').createInterface({ input: process.stdin });",
+    "  const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');",
+    "  rl.on('line', (line) => {",
+    "    const m = JSON.parse(line);",
+    "    if (m.method === 'initialize') send({ id: m.id, result: {} });",
+    "    if (m.method === 'thread/start') send({ id: m.id, result: { thread: { id: 't' } } });",
+    "    if (m.method === 'turn/start') {",
+    "      send({ id: m.id, result: { turn: { id: 'u' } } });",
+    "      send({ method: 'turn/started', params: { threadId: 't', turn: { id: 'u' } } });",
+    "      send({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'u', status: 'completed' } } });",
+    "    }",
+    "  });",
+    "});",
+    "setInterval(() => {}, 1000);",
+  ].join("\n")] });
+  const written = await runCodexAppServerTurn({ invocation: flooding(), cwd: os.tmpdir(), prompt: "x", timeoutMs: 20_000, stderrPath });
+  assert.equal(written.status, "completed");
+  assert.equal((await fsp.stat(stderrPath)).size, bytes, "all of it reached the file, and the file is closed");
+  const unlogged = await runCodexAppServerTurn({ invocation: flooding(), cwd: os.tmpdir(), prompt: "x", timeoutMs: 20_000 });
+  assert.equal(unlogged.status, "completed", "without a file it is read and dropped");
+});
+
+test("what the server says went wrong comes back for the caller to classify", async () => {
+  const failing = { command: process.execPath, args: ["-e", [
+    "const rl = require('node:readline').createInterface({ input: process.stdin });",
+    "const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');",
+    "rl.on('line', (line) => {",
+    "  const m = JSON.parse(line);",
+    "  if (m.method === 'initialize') send({ id: m.id, result: {} });",
+    "  if (m.method === 'thread/start') send({ id: m.id, result: { thread: { id: 't' } } });",
+    "  if (m.method === 'turn/start') {",
+    "    send({ id: m.id, result: { turn: { id: 'u' } } });",
+    "    send({ method: 'turn/started', params: { threadId: 't', turn: { id: 'u' } } });",
+    "    send({ method: 'error', params: { threadId: 't', turnId: 'u', willRetry: false, error: { message: 'usage limit reached' } } });",
+    "    send({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'u', status: 'failed', error: { message: 'usage limit reached' } } } });",
+    "  }",
+    "});",
+    "setInterval(() => {}, 1000);",
+  ].join("\n")] };
+  const result = await runCodexAppServerTurn({ invocation: failing, cwd: os.tmpdir(), prompt: "x", timeoutMs: 20_000 });
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.errors, ["usage limit reached"], "said twice, kept once");
+});
+
 test("a completed run returns once every thread has ended, with all usage, and stops the server", async () => {
   const result = await runCodexAppServerTurn({ invocation: fake("codex-app-server-nested.jsonl", "replay"), cwd: os.tmpdir(), prompt: "nested", timeoutMs: 20_000 });
   assert.equal(result.status, "completed");

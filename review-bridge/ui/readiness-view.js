@@ -10,6 +10,8 @@ export const RETRY_CONFIRM = "這會再啟動一次 reviewer CLI；可能消耗�
 // Technical reasons, shown only under 詳細資訊.
 export const REASONS = Object.freeze({
   sandbox_denied_write: "reviewer 實際嘗試寫入，被唯讀沙箱擋下，且沒有留下檔案。",
+  no_write_tool: "reviewer 的 session 裡沒有任何能寫入的工具，且沒有留下檔案。",
+  read_only_not_in_effect: "唯讀限制未生效：reviewer 的 session 不是 plan 模式，或還有只讀以外的工具（例如 MCP 工具）。",
   write_allowed: "唯讀限制未通過。",
   write_reported_success: "寫入指令回報成功，但檔案沒有出現。",
   no_write_attempt: "reviewer 沒有真的嘗試寫入（可能拒絕或略過）。",
@@ -19,7 +21,7 @@ export const REASONS = Object.freeze({
   invocation_error: "reviewer CLI 執行失敗。",
   incomplete_run: "reviewer CLI 沒有完整跑完。",
   ambiguous_output: "reviewer 的輸出無法明確對應到固定的寫入測試。",
-  unsupported_provider: "目前選的 reviewer 無法提供可驗證的唯讀沙箱證據，所以不能進行檢查。若要使用此檢查，請重新執行 init 並選擇 codex 作為 reviewer。",
+  unsupported_provider: "目前選的 reviewer 無法提供可驗證的唯讀證據，所以不能進行檢查。",
   adapter_not_verified: "這個平台的 adapter 尚未驗證，reviewer 唯讀實測與原生工作在這裡不開放。",
   configuration_changed: "角色、CLI、adapter、檢查程式或沙箱設定和檢查時不同。",
   fingerprint_unavailable: "目前讀不到用來比對的設定（例如 CLI 版本暫時查不出），無法確認和檢查時相同。",

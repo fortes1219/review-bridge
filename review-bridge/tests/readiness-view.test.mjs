@@ -53,7 +53,7 @@ test("D1 every state says only what was established", () => {
   assert.equal(stale.probe.primaryVisible, true);
 
   const unsupported = readinessView(status({}, { probe_supported: false, probe_available: false }));
-  assert.match(unsupported.readonly.text, /無法提供可驗證的唯讀沙箱證據/);
+  assert.match(unsupported.readonly.text, /無法提供可驗證的唯讀證據/);
 
   // Words that would claim more than was established, in any state.
   const every = [notRun, uncounted, allowed, reported, proven, stale, unsupported,

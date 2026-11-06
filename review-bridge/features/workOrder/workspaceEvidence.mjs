@@ -127,14 +127,19 @@ function ignoredForbiddenFiles(repoRoot, forbiddenPaths) {
   return found.map(normalizeRelative).filter((entry) => !isExcluded(entry));
 }
 
-// Content hash of every path Git says differs from the run's start, plus untracked files, plus
-// watched ignored files, plus whatever was already changed when the run started.
-async function stateSinceStart(repoRoot, start) {
-  const tracked = trackedChangesSince(repoRoot, start.start_commit);
+// What Git says differs from this commit, plus untracked files: what a person would call uncommitted.
+function uncommittedSince(repoRoot, commit) {
+  const tracked = trackedChangesSince(repoRoot, commit);
   const untracked = untrackedFiles(repoRoot);
   if (tracked === null || untracked === null) throw new Error("Git could not list the changes since the run started.");
+  return [...new Set([...tracked, ...untracked].map(normalizeRelative).filter((entry) => !isExcluded(entry)))].sort();
+}
+
+// Content hash of every path Git says differs from the run's start, plus untracked files, plus
+// watched ignored files, plus whatever was already changed when the run started.
+async function stateSinceStart(repoRoot, start, uncommitted = uncommittedSince(repoRoot, start.start_commit)) {
   const ignored = ignoredForbiddenFiles(repoRoot, start.forbidden_paths);
-  const candidates = new Set([...tracked, ...untracked, ...ignored, ...Object.keys(start.dirty)].map(normalizeRelative).filter((entry) => !isExcluded(entry)));
+  const candidates = new Set([...uncommitted, ...ignored, ...Object.keys(start.dirty)].map(normalizeRelative).filter((entry) => !isExcluded(entry)));
   const state = {};
   for (const relative of [...candidates].sort()) state[relative] = await fileSha256(repoRoot, relative);
   return state;
@@ -166,8 +171,10 @@ export async function createWorkspaceBaseline({ paths, planSha256, runId = null,
     const head = headCommit(paths.repoRoot);
     const start = { start_commit: head || EMPTY_TREE, forbidden_paths: forbiddenPaths, dirty: {} };
     // Already changed when the run started: recorded by hash, never added to Git (Owner 2026-10-17).
-    start.dirty = await stateSinceStart(paths.repoRoot, start);
-    record = { ...common, mode: "git", start_head: head, start_commit: start.start_commit, start_branch: currentBranch(paths.repoRoot), dirty: start.dirty };
+    // `dirty` also holds ignored files the forbidden list watches; the person's own list does not.
+    const uncommitted = uncommittedSince(paths.repoRoot, start.start_commit);
+    start.dirty = await stateSinceStart(paths.repoRoot, start, uncommitted);
+    record = { ...common, mode: "git", start_head: head, start_commit: start.start_commit, start_branch: currentBranch(paths.repoRoot), dirty: start.dirty, uncommitted_at_start: uncommitted };
   }
   const baselinePath = path.join(evidenceDir, "baseline.json");
   await writeJsonAtomic(baselinePath, record);

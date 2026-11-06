@@ -22,13 +22,16 @@
     "disallowed_tools": [],
     "self_review": "one_local_consistency_pass"
   },
+  "reviewer": {
+    "mcp_allow": []
+  },
   "priority": {
     "default": "medium",
     "writer": {
-      "low": { "model": "opus", "effort": "low" },
-      "medium": { "model": "opus", "effort": "medium" },
-      "high": { "model": "opus", "effort": "high" },
-      "urgent": { "model": "opus", "effort": "high" }
+      "low": { "model": null, "effort": "low" },
+      "medium": { "model": null, "effort": "medium" },
+      "high": { "model": null, "effort": "high" },
+      "urgent": { "model": null, "effort": "high" }
     },
     "reviewer": {
       "low": { "model": null, "effort": "low" },

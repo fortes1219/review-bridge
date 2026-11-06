@@ -14,7 +14,7 @@ const refused = (text) => {
   assert.fail("the work order was accepted");
 };
 
-test("frontmatter is data: the four keys are read, any other key and any value out of range is refused with its line", () => {
+test("frontmatter is data: its keys are read, any other key and any value out of range is refused with its line", () => {
   const read = parseWorkOrder([
     "---",
     "priority: high",
@@ -31,7 +31,7 @@ test("frontmatter is data: the four keys are read, any other key and any value o
     ["high", "low", { tokens: 2_000_000, run_timeout: 7_200_000 }, "SHOP-412", 8, 9],
   );
   assert.deepEqual(read.frontmatter.budget_lines, { tokens: 5, run_timeout: 6 });
-  assert.deepEqual(refused("---\npriority: high\nowner: me\n---\n" + BODY), ["line 3: unknown key owner; the frontmatter takes priority, effort, budget, source_id"]);
+  assert.deepEqual(refused("---\npriority: high\nowner: me\n---\n" + BODY), ["line 3: unknown key owner; the frontmatter takes priority, effort, writer, reviewer, budget, source_id"]);
   assert.deepEqual(refused("---\npriority: soon\n---\n" + BODY), ["line 2: priority must be one of low, medium, high, urgent"]);
   assert.deepEqual(refused("---\neffort: max\n---\n" + BODY), ["line 2: effort must be one of low, medium, high"]);
   assert.deepEqual(refused("---\nbudget:\n  rounds: 0\n  turns: 5\n  call_timeout: 1000\n---\n" + BODY), [
@@ -44,6 +44,23 @@ test("frontmatter is data: the four keys are read, any other key and any value o
   // No frontmatter is fine; so is one holding only comments.
   assert.equal(parseWorkOrder(BODY).frontmatter.priority, null);
   assert.equal(parseWorkOrder("---\n# priority: high\n---\n" + BODY).frontmatter.priority, null);
+});
+
+test("a writer: or reviewer: block says the model and effort of that role, and the top-level effort is the writer's", () => {
+  const read = parseWorkOrder("---\nwriter:\n  model: gpt-5.6-sol\n  effort: high\nreviewer: { model: null, effort: low }\n---\n" + BODY).frontmatter;
+  assert.deepEqual([read.writer.model, read.writer.effort, read.writer.lines], ["gpt-5.6-sol", "high", { model: 3, effort: 4 }]);
+  assert.deepEqual([read.reviewer.model, read.reviewer.effort], [null, "low"], "null is written: the CLI's default, over the table");
+  assert.equal(read.effort, "high", "the sealed contract's ticket keeps the writer's effort");
+  const unwritten = parseWorkOrder("---\nwriter: { effort: low }\n---\n" + BODY).frontmatter;
+  assert.equal("model" in unwritten.writer, false, "an unwritten model leaves the table's");
+  assert.equal("model" in unwritten.reviewer, false);
+  const top = parseWorkOrder("---\neffort: low\n---\n" + BODY).frontmatter;
+  assert.deepEqual([top.writer.effort, top.writer.lines.effort], ["low", 2]);
+  assert.deepEqual(refused("---\neffort: low\nwriter: { effort: high }\n---\n" + BODY), ["line 3: writer.effort and effort (line 2) say the same thing; keep writer.effort"]);
+  assert.deepEqual(refused("---\nwriter: opus\n---\n" + BODY), ["line 2: writer must be a mapping of model, effort"]);
+  assert.deepEqual(refused("---\nreviewer:\n  provider: codex\n---\n" + BODY), ["line 3: reviewer.provider is not a key here; the keys are model, effort"]);
+  assert.deepEqual(refused("---\nwriter:\n  effort: max\n---\n" + BODY), ["line 3: writer.effort must be one of low, medium, high"]);
+  assert.deepEqual(refused("---\nwriter:\n  model: 'a b'\n---\n" + BODY), ["line 3: writer.model must be one model name, or null for the CLI's default"]);
 });
 
 test("a budget over the policy's limit is refused with its line and the limit", () => {

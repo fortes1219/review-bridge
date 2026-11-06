@@ -7,7 +7,7 @@ import readline from "node:readline/promises";
 
 import {
   activeRuns, assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
-  projectRuns, readJson, recordsDatabase, runDetail, writeJson,
+  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, writeJson,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
 import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
@@ -36,7 +36,7 @@ export const DEFAULT_BREAKPOINT = "after the review";
 
 // For a work-order file the rest has defaults: the work package is the file name, the plan goes
 // to <name>.plan.json in the log folder of the run it proposes, the owner is the signed-in OS user,
-// and priority, effort and budget come from the work order or the policy. The breakpoint is asked at a terminal with a
+// the roles come from bridge.json, and priority, model, effort and budget from the work order or the policy. The breakpoint is asked at a terminal with a
 // default that Enter takes; without a terminal start takes the default and work-plan requires it.
 // The prompt library is loaded only then, like every other dependency of the runtime.
 async function askMissing(options, clack) {
@@ -71,7 +71,7 @@ async function openRecords(paths) {
 // The work order's path in the project, spelled as the file system spells it (the records' key).
 const taskFileOf = (paths, file) => canonicalTaskFile(paths.repoRoot, path.resolve(file));
 
-async function planFromOptions({ paths, options, command }) {
+async function planFromOptions({ paths, options, command, adapter, inspectionAdapter }) {
   const named = workPackageName(options);
   if (!options.outPath && !(options.taskFile && named)) throw new Error(command + " needs a work order. Run: review-bridge " + command + " .review-bridge/work-packages/<file>.md");
   if (options.update !== undefined && options.asNew) throw new Error("Give --update <work_order_id> or --as-new, not both.");
@@ -95,6 +95,8 @@ async function planFromOptions({ paths, options, command }) {
     projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), repoRoot: paths.repoRoot,
     update: options.update, asNew: Boolean(options.asNew),
   }) : null;
+  // Calls no model, so it uses the adapter for model-free checks; a fake run's is the fake CLI.
+  const modelFree = async () => (adapter?.resolveExecutable ? adapter : await inspectionAdapter());
   // A flag given at the terminal comes before the work order's own budget (settleWorkOrder).
   const plan = await createWorkPackagePlan({
     paths,
@@ -106,6 +108,11 @@ async function planFromOptions({ paths, options, command }) {
     allowedPaths: options.allowedPaths,
     rounds: options.rounds,
     callTimeout: options.callTimeout,
+    writer: options.writer,
+    reviewer: options.reviewer,
+    listCodexMcp: async () => await listCodexMcpServers(await modelFree()),
+    // The fake CLI has nothing to install or sign in to.
+    checkCodex: options.fakeCli ? null : async () => (await inspectProvider("codex", { adapter: await modelFree() })).next_action,
     outPath: options.outPath,
     planName: options.planName,
     workOrder,
@@ -114,8 +121,8 @@ async function planFromOptions({ paths, options, command }) {
   return { plan, records };
 }
 
-export async function planWork({ paths, options }) {
-  const planned = await planFromOptions({ paths, options, command: "work-plan" });
+export async function planWork({ paths, options, adapter, inspectionAdapter }) {
+  const planned = await planFromOptions({ paths, options, command: "work-plan", adapter, inspectionAdapter });
   if (planned.cancelled) return 1;
   const { plan } = planned;
   // --plain is the human summary (C5.2); --json is what scripts and tests read.
@@ -142,7 +149,8 @@ export async function planWork({ paths, options }) {
       scope: plan.scope,
       test: plan.test,
       priority: plan.priority,
-      effort: plan.effort,
+      writer: plan.writer,
+      reviewer: plan.reviewer,
       budget: plan.budget,
       budget_source: plan.budget_source,
       next_command: "work-start --plan <plan_path>",
@@ -236,7 +244,10 @@ export async function startWork({ paths, options, adapter, guard }) {
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
-  await guard();
+  // The gate first: without the proof nothing else is looked at. It asks about the plan's reviewer; a
+  // plan that cannot be read is refused below, once the gate has let it through.
+  const sealed = await readJson(path.resolve(options.planPath)).catch(() => null);
+  await guard(sealed?.reviewer?.provider, sealed?.reviewer ? { off: sealed.reviewer.mcp_off, allow: sealed.reviewer.mcp } : null);
   const relayed = Boolean(options.approval || options.yes);
   const approval = options.approval || await confirmWorkStart(paths, options.planPath, {
     assumeYes: Boolean(options.yes),
@@ -262,7 +273,7 @@ function checkFailureLines(check, again) {
   const next = check.reason === "page_runs_fake_cli"
     ? "Run: review-bridge down, then " + again
     : check.reason === "reviewer_not_ready"
-      ? "Sign the reviewer in (codex login), then run: " + again
+      ? "Sign the reviewer in (" + (SIGN_IN_COMMANDS[check.provider] || "see its CLI's help") + "), then run: " + again
       : "Run: " + again + " again" + (check.url ? ", or open " + check.url + " and press Check" : "");
   return [
     "Reviewer read-only check: not passed (" + why + ")",
@@ -313,6 +324,8 @@ async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerC
     write("Reviewer read-only check: not needed with the fake CLI (no model is called)");
   } else {
     const check = await reviewerCheck({
+      reviewer: plan.reviewer.provider,
+      mcp: { off: plan.reviewer.mcp_off, allow: plan.reviewer.mcp },
       onStart: (reviewer) => write("Checking that the reviewer (" + reviewer + ") cannot write files: one model call..."),
     });
     if (!check.ok) {
@@ -328,7 +341,7 @@ async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerC
     write("Needs authorization. If the person says yes, run again: " + again + " --yes");
     return 1;
   }
-  await guard();
+  await guard(plan.reviewer.provider, { off: plan.reviewer.mcp_off, allow: plan.reviewer.mcp });
   // A native start takes this machine's adapter only now, after the check (bootstrap leaves it).
   const runAdapter = adapter || await loadAdapter();
   if (!options.yes) {
@@ -377,14 +390,34 @@ async function cardForYes({ paths, planName = null, taskFile, options, again }) 
   return { ...card.body, plan_path: planPath };
 }
 
-async function planOrSay({ paths, options, command }) {
-  const planned = await planFromOptions({ paths, options, command });
+// The same two lines the reviewer's check prints when its CLI is not ready, here for a role whose CLI
+// the plan could not ask: no card was made, so there is nothing to withdraw.
+function notReadyLines(error, again) {
+  const sign = "(" + SIGN_IN_COMMANDS[error.provider] + ")";
+  const next = (error.nextAction === "install_cli" ? "Install the " + error.provider + " CLI and sign it in " + sign : "Sign the " + error.role + " in " + sign) + ", then run: " + again;
+  return [
+    error.role === "reviewer"
+      ? "Reviewer read-only check: not passed (the reviewer CLI is not installed and signed in)"
+      : "Writer: not ready (the writer CLI is not installed and signed in)",
+    next,
+  ];
+}
+
+async function planOrSay({ paths, options, command, adapter, inspectionAdapter, again }) {
+  let planned;
+  try {
+    planned = await planFromOptions({ paths, options, command, adapter, inspectionAdapter });
+  } catch (error) {
+    if (!(error instanceof RoleCliNotReadyError)) throw error;
+    for (const line of notReadyLines(error, again)) write(line);
+    return null;
+  }
   if (planned.plan) write("Plan written to " + shownPath(planned.plan.plan_path));
   return planned.plan || null;
 }
 
 // `start <file>`: the person's one command from a work order to its result.
-export async function startWorkOrder({ paths, options, adapter, loadAdapter, guard, reviewerCheck }) {
+export async function startWorkOrder({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck }) {
   if (!options.taskFile) throw new Error("start needs a work order. Run: review-bridge start .review-bridge/work-packages/<file>.md");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
@@ -393,16 +426,17 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, gua
   const again = "review-bridge start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
   const plan = options.yes
     ? await cardForYes({ paths, taskFile: options.taskFile, options, again })
-    : await planOrSay({ paths, options, command: "start" });
+    : await planOrSay({ paths, options, command: "start", adapter, inspectionAdapter, again });
   if (!plan) return 1;
   return await runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerCheck, plan, again });
 }
 
 // `resume <run_id>`: a stopped run is closed for good (its records were sealed by the controller
 // that ran it, which no later process can vouch for), so the work order is carried on as a new
-// run with that run's own stop point and scope, after the same card and yes. Its priority, effort and
-// budget come from the work order again, as they did for the run it carries on.
-export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdapter, guard, reviewerCheck }) {
+// run with that run's own stop point and scope, after the same card and yes. It is a new start: its
+// roles come from bridge.json or the flags as they are now, and its priority, model, effort and
+// budget from the work order again; the card shows them all.
+export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck }) {
   if (!runId) throw new Error("resume needs a run id. Run: review-bridge status to see the runs, then review-bridge resume <run_id>");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
@@ -419,6 +453,9 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
   const again = "review-bridge resume " + runId + (options.fakeCli ? " --fake-cli" : "");
   const plan = options.yes ? await cardForYes({ paths, planName, taskFile, options, again }) : await planOrSay({
     paths,
+    adapter,
+    inspectionAdapter,
+    again,
     command: "resume",
     options: {
       ...options,
@@ -484,10 +521,13 @@ export async function statusOverview({ paths, options, page }) {
   const service = await page();
   const { db, projectId, runs, more, active, logs } = await statusRecords(paths, { after: options.after || null });
   const queue = await queueStatus(paths);
+  // Who the next start uses, from the one place that says it; a run keeps what its card showed.
+  const { roles: configured } = await readJson(paths.bridgeConfigPath);
+  const roles = { writer: configured?.writer?.provider_id ?? null, reviewer: configured?.reviewer?.provider_id ?? null };
   if (options.json) {
     write(JSON.stringify({
       page: { running: service.running, url: service.url, reason: service.reason },
-      project_id: projectId, active_runs: active.length, runs, more, review_queue: queue, logs, database: db.connection,
+      roles, project_id: projectId, active_runs: active.length, runs, more, review_queue: queue, logs, database: db.connection,
     }, null, 2));
     return 0;
   }
@@ -503,6 +543,7 @@ export async function statusOverview({ paths, options, page }) {
   }
   write("Review queue: pending " + queue.pending + ", running " + queue.running + ", done " + queue.done + ", failed " + queue.failed);
   if (queue.latest_review) write("Latest review: " + queue.latest_review);
+  write("Roles: writer " + roles.writer + ", reviewer " + roles.reviewer);
   // The run's call logs live outside the project, one folder per run (review-bridge logs <run_id>).
   write("Logs: " + logs);
   // What VS Code's PostgreSQL extension asks for; the password stays in its owner-only file.

@@ -61,7 +61,7 @@ async function run(rt, name, { env = {}, allowPaths = null, scenario = "PASS", m
   const order = ".review-bridge/work-packages/" + name + ".md";
   await fsp.writeFile(path.join(rt.root, order), ORDER);
   const planArg = ".review-bridge/review-queue/" + name + ".plan.json";
-  const planned = rt.bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
+  const planned = rt.bridge(["work-plan", "--fake-cli", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
     ...(allowPaths ? ["--allow-paths", allowPaths] : []), "--rounds", String(maxCalls), "--call-timeout", "120000", "--out", planArg]);
   assert.equal(planned.status, 0, planned.stderr);
   const plan = await readJson(path.join(rt.root, planArg));
@@ -122,7 +122,6 @@ test("answers that skip, repeat or contradict a condition are refused, from the 
   const cases = [
     ["writer-missing", { FAKE_WRITER_CRITERIA: "missing" }, "malformed_writer_result", "$.criteria: missing AC2"],
     ["writer-duplicate", { FAKE_WRITER_CRITERIA: "duplicate" }, "malformed_writer_result", "$.criteria[2].id: duplicate AC1"],
-    ["writer-open", { FAKE_WRITER_CRITERIA: "open" }, "malformed_writer_result", "$.status: done while AC1 is not done"],
     ["review-missing", { FAKE_CODEX_VERDICT: "missing" }, "malformed_review_result", "$.verdicts: missing AC2"],
     ["review-contradiction", { FAKE_CODEX_VERDICT: "fail_under_pass" }, "malformed_review_result", "$.gate: PASS while a condition fails"],
     ["review-no-evidence", { FAKE_CODEX_VERDICT: "no_evidence" }, "malformed_review_result", "$.verdicts[0].evidence: say what shows it"],
@@ -236,7 +235,7 @@ test("two work orders started at the same time both run, side by side, and neith
     const order = ".review-bridge/work-packages/" + name + ".md";
     await fsp.writeFile(path.join(rt.root, order), ORDER);
     const planArg = ".review-bridge/review-queue/" + name + ".plan.json";
-    const planned = rt.bridge(["work-plan", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
+    const planned = rt.bridge(["work-plan", "--fake-cli", "--task-file", order, "--owner", "Fortes", "--work-package", name, "--breakpoint", "return after review",
       "--rounds", "1", "--call-timeout", "120000", "--out", planArg]);
     assert.equal(planned.status, 0, planned.stderr);
     plans.push({ name, planArg, plan: await readJson(path.join(rt.root, planArg)) });

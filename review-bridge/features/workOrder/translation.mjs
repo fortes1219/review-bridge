@@ -1,25 +1,21 @@
 // The model calls between the human starting the work and the writer's first call, all named in
 // the plan the human approved: Bridge splits the sealed work order into its marked blocks, the
-// writer's provider cuts the acceptance blocks into conditions (no tools), code checks them, the
+// writer's provider cuts the acceptance blocks into conditions (no write access), code checks them, the
 // reviewer's provider reads them against those blocks in its own read-only session, and only then
 // is the contract sealed. A work order that states no result, or lists open questions, stops before
 // any model call. A translation mistake is sent back
 // to the writer a bounded number of times; a real ambiguity or anything the reviewer cannot
 // confirm stops the run for the human. There is no second human approval.
 import { randomUUID } from "node:crypto";
-import fsp from "node:fs/promises";
 import path from "node:path";
 
 import {
   appendIoEvent,
+  callRole,
   classifyProviderFailure,
-  codexDiagnosticTrailer,
-  readEvidenceTail,
-  runProcess,
   tokenTotal,
   usageTotalForRun,
   writeFailureRecord,
-  writeJson,
   writeText,
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
@@ -38,19 +34,6 @@ import {
   workOrderQuestions,
 } from "./contract.mjs";
 import { parseWorkOrder } from "./workOrderFormat.mjs";
-import { loadSchema, parseCodexJsonl, reviewerUsageEvent, writerResultFromClaudeResult } from "./typedResults.mjs";
-import { parseClaudeStream, partialUsageFromStream, usageFromResult } from "./writerPrompt.mjs";
-
-// Until roles are honored everywhere (RC3-BLOCKER-02), each contract step has one provider that a
-// native run can actually call; any other configured provider is refused before a call is made.
-// The fake CLI stands in for every provider, so a fake run is not refused.
-const CALLABLE_PROVIDER = Object.freeze({ translate: "claude", check: "codex" });
-
-export function unsupportedContractStep(steps) {
-  if (steps.translate.provider !== CALLABLE_PROVIDER.translate) return "The writer role is " + steps.translate.provider + "; only claude can translate a work order in this version.";
-  if (steps.check.provider !== CALLABLE_PROVIDER.check) return "The reviewer role is " + steps.check.provider + "; only codex can check a translation in this version.";
-  return null;
-}
 
 // A provider failure is reported as one, like the writer's or reviewer's own.
 async function providerStop({ paths, runId, stamp, role, provider, phase, processResult, texts, evidence }) {
@@ -82,46 +65,36 @@ async function translateOnce({ paths, runId, workPackage, adapter, steps, lines,
   const logs = paths.runLogDir(runId);
   const streamPath = path.join(logs, stamp + "-contract.stream.jsonl");
   const stderrPath = path.join(logs, stamp + "-contract.stderr.log");
+  const resultPath = path.join(logs, stamp + "-contract.result.json");
   await writeText(path.join(logs, stamp + "-contract-prompt.txt"), prompt);
-  const executable = await adapter.resolveExecutable("claude");
-  const args = [
-    "-p",
-    "--session-id", randomUUID(),
-    // No tool exists in this session: the work order is in the prompt and nothing is written.
-    "--tools", "",
-    // A model of null leaves the choice to the CLI.
-    ...(steps.translate.model ? ["--model", steps.translate.model] : []),
-    "--effort", effort,
-    "--max-turns", String(TRANSLATION_MAX_TURNS),
-    "--output-format", "stream-json",
-    "--verbose",
-    "--json-schema", JSON.stringify(await loadSchema(CONTRACT_TRANSLATION_SCHEMA)),
-  ];
-  const startedAt = Date.now();
-  const processResult = await runProcess({
-    invocation: adapter.buildInvocation("claude", executable, args), cwd: paths.repoRoot, input: prompt,
-    stdoutPath: streamPath, stderrPath, timeoutMs, onSpawn,
+  const provider = steps.translate.provider;
+  // The work order is in the prompt and nothing is written: no access, as far as the provider can take it away.
+  const called = await callRole(provider, {
+    adapter, access: "none", role: "translator", prompt, schemaPath: CONTRACT_TRANSLATION_SCHEMA, model: steps.translate.model, effort, cwd: paths.repoRoot,
+    sessionId: randomUUID(), maxTurns: TRANSLATION_MAX_TURNS, mcpOff: workPackage.writer?.mcp_off, stdoutPath: streamPath, stderrPath, answerPath: resultPath, timeoutMs, onSpawn,
   });
-  const stream = parseClaudeStream(await fsp.readFile(streamPath, "utf8").catch(() => ""));
-  const durationMs = Date.now() - startedAt;
-  const usage = { ...(stream.result && !processResult.timedOut
-    ? usageFromResult(stream.result, { call: 0, durationMs })
-    : partialUsageFromStream(stream.streamUsage, { call: 0, durationMs })), role: "translator", attempt };
+  const usage = { ...called.usage, attempt };
   await appendIoEvent(paths, runId, usage);
-  if (processResult.timedOut || !stream.result || stream.result.is_error === true || processResult.exitCode !== 0) {
+  if (called.failed) {
     return { usage, stop: await providerStop({
-      paths, runId, stamp, role: "translator", provider: "claude", phase: "translate", processResult,
-      // `result` is the CLI's own message only when it marks the error (is_error); else the model's text.
-      texts: [stream.result?.is_error === true ? String(stream.result.result || "") : "", await readEvidenceTail(stderrPath)], evidence: { stdout_path: streamPath, stderr_path: stderrPath },
+      paths, runId, stamp, role: "translator", provider, phase: "translate", processResult: called,
+      texts: await called.failureTexts(), evidence: { stdout_path: streamPath, stderr_path: stderrPath },
     }) };
   }
-  const translation = writerResultFromClaudeResult(stream.result);
-  const resultPath = path.join(logs, stamp + "-contract.result.json");
-  await writeJson(resultPath, translation);
-  return { usage, translation, resultPath };
+  // The same judgement as the reviewer's probe, by the session's own init event: a translation holds
+  // the work order's text, and a session that also holds a connector's tools is not used. The call has
+  // already ended by then, so this stops its answer, not the call. A CLI that lists no tools says nothing.
+  const held = called.mcpToolsHeld;
+  if (held === null || held?.length) {
+    const named = held === null ? "and its stream did not show which tools it held" : "(" + held.slice(0, 5).join(", ") + (held.length > 5 ? ", and " + (held.length - 5) + " more" : "") + ")";
+    return { usage, stop: { status: "policy_failure", detail: "translation_tools", problems: [
+      "The work order's translation ran in a session that was to hold no MCP tools " + named + ", so Bridge did not use its answer. Nothing was sealed and no work started. Turn those connectors off in " + provider + ", or name another writer with --writer, then start again.",
+    ] } };
+  }
+  return { usage, translation: called.answer, resultPath };
 }
 
-async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, onSpawn }) {
+async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, maxTurns, onSpawn }) {
   const timeoutMs = await callTimeLeft(paths, runId, steps.call_timeout);
   if (timeoutMs === null) return { timedOut: true };
   const prompt = composeCheckPrompt({ workPackageId: workPackage.work_package_id, lines, format, candidate, sha256, attempt });
@@ -131,35 +104,22 @@ async function checkOnce({ paths, runId, workPackage, adapter, steps, lines, for
   const stderrPath = path.join(logs, stamp + "-contract-check.stderr.log");
   const resultPath = path.join(logs, stamp + "-contract-check.result.json");
   await writeText(path.join(logs, stamp + "-contract-check-prompt.txt"), prompt);
-  const executable = await adapter.resolveExecutable("codex");
+  const provider = steps.check.provider;
   // The reviewer's own read-only, throwaway session, never the writer's.
-  const args = [
-    "--ask-for-approval", "never",
-    "-c", "model_reasoning_effort=\"" + effort + "\"",
-    ...(model ? ["--model", model] : []),
-    // A project without Git still gets a contract (Owner 2026-10-17); Codex otherwise refuses any
-    // folder that is not a trusted Git repository. The session stays read-only and writes nothing.
-    "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", paths.repoRoot,
-    "--output-schema", CONTRACT_CHECK_SCHEMA, "--json", "--output-last-message", resultPath, "-",
-  ];
-  const startedAt = Date.now();
-  const processResult = await runProcess({
-    invocation: adapter.buildInvocation("codex", executable, args), cwd: paths.repoRoot, input: prompt,
-    stdoutPath, stderrPath, timeoutMs, onSpawn,
+  const called = await callRole(provider, {
+    adapter, access: "read", role: "contract_checker", prompt, schemaPath: CONTRACT_CHECK_SCHEMA, model, effort, cwd: paths.repoRoot, maxTurns,
+    mcp: workPackage.reviewer?.mcp, mcpOff: workPackage.reviewer?.mcp_off,
+    stdoutPath, stderrPath, answerPath: resultPath, timeoutMs, onSpawn,
   });
-  const stream = parseCodexJsonl(await fsp.readFile(stdoutPath, "utf8").catch(() => ""));
-  const usage = { ...reviewerUsageEvent({ usage: stream.usage, trailerTokens: null, call: 0, durationMs: Date.now() - startedAt }), role: "contract_checker", attempt };
+  const usage = { ...called.usage, attempt };
   await appendIoEvent(paths, runId, usage);
-  const text = await fsp.readFile(resultPath, "utf8").catch(() => "");
-  if (processResult.timedOut || processResult.exitCode !== 0 || !text.trim()) {
+  if (called.failed) {
     return { usage, stop: await providerStop({
-      paths, runId, stamp, role: "contract_checker", provider: "codex", phase: "contract_check", processResult,
-      texts: [codexDiagnosticTrailer(await readEvidenceTail(stderrPath))], evidence: { stdout_path: stdoutPath, stderr_path: stderrPath },
+      paths, runId, stamp, role: "contract_checker", provider, phase: "contract_check", processResult: called,
+      texts: await called.failureTexts(), evidence: { stdout_path: stdoutPath, stderr_path: stderrPath },
     }) };
   }
-  let answer = null;
-  try { answer = JSON.parse(text); } catch { answer = null; }
-  return { usage, answer, resultPath };
+  return { usage, answer: called.answer, resultPath };
 }
 
 // The calling side of the stop protocol: `stop` marks the run stopped and only then reads the
@@ -176,10 +136,8 @@ function guardedSpawn({ onSpawn, isStopped, role, provider }) {
 // state is read before every model call and again once each call has its pid, retries included.
 // `effort` and `model` are the reviewer's and `translateEffort` the writer's, from the policy's
 // priority table; a model of null leaves the choice to the CLI.
-export async function establishContract({ paths, runId, workPackage, adapter, limits, effort, model = null, translateEffort, executionMode, isStopped, onSpawn }) {
+export async function establishContract({ paths, runId, workPackage, adapter, limits, effort, model = null, translateEffort, isStopped, onSpawn }) {
   const steps = workPackage.contract_steps;
-  const unsupported = executionMode === "fake_cli" ? null : unsupportedContractStep(steps);
-  if (unsupported) return { status: "policy_failure", detail: "unsupported_role", problems: [unsupported] };
   // The same split the plan made; the human answers what the work order leaves open, not a model.
   const format = parseWorkOrder(workPackage.task);
   const { lines } = format;
@@ -213,7 +171,7 @@ export async function establishContract({ paths, runId, workPackage, adapter, li
     });
     const sha256 = digest(candidate);
     if (await isStopped()) return stopped;
-    const review = await checkOnce({ paths, runId, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, onSpawn: checkerSpawn });
+    const review = await checkOnce({ paths, runId, workPackage, adapter, steps, lines, format, candidate, sha256, attempt, effort, model, maxTurns: limits.max_turns, onSpawn: checkerSpawn });
     if (await isStopped() || review.timedOut) return stopped;
     if (review.stop) return review.stop;
     const overCheck = await ceilingStop({ paths, runId, usage: review.usage, limits });

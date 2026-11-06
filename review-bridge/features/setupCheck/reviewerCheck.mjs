@@ -44,34 +44,35 @@ export function probeAuditFile(paths, at = new Date()) {
 
 // Starts the page if it is not running, then reports the check: passed earlier in this page
 // session, passed now, or not passed with the reason and where its record is.
-export async function ensureReviewerChecked({ paths, onStart = () => {} }) {
-  let service = await checkService(paths);
+export async function ensureReviewerChecked({ paths, onStart = () => {}, reviewer = null, mcp = null }) {
+  let service = await checkService(paths, { reviewer, mcp });
   if (!service.running) {
     await serviceUp({ paths, bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs"), out: { write: () => {} } });
-    service = await checkService(paths);
+    service = await checkService(paths, { reviewer, mcp });
   }
   if (!service.running) return { ok: false, reason: "page_not_running", detail: service.reason, url: null };
   const url = service.url;
-  if (service.status?.reviewer_readonly?.state === "proven") return { ok: true, already: true, url };
+  const provider = reviewer || service.status?.roles?.reviewer || null;
+  if (service.status?.reviewer_readonly?.state === "proven") return { ok: true, already: true, url, provider };
   if (service.status?.platform_eligible !== true) {
-    return { ok: false, reason: service.status?.platform_status === "fake" ? "page_runs_fake_cli" : "adapter_not_verified", url };
+    return { ok: false, reason: service.status?.platform_status === "fake" ? "page_runs_fake_cli" : "adapter_not_verified", url, provider };
   }
   // The page's own answer to whether its button would start a check: nothing is announced as a
   // model call when none can be made.
   if (service.status?.probe_available !== true) {
-    return { ok: false, reason: service.status?.probe_in_flight ? "in_flight" : service.status?.probe_supported === false ? "unsupported_reviewer" : "reviewer_not_ready", url };
+    return { ok: false, reason: service.status?.probe_in_flight ? "in_flight" : service.status?.probe_supported === false ? "unsupported_reviewer" : "reviewer_not_ready", url, provider };
   }
-  onStart(service.status?.roles?.reviewer || "reviewer");
+  onStart(provider || "reviewer");
   const port = service.session.port;
   const response = await pageRequest(port, {
     method: "POST", requestPath: "/api/reviewer-probe", timeoutMs: PROBE_TIMEOUT_MS + 30_000,
     headers: { [TOKEN_HEADER]: await pageToken(port) },
-    body: { confirm: "one_model_call", request_id: randomUUID() },
+    body: { confirm: "one_model_call", request_id: randomUUID(), ...(reviewer ? { reviewer } : {}), ...(mcp ? { mcp } : {}) },
   });
   let answer;
   try { answer = JSON.parse(response.body); } catch { answer = null; }
   if (response.status !== 200 || answer?.ok !== true) {
-    return { ok: false, reason: answer?.error || "probe_failed", url };
+    return { ok: false, reason: answer?.error || "probe_failed", url, provider };
   }
   const result = answer.result;
   return {
@@ -80,5 +81,6 @@ export async function ensureReviewerChecked({ paths, onStart = () => {} }) {
     diagnostic_id: result.diagnostic_id,
     audit_path: result.audit_recorded ? probeAuditFile(paths, new Date(result.checked_at)) : null,
     url,
+    provider,
   };
 }

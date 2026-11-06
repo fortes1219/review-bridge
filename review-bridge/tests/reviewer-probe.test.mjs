@@ -146,7 +146,7 @@ test("refusal, unexplained failure, write, timeout, rate limit, and unsupported 
   const tokens = await runReviewerProbe({ provider: "codex", executable: "/codex", adapter, runner: scenarios.deniedWith429Tokens });
   assert.deepEqual([tokens.proven, tokens.reason], [true, "sandbox_denied_write"]);
   const { calls, wrapped } = counted(scenarios.denied);
-  const unsupported = await runReviewerProbe({ provider: "claude", executable: "/claude", adapter, runner: wrapped });
+  const unsupported = await runReviewerProbe({ provider: "another", executable: "/another", adapter, runner: wrapped });
   assert.equal(calls.length, 0);
   assert.equal(unsupported.proven, "unknown");
   assert.equal(unsupported.reason, "unsupported_provider");
@@ -238,7 +238,7 @@ test("editing the audit JSON from failed to proven cannot set readiness", async 
   assert.notEqual(fresh.reviewer_readonly.state, "proven");
 });
 
-test("in-memory proof becomes stale after role, CLI, adapter, probe or sandbox change", async (t) => {
+test("in-memory proof becomes stale after CLI, adapter, probe or sandbox change, and belongs to one reviewer", async (t) => {
   const { calls, wrapped } = counted(scenarios.denied);
   const env = await service(t, { runner: wrapped });
   let version = "codex-cli 1.0.0";
@@ -256,9 +256,15 @@ test("in-memory proof becomes stale after role, CLI, adapter, probe or sandbox c
   await expectStale("cli version");
   version = "codex-cli 1.0.0";
   await expectProven("restored version");
+  // The reviewer's proof does not rest on who writes.
   roles.writer = "codex";
-  await expectStale("roles");
+  await expectProven("another writer");
   roles.writer = "claude";
+  // Another reviewer has no proof yet; the first one's comes back with it.
+  roles.reviewer = "claude";
+  assert.equal((await probe.status()).reviewer_readonly_proven, "not_run", "another reviewer");
+  roles.reviewer = "codex";
+  await expectProven("the same reviewer again");
   await fsp.writeFile(env.adapterSource, "export const id = 1; // changed\n");
   await expectStale("adapter source with unchanged id");
   await fsp.writeFile(env.adapterSource, "export const id = 1;\n");
@@ -287,14 +293,152 @@ test("adapter id, adapter config and sandbox arguments are bound into the finger
   assert.equal(buildProbeArgs("codex", "<d>")[buildProbeArgs("codex", "<d>").indexOf("--sandbox") + 1], "read-only");
 });
 
-test("unsupported reviewer cannot start a model call and the button is disabled", async (t) => {
+// What Claude Code's stream looks like (the shape of a real session's log, 2.1.280). What it says
+// about its tools is the proof, so each test changes only that.
+const CLAUDE_READ_TOOLS = ["Read", "Grep", "Glob"];
+const claudeInit = ({ tools = CLAUDE_READ_TOOLS, permissionMode = "plan" } = {}) => JSON.stringify({ type: "system", subtype: "init", session_id: "secret-session", tools, permissionMode, mcp_servers: [] });
+const claudeResult = (extra = {}) => JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "I have no tool that writes.", permission_denials: [], ...extra });
+const claudeToolUse = (name) => JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name, input: {} }] } });
+const claudeScenarios = {
+  declined: async () => ok([claudeInit(), claudeResult()].join("\n")),
+  writes: async ({ cwd, input }) => {
+    await fsp.writeFile(path.join(cwd, sentinelFrom(input)), "probe\n");
+    return ok([claudeInit(), claudeResult()].join("\n"));
+  },
+  // Each of these, on a real machine, is a session that could have changed something.
+  mcpTools: async () => ok([claudeInit({ tools: [...CLAUDE_READ_TOOLS, "mcp__claude_ai_Google_Drive__trash_file"] }), claudeResult()].join("\n")),
+  shellLeft: async () => ok([claudeInit({ tools: [...CLAUDE_READ_TOOLS, "Bash"] }), claudeResult()].join("\n")),
+  notPlanMode: async () => ok([claudeInit({ permissionMode: "default" }), claudeResult()].join("\n")),
+  noToolList: async () => ok([JSON.stringify({ type: "system", subtype: "init", permissionMode: "plan" }), claudeResult()].join("\n")),
+  // A crash leaves no file either; that is not a proof.
+  crashed: async () => ({ status: 1, timedOut: false, error: null, stderr: "boom", stdout: "" }),
+  noResult: async () => ok(claudeInit()),
+  noInit: async () => ok(claudeResult()),
+  twoInits: async () => ok([claudeInit(), claudeInit(), claudeResult()].join("\n")),
+  errorResult: async () => ok([claudeInit(), claudeResult({ is_error: true, result: "something broke" })].join("\n")),
+  limited: async () => ({ status: 1, timedOut: false, error: null, stderr: "", stdout: [claudeInit(), claudeResult({ is_error: true, result: "Claude AI usage limit reached|1760000000" })].join("\n") }),
+  usedAnotherTool: async () => ok([claudeInit(), claudeToolUse("Bash"), claudeResult()].join("\n")),
+  malformedLine: async () => ok([claudeInit(), "{not json", claudeResult()].join("\n")),
+  timeout: scenarios.timeout,
+};
+
+test("a Claude reviewer is proven only by a finished plan-mode session that holds nothing but the three read tools, with no sentinel", async () => {
+  const expected = {
+    declined: [true, "no_write_tool"],
+    writes: [false, "write_allowed"],
+    mcpTools: [false, "read_only_not_in_effect"],
+    shellLeft: [false, "read_only_not_in_effect"],
+    notPlanMode: [false, "read_only_not_in_effect"],
+    noToolList: [false, "read_only_not_in_effect"],
+    crashed: ["unknown", "invocation_error"],
+    noResult: ["unknown", "incomplete_run"],
+    noInit: ["unknown", "incomplete_run"],
+    twoInits: ["unknown", "incomplete_run"],
+    errorResult: ["unknown", "incomplete_run"],
+    limited: ["unknown", "rate_limited"],
+    usedAnotherTool: ["unknown", "ambiguous_output"],
+    malformedLine: ["unknown", "ambiguous_output"],
+    timeout: ["unknown", "timeout"],
+  };
+  for (const [name, [proven, reason]] of Object.entries(expected)) {
+    const { calls, wrapped } = counted(claudeScenarios[name]);
+    const result = await runReviewerProbe({ provider: "claude", executable: "/claude", adapter, runner: wrapped });
+    assert.equal(calls.length, 1, name + " is one call without retry");
+    assert.deepEqual([result.proven, result.reason], [proven, reason], name);
+    assert.doesNotMatch(JSON.stringify(result.evidence), /secret-session|rb-sentinel-/, name);
+  }
+  const shown = await runReviewerProbe({ provider: "claude", executable: "/claude", adapter, runner: claudeScenarios.mcpTools });
+  assert.deepEqual(shown.evidence.tools_beyond_read_only, ["mcp__claude_ai_Google_Drive__trash_file"], "the person is told which tool it was");
+});
+
+test("the Claude probe runs under the flags every review of it runs with: plan mode, three tools, no MCP", async () => {
+  const { calls, wrapped } = counted(claudeScenarios.declined);
+  await runReviewerProbe({ provider: "claude", executable: "/claude", adapter, runner: wrapped });
+  const args = calls[0].invocation.args;
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "plan");
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Grep,Glob");
+  assert.equal(args[args.indexOf("--disallowedTools") + 1], "Write,Edit,NotebookEdit,Bash,PowerShell");
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.ok(args.includes("--no-session-persistence"));
+  assert.ok(sentinelFrom(calls[0].input), "the prompt asks for the sentinel, as Codex's does");
+  const codex = buildProbeArgs("codex", "<d>");
+  assert.deepEqual(codex.slice(0, 4), ["--disable", "apps", "--disable", "plugins"], "Codex's probe holds what its reviews hold");
+});
+
+test("each reviewer has its own proof and audit line, and bridge.json is read when asked", async (t) => {
+  const byProvider = async (request) => (request.invocation.command.endsWith("claude") ? claudeScenarios.declined : scenarios.denied)(request);
+  const { calls, wrapped } = counted(byProvider);
+  let current = { writer: "claude", reviewer: "codex" };
+  const env = await service(t, { runner: wrapped });
+  const probe = env.make({ roles: undefined, loadRoles: async () => current });
+  await probe.run();
+  assert.equal((await probe.status()).reviewer_readonly_proven, true);
+  assert.equal((await env.latestAudit()).provider, "codex");
+  // bridge.json now names another reviewer: its proof is not the first one's.
+  current = { writer: "claude", reviewer: "claude" };
+  assert.equal((await probe.status()).reviewer_readonly_proven, "not_run");
+  assert.equal((await probe.status({ reviewer: "codex" })).reviewer_readonly_proven, true, "a start with --reviewer codex still has it");
+  await probe.run();
+  assert.equal((await probe.status()).reviewer_readonly_proven, true);
+  const audit = await env.latestAudit();
+  assert.deepEqual([audit.provider, audit.reason, audit.evidence.adapter_id], ["claude", "no_write_tool", "claude-plan-readonly-stream-v1"]);
+  // A flag names a reviewer without touching bridge.json.
+  current = { writer: "codex", reviewer: "codex" };
+  assert.equal((await probe.status({ reviewer: "claude" })).reviewer_readonly_proven, true);
+  assert.equal(calls.length, 2);
+});
+
+test("the probe holds the plan's MCP list: Codex turns the others off by name, a Claude session may hold only the servers let through", async (t) => {
+  const off = buildProbeArgs("codex", "<d>", { off: ["node_repl", "other"], allow: [], config: null });
+  assert.deepEqual(off.slice(4, 8), ["-c", "mcp_servers.node_repl.enabled=false", "-c", "mcp_servers.other.enabled=false"]);
+  const claude = buildProbeArgs("claude", "<d>", { off: [], allow: ["db"], config: "{\"mcpServers\":{\"db\":{}}}" });
+  assert.equal(claude[claude.indexOf("--mcp-config") + 1], "{\"mcpServers\":{\"db\":{}}}");
+  assert.equal(claude[claude.indexOf("--allowedTools") + 1], "mcp__db");
+  assert.ok(claude.includes("--strict-mcp-config"), "only those load");
+
+  const project = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-probe-project-"));
+  t.after(() => fsp.rm(project, { recursive: true, force: true }));
+  await fsp.writeFile(path.join(project, ".mcp.json"), JSON.stringify({ mcpServers: { db: { command: "x" }, other: { command: "y" } } }));
+  const session = (tools) => async () => ok([claudeInit({ tools: [...CLAUDE_READ_TOOLS, ...tools] }), claudeResult()].join("\n"));
+  const mcp = { off: [], allow: ["db"], config: "{}" };
+  const allowed = await runReviewerProbe({ provider: "claude", executable: "/claude", adapter, runner: session(["mcp__db__query"]), mcp });
+  assert.deepEqual([allowed.proven, allowed.reason], [true, "no_write_tool"], "a server on the list is let through as it is");
+  const unlisted = await runReviewerProbe({ provider: "claude", executable: "/claude", adapter, runner: session(["mcp__db__query", "mcp__other__write"]), mcp });
+  assert.deepEqual([unlisted.proven, unlisted.reason, unlisted.evidence.tools_beyond_read_only], [false, "read_only_not_in_effect", ["mcp__other__write"]]);
+
+  // A service: the config comes from the project, and only the listed server is in it.
+  const { calls, wrapped } = counted(session(["mcp__db__query"]));
+  const env = await service(t, { runner: wrapped, roles: { writer: "claude", reviewer: "claude" } });
+  const probe = env.make({ projectRoot: project });
+  await probe.run({ mcp: { off: [], allow: ["db"] } });
+  const args = calls[0].invocation.args;
+  assert.deepEqual(Object.keys(JSON.parse(args[args.indexOf("--mcp-config") + 1]).mcpServers), ["db"]);
+  assert.deepEqual([(await env.latestAudit()).mcp_allow, (await env.latestAudit()).mcp_off], [["db"], []]);
+  assert.equal((await probe.status({ mcp: { off: [], allow: ["db"] } })).reviewer_readonly_proven, true);
+  // A start whose plan sealed another list checks again.
+  const stale = await probe.status({ mcp: { off: [], allow: [] } });
+  assert.deepEqual([stale.reviewer_readonly_proven, stale.reviewer_readonly.reason], [false, "configuration_changed"]);
+});
+
+test("the page's own button reads the list as a plan would, and a list it cannot read starts nothing", async (t) => {
+  const { calls, wrapped } = counted(scenarios.denied);
+  const env = await service(t, { runner: wrapped });
+  const listed = env.make({ resolveMcp: async () => ({ off: ["node_repl"], allow: [] }) });
+  await listed.run();
+  assert.ok(calls[0].invocation.args.includes("mcp_servers.node_repl.enabled=false"));
+  assert.equal((await listed.status()).reviewer_readonly_proven, true, "the page asks about the list its proof was made under");
+  const unreadable = env.make({ resolveMcp: async () => { throw new Error("no list"); } });
+  await assert.rejects(unreadable.run(), (error) => error.code === "probe_not_started" && /no list/.test(error.message));
+  assert.equal(calls.length, 1);
+});
+
+test("a reviewer with no way to prove itself cannot start a model call and the button is disabled", async (t) => {
   const { calls, wrapped } = counted(scenarios.denied);
   const { make } = await service(t, { runner: wrapped, roles: { writer: "codex", reviewer: "claude" } });
-  const probe = make();
-  const status = await probe.status();
-  assert.equal(status.probe_supported, false);
-  assert.equal(status.probe_available, false);
-  await assert.rejects(probe.run(), (error) => error.code === "unsupported_reviewer");
+  const probe = make({ adapter: { ...adapter, async resolveExecutable(provider) { return path.join(fakeBin, provider); } } });
+  assert.equal((await probe.status()).probe_supported, true, "Claude can prove it now");
+  const none = make();
+  await assert.rejects(none.run({ reviewer: "another" }), (error) => error.code === "unsupported_reviewer");
   assert.equal(calls.length, 0);
 });
 

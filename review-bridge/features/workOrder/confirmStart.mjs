@@ -24,6 +24,19 @@ export function decisionLine(workOrder) {
 // Where each value the card shows came from, in the person's words.
 const SOURCE = Object.freeze({ cli: "flag", work_order: "work order", priority: "priority table", config: "config" });
 
+// One role as the card shows it: who, which model and how hard, and where each came from. Either
+// a person says yes to it or it does not run, so a role changed since the last card is on this one.
+export function roleLine(role) {
+  const model = role.model ?? "the CLI's default";
+  return role.provider + " (" + SOURCE[role.provider_source] + "), model " + model + " (" + SOURCE[role.model_source] + "), effort " + role.effort + " (" + SOURCE[role.effort_source] + ")";
+}
+
+// What the reviewer holds besides reading files. A server on the policy's list is let through as it
+// is: nothing has shown that it cannot write, so the card says so.
+export function reviewerMcpLine(plan) {
+  return plan.reviewer.mcp.length ? plan.reviewer.mcp.join(", ") + " (allowed by the policy, not checked to be read-only)" : "none";
+}
+
 // The six budget values in their fixed order (a card read back from the database has its keys
 // reordered), each with where it came from: the work order, a flag, or the config.
 export function budgetLine(plan) {
@@ -46,7 +59,9 @@ export async function startCard(paths, plan) {
     "Scope:        " + scope,
     "Tests:        " + gate,
     "Priority:     " + plan.priority + " (" + SOURCE[plan.priority_source] + ")",
-    "Effort:       " + plan.effort + " (" + SOURCE[plan.effort_source] + "), for every writer call",
+    "Writer:       " + roleLine(plan.writer),
+    "Reviewer:     " + roleLine(plan.reviewer),
+    "Reviewer MCP: " + reviewerMcpLine(plan),
     "Budget:       " + budgetLine(plan),
     ...(plan.contract_steps ? ["Contract:     " + contractStepsLine(plan.contract_steps).replace(/^Before the work: /, "")] : []),
     "Valid until:  " + plan.authorization_expires_at,
@@ -76,7 +91,9 @@ export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask
     "Breakpoint: " + plan.breakpoint,
     "Allowed paths: " + plan.scope.allowed_paths.join(", "),
     "Priority: " + plan.priority + " (" + SOURCE[plan.priority_source] + ")",
-    "Writer effort: " + plan.effort + " (" + SOURCE[plan.effort_source] + ")",
+    "Writer: " + roleLine(plan.writer),
+    "Reviewer: " + roleLine(plan.reviewer),
+    "Reviewer MCP: " + reviewerMcpLine(plan),
     "Budget: " + budgetLine(plan),
     ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
     "Authorization expires at: " + plan.authorization_expires_at,

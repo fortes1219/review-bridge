@@ -5,6 +5,8 @@ import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
+export { MODEL_USAGE_FIELDS, parseClaudeStream, partialUsageFromStream, usageFromResult } from "../../service/agentCli/claude.mjs";
+
 export const WRITER_MODE_HEADER = "[REVIEW_BRIDGE_MODE: WRITER_ONLY]";
 export const MAX_INJECTED_FILE_BYTES = 64 * 1024;
 export const MAX_HANDOFF_CHARS = 4_000;
@@ -165,8 +167,12 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     ...(contract ? [
       "Contract: " + contract.sha256 + ". It is the work order as sealed when the human started the work; it is read-only.",
       "Answer with this contract_sha256. If the contract looks wrong, ask through needs_human; never edit it or work from another version.",
-      "In criteria, report every acceptance condition of the contract by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done.",
+      "In criteria, report every acceptance condition of the contract by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done, apart from the ones the project's tests decide.",
     ] : ["There is no contract for this task; leave criteria empty."]),
+    ...(workPackage.test?.kind === "command" ? [
+      "Bridge itself runs the project's tests (" + workPackage.test.command + ") outside your sandbox after this call, and their result decides every condition whose verify is test.",
+      "Run them if you can. If they cannot run where you are, write that in unverified and keep status done: it is not a reason to be blocked.",
+    ] : []),
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",
     "Your final answer must be one writer.result object that matches the JSON schema given to the CLI; no prose outside it.",
     "Set needs_human when a decision only the owner can make is missing; set status to blocked or out_of_scope instead of guessing.",
@@ -182,120 +188,4 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
   }
   const tail = handoff ? ["=== HANDOFF ===", JSON.stringify(handoff, null, 2), ""] : [];
   return [...header, ...rules, ...task, ...files, ...tail].join("\n");
-}
-
-// D3.2: one JSON object per line from `--output-format stream-json`; a single JSON
-// object (legacy `--output-format json`, fakes) is accepted as the result alone.
-export function parseClaudeStream(text) {
-  const source = String(text || "");
-  const reads = [];
-  let result = null;
-  let unparsable = 0;
-  // Per-message usage, kept for a call that ends without a final result (stopped, timed out).
-  // The CLI repeats an assistant message once per content block, so a message id counts once.
-  const messageUsage = new Map();
-  const trimmed = source.trim();
-  if (trimmed.startsWith("{") && !trimmed.includes("\n{")) {
-    const streamUsage = { messages: 0, subagent_messages: 0, tokens: emptyTokens() };
-    try { return { result: JSON.parse(trimmed), reads, streamUsage, unparsable_lines: 0 }; } catch { return { result: null, reads, streamUsage, unparsable_lines: 1 }; }
-  }
-  for (const line of source.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let record;
-    try { record = JSON.parse(line); } catch { unparsable += 1; continue; }
-    if (record?.type === "result") { result = record; continue; }
-    if (record?.type === "assistant") {
-      const subagent = Boolean(record.parent_tool_use_id);
-      if (record.message?.usage && !messageUsage.has(record.message.id ?? messageUsage.size)) {
-        messageUsage.set(record.message.id ?? messageUsage.size, { subagent, usage: record.message.usage });
-      }
-      const content = record.message?.content;
-      for (const block of Array.isArray(content) ? content : []) {
-        if (block?.type !== "tool_use") continue;
-        const name = String(block.name || "");
-        const input = block.input || {};
-        if (["Read", "Grep", "Glob", "Bash"].includes(name)) {
-          reads.push({
-            tool: name,
-            ...(input.file_path ? { path: String(input.file_path) } : {}),
-            ...(input.pattern ? { pattern: String(input.pattern) } : {}),
-            ...(input.path ? { path: String(input.path) } : {}),
-            ...(input.command ? { command: String(input.command).slice(0, 200) } : {}),
-            ...(subagent ? { subagent: true } : {}),
-          });
-        }
-      }
-    }
-  }
-  const streamUsage = { messages: messageUsage.size, subagent_messages: 0, tokens: emptyTokens() };
-  for (const { subagent, usage } of messageUsage.values()) {
-    if (subagent) streamUsage.subagent_messages += 1;
-    streamUsage.tokens.input += finite(usage.input_tokens);
-    streamUsage.tokens.cache_write += finite(usage.cache_creation_input_tokens);
-    streamUsage.tokens.cache_read += finite(usage.cache_read_input_tokens);
-    streamUsage.tokens.output += finite(usage.output_tokens);
-  }
-  return { result, reads, streamUsage, unparsable_lines: unparsable };
-}
-
-function emptyTokens() {
-  return { input: 0, cache_write: 0, cache_read: 0, output: 0 };
-}
-
-function finite(value) {
-  return Number.isFinite(value) ? value : 0;
-}
-
-// The four token fields Claude Code 2.1.280 was verified to put in result.usage (2026-10-13).
-// Measured 2026-10-17 on CLI 2.1.280: `usage` covers only the main model's last turn, while
-// `modelUsage` covers the whole call, every model, sub-agents included. With background sub-agents
-// the CLI emits more than one result; the last one carries the cumulative total.
-export const MODEL_USAGE_FIELDS = Object.freeze(["inputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "outputTokens"]);
-
-export function usageFromResult(result, { call, durationMs }) {
-  const models = result?.modelUsage && typeof result.modelUsage === "object" ? Object.entries(result.modelUsage) : [];
-  // Codex 2026-10-14: a missing or non-numeric field is unknown, never zero.
-  const missing = models.length
-    ? models.flatMap(([model, usage]) => MODEL_USAGE_FIELDS.filter((field) => !Number.isFinite(usage?.[field])).map((field) => model + "." + field))
-    : ["modelUsage"];
-  const sum = (field) => models.reduce((total, [, usage]) => total + finite(usage?.[field]), 0);
-  return {
-    event: "usage",
-    role: "writer",
-    provider: "claude",
-    call,
-    turns: finite(result?.num_turns),
-    duration_ms: durationMs,
-    tokens: {
-      input: sum("inputTokens"),
-      cache_write: sum("cacheCreationInputTokens"),
-      cache_read: sum("cacheReadInputTokens"),
-      output: sum("outputTokens"),
-    },
-    models: models.map(([model]) => model),
-    cost_usd: Number.isFinite(result?.total_cost_usd) ? result.total_cost_usd : null,
-    source: "cli_model_usage",
-    ...(missing.length ? { parse_error: true, missing } : {}),
-  };
-}
-
-// A call that ended without a final result (stopped, timed out, crashed): what the stream showed
-// is spent and is recorded, but it is a lower bound, so the record is marked partial and the
-// token table treats it as incomplete.
-export function partialUsageFromStream(streamUsage, { call, durationMs }) {
-  return {
-    event: "usage",
-    role: "writer",
-    provider: "claude",
-    call,
-    duration_ms: durationMs,
-    tokens: { ...(streamUsage?.tokens || emptyTokens()) },
-    messages: streamUsage?.messages || 0,
-    subagent_messages: streamUsage?.subagent_messages || 0,
-    cost_usd: null,
-    source: "cli_stream_messages",
-    partial: true,
-    parse_error: true,
-    missing: ["final_result"],
-  };
 }

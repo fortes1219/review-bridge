@@ -191,7 +191,7 @@ async function fakeRun(root, id) {
   const taskPath = path.join(privateOf(root), "work-packages", id + ".md");
   // A work order with something to check; one without stops at translation and asks the human.
   await fsp.writeFile(taskPath, "# Update the README\n\n<!-- bridge:requested_work -->\nUpdate README.md only.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n- README.md says hello.\n");
-  bootstrapRun(root, ["work-plan", "--task-file", taskPath, "--owner", "o", "--work-package", id, "--breakpoint", "b",
+  bootstrapRun(root, ["work-plan", "--fake-cli", "--task-file", taskPath, "--owner", "o", "--work-package", id, "--breakpoint", "b",
     "--allow-paths", "README.md", "--rounds", "2", "--call-timeout", "60000", "--out", planPath]);
   const started = bootstrapRun(root, ["work-start", "--plan", planPath, "--yes", "--fake-cli", "--fake-scenario", "PASS", "--json"]);
   assert.equal(JSON.parse(started.stdout).latest_state.status, "pass");
@@ -235,6 +235,7 @@ async function workApi(root, runtimeRoot = sourceRuntime) {
 
 async function makePlan(api, id) {
   return await api.createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths: api.paths, task: "Update README.md only.", owner: "o", workPackage: id, breakpoint: "b",
     allowedPaths: "README.md", rounds: 1, callTimeout: 60_000, outPath: path.join(api.paths.logRoot, id + ".plan.json"),
   });
@@ -549,8 +550,43 @@ test("W5 / W6 / W8 approval binds the plan; running work, a failed verification,
   const config = await readJson(configPath);
   config.requires_human_authorization = false;
   await writeJson(configPath, config);
-  await assert.rejects(planNeutralUpgrade({ target: root }), /does not verify, so it will not be upgraded: Neutral install protected role or authorization settings changed/);
+  await assert.rejects(planNeutralUpgrade({ target: root }), /does not verify, so it will not be upgraded: Neutral install protected authorization settings changed/);
   await assert.rejects(planNeutralUpgrade({ target: path.join(root, "missing") }), /existing, non-symlink workspace/);
+});
+
+test("who fills each role is the person's: the upgrade goes on, keeps the choice, and status names it; the authorization settings stay protected", async (t) => {
+  const root = await workspace(t);
+  await install(root);
+  await makeOld(root);
+  const configPath = path.join(privateOf(root), "bridge.json");
+  const edited = await readJson(configPath);
+  // An install from before: its record says who was chosen at init, and bridge.json has a key since retired.
+  edited.roles = { ...edited.roles, writer: { provider_id: "codex" }, reviewer: { provider_id: "claude" }, separate_sessions: true };
+  await writeJson(configPath, edited);
+  const installFile = manifestOf(root);
+  await writeJson(installFile, { ...(await readJson(installFile)), roles: { writer: "claude", reviewer: "codex" } });
+  assert.deepEqual((await verifyNeutralInstall(root)).roles, { writer: "codex", reviewer: "claude" }, "bridge.json says, not the record");
+  await upgrade(root);
+  const upgraded = await readJson(configPath);
+  assert.deepEqual(upgraded.roles, { writer: { provider_id: "codex" }, reviewer: { provider_id: "claude" }, reviewer_readonly_required: true });
+  assert.equal(Object.hasOwn(await readJson(installFile), "roles"), false, "the record no longer says");
+  assert.equal((await verifyNeutralInstall(root)).valid, true);
+  assert.match(bootstrapRun(root, ["status"]).stdout, /^Roles: writer codex, reviewer claude$/m);
+  assert.deepEqual(JSON.parse(bootstrapRun(root, ["status", "--json"]).stdout).roles, { writer: "codex", reviewer: "claude" });
+  // A change after the upgrade needs nothing else; a name no provider has is still refused.
+  await writeJson(configPath, { ...upgraded, roles: { ...upgraded.roles, writer: { provider_id: "claude" } } });
+  assert.match(bootstrapRun(root, ["status"]).stdout, /^Roles: writer claude, reviewer claude$/m);
+  await writeJson(configPath, { ...upgraded, roles: { ...upgraded.roles, writer: { provider_id: "gemini" } } });
+  await assert.rejects(planNeutralUpgrade({ target: root }), /Neutral install roles are invalid: writer must be one of: claude, codex/);
+  for (const [label, changed] of [
+    ["requires_human_authorization", { ...upgraded, requires_human_authorization: false }],
+    ["reviewer_readonly_required", { ...upgraded, roles: { ...upgraded.roles, reviewer_readonly_required: false } }],
+    ["reviewer_readonly_proven", { ...upgraded, readiness: { reviewer_readonly_proven: true } }],
+  ]) {
+    await writeJson(configPath, changed);
+    await assert.rejects(planNeutralUpgrade({ target: root }), /Neutral install protected authorization settings changed/, label);
+    await assert.rejects(verifyNeutralInstall(root), /protected authorization settings changed/, label);
+  }
 });
 
 test("W7 a new default policy invalidates unstarted authorizations, reports them and refuses them with a new-plan message", async (t) => {

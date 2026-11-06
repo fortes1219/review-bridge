@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { criteriaProblems, verdictProblems } from "./acceptance.mjs";
 
+export { CODEX_USAGE_FIELDS, parseCodexJsonl, pathFromCommand, reviewerUsageEvent } from "../../service/agentCli/codex.mjs";
+
 const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "schemas");
 
 export const WRITER_RESULT_SCHEMA = path.join(schemasDir, "writer.result.schema.json");
@@ -221,64 +223,4 @@ export function recheckFindings(previousFindings, currentFindings) {
 
 export function sortBySeverity(findings) {
   return [...(findings || [])].sort((a, b) => (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0));
-}
-
-// D5.1 / D5.2: `codex exec --json` prints one event per line; usage and commands are taken from it.
-export function parseCodexJsonl(text) {
-  let usage = null;
-  const commands = [];
-  let unparsable = 0;
-  for (const line of String(text || "").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let record;
-    try { record = JSON.parse(line); } catch { unparsable += 1; continue; }
-    if (record?.type === "turn.completed" && record.usage && typeof record.usage === "object") usage = record.usage;
-    if (record?.type === "item.completed" && record.item?.type === "command_execution" && record.item.command) {
-      commands.push(String(record.item.command).slice(0, 200));
-    }
-  }
-  return { usage, commands, unparsable_lines: unparsable };
-}
-
-// A path the command names, when one can be read off mechanically; otherwise null.
-export function pathFromCommand(command) {
-  const match = /(?:^|\s)((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})(?=\s|$|['"])/.exec(String(command || "").replace(/^(?:bash|sh)\s+-lc\s+/, "").replace(/^['"]|['"]$/g, ""));
-  return match ? normalizePath(match[1]) : null;
-}
-
-// The four token fields codex-cli 0.162 was verified to put in turn.completed.usage (2026-10-13).
-export const CODEX_USAGE_FIELDS = Object.freeze(["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens"]);
-
-export function reviewerUsageEvent({ usage, trailerTokens, call, durationMs }) {
-  const number = (value) => (Number.isFinite(value) ? value : 0);
-  const base = { event: "usage", role: "reviewer", provider: "codex", call, turns: null, duration_ms: durationMs };
-  if (usage) {
-    // Codex's input_tokens is the total; cached_input_tokens and cache_write_input_tokens are
-    // parts of it (OpenAI usage shape; field names verified against codex-cli 0.162 on 2026-10-13).
-    // The parts are split out so the ceiling total counts each token once. Parts larger than the
-    // total are a data anomaly: recorded as such, never silently floored.
-    const total = number(usage.input_tokens);
-    const cached = number(usage.cached_input_tokens);
-    const cacheWrite = number(usage.cache_write_input_tokens);
-    const plain = total - cached - cacheWrite;
-    // Codex 2026-10-14: an empty or partial usage object is unknown, never zero.
-    const missing = CODEX_USAGE_FIELDS.filter((field) => !Number.isFinite(usage[field]));
-    return {
-      ...base,
-      ...(missing.length ? { parse_error: true, missing } : {}),
-      tokens: {
-        input: Math.max(0, plain),
-        cache_write: cacheWrite,
-        cache_read: cached,
-        output: number(usage.output_tokens),
-      },
-      ...(plain < 0 ? { anomaly: "cache_parts_exceed_input_tokens", raw_usage: usage } : {}),
-      cost_usd: null,
-      source: "cli_json",
-    };
-  }
-  if (Number.isFinite(trailerTokens)) {
-    return { ...base, tokens: { input: trailerTokens, cache_write: 0, cache_read: 0, output: 0 }, cost_usd: null, source: "cli_trailer" };
-  }
-  return { ...base, tokens: { input: 0, cache_write: 0, cache_read: 0, output: 0 }, cost_usd: null, source: null, parse_error: true };
 }

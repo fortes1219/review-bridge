@@ -198,7 +198,6 @@ function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { p
     roles: {
       writer: { provider_id: roles.writer },
       reviewer: { provider_id: roles.reviewer },
-      separate_sessions: true,
       reviewer_readonly_required: true,
     },
     requires_human_authorization: true,
@@ -562,7 +561,6 @@ async function applyNeutralInstallLocked(plan, claimed) {
       schema_version: 1,
       layout: "neutral",
       profile_id: plan.profile.id,
-      roles: plan.roles,
       plan_sha256: claimed,
       // The Bridge runtime and default policy these settings were last set up against.
       runtime_sha256: plan.runtime_sha256,
@@ -649,14 +647,19 @@ export async function verifyNeutralInstall(target, { leftovers = false } = {}) {
   if (manifest.schema_version !== 1 || manifest.layout !== "neutral") {
     throw new Error("Unsupported neutral install manifest.");
   }
-  validateRoles(manifest.roles);
   const config = JSON.parse(await fsp.readFile(installPath(layout, layout.config), "utf8"));
   if (config.requires_human_authorization !== true
-    || config.roles?.writer?.provider_id !== manifest.roles.writer
-    || config.roles?.reviewer?.provider_id !== manifest.roles.reviewer
     || config.roles?.reviewer_readonly_required !== true
     || config.readiness?.reviewer_readonly_proven !== "not_run") {
-    throw new Error("Neutral install protected role or authorization settings changed.");
+    throw new Error("Neutral install protected authorization settings changed.");
+  }
+  // Who fills each role is the person's to change, like the watch block; it only has to name a
+  // provider. bridge.json is the one place that says it.
+  const roles = { writer: config.roles.writer?.provider_id, reviewer: config.roles.reviewer?.provider_id };
+  try {
+    validateRoles(roles);
+  } catch (error) {
+    throw new Error("Neutral install roles are invalid: " + error.message);
   }
   // The watch block is owner-editable; it only has to stay well formed.
   if (config.watch !== undefined) {
@@ -684,7 +687,7 @@ export async function verifyNeutralInstall(target, { leftovers = false } = {}) {
   if (!rulesText.trim() || rulesText.length > 4000) throw new Error("Neutral rules digest must be 1 to 4000 characters.");
   const boundary = gitBoundary(root);
   if (boundary.repository && !boundary.ignored) throw new Error("Neutral Bridge state is not private in Git.");
-  return { valid: true, layout: "neutral", roles: manifest.roles, runtime_sha256: manifest.runtime_sha256 };
+  return { valid: true, layout: "neutral", roles, runtime_sha256: manifest.runtime_sha256 };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1577,12 +1580,13 @@ export async function applyNeutralUninstall(plan, approval, hooks = {}) {
 // upgrade is undone from the marker and the backup alone (P2.12).
 // ---------------------------------------------------------------------------------------------
 
-const OWNER_EDITABLE_KEYS = Object.freeze(["watch", "retention", "locale", "test"]);
-const PROTECTED_KEYS = Object.freeze(["roles", "requires_human_authorization", "readiness"]);
+const OWNER_EDITABLE_KEYS = Object.freeze(["roles", "watch", "retention", "locale", "test"]);
+const PROTECTED_KEYS = Object.freeze(["requires_human_authorization", "readiness"]);
 // The project's identity in the database: never replaced by an upgrade.
 const IDENTITY_KEYS = Object.freeze(["project_id"]);
 // Keys an earlier Bridge wrote and no longer uses; an upgrade removes them.
 const RETIRED_KEYS = Object.freeze(["state_contract"]);
+const RETIRED_ROLE_KEYS = Object.freeze(["separate_sessions"]);
 // The work-order templates init copies and an upgrade keeps up to date: where each goes in the
 // project, and the template in the package it comes from. TEMPLATE.md is the English one.
 const TEMPLATES = Object.freeze([
@@ -1633,21 +1637,28 @@ function mergeBridgeConfig(current, defaults) {
       throw new Error("The new version would change the protected bridge.json setting \"" + key + "\"; the upgrade keeps protected settings as they are and stops.");
     }
   }
+  // The roles block is the person's except this one setting inside it.
+  if (current.roles?.reviewer_readonly_required !== defaults.roles.reviewer_readonly_required) {
+    throw new Error("The new version would change the protected bridge.json setting \"roles.reviewer_readonly_required\"; the upgrade keeps protected settings as they are and stops.");
+  }
   const kept = (key) => OWNER_EDITABLE_KEYS.includes(key) || PROTECTED_KEYS.includes(key) || IDENTITY_KEYS.includes(key);
   const merged = {};
   for (const key of Object.keys(defaults)) merged[key] = kept(key) && Object.hasOwn(current, key) ? current[key] : defaults[key];
   for (const key of Object.keys(current)) if (!Object.hasOwn(merged, key) && !RETIRED_KEYS.includes(key)) merged[key] = current[key];
+  const retiredRoleKeys = RETIRED_ROLE_KEYS.filter((key) => Object.hasOwn(merged.roles, key));
+  if (retiredRoleKeys.length) merged.roles = Object.fromEntries(Object.entries(merged.roles).filter(([key]) => !retiredRoleKeys.includes(key)));
   return {
     merged,
-    removed: Object.keys(current).filter((key) => RETIRED_KEYS.includes(key)),
+    removed: [...Object.keys(current).filter((key) => RETIRED_KEYS.includes(key)), ...retiredRoleKeys.map((key) => "roles." + key)],
     added: Object.keys(defaults).filter((key) => !Object.hasOwn(current, key)),
     updated: Object.keys(defaults).filter((key) => Object.hasOwn(current, key) && !kept(key) && !sameValue(current[key], defaults[key])),
   };
 }
 
-async function defaultConfigFor(root, current, manifest) {
+async function defaultConfigFor(root, current) {
   // A project set up before project ids gets one; an existing one is kept (IDENTITY_KEYS).
-  return neutralBridgeConfig({ projectId: current.project_id || randomUUID(), profileId: current.profile_id, roles: manifest.roles, profile: await resolveProfile(root, current.profile_id) });
+  const roles = { writer: current.roles?.writer?.provider_id, reviewer: current.roles?.reviewer?.provider_id };
+  return neutralBridgeConfig({ projectId: current.project_id || randomUUID(), profileId: current.profile_id, roles, profile: await resolveProfile(root, current.profile_id) });
 }
 
 // Where a new template goes when its installed one was edited: TEMPLATE.new.md beside TEMPLATE.md,
@@ -1734,7 +1745,7 @@ async function planFreshUpgrade(root, backupRootOverride) {
   if (from.runtime_sha256 === to.runtime_sha256 && legacy.length === 0 && !layout.nested && leftovers === 0 && !agentFiles && !agentEntriesPending(agentEntries)) {
     return { up_to_date: true, target: root, version: to.version, runtime_sha256: to.runtime_sha256 };
   }
-  const defaults = await defaultConfigFor(root, config, manifest);
+  const defaults = await defaultConfigFor(root, config);
   if (config.schema_version !== defaults.schema_version) {
     throw new Error("The new version uses another bridge.json schema (" + config.schema_version + " to "
       + defaults.schema_version + "); converting data across schemas is not supported.");
@@ -1959,7 +1970,7 @@ async function mergeSettings(context, plan) {
   const manifest = JSON.parse(await fsp.readFile(installPath(context, context.manifestName), "utf8"));
   const configText = await fsp.readFile(inPrivate(privateRoot, CONFIG_RELATIVE), "utf8");
   const current = JSON.parse(configText);
-  const merge = mergeBridgeConfig(current, await defaultConfigFor(context.root, current, manifest));
+  const merge = mergeBridgeConfig(current, await defaultConfigFor(context.root, current));
   // What the settings were before this upgrade wrote them, kept in the marker so a resumed upgrade
   // still knows.
   if (!context.marker.before) {
@@ -2032,8 +2043,10 @@ async function writeUpgradeManifest(context, plan, report) {
   for (const { new_path: newPath } of Object.values(plan.templates)) {
     if (newPath && context.marker.written[newPath]) installed.set(newPath, context.marker.written[newPath]);
   }
+  // An older install's record still says who filled each role at init; bridge.json says who does now.
+  const { roles: _rolesAtInit, ...recorded } = manifest;
   const next = {
-    ...manifest,
+    ...recorded,
     runtime_sha256: plan.to.runtime_sha256,
     work_template_sha256: Object.fromEntries(Object.entries(plan.templates).map(([relative, template]) => [relative, template.new_sha256])),
     bridge_version: plan.to.version,

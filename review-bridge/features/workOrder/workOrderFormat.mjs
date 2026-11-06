@@ -5,7 +5,7 @@
 // run_plan block are read by the same parser. Every refusal names the line it is about.
 import { createRequire } from "node:module";
 
-import { PRIORITIES } from "../../policy/policyRules.mjs";
+import { PRIORITIES, validModel } from "../../policy/policyRules.mjs";
 
 // The YAML parser is loaded on the first work order read, like every other dependency of the
 // runtime, so a command that reads none does not need it.
@@ -16,7 +16,10 @@ const isMap = (node) => yamlParser().isMap(node);
 const isScalar = (node) => yamlParser().isScalar(node);
 const isSeq = (node) => yamlParser().isSeq(node);
 
-export const FRONTMATTER_KEYS = Object.freeze(["priority", "effort", "budget", "source_id"]);
+export const FRONTMATTER_KEYS = Object.freeze(["priority", "effort", "writer", "reviewer", "budget", "source_id"]);
+// What a work order may say about a role, over the policy's priority table. Who fills the role is
+// not here: that is bridge.json or the flag, and the card shows it.
+const ROLE_KEYS = Object.freeze(["model", "effort"]);
 // Each budget key is the policy limit of the same name; a work order may only go below it.
 export const BUDGET_KEYS = Object.freeze(["tokens", "tokens_per_call", "call_timeout", "test_timeout", "run_timeout", "rounds"]);
 export const EFFORTS = Object.freeze(["low", "medium", "high"]);
@@ -101,15 +104,39 @@ function readEffort(node, lineOf, where, problems) {
   return value;
 }
 
+// A writer: or reviewer: block. A model written as null means the CLI's own default, over the table,
+// so an unwritten one has no key at all.
+function readRole(node, lineOf, where, problems) {
+  const role = { effort: null, lines: {} };
+  if (!isMap(node)) {
+    problems.push("line " + lineOf(node) + ": " + where + " must be a mapping of " + ROLE_KEYS.join(", "));
+    return role;
+  }
+  for (const pair of node.items) {
+    const key = String(pair.key?.value ?? "");
+    const line = lineOf(pair.key);
+    if (!ROLE_KEYS.includes(key)) { problems.push("line " + line + ": " + where + "." + key + " is not a key here; the keys are " + ROLE_KEYS.join(", ")); continue; }
+    role.lines[key] = line;
+    if (key === "effort") { role.effort = readEffort(pair.value, () => line, where + ".effort", problems); continue; }
+    const value = isScalar(pair.value) ? pair.value.value : undefined;
+    if (value !== undefined && validModel(value)) role.model = value;
+    else problems.push("line " + line + ": " + where + ".model must be one model name, or null for the CLI's default");
+  }
+  return role;
+}
+
 function readFrontmatter(lines, problems) {
-  const empty = { priority: null, effort: null, budget: null, source_id: null, lines: {}, budget_lines: {}, end: 0 };
+  const empty = {
+    priority: null, effort: null, writer: { effort: null, lines: {} }, reviewer: { effort: null, lines: {} },
+    budget: null, source_id: null, lines: {}, budget_lines: {}, end: 0,
+  };
   if (lines[0] !== FENCE) return empty;
   const close = lines.indexOf(FENCE, 1);
   if (close === -1) {
     problems.push("line 1: the frontmatter opened here is not closed by a line that is only ---");
     return empty;
   }
-  const read = { ...empty, end: close + 1 };
+  const read = { ...empty, writer: { ...empty.writer }, reviewer: { ...empty.reviewer }, end: close + 1 };
   const { document, lineOf, ok } = readYaml(lines.slice(1, close).join("\n"), 2, problems);
   if (!ok) return read;
   const root = document.contents;
@@ -129,6 +156,8 @@ function readFrontmatter(lines, problems) {
       else problems.push("line " + line + ": priority must be one of " + PRIORITIES.join(", "));
     } else if (key === "effort") {
       read.effort = readEffort(pair.value, () => line, "effort", problems);
+    } else if (key === "writer" || key === "reviewer") {
+      read[key] = readRole(pair.value, (node) => (node ? lineOf(node) : line), key, problems);
     } else if (key === "budget") {
       const budget = readBudget(pair.value, (node) => (node ? lineOf(node) : line), "budget", problems);
       if (budget) { read.budget = budget.budget; read.budget_lines = budget.lines; }
@@ -137,6 +166,15 @@ function readFrontmatter(lines, problems) {
       if ((typeof value === "string" && value.trim()) || Number.isFinite(value)) read.source_id = String(value);
       else problems.push("line " + line + ": source_id must be one value, such as SHOP-412");
     }
+  }
+  // The top-level effort is the writer's, as it always was; one work order says it in one place.
+  if (read.lines.effort && read.writer.lines.effort) {
+    problems.push("line " + read.writer.lines.effort + ": writer.effort and effort (line " + read.lines.effort + ") say the same thing; keep writer.effort");
+  } else if (read.effort) {
+    read.writer.effort = read.effort;
+    read.writer.lines.effort = read.lines.effort;
+  } else {
+    read.effort = read.writer.effort;
   }
   return read;
 }

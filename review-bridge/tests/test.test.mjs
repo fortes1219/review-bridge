@@ -41,6 +41,7 @@ async function plan({ paths, repoRoot }, { id = "gate-" + Math.random().toString
   const taskFile = path.join(paths.privateRoot, id + ".md");
   await fsp.writeFile(taskFile, order());
   return await createWorkPackagePlan({
+    listCodexMcp: async () => [],
     paths, taskFile, owner: "Fortes", workPackage: id, breakpoint: "return after review",
     rounds: 1, callTimeout: 300_000, outPath: path.join(paths.privateRoot, id + ".plan.json"),
   });

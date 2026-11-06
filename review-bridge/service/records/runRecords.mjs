@@ -308,7 +308,8 @@ export async function runDetail(db, runId) {
     "select r.run_id, r.status, r.conclusion, r.closed_reason, r.created_at, r.closed_at, r.updated_at, r.execution_mode, r.contract_sha256,"
     + " r.work_order_id, v.version_no, v.title, p.source_file, p.body->'breakpoint' as breakpoint, p.body->'scope' as scope, p.body->'budget' as budget,"
     + " p.body->'budget_source' as budget_source, p.body->'priority' as priority, p.body->'priority_source' as priority_source,"
-    + " p.body->'effort' as effort, p.body->'effort_source' as effort_source, p.body->'test' as test, r.timeout_at,"
+    + " coalesce(p.body->'writer'->'effort', p.body->'effort') as effort, coalesce(p.body->'writer'->'effort_source', p.body->'effort_source') as effort_source,"
+    + " r.writer_provider, r.writer_model, r.writer_effort, r.reviewer_provider, r.reviewer_model, r.reviewer_effort, r.reviewer_mcp, p.body->'test' as test, r.timeout_at,"
     + " a.authorized_by, a.authorized_via,"
     + " (select payload from run_events e where e.run_id = r.run_id and e.type = 'stop' order by sequence desc limit 1) as last_stop"
     + " from runs r join plans p using (plan_sha256) join work_order_versions v on v.work_order_id = r.work_order_id and v.content_sha256 = r.content_sha256"
@@ -424,11 +425,14 @@ export async function deleteRunRecords(db, runId) {
 }
 
 // The new run's row, written by the start's transaction before its held events are flushed.
-export async function insertRun(tx, { run, projectId, workOrderId, contentSha256, planSha256, repoRoot }) {
+export async function insertRun(tx, { run, projectId, workOrderId, contentSha256, planSha256, repoRoot, writer, reviewer }) {
   await tx.query(
     "insert into runs (run_id, project_id, work_order_id, content_sha256, plan_sha256, effective_policy_sha256, repo_root, authorized_by,"
-    + " execution_mode, budget, created_at, status, last_event_sequence, updated_at, timeout_at) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, $11, $13)",
+    + " execution_mode, budget, created_at, status, last_event_sequence, updated_at, timeout_at,"
+    + " writer_provider, writer_model, writer_effort, reviewer_provider, reviewer_model, reviewer_effort, reviewer_mcp)"
+    + " values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, $11, $13, $14, $15, $16, $17, $18, $19, $20)",
     [run.run_id, projectId, workOrderId, contentSha256, planSha256, run.effective_policy_sha256, repoRoot, run.authorized_by,
-      run.execution_mode, run.budget, run.created_at, run.status, orNull(run.timeout_at)],
+      run.execution_mode, run.budget, run.created_at, run.status, orNull(run.timeout_at),
+      writer.provider, orNull(writer.model), writer.effort, reviewer.provider, orNull(reviewer.model), reviewer.effort, reviewer.mcp],
   );
 }
