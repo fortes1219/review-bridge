@@ -166,7 +166,7 @@ export default withMermaid(defineConfig({
                   "link": "/principles/references"
                 },
                 {
-                  "text": "Asking the person",
+                  "text": "When Bridge needs your input",
                   "link": "/principles/asking"
                 }
               ]
@@ -189,7 +189,7 @@ export default withMermaid(defineConfig({
                   "link": "/reference/result-file"
                 },
                 {
-                  "text": "Integrating your systems",
+                  "text": "Connect your existing tools",
                   "link": "/reference/integration"
                 }
               ]
@@ -288,7 +288,7 @@ export default withMermaid(defineConfig({
                   "link": "/ja/principles/references"
                 },
                 {
-                  "text": "人に確認するとき",
+                  "text": "ユーザーの判断が必要なとき",
                   "link": "/ja/principles/asking"
                 }
               ]
