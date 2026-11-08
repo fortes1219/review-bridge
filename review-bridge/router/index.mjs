@@ -134,13 +134,13 @@ export const COMMANDS = {
   },
   up: {
     audience: "human",
-    summary: "Start the local page service in the background",
+    summary: "Start the database and the local page service in the background",
     options: { "--fake-cli": FAKE_CLI },
     run: (context) => setupCheck.upService(context),
   },
   down: {
     audience: "human",
-    summary: "Stop the local page service",
+    summary: "Stop the local page service and the database; refused while a run is running",
     options: {},
     run: (context) => setupCheck.downService(context),
   },

@@ -189,8 +189,8 @@ Commands:
   clean [<run_id>]        Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
   status                  Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
   logs <run_id|file>      Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
-  up                      Start the local page service in the background
-  down                    Stop the local page service
+  up                      Start the database and the local page service in the background
+  down                    Stop the local page service and the database; refused while a run is running
   ps                      Show whether the local page service is running, and its address
   watch                   Run the local page in this terminal until Ctrl+C
   upgrade                 Move this folder's setup to the installed Review Bridge version, with a backup
@@ -356,7 +356,7 @@ Options:
 ```text
 Usage: review-bridge up [options]
 
-Start the local page service in the background
+Start the database and the local page service in the background
 
 Options:
   --project <folder>
@@ -370,7 +370,7 @@ Options:
 ```text
 Usage: review-bridge down [options]
 
-Stop the local page service
+Stop the local page service and the database; refused while a run is running
 
 Options:
   --project <folder>

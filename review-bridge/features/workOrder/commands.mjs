@@ -530,12 +530,26 @@ export async function statusRecords(paths, { after = null } = {}) {
   }
 }
 
-export async function statusOverview({ paths, options, page }) {
+// `status` only looks (RC3-DOWN-01): a database that `down` stopped is said to be stopped, never started
+// to answer, as brew services list reports a service; its runs are shown once it is up again.
+// `databaseRunning` is a seam for tests.
+export async function statusOverview({ paths, options, page, databaseRunning = null }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
     write("This folder is not set up for Review Bridge. Run: review-bridge init");
     return 0;
   }
   const service = await page();
+  const t = await createTranslator(await resolveLocale(paths));
+  const running = await (databaseRunning ?? (await import("../../service/database/index.mjs")).databaseRunning)();
+  if (!running) {
+    if (options.json) {
+      write(JSON.stringify({ page: { running: service.running, url: service.url, reason: service.reason }, database: { running: false } }, null, 2));
+      return 0;
+    }
+    write("Page: " + (service.running ? service.url : "not running; start it with review-bridge up"));
+    write(t("status.database.stopped"));
+    return 0;
+  }
   const { db, projectId, runs, more, active, lines, logs } = await statusRecords(paths, { after: options.after || null });
   const queue = await queueStatus(paths);
   // Who the next start uses, from the one place that says it; a run keeps what its card showed.
@@ -544,11 +558,12 @@ export async function statusOverview({ paths, options, page }) {
   if (options.json) {
     write(JSON.stringify({
       page: { running: service.running, url: service.url, reason: service.reason },
-      roles, project_id: projectId, active_runs: active.length, lines, runs, more, review_queue: queue, logs, database: db.connection,
+      roles, project_id: projectId, active_runs: active.length, lines, runs, more, review_queue: queue, logs, database: { running: true, ...db.connection },
     }, null, 2));
     return 0;
   }
   write("Page: " + (service.running ? service.url : "not running; start it with review-bridge up"));
+  write(t("status.database.running"));
   if (!runs.length && !options.after) {
     write("Work: none yet. Put a work order in .review-bridge/work-packages/ and run: review-bridge start <file>");
   } else {

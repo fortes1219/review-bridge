@@ -28,8 +28,8 @@ export class BackupRefusedError extends Error {
 
 export const runLines = (runs) => runs.map((run) => "  " + run.run_id + "  " + run.root_path).join("\n");
 
-// The runs still running in any project: the server they write to is about to stop.
-async function runningRuns(root) {
+// The runs still running in any project: the server they write to is about to stop (backup, down).
+export async function runningRuns(root) {
   let client;
   try {
     client = await connect(root, { database: DATABASE_NAME });

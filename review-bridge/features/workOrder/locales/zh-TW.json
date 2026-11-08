@@ -231,5 +231,18 @@
   "card.decision.copy": "是 {from} 的複製，記為新工單「{title}」",
   "card.decision.moved": "（原本在 {from}）",
   "line.card.copy": "是 {from} 的複製，記為新工單",
-  "line.card.moved": "原本在 {from}，是同一張工單"
+  "line.card.moved": "原本在 {from}，是同一張工單",
+  "database.old_server": "資料庫上次沒有正常關閉，還有它留下的程序在跑，Bridge 無法安全地清掉；請重開機後再執行一次。細節在 {file}",
+  "down.refused": "沒有停任何東西：下面這些 run 還在跑。到各自的專案用 review-bridge stop <run_id> 停掉，或等它跑完，再執行 review-bridge down。",
+  "down.page.stopped": "頁面已停止。",
+  "down.page.not_running": "頁面本來就沒在跑。",
+  "down.page.failed": "頁面沒有停下來。",
+  "down.database.stopped": "資料庫已停止。",
+  "down.database.not_running": "資料庫本來就沒在跑。",
+  "down.database.cleared": "資料庫本來就沒在跑；它留下的東西已清掉。",
+  "down.database.none": "還沒有資料庫。",
+  "down.database.in_use": "資料庫本來就沒在跑；另一套 PostgreSQL 在用它記的號碼（{pid}），Bridge 沒有停它，也沒有刪任何檔案。",
+  "up.database": "資料庫在跑（port {port}）。",
+  "status.database.running": "資料庫：在跑",
+  "status.database.stopped": "資料庫：已停止；review-bridge up 會把它起來，下一次 start 也會。"
 }

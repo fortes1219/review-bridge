@@ -160,7 +160,7 @@ Features never import each other. When one flow needs another feature's capabili
 | `records/probeAudit` | Reviewer read-only check records (used by both the setup page and prune) |
 | `records/failureRecords` | Writing a failure record beside its evidence |
 | `records/runRecords` | The run recorder: each run event, and the facts it carries, into the database; the start's held events; `clean <run_id>`'s delete |
-| `database/postgresServer` | The person's embedded PostgreSQL server: create, start, stop, connect. Owns no table |
+| `database/postgresServer` | The person's embedded PostgreSQL server: create, start (on a console of its own with no window, output in pg_ctl's `-l` file), stop, connect, and clear what a server that died left behind. Owns no table |
 | `database/migrate`, `database/migrations/` | Dated migration files, each applied once in its own transaction; a changed applied file stops everything |
 | `database/index` | `openDatabase()`: the cluster on first use, the server started, the `bridge` database and the migrations; one pool per process. Imported only by the commands that keep records, not re-exported |
 | `database/backup` | PostgreSQL's file system level backup into `<data home>/backups/database/<time>/`: refused while a run is running, the server stopped, the cluster folder copied whole and the server started again; a copy made while another command started the server is discarded. `openDatabase()` makes one before the first new migration of an upgraded Bridge, and refuses that upgrade while a run is running |

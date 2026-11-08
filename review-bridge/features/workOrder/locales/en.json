@@ -231,5 +231,18 @@
   "card.decision.copy": "A copy of {from}: recorded as a new work order \"{title}\"",
   "card.decision.moved": " (was at {from})",
   "line.card.copy": "a copy of {from}; recorded as a new work order",
-  "line.card.moved": "was at {from}; the same work order"
+  "line.card.moved": "was at {from}; the same work order",
+  "database.old_server": "The database was not shut down properly last time, and processes it left are still running; Bridge cannot clear them safely. Restart the computer and run this again. Details are in {file}",
+  "down.refused": "Nothing was stopped: these runs are still running. Stop each with review-bridge stop <run_id> in its project, or let it end, then run review-bridge down again.",
+  "down.page.stopped": "Page stopped.",
+  "down.page.not_running": "Page was not running.",
+  "down.page.failed": "The page did not stop.",
+  "down.database.stopped": "Database stopped.",
+  "down.database.not_running": "Database was not running.",
+  "down.database.cleared": "Database was not running; what it left behind was cleared.",
+  "down.database.none": "There is no database yet.",
+  "down.database.in_use": "Database was not running; another PostgreSQL is using the number it recorded ({pid}). Bridge did not stop it and removed nothing.",
+  "up.database": "Database running (port {port}).",
+  "status.database.running": "Database: running",
+  "status.database.stopped": "Database: stopped; review-bridge up starts it, and so does the next start."
 }

@@ -16,6 +16,7 @@ import { COMMANDS, dispatchCommand } from "./router/index.mjs";
 import { renderCommandHelp, renderMainHelp } from "./router/help.mjs";
 import { inspectDoctor } from "./features/doctor/index.mjs";
 import { createFakeAdapter, readJson } from "./service/index.mjs";
+import { failureLine, oldServerIn } from "./service/database/serverErrors.mjs";
 import { getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
 import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
 
@@ -145,9 +146,21 @@ async function main() {
   });
 }
 
+// A failure the person can act on is said in the project's language (RC3-DOWN-01); the translations are
+// loaded only for it.
+async function failureTranslator(error) {
+  if (!oldServerIn(error)) return null;
+  try {
+    const { createTranslator, resolveLocale } = await import("./features/workOrder/i18n.mjs");
+    return await createTranslator(await resolveLocale(getBridgePaths(takeProject(process.argv.slice(2)).repoRoot, bridgeRoot, { privateRootName })));
+  } catch {
+    return null;
+  }
+}
+
 try {
   process.exitCode = await main();
 } catch (error) {
-  process.stderr.write("Review bridge failed closed: " + error.message + "\n");
+  process.stderr.write(failureLine(error, await failureTranslator(error)) + "\n");
   process.exitCode = 2;
 }

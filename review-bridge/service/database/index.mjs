@@ -4,11 +4,13 @@
 // it is idle, so a command never has to close it.
 import pg from "pg";
 
-import { BackupRefusedError, backupDatabase, runLines } from "./backup.mjs";
+import { BackupRefusedError, backupDatabase, runLines, runningRuns } from "./backup.mjs";
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
 import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
-import { clusterPaths, connect, connectionSettings, ensureCluster, postgresBinaries, startServer } from "./postgresServer.mjs";
+import {
+  clearOldServer, clusterPaths, connect, connectionSettings, ensureCluster, postgresBinaries, serverState, startServer, stopServer,
+} from "./postgresServer.mjs";
 
 export const DATABASE_NAME = "bridge";
 const opened = new Map();
@@ -110,3 +112,41 @@ export async function openDatabase({ dataHome = bridgeDataHome(), migrationsDir 
   }
   return await opened.get(dataHome);
 }
+
+// Whether the person's database server is running, for `status`: nothing is started.
+export async function databaseRunning({ dataHome = bridgeDataHome() } = {}) {
+  return (await serverState(databaseRoot(dataHome), { binaries: await postgresBinaries() })).running;
+}
+
+// The database half of `review-bridge down`, in the order docker compose down takes (the page first,
+// then what it uses). `runsRunning` is asked before anything is stopped, since a running run writes to
+// this server whichever project it is in. `stopDatabase` then stops a running server with pg_ctl's fast
+// shutdown, or clears what a server that is gone left behind (clearOldServer; nothing is listed when it
+// stopped cleanly). `server` replaces the server calls in tests.
+const serverCalls = async (server) => server ?? {
+  binaries: await postgresBinaries(), state: serverState, runs: runningRuns, stop: stopServer, clear: clearOldServer,
+};
+
+export async function runsRunning({ dataHome = bridgeDataHome(), server = null } = {}) {
+  const root = databaseRoot(dataHome);
+  const calls = await serverCalls(server);
+  if (!(await calls.state(root, { binaries: calls.binaries })).running) return [];
+  return await calls.runs(root);
+}
+
+export async function stopDatabase({ dataHome = bridgeDataHome(), server = null } = {}) {
+  const root = databaseRoot(dataHome);
+  const calls = await serverCalls(server);
+  const state = await calls.state(root, { binaries: calls.binaries });
+  if (!state.cluster) return { database: "none" };
+  if (state.running) {
+    await calls.stop(root, { binaries: calls.binaries });
+    opened.delete(dataHome);
+    return { database: "stopped" };
+  }
+  const cleared = await calls.clear(root, { binaries: calls.binaries });
+  if (cleared.cleared === "in_use") return { database: "in_use", pid: cleared.pid };
+  return { database: cleared.cleared === "nothing" ? "not_running" : "cleared" };
+}
+
+export { runLines };
