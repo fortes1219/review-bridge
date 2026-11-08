@@ -14,7 +14,9 @@ import {
   writeJson,
   writeText,
   graphMcpServer,
+  reviewerGraphContext,
 } from "../../service/index.mjs";
+import { graphStats, readProjectGraph } from "./projectGraph.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
 import { EvidenceUnavailableError } from "./workspaceEvidence.mjs";
 import { validateJobPolicy } from "../../policy/policyChecks.mjs";
@@ -196,7 +198,11 @@ export async function runReviewWorker({
         }
         const template = await fsp.readFile(reviewPromptPath, "utf8");
         const reviewInput = await buildReviewInput({ paths, job, control });
-        if (runId) await appendIoEvent(paths, runId, reviewInput);
+        // What the change touches, read by Bridge from the project's graph and put into the packet.
+        const changedPaths = reviewInput.delta.length ? reviewInput.delta.map((entry) => entry.path) : (job.writer_result?.changed || []).map((entry) => entry.path);
+        const graph = await readProjectGraph(paths, (db, projectId) => reviewerGraphContext({ db, projectId, changedPaths }));
+        if (graph?.text) reviewInput.project_graph = graph.text;
+        if (runId) await appendIoEvent(paths, runId, { ...reviewInput, ...(graph ? { graph: graphStats(graph) } : {}) });
         const prompt = renderPrompt(template, {
           JOB_PATH: metadataPath,
           REPORT_PATH: reportPath,

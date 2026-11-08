@@ -179,6 +179,16 @@ export function tokenRows(events) {
   return rows;
 }
 
+// The graph's statements and prompt tokens over the writer's and reviewer's prompts; null when none read it.
+export function graphTotals(events) {
+  const read = events.filter((event) => (event.event === "task.input" || event.event === "review.input") && event.graph);
+  if (!read.length) return null;
+  return {
+    queries: read.reduce((total, event) => total + number(event.graph.queries), 0),
+    tokens: read.reduce((total, event) => total + number(event.graph.tokens), 0),
+  };
+}
+
 function writerCalls(run, events) {
   const fromEvents = events.filter((event) => event.event === "task.input").length;
   return fromEvents || Number(run.last_state?.call || 0) || 0;
@@ -366,6 +376,10 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
     }
     tokens.push("| " + [label, row.calls, row.input, row.cache_read, row.cache_write, row.output, row.total, row.cost_usd === null ? "" : row.cost_usd.toFixed(4) + " " + t("result.tokens.cost_unit")].join(" | ") + " |");
   }
+  // What Bridge read from the project's graph for the prompts: its statements and the tokens it put in,
+  // which the writer's and reviewer's input above already count; no model cost of its own.
+  const graph = graphTotals(events);
+  if (graph) tokens.push(t("result.tokens.graph", graph));
 
   const line = oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run });
   return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, claimed, startUncommitted, tokens, line, calls };

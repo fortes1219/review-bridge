@@ -1,9 +1,12 @@
 // The nine languages the graph reads (Owner 2026-11-08) and what each grammar says a definition, a
 // reference and an import are. Definitions and references follow each grammar's own queries/tags.scm,
 // the code-navigation convention of tree-sitter (docs/src/4-code-navigation.md) that aider's repo map
-// reads: the same node kinds and the same name child, nothing added. Where a grammar's tags.scm has no
-// line for something (TypeScript type aliases, Java enums, C# structs, any C++ reference), the graph has
-// none either. Imports are the node kinds each grammar's node-types.json gives for its import statement.
+// reads: the same node kinds and the same name child. JavaScript and TypeScript add Bridge's own lines, as
+// aider carries query files of its own: module-level constants and variables, type aliases, enums and
+// their members, in the kinds of universal-ctags' TypeScript parser and LSP's SymbolKind (Fortes
+// 2026-11-09). Other languages keep their grammar's tags.scm until each gets its ctags parser's kinds;
+// where it has no line (Java enums, C# structs, any C++ reference) the graph has none either. Imports are
+// the node kinds each grammar's node-types.json gives for its import statement.
 // The tags.scm versions read are listed in .claude/docs/ECOSYSTEM-REFERENCES.md (2026-11-09).
 
 // JavaScript, TypeScript and TSX come with @ast-grep/napi; the other six are @ast-grep/lang-* packages,
@@ -77,10 +80,18 @@ const JAVASCRIPT = {
   function_declaration(node, out) { definition(out, node, node.field("name"), "function"); },
   generator_function(node, out) { definition(out, node, node.field("name"), "function"); },
   generator_function_declaration(node, out) { definition(out, node, node.field("name"), "function"); },
+  // A function value is a function wherever it is declared (tags.scm). Any other value declared at the
+  // module's top level, exported or not, is a constant (const) or a variable (let, var): Bridge's own
+  // query set, in the kinds of universal-ctags' TypeScript parser and LSP's SymbolKind, as aider carries
+  // query files of its own (knowledge base J, 2026-11-09). A destructuring pattern names no one thing.
   variable_declarator(node, out) {
     const name = node.field("name");
-    if (name?.kind() === "identifier" && FUNCTION_VALUES.includes(node.field("value")?.kind())
-      && ["lexical_declaration", "variable_declaration"].includes(node.parent()?.kind())) definition(out, node, name, "function");
+    const declaration = node.parent();
+    if (name?.kind() !== "identifier" || !["lexical_declaration", "variable_declaration"].includes(declaration?.kind())) return;
+    if (FUNCTION_VALUES.includes(node.field("value")?.kind())) return definition(out, node, name, "function");
+    if (!moduleLevel(declaration)) return;
+    const constant = declaration.kind() === "lexical_declaration" && declaration.children()[0]?.text() === "const";
+    definition(out, declaration.parent()?.kind() === "export_statement" ? declaration.parent() : declaration, name, constant ? "constant" : "variable");
   },
   assignment_expression(node, out) {
     if (!FUNCTION_VALUES.includes(node.field("right")?.kind())) return;
@@ -113,6 +124,13 @@ const JAVASCRIPT = {
   },
   import_statement(node, out) { importOf(out, node, stringValue(node.field("source"))); },
 };
+// The module's top level: the program itself, or an `export` directly under it (a .vue script block is
+// its own program, so its top level is the same).
+function moduleLevel(declaration) {
+  const parent = declaration.parent();
+  return parent?.kind() === "program" || (parent?.kind() === "export_statement" && parent.parent()?.kind() === "program");
+}
+
 function stringValue(node) {
   return node && node.kind() === "string" ? unquote(node.text()) : null;
 }
@@ -131,6 +149,16 @@ const TYPESCRIPT = {
   module(node, out) { definition(out, node, node.field("name"), "module"); },
   interface_declaration(node, out) { definition(out, node, node.field("name"), "interface"); },
   type_annotation(node, out) { reference(out, childOf(node, ["type_identifier"]), "type"); },
+  // Bridge's own (ctags' alias, enum and enumerator; aider's typescript-tags.scm has the first two).
+  type_alias_declaration(node, out) { definition(out, node, node.field("name"), "alias"); },
+  enum_declaration(node, out) {
+    definition(out, node, node.field("name"), "enum");
+    const body = node.field("body") ?? childOf(node, ["enum_body"]);
+    for (const member of body ? body.children() : []) {
+      if (member.kind() === "property_identifier") definition(out, member, member, "enumerator");
+      else if (member.kind() === "enum_assignment") definition(out, member, member.field("name") ?? childOf(member, ["property_identifier"]), "enumerator");
+    }
+  },
   import_require_clause(node, out) { importOf(out, node, stringValue(node.field("source")), "require"); },
 };
 

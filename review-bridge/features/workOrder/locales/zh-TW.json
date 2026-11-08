@@ -131,6 +131,7 @@
   "result.why.contract.problems": "合約缺了工單必填的欄位，writer 沒有接：",
   "result.tokens.header": "| 角色 | 呼叫 | input | cache read | cache write | output | 合計 | 費用 |",
   "result.tokens.unknown": "未知",
+  "result.tokens.graph": "| graph 查詢 | {queries} 次 SQL | 放進 prompt 約 {tokens} token |  |  |  |  | 估算；已算在上面 writer 與 reviewer 的 input 裡，不是另外的花費 |",
   "result.tokens.cost_unit": "USD",
   "notify.body": "{name}：{line}",
   "line.delivered": "現有測試通過，reviewer 通過",

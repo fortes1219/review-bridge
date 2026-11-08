@@ -131,6 +131,7 @@
   "result.why.contract.problems": "The contract lacks what a work order must say, so the writer did not take it:",
   "result.tokens.header": "| role | calls | input | cache read | cache write | output | total | cost |",
   "result.tokens.unknown": "unknown",
+  "result.tokens.graph": "| graph lookups | {queries} SQL | about {tokens} prompt tokens |  |  |  |  | estimated; already in the writer's and reviewer's input above, no cost of its own |",
   "result.tokens.cost_unit": "USD",
   "notify.body": "{name}: {line}",
   "line.delivered": "existing tests passed, reviewer passed",

@@ -148,8 +148,9 @@ export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFin
   return handoff;
 }
 
-// D1.2: fixed order. Header, rules, task.input, injected files, handoff.
-export function composeWriterPrompt({ workPackage, control, runId, call, taskInput, references, handoff = null, rulesText, contract = null }) {
+// D1.2: fixed order. Header, rules, task.input, the project's graph, injected files, handoff. The graph
+// section is what Bridge read itself (service/graph/graphContext.mjs); without a graph there is none.
+export function composeWriterPrompt({ workPackage, control, runId, call, taskInput, references, handoff = null, rulesText, contract = null, projectGraph = null }) {
   const scope = workPackage.scope;
   const header = [
     WRITER_MODE_HEADER,
@@ -180,6 +181,7 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
   ];
   const rules = ["=== RULES (rules.md) ===", String(rulesText || "").trim(), ""];
   const task = ["=== TASK (task.input) ===", JSON.stringify(taskInput, null, 2), ""];
+  const project = projectGraph ? ["=== PROJECT (review-bridge-graph) ===", projectGraph, ""] : [];
   const files = [];
   for (const file of references) {
     files.push("=== " + file.path + " (" + file.sha256.slice(0, 12) + ") ===");
@@ -187,5 +189,5 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     files.push("");
   }
   const tail = handoff ? ["=== HANDOFF ===", JSON.stringify(handoff, null, 2), ""] : [];
-  return [...header, ...rules, ...task, ...files, ...tail].join("\n");
+  return [...header, ...rules, ...task, ...project, ...files, ...tail].join("\n");
 }

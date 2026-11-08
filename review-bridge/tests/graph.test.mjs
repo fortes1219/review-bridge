@@ -49,7 +49,7 @@ function git(root, ...args) {
   return done.stdout;
 }
 
-test("a TypeScript file's definitions, references and imports follow the grammar's tags.scm, and a part it cannot read is counted", async () => {
+test("a TypeScript file's definitions, references and imports follow the grammar's tags.scm with Bridge's own lines, and a part it cannot read is counted", async () => {
   const source = [
     "import { a } from \"./a\";",
     "export class Foo extends Bar {",
@@ -63,10 +63,44 @@ test("a TypeScript file's definitions, references and imports follow the grammar
     "function broken( {",
   ].join("\n");
   const out = await extractSource(napi, "typescript", source);
-  assert.deepEqual(out.definitions.map((item) => [item.name, item.kind, item.start_line]), [["Foo", "class", 2], ["run", "method", 3], ["f", "function", 6], ["I", "interface", 8]]);
+  assert.deepEqual(out.definitions.map((item) => [item.name, item.kind, item.start_line]), [["Foo", "class", 2], ["run", "method", 3], ["f", "function", 6], ["m", "constant", 7], ["I", "interface", 8]]);
   assert.deepEqual(out.references.map((item) => [item.name, item.kind, item.line]), [["Baz", "type", 3], ["helper", "call", 3], ["go", "call", 3], ["Qux", "class", 3]]);
   assert.deepEqual(out.imports.map((item) => [item.specifier, item.form, item.line]), [["./a", "import", 1], ["m", "require", 7], ["./y", "export", 9]]);
   assert.equal(out.error_count, 1, "the unclosed function is an ERROR node");
+});
+
+// The canary's presentation.ts (2026-11-09): its labels, options and schema are constants, which the
+// grammar's tags.scm leaves out, so the graph could not say where `statusLabel` is. Bridge's own query set
+// keeps module-level constants and variables, type aliases, enums and their members, in ctags' kinds.
+test("a module's top-level constants, variables, type aliases and enums are definitions; a constant inside a function is not", async () => {
+  const source = [
+    "import { z } from \"zod\";",
+    "export const statusLabel: Record<Status, string> = { open: \"開啟\", closed: \"關閉\" };",
+    "export const statusOptions = Object.keys(statusLabel);",
+    "export const requestStatusSchema = z.enum([\"open\", \"closed\"]);",
+    "export const priorityLabel = { low: \"低\" };",
+    "export const priorityOptions = [\"low\", \"high\"];",
+    "export const DEFAULT_STATUS = \"open\";",
+    "export const MAX_ITEMS = 50;",
+    "export const colors = { open: \"green\" };",
+    "const internalMap = new Map();",
+    "export const emptyText = \"\";",
+    "export function statusText(s: Status) {",
+    "  const local = statusLabel[s];",
+    "  return local;",
+    "}",
+  ].join("\n");
+  const out = await extractSource(napi, "typescript", source);
+  const kinds = out.definitions.map((item) => item.kind);
+  assert.equal(kinds.filter((kind) => kind === "constant").length, 10, JSON.stringify(out.definitions));
+  assert.deepEqual(out.definitions.filter((item) => item.kind === "function").map((item) => item.name), ["statusText"]);
+  assert.equal(out.definitions.some((item) => item.name === "local"), false, "inside a function it is no module's definition");
+  assert.deepEqual(out.definitions.find((item) => item.name === "statusLabel"), { name: "statusLabel", kind: "constant", start_line: 2, end_line: 2 });
+
+  const more = await extractSource(napi, "typescript", "let count = 0;\nvar total = 1;\nexport type Id = string;\nenum Color { Red, Green = 2 }\nconst { a, b } = pair;\n");
+  assert.deepEqual(more.definitions.map((item) => [item.name, item.kind]), [["count", "variable"], ["total", "variable"], ["Id", "alias"], ["Color", "enum"], ["Red", "enumerator"], ["Green", "enumerator"]]);
+  const vue = await extractVue(napi, "<script setup lang=\"ts\">\nconst title = \"x\";\nfunction go() { const inner = 1; }\n</script>\n");
+  assert.deepEqual(vue.definitions.map((item) => [item.name, item.kind, item.start_line]), [["title", "constant", 2], ["go", "function", 3]]);
 });
 
 test("a .jsx file is read with the TSX grammar, so class= in JSX is no error", async () => {

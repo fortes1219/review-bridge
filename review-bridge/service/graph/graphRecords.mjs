@@ -102,6 +102,56 @@ export async function referrers(db, { projectId, names, perName = 10 }) {
   return rows;
 }
 
+// What Bridge reads itself to put into the writer's and the reviewer's prompt (graphContext.mjs). Each is
+// one statement whatever the number of names or files asked, so a start and a review read a fixed number.
+
+// For each name, where it is defined (`perName` at most): find_definitions for many names at once.
+export async function definitionsOf(db, { projectId, names, perName = 3 }) {
+  if (!names.length) return [];
+  const { rows } = await db.query(
+    "select n.name, f.path, d.kind, d.start_line, d.end_line from unnest($2::text[]) as n(name)"
+    + " cross join lateral (select file_id, kind, start_line, end_line from graph_definitions where project_id = $1 and name = n.name order by file_id, start_line limit $3) d"
+    + " join graph_files f on f.file_id = d.file_id order by n.name, f.path, d.start_line",
+    [projectId, names, Math.max(1, Math.min(Number(perName) || 3, 10))],
+  );
+  return rows;
+}
+
+// The project's files a work order names: by their path, or by their file name in any folder. The file name
+// is matched against every path of the project (`like '%/name'` cannot use the path index): this one
+// statement reads the project's file list, once per start.
+export async function filesNamed(db, { projectId, paths, fileNames, limit = 20 }) {
+  if (!paths.length && !fileNames.length) return [];
+  const { rows } = await db.query(
+    "select path from graph_files where project_id = $1 and (path = any($2::text[]) or path = any($3::text[]) or path like any($4::text[])) order by path limit $5",
+    [projectId, paths, fileNames, fileNames.map((name) => "%/" + name.replace(/[\\%_]/g, "\\$&")), Math.max(1, Math.min(Number(limit) || 20, 50))],
+  );
+  return rows.map((row) => row.path);
+}
+
+// What the given files import, in one statement: file_outline's imports for several files.
+export async function importsOf(db, { projectId, paths, limit = 60 }) {
+  if (!paths.length) return [];
+  const { rows } = await db.query(
+    "select f.path, i.specifier, i.line, i.status, i.target_path from graph_files f join graph_imports i on i.file_id = f.file_id"
+    + " where f.project_id = $1 and f.path = any($2::text[]) order by f.path, i.line limit $3",
+    [projectId, paths, Math.max(1, Math.min(Number(limit) || 60, 200))],
+  );
+  return rows;
+}
+
+// The project's folders and how many files each holds, largest first: what the writer gets when the work
+// order names nothing the graph knows. It counts the project's file list (one index-only read of it).
+export async function folderOverview(db, { projectId, limit = 20 }) {
+  const { rows } = await db.query(
+    "select folder, count(*)::int as files, sum(count(*)) over ()::int as total from ("
+    + "select case when strpos(path, '/') > 0 then regexp_replace(path, '/[^/]*$', '') else '.' end as folder from graph_files where project_id = $1"
+    + ") listed group by folder order by files desc, folder limit $2",
+    [projectId, Math.max(1, Math.min(Number(limit) || 20, 50))],
+  );
+  return rows;
+}
+
 // Writes. `files` are parsed files: { path, language, oid, package, parse_status, error_count,
 // definitions, references, imports (each with status, target_path, target_kind) }. A file's earlier rows
 // go and its new ones come in the same transaction; rows of files not named are untouched.

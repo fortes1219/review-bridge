@@ -28,7 +28,9 @@ import {
   writeJson,
   writeText,
   graphMcpServer,
+  writerGraphContext,
 } from "../../service/index.mjs";
+import { graphStats, readProjectGraph, workOrderTexts } from "./projectGraph.mjs";
 import { assertUnder, assertUnderOne } from "../../utils/pathGuard.mjs";
 import { enqueueReview, hasPendingMessageHash } from "./reviewQueue.mjs";
 import { runReviewWorker } from "./review.mjs";
@@ -373,6 +375,8 @@ export async function runBoundedResume({
     let lastTestResult = null;
     let lastTestDelta = null;
     let handoffReason = "correction";
+    // The writer's part of the project's graph, read before the first call (undefined until then).
+    let projectGraph;
     const unconfirmable = await unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId });
     if (unconfirmable !== null) return unconfirmable;
     const sealed = await sealedContractFor({ paths, runtimeState, control, writerModel, sessionId });
@@ -424,6 +428,9 @@ export async function runBoundedResume({
       const contract = beforeCall.contract;
       const readList = buildReadList({ references, findings: lastFindings });
       const taskInput = buildTaskInput({ workPackage, call, readList, limits, contract });
+      // Read from the project's graph once, before the first call, and put into every call's prompt.
+      const firstGraphRead = projectGraph === undefined;
+      if (firstGraphRead) projectGraph = await readProjectGraph(paths, (db, projectId) => writerGraphContext({ db, projectId, texts: workOrderTexts(contract?.contract, workPackage) }));
       const handoff = call > 1 ? buildHandoff({
         workPackage, call, reason: handoffReason, ioEvents: await readIoEvents(paths, runId),
         openFindings: lastFindings, lastGate, changedFiles: lastChangedFiles, readList,
@@ -432,11 +439,13 @@ export async function runBoundedResume({
       if (handoff) await recordIo(paths, runId, handoff);
       const effectivePrompt = composeWriterPrompt({
         workPackage, control: currentControl, runId, call, taskInput, references, handoff,
-        rulesText: workPackage.rules?.text || "", contract,
+        rulesText: workPackage.rules?.text || "", contract, projectGraph: projectGraph?.text || null,
       });
       await recordIo(paths, runId, {
         ...taskInput,
         injected: references.map((file) => ({ path: file.path, sha256: file.sha256, bytes: file.bytes, inlined: file.text !== null })),
+        // What Bridge read from the graph for this prompt: its statements (the first call only) and the tokens put in.
+        ...(projectGraph ? { graph: graphStats(projectGraph, firstGraphRead) } : {}),
       });
       await writeText(effectivePromptPath, effectivePrompt);
 

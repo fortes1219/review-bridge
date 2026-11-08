@@ -52,18 +52,20 @@ test.after(async () => {
 
 const projectA = randomUUID();
 const projectB = randomUUID();
-for (const id of [projectA, projectB]) {
+// A third, larger project: one person's database holds every project, so the one asked is a small part.
+const projectC = randomUUID();
+for (const id of [projectA, projectB, projectC]) {
   await client.query("insert into projects (project_id, root_path, name, created_at, last_activity_at) values ($1, $2, 'p', now(), now())", [id, "/p/" + id]);
 }
 await client.query(
   "insert into graph_files (project_id, path, language, oid, package, parse_status, error_count, parsed_at)"
-  + " select p, 'src/f' || g || '.ts', 'typescript', null, null, case when g % 500 = 0 then 'no_parser' else 'parsed' end, case when g % 300 = 0 then 1 else 0 end, now()"
-  + " from unnest($1::uuid[]) p, generate_series(1, 3000) g",
-  [[projectA, projectB]],
+  + " select p.id, 'src/d' || (g % 40) || '/f' || g || '.ts', 'typescript', null, null, case when g % 500 = 0 then 'no_parser' else 'parsed' end, case when g % 300 = 0 then 1 else 0 end, now()"
+  + " from unnest($1::uuid[], $2::int[]) p(id, files), generate_series(1, p.files) g",
+  [[projectA, projectB, projectC], [3000, 3000, 20000]],
 );
 await client.query("insert into graph_definitions select f.file_id, f.project_id, 'name' || ((f.file_id * 7 + k) % 5000), 'function', k * 10 + 1, k * 10 + 5 from graph_files f, generate_series(0, 2) k");
 await client.query("insert into graph_references select f.file_id, f.project_id, 'name' || ((f.file_id * 13 + k) % 5000), 'call', k * 10 + 2 from graph_files f, generate_series(0, 2) k");
-await client.query("insert into graph_imports select f.file_id, f.project_id, './f' || k, k + 1, 'resolved', 'src/f' || (((f.file_id + k) % 3000) + 1) || '.ts', 'file' from graph_files f, generate_series(0, 1) k");
+await client.query("insert into graph_imports select f.file_id, f.project_id, './f' || k, k + 1, 'resolved', 'src/d' || (((f.file_id + k) % 3000 + 1) % 40) || '/f' || (((f.file_id + k) % 3000) + 1) || '.ts', 'file' from graph_files f, generate_series(0, 1) k");
 await client.query("insert into graph_states (project_id, scope, git_commit, built_at, updated_at) values ($1, '{\"\"}', null, now(), now()), ($2, '{\"\"}', null, now(), now())", [projectA, projectB]);
 await client.query("analyze");
 
@@ -79,14 +81,19 @@ function explaining(plans) {
 }
 
 const QUERIES = [
-  ["storedFiles", (database) => records.storedFiles(database, { projectId: projectA, paths: ["src/f10.ts", "src/f11.ts"] }), ["graph_files_project_id_path_key"]],
+  ["storedFiles", (database) => records.storedFiles(database, { projectId: projectA, paths: ["src/d10/f10.ts", "src/d11/f11.ts"] }), ["graph_files_project_id_path_key"]],
   ["definitions", (database) => records.definitions(database, { projectId: projectA, name: "name42" }), ["graph_definitions_by_name"]],
   ["references", (database) => records.references(database, { projectId: projectA, name: "name42", after: { file_id: 10, line: 2 } }), ["graph_references_by_name"]],
-  ["importers", (database) => records.importers(database, { projectId: projectA, targets: ["src/f10.ts", "src"] }), ["graph_imports_by_target"]],
-  ["outline", (database) => records.outline(database, { projectId: projectA, path: "src/f10.ts" }), ["graph_files_project_id_path_key"]],
-  ["touched", (database) => records.touched(database, { projectId: projectA, changes: [{ path: "src/f10.ts", start_line: 1, end_line: 12 }] }), ["graph_files_project_id_path_key", "graph_definitions_by_file"]],
+  ["importers", (database) => records.importers(database, { projectId: projectA, targets: ["src/d10/f10.ts", "src/d10"] }), ["graph_imports_by_target"]],
+  ["outline", (database) => records.outline(database, { projectId: projectA, path: "src/d10/f10.ts" }), ["graph_files_project_id_path_key"]],
+  ["touched", (database) => records.touched(database, { projectId: projectA, changes: [{ path: "src/d10/f10.ts", start_line: 1, end_line: 12 }] }), ["graph_files_project_id_path_key", "graph_definitions_by_file"]],
   ["referrers", (database) => records.referrers(database, { projectId: projectA, names: ["name42", "name43"], perName: 10 }), ["graph_references_by_name"]],
   ["incompleteFiles", (database) => records.incompleteFiles(database, { projectId: projectA }), ["graph_files_incomplete"]],
+  // What Bridge reads itself for the writer's and the reviewer's prompts (graphContext.mjs).
+  ["definitionsOf", (database) => records.definitionsOf(database, { projectId: projectA, names: ["name42", "name43", "nothing"], perName: 3 }), ["graph_definitions_by_name"]],
+  ["filesNamed", (database) => records.filesNamed(database, { projectId: projectA, paths: ["src/d10/f10.ts"], fileNames: ["f11.ts"] }), ["graph_files_project_id_path_key"]],
+  ["importsOf", (database) => records.importsOf(database, { projectId: projectA, paths: ["src/d10/f10.ts", "src/d11/f11.ts"] }), ["graph_files_project_id_path_key", "graph_imports_by_file"]],
+  ["folderOverview", (database) => records.folderOverview(database, { projectId: projectA }), ["graph_files_project_id_path_key"]],
 ];
 
 for (const [name, run, indexes] of QUERIES) {
@@ -102,7 +109,7 @@ for (const [name, run, indexes] of QUERIES) {
 }
 
 test("the outline's follow-up reads go through the file's own indexes", async (t) => {
-  const [{ file_id: fileId }] = (await client.query("select file_id from graph_files where project_id = $1 and path = 'src/f10.ts'", [projectA])).rows;
+  const [{ file_id: fileId }] = (await client.query("select file_id from graph_files where project_id = $1 and path = 'src/d10/f10.ts'", [projectA])).rows;
   for (const [sql, index] of [
     ["select name, kind, start_line, end_line from graph_definitions where file_id = $1 order by start_line limit $2", "graph_definitions_by_file"],
     ["select specifier, line, status, target_path, target_kind from graph_imports where file_id = $1 order by line limit $2", "graph_imports_by_file"],
@@ -136,9 +143,11 @@ test("the MCP server's session reads the graph and cannot write to it", async ()
   try {
     await assert.rejects(reader.query("delete from graph_files where project_id = $1", [projectA]), (error) => error.code === "25006");
     const tools = graphTools({ projectId: projectA, db: async () => reader });
-    const found = JSON.parse((await tools.find_definitions({ name: "name42", limit: 2 })).content[0].text);
+    const found = JSON.parse((await tools.find_definitions({ symbol: "name42", limit: 2 })).content[0].text);
     assert.equal(found.definitions.length, 2);
-    assert.ok(found.next);
+    assert.ok(found.next_cursor);
+    const following = JSON.parse((await tools.find_definitions({ symbol: "name42", limit: 2, cursor: found.next_cursor })).content[0].text);
+    assert.ok(following.definitions.length >= 1, "the cursor reaches the next page");
     const state = JSON.parse((await tools.graph_state({})).content[0].text);
     assert.equal(state.incomplete_first_20.length, 20);
   } finally {

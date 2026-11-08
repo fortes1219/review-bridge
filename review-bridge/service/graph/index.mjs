@@ -3,6 +3,7 @@ import path from "node:path";
 
 export { buildGraph, updateGraph } from "./build.mjs";
 export * as graphQueries from "./graphRecords.mjs";
+export { reviewerGraphContext, writerGraphContext } from "./graphContext.mjs";
 export { languageOf } from "./languages.mjs";
 
 // Bridge's own MCP server, the same for both roles and both providers: the runtime's `graph-mcp` command

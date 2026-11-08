@@ -588,6 +588,21 @@ test("init maps a Git project's code into its graph and leaves git status as it 
   assert.equal(after["src/broken.ts"], before["src/broken.ts"]);
   assert.notEqual(after["src/b.ts"], before["src/b.ts"], "the changed file is read again");
   assert.deepEqual(await queryRecords("select f.path from graph_definitions d join graph_files f using (file_id) where d.project_id = $1 and d.name = 'c'", [projectId]), [{ path: "src/b.ts" }]);
+
+  // Bridge read the graph itself and put it into the prompts (Fortes 2026-11-09): this work order names
+  // nothing the graph defines, so the writer gets the project's folders; the reviewer gets what the change
+  // touched; the result counts the statements and the tokens.
+  const [{ run_id: runId }] = await queryRecords("select run_id from runs where project_id = $1 order by created_at desc limit 1", [projectId]);
+  const logs = projectPaths(root).runLogDir(runId);
+  const promptFile = (await fsp.readdir(logs)).find((name) => name.endsWith("-writer-only-prompt.txt"));
+  const prompt = await fsp.readFile(path.join(logs, promptFile), "utf8");
+  assert.match(prompt, /=== PROJECT \(review-bridge-graph\) ===\nProject graph: no name or file in the work order is in the project's index of 3 file\(s\)\. Its folders, largest first:\n- src \(3 file\(s\)\)/);
+  const inputs = await queryRecords("select type, payload from run_events where run_id = $1 and type in ('task.input', 'review.input') order by sequence", [runId]);
+  assert.deepEqual(inputs.map((row) => row.type), ["task.input", "review.input"]);
+  assert.ok(inputs.every((row) => row.payload.graph && row.payload.graph.tokens > 0), JSON.stringify(inputs.map((row) => row.payload.graph)));
+  assert.match(inputs[1].payload.project_graph, /^Project graph: /, "the reviewer's packet carries its section");
+  const result = await fsp.readFile(path.join(root, ".review-bridge", "results", "hello", (await fsp.readdir(path.join(root, ".review-bridge", "results", "hello"))).find((name) => name.endsWith(".md") && !name.startsWith("contract"))), "utf8");
+  assert.match(result, /^\| graph lookups \| \d+ SQL \| about \d+ prompt tokens \|/m);
 });
 
 // init on a folder whose install record is gone rebuilds the record, as git init reinitializes, and reads
