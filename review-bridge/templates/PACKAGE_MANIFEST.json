@@ -1,6 +1,5 @@
 {
   "package": "review-bridge-runtime",
-  "version": "0.2.0-rc.2",
   "snapshot_date": "2026-08-28",
   "status": "private-release-candidate",
   "active_target": "win32-x64",

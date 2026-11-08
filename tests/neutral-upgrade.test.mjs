@@ -257,7 +257,7 @@ test("W1 upgrade merges the settings, removes the old tools/ copy, keeps every u
   const before = await persistent(root);
   const { plan, result } = await upgrade(root);
   assert.equal(plan.from.version, "0.1.0-old");
-  assert.equal(plan.to.version, (await readJson(path.join(sourceRuntime, "templates", "PACKAGE_MANIFEST.json"))).version);
+  assert.equal(plan.to.version, (await readJson(path.join(sourceRuntime, "..", "package.json"))).version);
   assert.deepEqual(plan.config_added_keys, ["active_runs"]);
   assert.deepEqual(plan.config_removed_keys, ["state_contract"]);
   // The edited English template is kept; the untouched Chinese one is replaced.

@@ -28,6 +28,24 @@ export async function inEveryLocale(key) {
   return packs.map((pack) => pack?.[key]).filter(Boolean);
 }
 
+// The language of the person's system, the one init writes into bridge.json: what Intl reports (MDN: a
+// DateTimeFormat made with no arguments "uses the current system settings"), matched to a language pack by
+// language and script after Add Likely Subtags (Intl.Locale maximize: zh-TW and zh-Hant-HK are both
+// zh-Hant, zh-CN is zh-Hans). The default when no pack matches or Intl cannot tell.
+export async function systemLocale({ locale = new Intl.DateTimeFormat().resolvedOptions().locale } = {}) {
+  let wanted;
+  try {
+    wanted = new Intl.Locale(locale).maximize();
+  } catch {
+    return DEFAULT_LOCALE;
+  }
+  for (const name of await availableLocales()) {
+    const pack = new Intl.Locale(name).maximize();
+    if (pack.language === wanted.language && pack.script === wanted.script) return name;
+  }
+  return DEFAULT_LOCALE;
+}
+
 // The locale named in bridge.json, or the default; an unknown name falls back to the default.
 export async function resolveLocale(paths) {
   const config = await fsp.readFile(paths.bridgeConfigPath, "utf8").then((text) => JSON.parse(text), () => ({}));

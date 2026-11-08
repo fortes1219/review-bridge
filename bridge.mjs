@@ -22,7 +22,7 @@ import { projectLogRoot, projectStateRoot } from "./review-bridge/utils/paths.mj
 import {
   applyNeutralInstall, applyNeutralUninstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult,
   formatUpgradeRollbackPlan, formatUpgradeRollbackResult, loadInstalledServiceModules, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
-  rollbackFreshNeutralInstall, verifyNeutralInstall,
+  reinitializeNeutralInstall, rollbackFreshNeutralInstall, verifyNeutralInstall,
 } from "./installer/neutral-install.mjs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -263,6 +263,12 @@ async function init(options) {
     write: (text) => process.stdout.write(text),
     inspectProvider: async (provider) => (await inspectSelectedRoles({ writer: provider, reviewer: provider })).checks.writer,
     setUpProject,
+    // The record rebuilt, then the setup checked as init checks it.
+    reinitialize: async (target) => {
+      const done = await reinitializeNeutralInstall({ target });
+      if (done) await verifyNeutralInstall(target);
+      return done;
+    },
   });
 }
 

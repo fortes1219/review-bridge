@@ -3,6 +3,7 @@ import readline from "node:readline/promises";
 
 import { readJson } from "../../service/index.mjs";
 import { assertUnderOne } from "../../utils/pathGuard.mjs";
+import { createTranslator, resolveLocale } from "./i18n.mjs";
 import { BUDGET_KEYS } from "./workOrderFormat.mjs";
 import { assertCurrentPlan, runningVersions } from "./workPackage.mjs";
 
@@ -44,68 +45,81 @@ export function readiness({ options, adapter, loadAdapter, guard, reviewerCheck,
   };
 }
 
+// The card speaks the project's language (bridge.json's locale, Owner 2026-11-06: a person stopped sees
+// their own words); every line below comes from the language pack.
+export async function cardTranslator(paths) {
+  return await createTranslator(await resolveLocale(paths));
+}
+
 // Which work order the yes starts (spec 2026-10-24's three lines, in the card's language): y starts
 // it as the card says, n does not start; --update <work_order_id> or --as-new prints another card.
-export function decisionLine(workOrder) {
-  const title = "\"" + workOrder.title + "\"";
-  if (workOrder.decision === "new") return "New work order " + title;
-  if (workOrder.decision === "same") return "Updates " + title + ": still version " + workOrder.from_version + ", with new run settings";
-  return "Updates " + title + ": version " + (workOrder.from_version ?? 0) + " → " + workOrder.to_version + ", " + workOrder.changed_lines + " line(s) changed";
+export function decisionLine(t, workOrder) {
+  if (workOrder.decision === "new") return t("card.decision.new", { title: workOrder.title });
+  if (workOrder.decision === "same") return t("card.decision.same", { title: workOrder.title, version: workOrder.from_version });
+  return t("card.decision.changed", { title: workOrder.title, from: workOrder.from_version ?? 0, to: workOrder.to_version, lines: workOrder.changed_lines });
 }
 
 // Where each value the card shows came from, in the person's words.
-const SOURCE = Object.freeze({ cli: "flag", work_order: "work order", priority: "priority table", config: "config" });
+const source = (t, layer) => t("card.source." + layer);
 
 // One role as the card shows it: who, which model and how hard, and where each came from. Either
 // a person says yes to it or it does not run, so a role changed since the last card is on this one.
-export function roleLine(role) {
-  const model = role.model ?? "the CLI's default";
-  return role.provider + " (" + SOURCE[role.provider_source] + "), model " + model + " (" + SOURCE[role.model_source] + "), effort " + role.effort + " (" + SOURCE[role.effort_source] + ")";
+export function roleLine(t, role) {
+  return t("card.role", {
+    provider: role.provider, provider_source: source(t, role.provider_source),
+    model: role.model ?? t("card.model.default"), model_source: source(t, role.model_source),
+    effort: role.effort, effort_source: source(t, role.effort_source),
+  });
 }
 
 // What the reviewer holds besides reading files. A server on the policy's list is let through as it
 // is: nothing has shown that it cannot write, so the card says so.
-export function reviewerMcpLine(plan) {
-  return plan.reviewer.mcp.length ? plan.reviewer.mcp.join(", ") + " (allowed by the policy, not checked to be read-only)" : "none";
+export function reviewerMcpLine(t, plan) {
+  return plan.reviewer.mcp.length ? t("card.mcp.allowed", { list: plan.reviewer.mcp.join(", ") }) : t("card.mcp.none");
 }
 
 // The contract the plan sealed: Bridge cut it from the work order, so no model call comes before the work.
-export function contractLine(plan) {
-  return "sha256 " + plan.contract_sha256 + ", " + plan.contract_conditions + " condition(s) cut from the acceptance list";
+export function contractLine(t, plan) {
+  return t("card.contract", { sha: plan.contract_sha256, count: plan.contract_conditions });
 }
 
 // The six budget values in their fixed order (a card read back from the database has its keys
 // reordered), each with where it came from: the work order, a flag, or the config.
-export function budgetLine(plan) {
-  return BUDGET_KEYS.map((key) => key + " " + plan.budget[key] + " (" + SOURCE[plan.budget_source[key]] + ")").join(", ");
+export function budgetLine(t, plan) {
+  return BUDGET_KEYS.map((key) => t("card.budget.item", { key, value: plan.budget[key], source: source(t, plan.budget_source[key]) })).join(t("card.budget.separator"));
 }
+
+const replacedLine = (t, { runId, unchanged }) => t(unchanged ? "card.replaced.unchanged" : "card.replaced.stops", { run: runId });
+
+// The line an agent passes on: the card stops here, and the person's yes is relayed with --yes.
+export const needsAuthorizationLine = (t, again) => t("card.needs_authorization", { command: again });
 
 // start's one card (Owner 2026-11-08): what the yes authorizes, in the words a person checks it by. Every
 // line comes from the sealed plan, the contract Bridge cut from the work order among them.
-export async function startCard(paths, plan) {
+export async function startCard(paths, plan, t = null) {
+  t ??= await cardTranslator(paths);
   const replaced = await runningVersions(paths, plan);
-  const gate = plan.test?.kind === "command" ? "runs " + plan.test.command + " after each writer call" : "not configured (no test rule matched; the work starts without tests)";
+  const label = (key) => t("card.label." + key);
+  const gate = plan.test?.kind === "command" ? t("card.tests.command", { command: plan.test.command }) : t("card.tests.none");
   const scope = plan.scope.source === "explicit"
     ? plan.scope.allowed_paths.join(", ")
-    : "the whole project except protected files (" + plan.scope.forbidden_paths.length + " patterns)";
+    : t("card.scope.default", { count: plan.scope.forbidden_paths.length });
   return [
-    "Work order:   " + plan.task_file,
-    ...(plan.work_order ? ["              " + decisionLine(plan.work_order)] : []),
-    "Stops:        " + plan.breakpoint,
-    "Scope:        " + scope,
-    "Tests:        " + gate,
-    "Priority:     " + plan.priority + " (" + SOURCE[plan.priority_source] + ")",
-    "Writer:       " + roleLine(plan.writer),
-    "Reviewer:     " + roleLine(plan.reviewer),
-    "Reviewer MCP: " + reviewerMcpLine(plan),
-    "Budget:       " + budgetLine(plan),
-    ...(plan.contract_sha256 ? ["Contract:     " + contractLine(plan)] : []),
-    "Valid until:  " + plan.authorization_expires_at,
-    ...replaced.map(({ runId, unchanged }) => (unchanged
-      ? "This work order is already running unchanged as run " + runId + "; this start will be refused."
-      : "Starting stops the version still running from this work order: run " + runId)),
+    label("work_order") + plan.task_file,
+    ...(plan.work_order ? [t("card.indent") + decisionLine(t, plan.work_order)] : []),
+    label("stops") + plan.breakpoint,
+    label("scope") + scope,
+    label("tests") + gate,
+    label("priority") + t("card.priority", { priority: plan.priority, source: source(t, plan.priority_source) }),
+    label("writer") + roleLine(t, plan.writer),
+    label("reviewer") + roleLine(t, plan.reviewer),
+    label("reviewer_mcp") + reviewerMcpLine(t, plan),
+    label("budget") + budgetLine(t, plan),
+    ...(plan.contract_sha256 ? [label("contract") + contractLine(t, plan)] : []),
+    label("valid_until") + plan.authorization_expires_at,
+    ...replaced.map((entry) => replacedLine(t, entry)),
     "",
-    "The work order, as sealed:",
+    t("card.sealed_text"),
     ...plan.task.trimEnd().split(/\r?\n/).map((line) => "  │ " + line),
     "",
   ].join("\n");
@@ -119,34 +133,34 @@ export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask
   const plan = await readJson(resolvedPlan);
   assertCurrentPlan(plan);
   if (assumeYes) return plan.plan_sha256;
+  const t = await cardTranslator(paths);
+  const label = (key) => t("workstart.label." + key);
   const replaced = await runningVersions(paths, plan);
   process.stdout.write([
-    "Work package: " + plan.work_package_id,
-    ...(plan.work_order ? ["Work order: " + decisionLine(plan.work_order)] : []),
-    "Owner: " + plan.owner,
-    "Breakpoint: " + plan.breakpoint,
-    "Allowed paths: " + plan.scope.allowed_paths.join(", "),
-    "Priority: " + plan.priority + " (" + SOURCE[plan.priority_source] + ")",
-    "Writer: " + roleLine(plan.writer),
-    "Reviewer: " + roleLine(plan.reviewer),
-    "Reviewer MCP: " + reviewerMcpLine(plan),
-    "Budget: " + budgetLine(plan),
-    ...(plan.contract_sha256 ? ["Contract: " + contractLine(plan)] : []),
-    "Authorization expires at: " + plan.authorization_expires_at,
-    ...replaced.map(({ runId, unchanged }) => (unchanged
-      ? "This work order is already running unchanged as run " + runId + "; this start will be refused."
-      : "Starting stops the version still running from this work order: run " + runId)),
-    "Task:",
+    label("work_package") + plan.work_package_id,
+    ...(plan.work_order ? [label("work_order") + decisionLine(t, plan.work_order)] : []),
+    label("owner") + plan.owner,
+    label("breakpoint") + plan.breakpoint,
+    label("allowed_paths") + plan.scope.allowed_paths.join(", "),
+    label("priority") + t("card.priority", { priority: plan.priority, source: source(t, plan.priority_source) }),
+    label("writer") + roleLine(t, plan.writer),
+    label("reviewer") + roleLine(t, plan.reviewer),
+    label("reviewer_mcp") + reviewerMcpLine(t, plan),
+    label("budget") + budgetLine(t, plan),
+    ...(plan.contract_sha256 ? [label("contract") + contractLine(t, plan)] : []),
+    label("expires") + plan.authorization_expires_at,
+    ...replaced.map((entry) => replacedLine(t, entry)),
+    label("task"),
     plan.task,
     "",
   ].join("\n"));
   if (!ask) {
-    process.stdout.write("Needs authorization. If the person says yes, run again: " + again + " --yes\n");
+    process.stdout.write(needsAuthorizationLine(t, again) + "\n");
     return null;
   }
   const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await terminal.question("Authorize this work package? [y/N] ");
+    const answer = await terminal.question(t("workstart.ask"));
     if (!/^y(?:es)?$/i.test(answer.trim())) throw new Error("Work package authorization cancelled by user.");
   } finally {
     terminal.close();

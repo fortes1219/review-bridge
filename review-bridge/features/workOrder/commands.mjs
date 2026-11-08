@@ -9,7 +9,7 @@ import {
   inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, writeJson,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
-import { askYes, confirmWorkStart, contractLine, readiness, startCard } from "./confirmStart.mjs";
+import { askYes, cardTranslator, confirmWorkStart, contractLine, needsAuthorizationLine, readiness, startCard } from "./confirmStart.mjs";
 import { loadContract } from "./contract.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
@@ -140,7 +140,7 @@ export async function planWork({ paths, options, adapter, inspectionAdapter }) {
       plan.task_file ? "工單：" + plan.task_file : "工作包：" + plan.work_package_id,
       "範圍：" + ({ default: "預設（整個專案減禁改清單）", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
       "驗收：" + (plan.test?.kind === "command" ? "會跑 " + plan.test.command + "（profile 核准）" : plan.test?.label || "沒有設定測試"),
-      ...(plan.contract_sha256 ? ["合約：" + contractLine(plan)] : []),
+      ...(plan.contract_sha256 ? ["合約：" + contractLine(await cardTranslator(paths), plan)] : []),
       "plan：" + plan.plan_path,
       "sha：" + plan.plan_sha256,
       // T0-08: native work-start refuses --approve; the human confirms the card at the terminal.
@@ -325,19 +325,21 @@ async function runSteps() {
 async function cardForYes({ paths, planName = null, taskFile, options, again }) {
   const { db, projectId } = await openRecords(paths);
   const card = await cardFor(db, { projectId, fileName: taskFileOf(paths, taskFile) });
+  // The person was stopped here, so it is said in their language (Owner 2026-11-06), as the card is.
+  const t = await cardTranslator(paths);
   const refuse = (line) => { write(line); return null; };
-  if (!card) return refuse("No card was shown for this work order, so there is no yes to run on. Run: " + again + " and show the person the card.");
+  if (!card) return refuse(t("yes.no_card", { again }));
   // A directory's card printed no work order's text, so its yes is not a yes to this one alone.
-  if (card.body.line) return refuse("The last card shown for this work order was its directory's (" + card.body.line.directory + "/), which says yes to the whole list. Run: " + again + " to show the person this one, or start the directory with --yes.");
-  if (card.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse("This card was made by an older Bridge and is not read again. Run: " + again + " and show the person the new card.");
-  if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) return refuse("The work order changed after you saw the card. Run: " + again + " and look again.");
+  if (card.body.line) return refuse(t("yes.directory_card", { directory: card.body.line.directory, again }));
+  if (card.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse(t("yes.old_card", { again }));
+  if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) return refuse(t("yes.changed", { again }));
   const option = optionAgainstCard(card.body, options);
-  if (option) return refuse(option + " is not what the card showed. Run: " + again + " --yes without it, or " + again + " to show the person a new card.");
-  if (await cardUsed(db, card.plan_sha256)) return refuse("This card was already said yes to; one card starts one run. Run: " + again + " and show the person the new card.");
-  if (!(card.authorization_expires_at > new Date())) return refuse("The card was valid until " + card.authorization_expires_at.toISOString() + ". Run: " + again + " and show the person the new card.");
+  if (option) return refuse(t("yes.option", { option, again }));
+  if (await cardUsed(db, card.plan_sha256)) return refuse(t("yes.used", { again }));
+  if (!(card.authorization_expires_at > new Date())) return refuse(t("yes.expired", { until: card.authorization_expires_at.toISOString(), again }));
   const planPath = options.outPath || planFilePath(paths, card.body, planName);
   await writeJson(planPath, card.body);
-  write("Plan from the card: " + shownPath(planPath));
+  write(t("yes.plan_from_card", { path: shownPath(planPath) }));
   return { ...card.body, plan_path: planPath };
 }
 
@@ -383,15 +385,16 @@ async function startFile({ paths, options, adapter, loadAdapter, inspectionAdapt
     : await planOrSay({ paths, options: { ...options, ...planOptions }, command, adapter, inspectionAdapter, again });
   if (!plan) return 1;
   const ready = readiness({ options, adapter, loadAdapter, guard, reviewerCheck, plan, again, checkFailureLines });
+  const t = await cardTranslator(paths);
   write("");
-  write(await startCard(paths, plan));
+  write(await startCard(paths, plan, t));
   await markCardShown(db, plan.plan_sha256);
   const yesGiven = Boolean(options.yes);
   if (!yesGiven) {
-    if (!interactive()) { write("Needs authorization. If the person says yes, run again: " + again + " --yes"); return 1; }
-    if (!(await askYes("Start this work? [y/N] "))) {
+    if (!interactive()) { write(needsAuthorizationLine(t, again)); return 1; }
+    if (!(await askYes(t("card.ask")))) {
       await withdrawCard(db, plan.plan_sha256);
-      write("Not started. Nothing was authorized.");
+      write(t("card.declined"));
       return 1;
     }
   }

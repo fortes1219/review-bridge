@@ -65,7 +65,7 @@ export function doneMessage(target, cwd, url, database, vscodeTasks = null) {
 // project up, running each part through `step(label, work)`.
 export async function runGuide(options, {
   packageRoot, cwd = process.cwd(), interactive, ui = clack, write = () => {},
-  inspectProvider, setUpProject, dataHome, asRoot = runningAsRoot,
+  inspectProvider, setUpProject, dataHome, asRoot = runningAsRoot, reinitialize = async () => null,
 }) {
   for (const key of Object.keys(options)) {
     if (!GUIDE_OPTIONS.has(key)) throw new Error("Unknown option for init: --" + key);
@@ -74,8 +74,13 @@ export async function runGuide(options, {
   const target = path.resolve(cwd, options.target ?? ".");
   const stat = await fsp.lstat(target).catch(() => null);
   if (!stat?.isDirectory() || stat.isSymbolicLink()) throw new Error("The project folder must be an existing, non-symlink folder: " + target);
+  // A folder already set up: with its record in the data folder it is an install, which upgrade moves;
+  // without it, init rebuilds the record and leaves everything else as it is, as git init reinitializes.
   if (fs.existsSync(path.join(target, ".review-bridge"))) {
-    throw new Error("This folder is already set up (" + path.join(target, ".review-bridge") + "). To move it to this version, run: review-bridge upgrade");
+    const reinitialized = await reinitialize(target);
+    if (!reinitialized) throw new Error("This folder is already set up (" + path.join(target, ".review-bridge") + "). To move it to this version, run: review-bridge upgrade");
+    if (!options.json) write("Reinitialized existing Review Bridge setup in " + reinitialized.private_root + "\n");
+    return { ...reinitialized, printed: !options.json };
   }
   if (asRoot()) throw new Error(ROOT_REFUSAL);
 

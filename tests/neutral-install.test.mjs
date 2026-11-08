@@ -16,6 +16,7 @@ import {
   applyNeutralInstall,
   fileSnapshot,
   planNeutralInstall,
+  reinitializeNeutralInstall,
   removeEmptyDirectories,
   rollbackFreshNeutralInstall,
   runtimeFingerprint,
@@ -93,6 +94,36 @@ test("a Git project named by its Windows short path is set up and excluded like 
   const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/bridge.json"], { cwd: root, windowsHide: true });
   assert.equal(ignored.status, 0);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
+});
+
+// git init in an existing repository reinitializes it (git setup.c): what is missing is made, nothing is
+// overwritten. Here the data folder lost the install record (deleted, another machine).
+test("reinit: .review-bridge/ without its install record gets the record back and keeps every file of the person's", async (t) => {
+  const root = await workspace(t);
+  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  const privateRoot = path.join(root, ".review-bridge");
+  assert.equal(await reinitializeNeutralInstall({ target: root }), null, "with its record it is an install, which upgrade moves");
+  await fsp.appendFile(path.join(privateRoot, "rules.md"), "- Mine.\n");
+  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "<!-- bridge:requested_work -->\nBuild a farm.\n");
+  await fsp.rm(path.join(privateRoot, "work-packages", "TEMPLATE.md"));
+  const configText = await fsp.readFile(path.join(privateRoot, "bridge.json"), "utf8");
+  const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" });
+  await fsp.rm(paths.stateRoot, { recursive: true, force: true });
+  const before = new Map(await fileSnapshot(privateRoot));
+
+  const done = await reinitializeNeutralInstall({ target: root });
+  assert.deepEqual(done.wrote, ["work-packages/TEMPLATE.md"], "only what was missing is made");
+  const after = new Map(await fileSnapshot(privateRoot));
+  for (const [name, hash] of before) assert.equal(after.get(name), hash, name + " is as it was");
+  assert.equal(await fsp.readFile(path.join(privateRoot, "bridge.json"), "utf8"), configText);
+  const record = JSON.parse(await fsp.readFile(path.join(paths.stateRoot, "review-bridge-install.json"), "utf8"));
+  const installed = record.installed_files.map(([name]) => name);
+  assert.ok(installed.includes("work-packages/TEMPLATE.md") && installed.includes("work-packages/TEMPLATE.zh-TW.md"), installed.join(", "));
+  for (const mine of ["rules.md", "work-packages/farm.md", "bridge.json"]) assert.equal(installed.includes(mine), false, mine + " is the person's, so upgrade and uninstall keep it");
+  assert.ok(record.reinitialized_at);
+  await verifyNeutralInstall(root);
+  assert.equal(await reinitializeNeutralInstall({ target: root }), null, "once rebuilt, it is an install again");
 });
 
 test("stale or modified plan cannot create neutral state", async (t) => {

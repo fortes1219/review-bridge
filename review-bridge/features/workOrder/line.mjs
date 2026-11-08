@@ -17,7 +17,7 @@ import { localTimestamp } from "../../utils/dates.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { workOrderDirectory } from "../../utils/paths.mjs";
 import { nfc } from "../../utils/workOrderName.mjs";
-import { askYes, readiness } from "./confirmStart.mjs";
+import { askYes, needsAuthorizationLine, readiness } from "./confirmStart.mjs";
 import { deliverOutcome } from "./delivery.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
 import {
@@ -181,62 +181,65 @@ async function surveyDirectory({ paths, records, directory, check }) {
 const rowKind = (row) => (row.problem ? "not_work_order" : row.deliveredAt ? "delivered" : row.plan ? "to_run" : "appeared");
 
 // The card (卡的樣子 in RC3-PIPE-01): a list, and no work order's text.
-function cardLines({ directory, rows, place, uncommitted }) {
+function cardLines({ t, directory, rows, place, uncommitted }) {
   const count = (kind) => rows.filter((row) => rowKind(row) === kind).length;
   const width = Math.max(0, ...rows.map((row) => row.name.length)) + 2;
   const toRun = rows.filter((row) => rowKind(row) === "to_run");
+  const skip = t("line.card.skip");
   const beside = (row) => {
-    if (rowKind(row) === "not_work_order") return "not a work order (" + row.problem + ")   (skip)";
-    if (rowKind(row) === "delivered") return "delivered " + localTimestamp(row.deliveredAt).slice(0, 16) + "   (skip)";
-    if (rowKind(row) === "appeared") return "appeared after the card   (skip)";
+    if (rowKind(row) === "not_work_order") return t("line.card.not_work_order", { problem: row.problem }) + skip;
+    if (rowKind(row) === "delivered") return t("line.card.delivered", { at: localTimestamp(row.deliveredAt).slice(0, 16) }) + skip;
+    if (rowKind(row) === "appeared") return t("line.card.appeared") + skip;
     const before = toRun[toRun.indexOf(row) - 1];
     const notes = [
-      ...(row.step !== null && before?.step === row.step ? ["same number as " + before.name + "; runs after it, by name"] : []),
-      ...(row.interrupted ? ["interrupted last time; starts a new run"] : []),
-      ...(row.plan.work_order?.renamed_from ? ["reads as " + row.plan.work_order.renamed_from + " renamed; recorded as the same work order"] : []),
+      ...(row.step !== null && before?.step === row.step ? [t("line.card.same_step", { name: before.name })] : []),
+      ...(row.interrupted ? [t("line.card.interrupted")] : []),
+      ...(row.plan.work_order?.renamed_from ? [t("line.card.renamed", { from: row.plan.work_order.renamed_from })] : []),
     ];
-    return "contract sha256 " + row.plan.contract_sha256.slice(0, 4) + "…, " + row.plan.contract_conditions + " condition(s)" + notes.map((note) => "   (" + note + ")").join("");
+    return t("line.card.contract", { sha: row.plan.contract_sha256.slice(0, 4), count: row.plan.contract_conditions }) + notes.map((note) => t("line.card.note", { note })).join("");
   };
   const appeared = count("appeared");
   return [
-    "Directory " + directory.shown + "  — " + rows.length + " file(s): " + count("delivered") + " delivered, " + count("not_work_order") + " not a work order, "
-      + (appeared ? appeared + " appeared after the card, " : "") + toRun.length + " to run",
+    t("line.card.header", {
+      directory: directory.shown, files: rows.length, delivered: count("delivered"), not_work_order: count("not_work_order"),
+      appeared: appeared ? t("line.card.header.appeared", { count: appeared }) : "", to_run: toRun.length,
+    }),
     "",
     ...rows.map((row) => "  " + row.name.padEnd(width) + beside(row)),
     "",
     ...(toRun.length ? [
-      ...place.cardLines,
-      ...(uncommitted?.length ? ["Working tree has " + uncommitted.length + " uncommitted file(s); they will be listed in each result's third list."] : []),
-    ] : ["Nothing to run."]),
+      ...place.cardLines.map((key) => t(key)),
+      ...(uncommitted?.length ? [t("line.card.uncommitted", { count: uncommitted.length })] : []),
+    ] : [t("line.card.nothing")]),
   ];
 }
 
-// Where the line will run; the one place that says it. RC3-WT-01 answers with a worktree here when the
-// working tree is taken, after the same-directory refusal and before the card.
+// Where the line will run; the one place that says it, as language-pack keys. RC3-WT-01 answers with a
+// worktree here when the working tree is taken, after the same-directory refusal and before the card.
 export function whereLineRuns() {
-  return { mode: "in_place", cardLines: ["Runs in place, one after another. A failed step does not stop the next."] };
+  return { mode: "in_place", cardLines: ["line.card.in_place"] };
 }
 
 // E8, E10 for a card of many: --yes takes the card as printed, found in the records, whole or not at
 // all. Its plans are the ones sharing the id of the latest card printed for this directory's files.
-async function cardForYes({ paths, records, directory, rows, options, again }) {
+async function cardForYes({ t, paths, records, directory, rows, options, again }) {
   const refuse = (line) => { write(line); return null; };
   const cards = await latestCardsOfFiles(records.db, { projectId: records.projectId, files: rows.map((row) => row.taskFile) });
   const latest = cards.reduce((newest, card) => (!newest || card.shown_at > newest.shown_at ? card : newest), null);
-  if (!latest?.body.line || latest.body.line.directory !== directory.name) return refuse("No card was shown for this directory, so there is no yes to run on. Run: " + again + " and show the person the card.");
-  if (latest.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse("This card was made by an older Bridge and is not read again. Run: " + again + " and show the person the new card.");
+  if (!latest?.body.line || latest.body.line.directory !== directory.name) return refuse(t("line.yes.no_card", { again }));
+  if (latest.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse(t("yes.old_card", { again }));
   const onCard = cards.filter((card) => card.body.line?.id === latest.body.line.id);
-  const changed = "The directory changed after you saw the card. Run: " + again + " and look again.";
+  const changed = t("line.yes.changed", { again });
   if (onCard.length !== latest.body.line.total) return refuse(changed);
   for (const card of onCard) {
     const row = rows.find((candidate) => candidate.taskFile === card.file);
     if (row.text === null || digest(row.text.trim()) !== card.content_sha256) return refuse(changed);
     const option = optionAgainstCard(card.body, options);
-    if (option) return refuse(option + " is not what the card showed. Run: " + again + " --yes without it, or " + again + " to show the person a new card.");
-    if (!(card.authorization_expires_at > new Date())) return refuse("The card was valid until " + card.authorization_expires_at.toISOString() + ". Run: " + again + " and show the person the new card.");
+    if (option) return refuse(t("yes.option", { option, again }));
+    if (!(card.authorization_expires_at > new Date())) return refuse(t("yes.expired", { until: card.authorization_expires_at.toISOString(), again }));
   }
   const shas = onCard.map((card) => card.plan_sha256);
-  if (await anyCardUsed(records.db, shas)) return refuse("This card was already said yes to; one card starts its line once. Run: " + again + " and show the person the new card.");
+  if (await anyCardUsed(records.db, shas)) return refuse(t("line.yes.used", { again }));
   const plans = [];
   for (const card of [...onCard].sort((left, right) => left.body.line.position - right.body.line.position)) {
     const planPath = planFilePath(paths, card.body);
@@ -340,7 +343,7 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
   const t = await createTranslator(await resolveLocale(paths));
   let plans;
   if (options.yes) {
-    plans = await cardForYes({ paths, records, directory, rows, options, again });
+    plans = await cardForYes({ t, paths, records, directory, rows, options, again });
     if (!plans) return 1;
   } else {
     const pending = rows.filter((row) => !row.problem && !row.deliveredAt);
@@ -365,16 +368,16 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
   const first = plans[0];
   const uncommitted = first ? uncommittedNow(paths.repoRoot) : null;
   write("");
-  for (const line of cardLines({ directory, rows, place, uncommitted })) write(line);
+  for (const line of cardLines({ t, directory, rows, place, uncommitted })) write(line);
   if (!first) return 0;
   const withdraw = (list) => withdrawCards(records.db, list.map((plan) => plan.plan_sha256));
   const ready = readiness({ options, adapter, loadAdapter, guard, reviewerCheck, plan: first, again, checkFailureLines: tools.checkFailureLines });
   await markCardsShown(records.db, plans.map((plan) => plan.plan_sha256));
   if (!options.yes) {
-    if (!tools.interactive()) { write("Needs authorization. If the person says yes, run again: " + again + " --yes"); return 1; }
-    if (!(await askYes("Run these " + plans.length + " in this order? [y/N] "))) {
+    if (!tools.interactive()) { write(needsAuthorizationLine(t, again)); return 1; }
+    if (!(await askYes(t("line.card.ask", { count: plans.length })))) {
       await withdraw(plans);
-      write("Not started. Nothing was authorized.");
+      write(t("card.declined"));
       return 1;
     }
   }
@@ -397,7 +400,7 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
     const toRun = rows.filter((row) => row.plan);
     const now = await latestRunsOfFiles(records.db, { projectId: records.projectId, files: toRun.map((row) => row.taskFile) });
     if (toRun.some((row) => (now.get(row.taskFile)?.run_id ?? null) !== row.latestRun)) {
-      write("The directory changed after you saw the card: a work order on it ran meanwhile. Nothing was authorized. Run: " + again + " and look again.");
+      write(t("line.yes.ran_meanwhile", { again }));
       return 1;
     }
     return await runLine({

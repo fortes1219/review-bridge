@@ -1,4 +1,4 @@
-# Review Bridge Runtime 0.2.0-rc.2
+# Review Bridge Runtime
 
 This runtime is installed through the checksum-gated package installer. Do not copy runtime state between projects.
 

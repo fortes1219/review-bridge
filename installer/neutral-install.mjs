@@ -16,6 +16,7 @@ import {
   policyIdentity,
 } from "../review-bridge/service/index.mjs";
 import { bridgeDataHome } from "../review-bridge/service/database/dataHome.mjs";
+import { DEFAULT_LOCALE, systemLocale } from "../review-bridge/features/workOrder/i18n.mjs";
 import { projectLogRoot, projectStateRoot, readProjectId } from "../review-bridge/utils/paths.mjs";
 import {
   AGENT_COMMAND_RELATIVE, agentEntriesPending, agentEntriesState, agentFilesState, planAgentEntries, releaseAgentEntries, undoAgentFiles, writeAgentEntries,
@@ -190,7 +191,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
 // project_id is the project's identity in the person's database (one database for all their
 // projects); the folder's path is only where it was last seen. A copied folder carries the same id;
 // init in the copy gives it its own (Owner 2026-10-25).
-function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { port: DEFAULT_WATCH_PORT, strict_port: false }, retentionDays = DEFAULT_RETENTION_DAYS }) {
+function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { port: DEFAULT_WATCH_PORT, strict_port: false }, retentionDays = DEFAULT_RETENTION_DAYS, locale = DEFAULT_LOCALE }) {
   return {
     schema_version: 4,
     project_id: projectId,
@@ -203,8 +204,8 @@ function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { p
     requires_human_authorization: true,
     watch: { port: watch.port, strict_port: watch.strict_port },
     retention: { days: retentionDays },
-    // The language pack for result files, notifications and the stdout summary.
-    locale: "en",
+    // The language pack for cards, result files, notifications and the stdout summary: the system's at init.
+    locale,
     // T0-06 G1.3: the profile-approved verification rules; work-plan picks the test command from here.
     test: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
     readiness: { reviewer_readonly_proven: "not_run" },
@@ -546,6 +547,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
       projectId, profileId: plan.profile.id, roles: plan.roles, profile,
       watch: { port: plan.watch.port, strict_port: plan.watch.strict_port },
       retentionDays: plan.retention?.days ?? DEFAULT_RETENTION_DAYS,
+      locale: await systemLocale(),
     }));
     await writeJson(inPrivate(privateRoot, "policy.override.json"), projectPolicyOverride(profile));
     await fsp.mkdir(path.join(privateRoot, "work-packages"), { recursive: true });
@@ -584,6 +586,77 @@ async function applyNeutralInstallLocked(plan, claimed) {
     }
     throw new Error("Neutral install rolled back: " + error.message);
   }
+}
+
+// What upgrade and uninstall say when .review-bridge/ is here but its record is not: init rebuilds it.
+const NO_RECORD = ".review-bridge/ is here, but its install record is not in Bridge's data folder (the folder was deleted, or this is another machine). Run: review-bridge init — it rebuilds the record and keeps your settings, work orders and results.";
+
+// init where .review-bridge/ is and its install record in the data folder is not (the data folder deleted,
+// another machine, a reinstalled system), the way `git init` reinitializes an existing repository (git
+// setup.c, "Reinitialized existing Git repository"): what is missing is made, nothing there is
+// overwritten. The person's settings, rules, work orders and results stay as they are. The record counts as
+// installed only the files that are exactly what this version ships, or that this call wrote; every other
+// file is the person's, so upgrade and uninstall keep it. Returns null when the record is there: that is
+// an install, and upgrade is the way to move it.
+export async function reinitializeNeutralInstall({ target }) {
+  const root = path.resolve(target);
+  return await withInstallLock(root, async () => {
+    const privateRoot = path.join(root, privateName);
+    const configPath = inPrivate(privateRoot, CONFIG_RELATIVE);
+    const config = await readJsonOptional(configPath).catch(() => null);
+    if (!config?.project_id) {
+      throw new Error(".review-bridge/ is here but its bridge.json has no project id, so Bridge cannot tell which project it was. Move .review-bridge/ aside and run: review-bridge init");
+    }
+    const layout = await installLayout(root);
+    if (await statOptional(installPath(layout, layout.manifest))) return null;
+    for (const name of STATE_FOLDERS) await fsp.mkdir(path.join(layout.stateRoot, name), { recursive: true });
+    await fsp.mkdir(path.join(privateRoot, "work-packages"), { recursive: true });
+    const wrote = [];
+    const fill = async (relative, write) => {
+      if (await statOptional(inPrivate(privateRoot, relative))) return;
+      await write(inPrivate(privateRoot, relative));
+      wrote.push(relative);
+    };
+    for (const template of TEMPLATES) await fill(template.relative, (file) => fsp.copyFile(templateSource(template), file));
+    await fill("rules.md", (file) => fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), file));
+    await fill("policy.override.json", async (file) => writeJson(file, projectPolicyOverride(await resolveProfile(root, config.profile_id ?? "auto"))));
+    // Kept out of Git as init does; a project already keeping it out is left as it is, and then the
+    // exclusion is not this record's to remove.
+    const boundary = gitBoundary(root);
+    let gitExclusion = null;
+    if (boundary.repository && !boundary.ignored) {
+      await assertSafeExcludePath(boundary.excludePath);
+      const before = (await fsp.readFile(boundary.excludePath).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)))) || Buffer.alloc(0);
+      const addition = (before.length && before[before.length - 1] !== 10 ? "\n" : "") + "# Review Bridge local state\n" + boundary.pattern + "\n";
+      await fsp.mkdir(path.dirname(boundary.excludePath), { recursive: true });
+      await fsp.writeFile(boundary.excludePath, Buffer.concat([before, Buffer.from(addition, "utf8")]));
+      if (!gitBoundary(root).ignored) throw new Error("Local Git exclusion did not take effect.");
+      gitExclusion = { path: boundary.excludePath, pattern: boundary.pattern, added_prefix_newline: addition.startsWith("\n") };
+    }
+    await writeAgentEntries();
+    const shipped = new Map([
+      ...TEMPLATES.map((template) => [template.relative, templateSource(template)]),
+      ["rules.md", path.join(packageRoot, "project-templates", "rules.md")],
+    ]);
+    const shippedHash = new Map();
+    for (const [relative, source] of shipped) shippedHash.set(relative, sha256(await fsp.readFile(source)));
+    const installedFiles = (await fileSnapshot(privateRoot)).filter(([name, hash]) => wrote.includes(name) || shippedHash.get(name) === hash);
+    await writeJson(installPath(layout, layout.manifest), {
+      schema_version: 1,
+      layout: "neutral",
+      profile_id: config.profile_id ?? null,
+      plan_sha256: null,
+      reinitialized_at: new Date().toISOString(),
+      runtime_sha256: await runtimeFingerprint(),
+      bridge_version: await runtimeVersion(sourceRuntime),
+      policy_identity: await sourcePolicyIdentity(),
+      work_template_sha256: await shippedTemplateHashes(),
+      rules_sha256: shippedHash.get("rules.md"),
+      installed_files: installedFiles,
+      git_exclusion: gitExclusion,
+    });
+    return { reinitialized: true, target: root, private_root: privateRoot, wrote };
+  });
 }
 
 export async function rollbackFreshNeutralInstall(plan) {
@@ -1021,7 +1094,7 @@ async function planFreshUninstall(root, backupRootOverride) {
   const manifestBytes = layout ? await fsp.readFile(installPath(layout, layout.manifest)).catch(() => null) : null;
   if (!manifestBytes) {
     throw new Error((await statOptional(privateRoot))
-      ? "This is not a Review Bridge installation in the .review-bridge/ layout."
+      ? NO_RECORD
       : "No Review Bridge installation here. If an earlier uninstall used --backup-root, run uninstall again with that --backup-root.");
   }
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -1612,8 +1685,9 @@ function sameValue(left, right) {
   return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
+// The version has one source, the package's package.json, which npm publishes; nothing else writes one.
 async function runtimeVersion(runtimeRoot) {
-  const manifest = await readJsonOptional(path.join(runtimeRoot, "templates", "PACKAGE_MANIFEST.json")).catch(() => null);
+  const manifest = await readJsonOptional(path.join(runtimeRoot, "..", "package.json")).catch(() => null);
   return typeof manifest?.version === "string" ? manifest.version : null;
 }
 
@@ -1714,7 +1788,7 @@ async function planFreshUpgrade(root, backupRootOverride) {
   const manifestBytes = layout ? await fsp.readFile(installPath(layout, layout.manifest)).catch(() => null) : null;
   if (!manifestBytes) {
     throw new Error((await statOptional(privateRoot))
-      ? "This is not a Review Bridge installation in the .review-bridge/ layout."
+      ? NO_RECORD
       : "No Review Bridge installation here; install it with init first.");
   }
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
