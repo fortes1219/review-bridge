@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  activeLineSteps, activeRuns, assertRunResumable, bridgeDataHome, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
+  activeLineSteps, activeRuns, appendIoEvent, assertRunResumable, bridgeDataHome, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
   inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, updateGraph, writeJson,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
@@ -185,6 +185,21 @@ function shownPath(file) {
   return /\s/.test(shown) ? "\"" + shown + "\"" : shown;
 }
 
+// `update` is the graph's own (tests give another). Nothing here stops the run: a record that cannot be
+// written is said too, and the run's own next record meets the same database.
+export async function updateRunGraph(paths, records, runId, { update = updateGraph, record = appendIoEvent, write = (text) => process.stderr.write(text) } = {}) {
+  try {
+    await update({ db: records.db, projectId: records.projectId, projectRoot: paths.repoRoot, dataHome: bridgeDataHome() });
+    return null;
+  } catch (error) {
+    const reason = String(error?.message || error);
+    const t = await cardTranslator(paths);
+    write(t("start.graph_not_updated", { reason }) + "\n");
+    await record(paths, runId, { event: "graph_update", updated: false, reason }).catch((recordError) => write(String(recordError?.message || recordError) + "\n"));
+    return reason;
+  }
+}
+
 // Authorizes the approved plan and runs it to its end; every way out delivers once. A work order's
 // start is one database transaction around the file authorization (recordStart): the work order and
 // its version, the authorization and its claim. When that transaction fails after the run was made,
@@ -221,15 +236,10 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
     throw error;
   }
   // The project's graph is brought up to date before the writer's first call, from the files Git says
-  // changed (T0-GRAPH-01). The work does not depend on it: a graph that cannot be updated is said, and
-  // the writer and reviewer read it as it was.
-  if (records) {
-    try {
-      await updateGraph({ db: records.db, projectId: records.projectId, projectRoot: paths.repoRoot, dataHome: bridgeDataHome() });
-    } catch (error) {
-      process.stderr.write("The project's graph was not brought up to date (" + String(error?.message || error) + "); the writer and reviewer read it as it was. Run: review-bridge graph\n");
-    }
-  }
+  // changed. The work does not depend on it: a graph that cannot be updated goes into this run's records
+  // (the result shows it beside the verdicts, so the person knows the reviewer judged on the old graph),
+  // is said in the project's language, and the writer and reviewer read it as it was.
+  if (records) await updateRunGraph(paths, records, authorization.run.run_id);
   // The replaced version is delivered here too, in case its own work-start is gone.
   for (const runId of authorization.superseded) {
     await deliverOutcome({ paths, runId, adapter, notify: true })

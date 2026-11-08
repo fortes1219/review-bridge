@@ -6,7 +6,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { recordCard } from "../features/workOrder/workOrderRecords.mjs";
-import { applyMigrations, migrationFiles, MIGRATIONS_DIR } from "../service/database/migrate.mjs";
+import { createTranslator } from "../features/workOrder/i18n.mjs";
+import { applyMigrations, migrationFiles, migrationState, MIGRATIONS_DIR } from "../service/database/migrate.mjs";
+import { failureLine, UNKNOWN_MIGRATIONS_CODE, UnknownMigrationsError } from "../service/database/serverErrors.mjs";
 import { connect, ensureCluster, postgresBinaries, startServer, stopServer } from "../service/database/postgresServer.mjs";
 
 // RC3-BLOCKER-01 step 2: the migrations bring an empty database to the tables the records use; a
@@ -63,7 +65,7 @@ test("an upgrade from a database with the contract gatherings drops those two ta
   assert.ok((await tables(client)).includes("contract_gatherings"));
   const at = new Date().toISOString();
   await client.query("insert into projects (project_id, root_path, name, created_at, last_activity_at) values ('00000000-0000-4000-8000-000000000001', 'C:/farm', 'farm', $1, $1)", [at]);
-  assert.deepEqual(await applyMigrations(client), ["20261108012648_drop_contract_gatherings.sql", "20261108195620_project_graph.sql"]);
+  assert.deepEqual(await applyMigrations(client), ["20261108012648_drop_contract_gatherings.sql", "20261108195620_project_graph.sql", "20261108201337_graph_update_event.sql"]);
   const after = await tables(client);
   assert.equal(after.includes("contract_gatherings") || after.includes("contract_gathering_events"), false);
   assert.deepEqual((await client.query("select name, root_path from projects")).rows, [{ name: "farm", root_path: "C:/farm" }]);
@@ -121,6 +123,36 @@ test("a migration file not named <yyyymmddhhmmss>_<what>.sql is refused, the ear
     await assert.rejects(migrationFiles(dir), new RegExp("Migration file name is not <yyyymmddhhmmss>_<what>\\.sql \\(UTC\\): " + name.replaceAll(".", "\\.")), name);
   }
 });
+
+// Owner 2026-11-09: a released migration is never renamed or removed, so a database that has had one this
+// Bridge does not have was opened by a newer Bridge. Refused before anything is backed up or applied, as
+// Knex's validateMigrationList refuses before it migrates; said in the project's language.
+test("a database that has had a migration this Bridge does not have is refused before any backup or migration, and said in the project's language", async (t) => {
+  const dir = await migrationCopy(t);
+  const names = (await migrationFiles(dir)).map((file) => file.name);
+  const sent = [];
+  const client = (applied) => ({
+    query: async (sql) => {
+      sent.push(sql);
+      if (sql.startsWith("select to_regclass")) return { rows: [{ name: "schema_migrations" }] };
+      if (sql.startsWith("select name from schema_migrations")) return { rows: applied.map((name) => ({ name })) };
+      throw new Error("nothing else may be sent: " + sql);
+    },
+  });
+  const newer = [...names, "20991231235959_from_a_newer_bridge.sql"];
+  for (const call of [() => migrationState(client(newer), { dir }), () => applyMigrations(client(newer), { dir })]) {
+    sent.length = 0;
+    await assert.rejects(call(), (error) => error instanceof UnknownMigrationsError && error.code === UNKNOWN_MIGRATIONS_CODE
+      && deepEqualNames(error.names, ["20991231235959_from_a_newer_bridge.sql"]));
+    assert.deepEqual(sent.filter((sql) => !/^select (to_regclass|name from schema_migrations)/.test(sql)), [], "nothing created, locked or applied");
+  }
+  assert.deepEqual(await migrationState(client(names.slice(0, 3)), { dir }), { applied: 3, pending: names.slice(3) }, "an older database is an upgrade, as before");
+  const error = new UnknownMigrationsError(["20991231235959_from_a_newer_bridge.sql"]);
+  assert.equal(failureLine(error, await createTranslator("zh-TW")), "這個資料庫被較新版的 Review Bridge 改過（遷移 20991231235959_from_a_newer_bridge.sql，這一版沒有），所以這一版不開它，裡面什麼都沒動。請重新安裝較新的版本：npm i -g review-bridge@latest");
+  assert.match(failureLine(error, await createTranslator("en")), /^This database was changed by a newer Review Bridge \(migrations 20991231235959_from_a_newer_bridge\.sql, which this version does not have\)/);
+  assert.match(failureLine(new Error("wrapped", { cause: error }), null), /^Review bridge failed closed: wrapped/, "without the translations, the message as it is");
+});
+const deepEqualNames = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
 
 test("the migrations are named in time order: each one's 14 digits follow the one before it", async () => {
   const names = (await migrationFiles()).map((file) => file.name);

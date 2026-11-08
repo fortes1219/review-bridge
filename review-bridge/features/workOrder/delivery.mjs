@@ -380,6 +380,9 @@ function acceptanceSection({ t, contract, events, writer, review, gate }) {
   }));
   if (version?.kind === "git") lines.push(t(version.dirty ? "result.acceptance.version.dirty" : "result.acceptance.version.git", { head: String(version.head || "none").slice(0, 12) }));
   else if (version) lines.push(t("result.acceptance.version.unknown"));
+  // The project's graph the reviewer asked was not brought up to date at this run's start.
+  const graph = last(events, "graph_update");
+  if (graph && graph.updated === false) lines.push(t("result.acceptance.graph_not_updated", { reason: graph.reason }));
   return lines;
 }
 

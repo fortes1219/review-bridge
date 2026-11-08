@@ -7,6 +7,8 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { UnknownMigrationsError } from "./serverErrors.mjs";
+
 export const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "migrations");
 // <UTC yyyymmddhhmmss>_<what>.sql, as Knex (util/timestamp.js, MigrationGenerator `_getNewMigrationName`)
 // and Prisma (schema-engine create_migration.rs, `{timestamp}_{migration_name}`) name theirs; the name
@@ -27,18 +29,34 @@ export async function migrationFiles(dir = MIGRATIONS_DIR) {
   return files;
 }
 
+// The names the database has had and this Bridge does not have refuse it before anything else, as Knex's
+// validateMigrationList does before it migrates (Migrator.js `latest`): a released migration is never
+// renamed or removed, so such a name means a newer Bridge used this database.
+function refuseUnknown(files, appliedNames) {
+  const known = new Set(files.map((file) => file.name));
+  const unknown = appliedNames.filter((name) => !known.has(name)).sort();
+  if (unknown.length) throw new UnknownMigrationsError(unknown);
+}
+
+async function appliedNames(client) {
+  const table = (await client.query("select to_regclass('public.schema_migrations') as name")).rows[0].name;
+  return table ? (await client.query("select name from schema_migrations")).rows.map((row) => row.name) : [];
+}
+
 // The migration files this database has not had yet, and how many it has had: one that has had none
 // is new, so an upgrade is a database with some applied and some still to apply.
 export async function migrationState(client, { dir = MIGRATIONS_DIR } = {}) {
   const files = await migrationFiles(dir);
-  const table = (await client.query("select to_regclass('public.schema_migrations') as name")).rows[0].name;
-  const applied = new Set(table ? (await client.query("select name from schema_migrations")).rows.map((row) => row.name) : []);
+  const names = await appliedNames(client);
+  refuseUnknown(files, names);
+  const applied = new Set(names);
   return { applied: applied.size, pending: files.filter((file) => !applied.has(file.name)).map((file) => file.name) };
 }
 
 // Returns the names applied by this call.
 export async function applyMigrations(client, { dir = MIGRATIONS_DIR } = {}) {
   const files = await migrationFiles(dir);
+  refuseUnknown(files, await appliedNames(client));
   await client.query("create table if not exists schema_migrations ("
     + "name text primary key, sha256 text not null check (sha256 ~ '^[0-9a-f]{64}$'), applied_at timestamptz not null default now())");
   const applied = [];

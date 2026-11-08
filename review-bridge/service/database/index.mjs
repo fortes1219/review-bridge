@@ -8,6 +8,7 @@ import { BackupRefusedError, backupDatabase, runLines, runningRuns } from "./bac
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
 import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
+import { UnknownMigrationsError } from "./serverErrors.mjs";
 import {
   clearOldServer, clusterPaths, connect, connectionSettings, dataDirectoryProblem, ensureCluster, postgresBinaries, serverState, startServer, stopServer,
 } from "./postgresServer.mjs";
@@ -105,8 +106,9 @@ export async function openDatabase({ dataHome = bridgeDataHome(), migrationsDir 
   if (!opened.has(dataHome)) {
     opened.set(dataHome, open(dataHome, migrationsDir).catch((error) => {
       opened.delete(dataHome);
-      // A refusal to upgrade while a run is running is said as it is, not as a database gone away.
-      if (error instanceof BackupRefusedError) throw error;
+      // A refusal to upgrade while a run is running, or to open a database a newer Bridge migrated, is said
+      // as it is, not as a database gone away.
+      if (error instanceof BackupRefusedError || error instanceof UnknownMigrationsError) throw error;
       throw new DatabaseUnavailableError(error, databaseRoot(dataHome));
     }));
   }

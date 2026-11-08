@@ -12,7 +12,13 @@ import test from "node:test";
 
 import * as napi from "@ast-grep/napi";
 
+import { fileURLToPath } from "node:url";
+
 import { doneMessage } from "../../installer/install-guide.mjs";
+import { updateRunGraph } from "../features/workOrder/commands.mjs";
+import { composeSections } from "../features/workOrder/delivery.mjs";
+import { createTranslator } from "../features/workOrder/i18n.mjs";
+import { getBridgePaths } from "../utils/paths.mjs";
 import { graphTools } from "../features/graph/graphMcp.mjs";
 import { buildProbeArgs, evaluateProbe } from "../features/setupCheck/reviewerProbe.mjs";
 import { ACCESS_ARGS, mcpConfigFor, readOnlyArgs } from "../service/agentCli/claude.mjs";
@@ -286,6 +292,34 @@ test("the MCP tools answer one page at a time from the graph, say when there is 
   assert.equal(last.next, null);
   const broken = graphTools({ projectId: "p", db: async () => { throw new Error("connect ECONNREFUSED"); } });
   assert.match((await broken.graph_state({})).content[0].text, /^The graph could not be read: connect ECONNREFUSED/);
+});
+
+test("a graph that cannot be brought up to date at a start goes into the run's records, and the result says it beside the verdicts", async (t) => {
+  const root = await tempDir(t);
+  await files(root, { ".review-bridge/bridge.json": JSON.stringify({ project_id: "00000000-0000-4000-8000-000000000001", locale: "zh-TW" }) });
+  const paths = getBridgePaths(root, path.join(path.dirname(fileURLToPath(import.meta.url)), ".."), { privateRootName: ".review-bridge" });
+  const recorded = [];
+  let written = "";
+  const reason = await updateRunGraph(paths, { db: {}, projectId: "p" }, "run-0001", {
+    update: async () => { throw new Error("Git could not answer `git diff`"); },
+    record: async (_paths, runId, event) => { recorded.push([runId, event]); },
+    write: (text) => { written += text; },
+  });
+  assert.equal(reason, "Git could not answer `git diff`");
+  assert.deepEqual(recorded, [["run-0001", { event: "graph_update", updated: false, reason }]]);
+  assert.equal(written, "專案的 graph 沒有更新（Git could not answer `git diff`）；writer 與 reviewer 會查更新前的 graph，結果檔會寫明。要重讀整個專案：review-bridge graph\n");
+  assert.equal(await updateRunGraph(paths, { db: {}, projectId: "p" }, "run-0001", { update: async () => ({ updated: true }), record: async () => assert.fail("nothing to record") }), null);
+
+  const tr = await createTranslator("zh-TW");
+  const events = [
+    { event: "acceptance", rows: [{ id: "AC1", result: "proven", statement: "The farm is visible.", verdict: "pass", evidence: "farm.ts:3" }], review_version: { kind: "git", head: "abc123", dirty: false } },
+    { event: "graph_update", updated: false, reason },
+  ];
+  const run = { run_id: "run-0001", status: "completed", conclusion: "success", closed_reason: null, closed_at: "2026-11-09T00:00:00.000Z", updated_at: "2026-11-09T00:00:00.000Z" };
+  const sections = composeSections({ t: tr, run, workPackage: { work_package_id: "wo", budget: { rounds: 2 }, scope: {} }, plan: null, events, delta: null });
+  assert.equal(sections.acceptance.at(-1), "開工時專案的 graph 沒有更新（Git could not answer `git diff`）：writer 與 reviewer 查的是這次改動之前的 graph。");
+  const without = composeSections({ t: tr, run, workPackage: { work_package_id: "wo", budget: { rounds: 2 }, scope: {} }, plan: null, events: events.slice(0, 1), delta: null });
+  assert.doesNotMatch(without.acceptance.join("\n"), /graph/, "an up-to-date graph adds no line");
 });
 
 test("the writer and the reviewer are given Bridge's graph server, by name, and the read-only check runs with it", async (t) => {

@@ -18,6 +18,9 @@ export const IO_EVENT_TYPES = Object.freeze([
   "writer.result", "review.input", "review.result", "recheck",
   "test_result", "fix.input", "contract.translation", "contract.check", "contract.sealed", "acceptance",
   "notified", "delivery_skipped",
+  // The project's graph could not be brought up to date before the writer's first call: the writer and
+  // the reviewer read it as it was, and the result says so beside the verdicts.
+  "graph_update",
 ]);
 
 export function ioEventFile(paths, runId) {

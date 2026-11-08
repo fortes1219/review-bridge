@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Your database is backed up, then migrated.** The first command after you install this version backs up your database before it applies this version's migrations, and prints one line: `Backed up the database to <folder> before upgrading it.` The backup is refused while a run is running; let it end or stop it, then run the command again. Backups are in `backups/database/<time>/` under Bridge's data folder. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
+- **Migrations in this version:**
+  - `20261108012648_drop_contract_gatherings.sql` drops `contract_gatherings` and `contract_gathering_events`, which no step uses any more, and the `test` column of `acceptance_rows`.
+  - `20261108195620_project_graph.sql` adds the project graph's tables: `graph_states`, `graph_files`, `graph_definitions`, `graph_references`, `graph_imports`.
+  - `20261108201337_graph_update_event.sql` lets a run record that its project graph could not be brought up to date (`graph_update`).
+  - Every migration file was renamed before this release to `<UTC yyyymmddhhmmss>_<what>.sql`, the form Knex and Prisma use, with the time each was first committed. A database made by a development build before the rename cannot be migrated across it; delete it and let Bridge make a new one. From this release on, a migration file is never renamed or removed; a change to a table is a new migration.
+- **Do not go back to an earlier version.** A Review Bridge that finds migrations in your database that it does not have refuses to open it, names them, and changes nothing. To go back, restore the backup made before the upgrade.
+- **PostgreSQL stays at major version 18** (`embedded-postgres` 18). Moving to another major version of PostgreSQL needs its own steps, a dump and a restore, and will come with them; this version does not do it.
+
 ### Added
 
 - `init` reads the project's code into a graph in your database: for each file in JavaScript, TypeScript (and `.vue` script blocks), Python, Go, Rust, Java, Kotlin, C++ or C#, what it defines, which names it refers to, and where each import leads. It shows its progress and ends by saying how many files, definitions, references and imports it read, and naming every file it could not read whole. Nothing is written in the project; the parsers for languages other than JavaScript and TypeScript are installed by npm into Bridge's data folder the first time a project needs them. In a pnpm or npm workspace it reads the package and the workspace packages it depends on. `start` re-reads only the files Git says changed since; `review-bridge graph` reads the whole project again. The writer and the reviewer ask the graph through Bridge's own read-only MCP server (`review-bridge-graph`) instead of searching the files.
