@@ -104,10 +104,20 @@ function decided(kind, workOrderId, title, latest, text) {
 // records last saw is the work order, the other a copy, which is a new one. No content is compared (git's
 // similarity only shows a rename; it is no identity). `fileName` is the file's path in the project as
 // canonicalTaskFile names it, `text` its sealed text (sealedText) and `id` the id its front matter holds;
-// `update` (a work order id) and `asNew` are how the person or an agent overrides it.
+// `update` (a work order id) and `asNew` are how the person or an agent overrides it. `file_id` is the id
+// the front matter held when the card was made: the yes takes the card only while the file still holds it
+// (cardStillMatches), so the card and the yes know a work order by the same rule.
 export async function identifyWorkOrder(db, options) {
   const decision = await decide(db, options);
-  return { ...decision, file: options.fileName, ...(options.asNew ? { as_new: true } : {}) };
+  return { ...decision, file: options.fileName, file_id: options.id ?? null, ...(options.asNew ? { as_new: true } : {}) };
+}
+
+// At the yes, the same rule as the card's (Fortes 2026-11-09): the file's front matter id is what it was
+// when the card was made. A file that gained one since (another card's yes wrote it) is that work order
+// now, not the new one this card shows; --as-new is meant new and is taken as shown.
+export function cardStillMatches(workOrder, raw) {
+  if (!workOrder || workOrder.as_new) return true;
+  return (workOrderIdOf(raw) ?? null) === (workOrder.file_id ?? null);
 }
 
 // Whether the file the records last saw for a work order still holds that work order's id.
@@ -115,6 +125,22 @@ async function stillHolds(repoRoot, relative, id) {
   if (!(await recordedFileThere(repoRoot, relative))) return false;
   const raw = await fsp.readFile(path.join(repoRoot, ...relative.split("/")), "utf8").catch(() => null);
   return raw !== null && workOrderIdOf(raw) === id;
+}
+
+// Whether two of the project's paths name one file: the same device and inode (Windows: the file index
+// Node gives as `ino`), as find -samefile and coreutils `test -ef` decide. A file system that gives no
+// file id cannot tell a hard link from a copy, and is refused rather than guessed (workOrderLocation's rule).
+export async function sameFile(repoRoot, left, right, { stat = (file) => fsp.stat(file, { bigint: true }) } = {}) {
+  const [a, b] = await Promise.all([left, right].map((relative) => stat(path.join(repoRoot, ...relative.split("/")))));
+  if (!a.ino || !b.ino) throw new Error("This file system gives no file id, so Bridge cannot tell whether " + left + " and " + right + " are one file or a copy; nothing was planned.");
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+// Whether `fileName`, holding `id`, is a copy of the work order the records last saw in `recorded`: that
+// file still holds the id and is another file. Two names holding one id are one work order when they are
+// one file (a hard link, as find -samefile and rsync -H tell it). The card and a directory's line both ask this.
+export async function isCopy(repoRoot, { recorded, fileName, id }) {
+  return recorded !== fileName && await stillHolds(repoRoot, recorded, id) && !(await sameFile(repoRoot, recorded, fileName));
 }
 
 async function decide(db, { projectId, fileName, text, id = null, repoRoot, update = null, asNew = false }) {
@@ -130,7 +156,7 @@ async function decide(db, { projectId, fileName, text, id = null, repoRoot, upda
   // An id the records do not know (its records were cleared, or the file came from elsewhere) is kept.
   if (!rows.length) return decided("new", id, title, null, text);
   const recorded = rows[0].last_file_name;
-  if (recorded !== fileName && await stillHolds(repoRoot, recorded, id)) {
+  if (await isCopy(repoRoot, { recorded, fileName, id })) {
     return { ...decided("new", null, title, null, text), copy_of: recorded };
   }
   return { ...decided("update", id, title, await latestVersion(db, id), text), ...(recorded !== fileName ? { moved_from: recorded } : {}) };
@@ -196,17 +222,26 @@ export async function cardUsed(db, planSha256) {
 }
 
 // What a directory's card shows beside each file, for that directory's files only: the work order that
-// file is now (by its exact name, never a guess at a rename) and that work order's latest run. One probe
-// of work_orders_by_file and one of runs_by_work_order per file, whatever the history holds.
-export async function latestRunsOfFiles(db, { projectId, files }) {
+// file is by the card's rule (Fortes 2026-11-09) and that work order's latest run. `orders` are
+// { file, id }, id being the one the file's front matter holds: a file without one is a new work order
+// and has no run, and a copy of another file's work order is new too (isCopy). One probe of
+// work_orders_pkey and one of runs_by_work_order per file with an id, whatever the history holds.
+export async function latestRunsOfWorkOrders(db, { projectId, repoRoot, orders }) {
+  const known = orders.filter((order) => order.id);
+  if (!known.length) return new Map();
   const { rows } = await db.query(
-    "select f.file, w.work_order_id, r.run_id, r.status, r.conclusion, r.closed_reason, r.closed_at"
-    + " from unnest($2::text[]) as f(file)"
-    + " cross join lateral (select work_order_id from work_orders where project_id = $1 and last_file_name = f.file order by last_activity_at desc limit 1) w"
+    "select o.file, w.work_order_id, w.last_file_name, r.run_id, r.status, r.conclusion, r.closed_reason, r.closed_at"
+    + " from unnest($2::text[], $3::uuid[]) as o(file, id)"
+    + " join work_orders w on w.work_order_id = o.id and w.project_id = $1"
     + " left join lateral (select run_id, status, conclusion, closed_reason, closed_at from runs where work_order_id = w.work_order_id order by created_at desc, run_id desc limit 1) r on true",
-    [projectId, files],
+    [projectId, known.map((order) => order.file), known.map((order) => order.id)],
   );
-  return new Map(rows.map((row) => [row.file, row]));
+  const found = new Map();
+  for (const row of rows) {
+    if (await isCopy(repoRoot, { recorded: row.last_file_name, fileName: row.file, id: row.work_order_id })) continue;
+    found.set(row.file, row);
+  }
+  return found;
 }
 
 // The latest printed, not withdrawn plan of each of these files (Q14 for many): one probe of
@@ -266,12 +301,6 @@ async function lockWorkOrder(tx, { projectId, plan, file }) {
   for (const key of keys) {
     const { rows: [{ locked }] } = await tx.query("select pg_try_advisory_xact_lock(hashtextextended($1, 0)) as locked", [key]);
     if (!locked) throw new Error("Another start of " + file + " is in progress; nothing was created. Try again in a moment.");
-  }
-  // A card that said "new work order" is out of date once its file became a work order after it
-  // was shown (another card for the same file was said yes to first); --as-new is meant new.
-  if (plan.work_order?.decision === "new" && !plan.work_order.as_new) {
-    const owner = await workOrderOfFile(tx, { projectId, fileName: file });
-    if (owner) throw new Error("This card was made before " + file + " became work order " + owner + "; nothing was created. Run: review-bridge start " + file + " again to see the card as it is now");
   }
 }
 

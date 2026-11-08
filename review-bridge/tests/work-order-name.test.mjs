@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { orderWorkOrders } from "../features/workOrder/line.mjs";
 import { canonicalTaskFile } from "../features/workOrder/workOrderRecords.mjs";
+import { workOrderIdOf } from "../features/workOrder/workOrderFormat.mjs";
 import { nfc, workOrderNameProblem } from "../utils/workOrderName.mjs";
 
 const runtime = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -83,7 +84,7 @@ test("a work order named in any language goes from its card through its yes to a
     assert.equal(card.status, 1, name + ": " + card.stdout + card.stderr);
     assert.ok(card.stdout.includes("Work order:   " + file), name + ": " + card.stdout);
     assert.match(card.stdout, /Needs authorization/);
-    assert.equal(rt.bridge(["start", file, "--fake-cli", "--yes"]).status, 1, name + ": the first yes ends at the sealed card");
+    // One yes to the card starts the run.
     const ran = rt.bridge(["start", file, "--fake-cli", "--yes"]);
     assert.equal(ran.status, 0, name + ": " + ran.stdout + ran.stderr);
     const entries = await rt.results(name);
@@ -98,25 +99,26 @@ test("one name in NFD and in NFC is one work order, with one results folder", LI
   const decomposed = JAPANESE.normalize("NFD");
   await rt.write(decomposed);
   assert.equal(rt.bridge(["start", WORK_ORDERS + decomposed + ".md", "--fake-cli"]).status, 1);
-  assert.equal(rt.bridge(["start", WORK_ORDERS + decomposed + ".md", "--fake-cli", "--yes"]).status, 1);
   const first = rt.bridge(["start", WORK_ORDERS + decomposed + ".md", "--fake-cli", "--yes"]);
   assert.equal(first.status, 0, first.stdout + first.stderr);
   const [{ work_order_id: id, last_file_name: recorded }] = await queryRecords("select work_order_id, last_file_name from work_orders where project_id = $1", [rt.projectId]);
   assert.equal(recorded, WORK_ORDERS + JAPANESE + ".md");
   assert.deepEqual(await rt.results(JAPANESE).then((entries) => entries.map(nfc).filter((entry) => entry.endsWith(".md")).length), 1);
 
-  // A file another work order is not "gone" when the disk holds its name in the other form, so a similar
-  // new file is not guessed to be it renamed.
+  // The yes wrote the work order's id into the file under the name it was given (DECISIONS 2026-11-08).
+  const marked = await fsp.readFile(path.join(rt.root, WORK_ORDERS, decomposed + ".md"), "utf8");
+  assert.equal(workOrderIdOf(marked), id);
+
+  // A new file with the same text and no id is a new work order; content is never compared.
   await rt.write("copy of it", order(JAPANESE));
   const copy = rt.bridge(["start", WORK_ORDERS + "copy of it.md", "--fake-cli"]);
   assert.match(copy.stdout, /New work order/, copy.stdout);
 
-  // The same name in the other form, where the disk tells the two apart.
+  // The same name in the other form, where the disk tells the two apart, with the file's text and id.
   await fsp.rm(path.join(rt.root, WORK_ORDERS, decomposed + ".md"));
-  await rt.write(JAPANESE);
+  await rt.write(JAPANESE, marked);
   const again = rt.bridge(["start", WORK_ORDERS + JAPANESE + ".md", "--fake-cli"]);
   assert.match(again.stdout, /still version 1/, again.stdout);
-  assert.equal(rt.bridge(["start", WORK_ORDERS + JAPANESE + ".md", "--fake-cli", "--yes"]).status, 1);
   assert.equal(rt.bridge(["start", WORK_ORDERS + JAPANESE + ".md", "--fake-cli", "--yes"]).status, 0);
   const rows = await queryRecords("select work_order_id from runs where project_id = $1", [rt.projectId]);
   assert.deepEqual(rows.map((row) => row.work_order_id), [id, id]);
@@ -130,10 +132,13 @@ test("in a directory, delivered holds across the two forms, and both forms side 
   const decomposed = "01-" + JAPANESE.normalize("NFD");
   await fsp.writeFile(path.join(rt.root, dir, decomposed + ".md"), order(JAPANESE));
   assert.equal(rt.bridge(["start", dir, "--fake-cli"]).status, 1);
-  assert.equal(rt.bridge(["start", dir, "--fake-cli", "--yes"]).status, 1);
   assert.equal(rt.bridge(["start", dir, "--fake-cli", "--yes"]).status, 0);
+  // Saved again under the other form with the id the yes wrote (delivered is the work order's, by its
+  // front matter id, Fortes 2026-11-09).
+  const saved = await fsp.readFile(path.join(rt.root, dir, decomposed + ".md"), "utf8");
+  assert.ok(workOrderIdOf(saved), "the yes wrote the work order's id");
   await fsp.rm(path.join(rt.root, dir, decomposed + ".md"));
-  await fsp.writeFile(path.join(rt.root, dir, "01-" + JAPANESE + ".md"), order(JAPANESE));
+  await fsp.writeFile(path.join(rt.root, dir, "01-" + JAPANESE + ".md"), saved);
   const card = rt.bridge(["start", dir, "--fake-cli"]);
   assert.match(card.stdout, /1 delivered, 0 not a work order, 0 to run/, card.stdout);
   // Only where a disk keeps both: on one that folds them this is one file, and the card says so.

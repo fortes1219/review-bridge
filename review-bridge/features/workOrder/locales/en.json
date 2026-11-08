@@ -244,5 +244,15 @@
   "down.database.in_use": "Database was not running; another PostgreSQL is using the number it recorded ({pid}). Bridge did not stop it and removed nothing.",
   "up.database": "Database running (port {port}).",
   "status.database.running": "Database: running",
-  "status.database.stopped": "Database: stopped; review-bridge up starts it, and so does the next start."
+  "status.database.stopped": "Database: stopped; review-bridge up starts it, and so does the next start.",
+  "page.not_running": "Bridge is not running. Run: review-bridge up",
+  "page.up.already_running": "Already running: {url}",
+  "page.up.failed": "Bridge did not start: {reason}",
+  "page.up.started": "Page: {url}",
+  "page.down.not_running": "Bridge was not running.",
+  "page.down.failed": "Bridge did not stop (pid {pid}).",
+  "page.down.stopped": "Bridge stopped.",
+  "status.database.missing": "Database: the data directory {path} does not exist.",
+  "status.database.unreadable": "Database: the data directory {path} cannot be read ({code}).",
+  "status.database.not_cluster": "Database: {path} is not a database cluster directory."
 }

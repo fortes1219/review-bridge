@@ -37,8 +37,9 @@ import { recheckTest, selectTest } from "./test.mjs";
 import { buildContract, sealContract } from "./contract.mjs";
 import { processFile, startLockFile, workLockFile } from "./processRecords.mjs";
 import { priorityChoice } from "../../policy/policyRules.mjs";
-import { BUDGET_KEYS, budgetProblems, formProblems, MIN_CALL_TIMEOUT, parseWorkOrder, sealedText, WorkOrderFormatError, WorkOrderFormError } from "./workOrderFormat.mjs";
+import { BUDGET_KEYS, budgetProblems, formProblems, MIN_CALL_TIMEOUT, parseWorkOrder, sealedText, WorkOrderFormatError, WorkOrderFormError, workOrderIdOf } from "./workOrderFormat.mjs";
 import { stopRun } from "./writerLoop.mjs";
+import { cardStillMatches } from "./workOrderRecords.mjs";
 
 // Who fills each role in this run: the flag given at the terminal, else bridge.json. The plan seals
 // it, so changing bridge.json later only affects the next start (Owner 2026-11-04).
@@ -584,11 +585,17 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
     const current = await snapshotRules(paths);
     if (current.sha256 !== plan.rules.sha256) throw new Error("批准後 " + plan.rules.path + " 變了，重新建 plan");
   }
-  // Starting authorizes the work order as it is now; one edited since the plan is not what was sealed.
+  // Starting authorizes the work order as it is now; one edited since the plan is not what was sealed,
+  // and one whose front matter id changed since the card is another work order than the card showed.
   if (plan.task_file) {
     const current = await fsp.readFile(path.resolve(paths.repoRoot, ...plan.task_file.split("/")), "utf8").catch(() => null);
     if (current === null || digest(sealedText(current).trim()) !== plan.task_sha256) {
       throw new Error("The work order " + plan.task_file + " changed after the plan was built. Build a new plan.");
+    }
+    if (!cardStillMatches(plan.work_order, current)) {
+      const now = workOrderIdOf(current);
+      throw new Error("The work order " + plan.task_file + " changed after the plan was built: its front matter "
+        + (now ? "now holds work order id " + now : "no longer holds its work order id") + "; nothing was created. Build a new plan.");
     }
   }
   // T0-06 G2.5: the sealed test entry point must still exist when the human approves.

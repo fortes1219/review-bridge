@@ -369,7 +369,15 @@ test("--help lists the commands for people; --help --all adds the ones for agent
   assert.deepEqual(listed(run("--help").stdout), human);
   assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());
   assert.match(run("init", "--help").stdout, /\n\nAfterwards you start work through your agent: in Claude Code type \/review-bridge start <file>; in Codex, \$review-bridge start <file>\. review-bridge start <file> at a terminal is for advanced use and CI\.\n/);
-  assert.match(run("status", "--help").stdout, /Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database/);
+  // status lists the runs from the database and no totals counted from files (Fortes 2026-11-08).
+  const statusHelp = run("status", "--help").stdout;
+  assert.match(statusHelp, /Show what Bridge is doing now: the page, this project's runs, and how to look at the database/);
+  assert.doesNotMatch(statusHelp, /review queue/i);
+  // up and down start and stop the database with the page, as docker compose up and down (RC3-DOWN-01);
+  // ps shows the page's address and nothing counted.
+  assert.match(run("up", "--help").stdout, /Start the database and the local page service in the background/);
+  assert.match(run("down", "--help").stdout, /Stop the local page service and the database; refused while a run is running/);
+  assert.match(run("ps", "--help").stdout, /Show whether the local page service is running, and its address/);
   assert.match(run("prune", "--help").stdout, /Same as clean without a run id/);
   assert.match(run("rm", "--help").stdout, /Same as clean <run_id>/);
 });

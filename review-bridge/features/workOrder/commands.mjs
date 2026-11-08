@@ -532,25 +532,33 @@ export async function statusRecords(paths, { after = null } = {}) {
 
 // `status` only looks (RC3-DOWN-01): a database that `down` stopped is said to be stopped, never started
 // to answer, as brew services list reports a service; its runs are shown once it is up again.
-// `databaseRunning` and `records` are seams for tests.
+// A data directory that does not exist, cannot be read or is no cluster is said with where it is, and
+// exits 4, as pg_ctl status does ("If an accessible data directory is not specified, pg_ctl returns an
+// exit status of 4"; LSB: status unknown); nothing says up would start it (Fortes 2026-11-09).
+// `databaseStatus` and `records` are seams for tests.
 // The runs are the database's alone, listed and not totalled, as gh run list does (Fortes 2026-11-08):
 // the page service's review-queue folders are its working copy, emptied when it restarts.
-export async function statusOverview({ paths, options, page, databaseRunning = null, records = statusRecords }) {
+const DATA_DIRECTORY_UNUSABLE = 4;
+
+export async function statusOverview({ paths, options, page, databaseStatus = null, records = statusRecords }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
     write("This folder is not set up for Review Bridge. Run: review-bridge init");
     return 0;
   }
   const service = await page();
   const t = await createTranslator(await resolveLocale(paths));
-  const running = await (databaseRunning ?? (await import("../../service/database/index.mjs")).databaseRunning)();
-  if (!running) {
+  const server = await (databaseStatus ?? (await import("../../service/database/index.mjs")).databaseStatus)();
+  if (server.state !== "running") {
+    const unusable = server.state === "unusable";
+    const exitCode = unusable ? DATA_DIRECTORY_UNUSABLE : 0;
     if (options.json) {
-      write(JSON.stringify({ page: { running: service.running, url: service.url, reason: service.reason }, database: { running: false } }, null, 2));
-      return 0;
+      const detail = unusable ? { problem: server.problem, path: server.path, ...(server.code ? { code: server.code } : {}) } : {};
+      write(JSON.stringify({ page: { running: service.running, url: service.url, reason: service.reason }, database: { running: false, ...detail } }, null, 2));
+      return exitCode;
     }
     write("Page: " + (service.running ? service.url : "not running; start it with review-bridge up"));
-    write(t("status.database.stopped"));
-    return 0;
+    write(unusable ? t("status.database." + server.problem, { path: server.path, code: server.code }) : t("status.database.stopped"));
+    return exitCode;
   }
   const { db, projectId, runs, more, active, lines, logs } = await records(paths, { after: options.after || null });
   const latestReview = (await fsp.readFile(paths.latestPath, "utf8").catch(() => "")).trim() || null;

@@ -53,13 +53,16 @@ const typed = args.includes("--json-schema") ? { structured_output: writerResult
 const ok = { session_id: session, is_error: false, result: "report\\nCODEX_REVIEW_REQUIRED: true", num_turns: 2,
   modelUsage: { "fake-opus": { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: 1000, outputTokens: 3 } }, ...typed };
 if (mode === "stream") {
+  // T_TOKENS is what the call read back from the cache, which the writer's budget does not count;
+  // T_INPUT_TOKENS is what it read new, which it does (Owner 2026-11-08).
   const tokens = Number(process.env.T_TOKENS || 1000);
+  const input = Number(process.env.T_INPUT_TOKENS || 1);
   const lines = [
     { type: "system", subtype: "init", session_id: session },
     { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "README.md" } }] } },
     { type: "result", subtype: "success", session_id: session, is_error: false, num_turns: 2, total_cost_usd: 0.01,
-      usage: { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: tokens, output_tokens: 3 },
-      modelUsage: { "fake-opus": { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: tokens, outputTokens: 3 } },
+      usage: { input_tokens: input, cache_creation_input_tokens: 2, cache_read_input_tokens: tokens, output_tokens: 3 },
+      modelUsage: { "fake-opus": { inputTokens: input, cacheCreationInputTokens: 2, cacheReadInputTokens: tokens, outputTokens: 3 } },
       result: "report\\nCODEX_REVIEW_REQUIRED: true", ...typed },
   ];
   for (const line of lines) process.stdout.write(JSON.stringify(line) + "\\n");
@@ -160,7 +163,7 @@ async function makeRuntime(t, override = { schema_version: 5 }, { git = false, w
   return { repoRoot, toolsRoot, paths, claude, codex };
 }
 
-async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, writer = "", codexTokens = 0, withTests = false, gateExit = 0, reviewPrompt = null, git = false, beforeResume = null, beforeReview = null } = {}) {
+async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, staleJob = false, override, tokens = 0, inputTokens = 0, writer = "", codexTokens = 0, withTests = false, gateExit = 0, reviewPrompt = null, git = false, beforeResume = null, beforeReview = null } = {}) {
   const runtime = await makeRuntime(t, override, { git, withTests });
   if (reviewPrompt !== null) {
     await fsp.mkdir(path.dirname(runtime.paths.reviewPromptOverridePath), { recursive: true });
@@ -200,6 +203,7 @@ async function start(t, { claudeMode = "ok", codexMode = "pass", maxCalls = 1, s
           T_ARGS_OUT: kind === "claude" ? argsOut : "",
           T_STALE_JOB: staleJob ? path.join(runtime.paths.pendingDir, STALE_JOB_ID + ".json") : "",
           T_TOKENS: tokens ? String(tokens) : "",
+          T_INPUT_TOKENS: inputTokens ? String(inputTokens) : "",
           T_WRITER: writer,
           T_CODEX_TOKENS: codexTokens ? String(codexTokens) : "",
           FAKE_GATE_EXIT: String(gateExit),
@@ -519,43 +523,56 @@ test("Q7 a finding that survives one correction is a loop: hard_stop, no third w
   assert.deepEqual(secondWriter.addressed_findings, ["F1"]);
 });
 
-test("Q8 reviewer usage from the --json stream counts against the per-call ceiling", async (t) => {
+// The budget is the writer's (Owner 2026-11-08, replacing T0-05 D5.3's one ceiling for both roles): the
+// reviewer's usage is recorded as read and stops nothing, however large.
+test("Q8 reviewer usage from the --json stream is recorded and counts against no budget", async (t) => {
   const { runtime, exitCode, error, run, status } = await start(t, { claudeMode: "stream", codexTokens: 2_000_000 });
   assert.equal(error, null);
-  assert.equal(exitCode, 76);
-  assert.equal(run.closed_reason, "token_limit");
-  assert.equal(status.latest_state.token_limit_role, "reviewer");
+  assert.equal(exitCode, 0);
+  assert.equal(run.conclusion, "success");
+  assert.equal(status.latest_state.token_limit, undefined);
   const events = await readIoEvents(runtime.paths, run.run_id);
   const reviewer = events.find((event) => event.event === "usage" && event.role === "reviewer");
   assert.equal(reviewer.source, "cli_json");
   assert.equal(reviewer.tokens.input, 2_000_000);
-  assert.equal(events.at(-1).status, "token_limit");
-  assert.equal(events.at(-1).role, "reviewer");
+  assert.equal(events.some((event) => event.event === "stop" && event.status === "token_limit"), false);
 });
 
+// What a writer call read new, wrote to the cache and wrote out is its budget's: 2_000_000 + 2 + 3 here.
 test("P5 a call over tokens_per_call ends token_limit with exit 76, no review, no second call", async (t) => {
-  const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", tokens: 2_000_000, maxCalls: 2, codexMode: "fail" });
+  const { runtime, exitCode, error, status, run } = await start(t, { claudeMode: "stream", inputTokens: 2_000_000, maxCalls: 2, codexMode: "fail" });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
   assert.equal(run.closed_reason, "token_limit");
   assert.equal(status.latest_state.token_limit, "per_call");
-  assert.equal(status.latest_state.tokens_this_call, 2_000_006);
+  assert.equal(status.latest_state.tokens_this_call, 2_000_005);
   const events = await readIoEvents(runtime.paths, run.run_id);
   assert.equal(events.filter((event) => event.event === "usage").length, 1);
   assert.equal(events.at(-1).event, "stop");
   assert.equal(events.at(-1).status, "token_limit");
 });
 
+// A writer carrying a long context reads most of it back from the cache: none of that is the budget's,
+// so a call of 2_000_000 cache reads stays under tokens_per_call and is recorded apart.
+test("P5c cache reads are recorded but spend none of the writer's budget", async (t) => {
+  const { runtime, exitCode, error, run } = await start(t, { claudeMode: "stream", tokens: 2_000_000 });
+  assert.equal(error, null);
+  assert.equal(exitCode, 0);
+  assert.equal(run.conclusion, "success");
+  const writer = (await readIoEvents(runtime.paths, run.run_id)).find((event) => event.event === "usage" && event.role === "writer");
+  assert.equal(writer.tokens.cache_read, 2_000_000);
+});
+
 test("P5b the per-run ceiling adds up across calls and the second call rotates the session", async (t) => {
   const { runtime, exitCode, error, run, status } = await start(t, {
-    claudeMode: "stream", tokens: 1000, maxCalls: 2, codexMode: "fail",
+    claudeMode: "stream", inputTokens: 1000, maxCalls: 2, codexMode: "fail",
     override: { schema_version: 5, limits: { tokens: 1500 } },
   });
   assert.equal(error, null);
   assert.equal(exitCode, 76);
   assert.equal(run.closed_reason, "token_limit");
   assert.equal(status.latest_state.token_limit, "per_run");
-  assert.equal(status.latest_state.tokens_this_run, 2013); // two writer calls of 1006 and one reviewer output token
+  assert.equal(status.latest_state.tokens_this_run, 2010); // two writer calls of 1000 + 2 + 3; the reviewer's spend none of it
   assert.equal(run.writer_session_ids.length, 2);
   assert.notEqual(run.writer_session_ids[0], run.writer_session_ids[1]);
   assert.equal(run.writer_session_id, run.writer_session_ids[1]);

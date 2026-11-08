@@ -21,10 +21,10 @@ import { askYes, needsAuthorizationLine, readiness } from "./confirmStart.mjs";
 import { deliverOutcome } from "./delivery.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
 import {
-  anyCardUsed, canonicalTaskFile, latestCardsOfFiles, latestRunsOfFiles, markCardsShown, recordDirectoryYes, withdrawCards,
+  anyCardUsed, canonicalTaskFile, latestCardsOfFiles, latestRunsOfWorkOrders, markCardsShown, recordDirectoryYes, withdrawCards,
 } from "./workOrderRecords.mjs";
 import { refuseForm } from "./workOrderForm.mjs";
-import { formProblems, parseWorkOrder, sealedText, WorkOrderFormError } from "./workOrderFormat.mjs";
+import { formProblems, parseWorkOrder, sealedText, WorkOrderFormError, workOrderIdOf } from "./workOrderFormat.mjs";
 import { authorizeCard, optionAgainstCard, planFilePath, PLAN_SCHEMA_VERSION, workLockReleased, workOrderChecker } from "./workPackage.mjs";
 import { uncommittedNow } from "./workspaceEvidence.mjs";
 import { stopRun } from "./writerLoop.mjs";
@@ -156,9 +156,14 @@ async function surveyDirectory({ paths, records, directory, check }) {
     const taskFile = canonicalTaskFile(paths.repoRoot, absolute);
     // Where a disk keeps both spellings of one name they are two files and one work order by name.
     const twin = rows.find((row) => row.taskFile === taskFile);
-    rows.push({ name, step, absolute, taskFile, text, problem: twin ? "its name is the same as " + twin.name + " in another Unicode form" : text === null ? "it cannot be read" : check(name, text) });
+    // The work order the file is, by the card's rule: the id in its front matter (none: a new one).
+    const id = workOrderIdOf(raw);
+    rows.push({ name, step, absolute, taskFile, text, id, problem: twin ? "its name is the same as " + twin.name + " in another Unicode form" : text === null ? "it cannot be read" : check(name, text) });
   }
-  const latest = await latestRunsOfFiles(records.db, { projectId: records.projectId, files: rows.map((row) => row.taskFile) });
+  // Delivered and interrupted are that work order's, never the name's (Fortes 2026-11-09).
+  const latest = await latestRunsOfWorkOrders(records.db, {
+    projectId: records.projectId, repoRoot: paths.repoRoot, orders: rows.map((row) => ({ file: row.taskFile, id: row.id })),
+  });
   const busy = [];
   for (const row of rows) {
     const found = latest.get(row.taskFile);
@@ -400,9 +405,14 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
     write("");
     // A person may answer long after the card. Whatever ran since (another terminal's line, say) was not
     // on it, and a work order it delivered must not run a second time on this yes.
+    // A file that gained an id since the card was said yes to elsewhere; one that kept its id is asked
+    // for that work order's latest run.
     const toRun = rows.filter((row) => row.plan);
-    const now = await latestRunsOfFiles(records.db, { projectId: records.projectId, files: toRun.map((row) => row.taskFile) });
-    if (toRun.some((row) => (now.get(row.taskFile)?.run_id ?? null) !== row.latestRun)) {
+    const ids = await Promise.all(toRun.map(async (row) => workOrderIdOf(await fsp.readFile(row.absolute, "utf8").catch(() => null))));
+    const now = await latestRunsOfWorkOrders(records.db, {
+      projectId: records.projectId, repoRoot: paths.repoRoot, orders: toRun.map((row, index) => ({ file: row.taskFile, id: ids[index] })),
+    });
+    if (toRun.some((row, index) => ids[index] !== row.id || (now.get(row.taskFile)?.run_id ?? null) !== row.latestRun)) {
       write(t("line.yes.ran_meanwhile", { again }));
       return 1;
     }

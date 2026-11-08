@@ -10,7 +10,7 @@ import { statusOverview } from "../features/workOrder/commands.mjs";
 import { createTranslator } from "../features/workOrder/i18n.mjs";
 import { stopDatabase } from "../service/database/index.mjs";
 import {
-  clearOldServer, clusterPaths, isPostgresProgram, leftoverProcesses, OldServerError, posixServerProcesses, runDetaching, startServer,
+  clearOldServer, clusterPaths, dataDirectoryProblem, isPostgresProgram, leftoverProcesses, OldServerError, posixServerProcesses, runDetaching, startServer,
   windowsServerProcesses,
 } from "../service/database/postgresServer.mjs";
 import { failureLine } from "../service/database/serverErrors.mjs";
@@ -311,13 +311,55 @@ test("status says the database is stopped and does not start it", async (t) => {
   process.stdout.write = (text) => { lines.push(...String(text).split("\n").filter(Boolean)); return true; };
   try {
     const code = await statusOverview({
-      paths, options: {}, page: async () => ({ running: false, url: null, reason: "no_session" }), databaseRunning: async () => false,
+      paths, options: {}, page: async () => ({ running: false, url: null, reason: "no_session" }), databaseStatus: async () => ({ state: "stopped" }),
     });
     assert.equal(code, 0);
   } finally {
     process.stdout.write = write;
   }
   assert.deepEqual(lines, ["Page: not running; start it with review-bridge up", "資料庫：已停止；review-bridge up 會把它起來，下一次 start 也會。"]);
+});
+
+// Fortes 2026-11-09: a data directory that does not exist, cannot be read or is no cluster is said with
+// where it is and exits 4, as pg_ctl status does; status never says up would start it.
+test("status says what is wrong with the data directory and where, and exits 4 as pg_ctl status does", async (t) => {
+  const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-data-dir-"));
+  t.after(() => fsp.rm(home, { recursive: true, force: true }));
+  const data = path.join(home, "data");
+  // As pg_ctl's get_pgpid looks: the directory, then PG_VERSION in it.
+  assert.deepEqual(await dataDirectoryProblem(home), { problem: "missing", path: data });
+  await fsp.mkdir(data);
+  await fsp.writeFile(path.join(data, "notes.txt"), "not a cluster\n");
+  assert.deepEqual(await dataDirectoryProblem(home), { problem: "not_cluster", path: data });
+  await fsp.writeFile(path.join(data, "PG_VERSION"), "18\n");
+  assert.equal(await dataDirectoryProblem(home), null);
+
+  const show = async (locale, server, options = {}) => {
+    const paths = await project(t, locale);
+    const lines = [];
+    const write = process.stdout.write;
+    process.stdout.write = (text) => { lines.push(String(text)); return true; };
+    let code;
+    try {
+      code = await statusOverview({ paths, options, page: async () => ({ running: false, url: null, reason: "no_session" }), databaseStatus: async () => server });
+    } finally {
+      process.stdout.write = write;
+    }
+    return { code, out: lines.join("") };
+  };
+  const notCluster = { state: "unusable", problem: "not_cluster", path: data };
+  const zh = await show("zh-TW", notCluster);
+  assert.equal(zh.code, 4);
+  assert.equal(zh.out, "Page: not running; start it with review-bridge up\n資料庫：" + data + " 不是資料庫叢集目錄。\n");
+  const en = await show("en", { state: "unusable", problem: "unreadable", path: data, code: "EACCES" });
+  assert.equal(en.code, 4);
+  assert.match(en.out, new RegExp("Database: the data directory " + data.replace(/[\\.]/g, "\\$&") + " cannot be read \\(EACCES\\)\\."));
+  assert.match((await show("en", { state: "unusable", problem: "missing", path: data })).out, /does not exist\./);
+  for (const { out } of [zh, en]) assert.doesNotMatch(out, /review-bridge up 會把它起來|up starts it/);
+  // --json carries the same, and the same exit.
+  const json = await show("en", notCluster, { json: true });
+  assert.equal(json.code, 4);
+  assert.deepEqual(JSON.parse(json.out).database, { running: false, problem: "not_cluster", path: data });
 });
 
 // Fortes 2026-11-08: the runs come from the database only and are listed, not totalled (gh run list).
@@ -343,7 +385,7 @@ test("after the page service restarts, status lists the same runs and prints no 
     const write = process.stdout.write;
     process.stdout.write = (text) => { lines.push(...String(text).split("\n").filter(Boolean)); return true; };
     try {
-      assert.equal(await statusOverview({ paths, options: {}, page, databaseRunning: async () => true, records }), 0);
+      assert.equal(await statusOverview({ paths, options: {}, page, databaseStatus: async () => ({ state: "running" }), records }), 0);
     } finally {
       process.stdout.write = write;
     }

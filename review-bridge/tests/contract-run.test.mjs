@@ -14,6 +14,7 @@ import { loadContract, sealContract } from "../features/workOrder/contract.mjs";
 import { workOrderChange } from "../features/workOrder/delivery.mjs";
 import { processFile, startLockFile, workLockFile } from "../features/workOrder/processRecords.mjs";
 import { workLockReleased, workOrderLocation } from "../features/workOrder/workPackage.mjs";
+import { withWorkOrderId, workOrderIdOf } from "../features/workOrder/workOrderFormat.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 import { digest } from "../utils/digest.mjs";
@@ -57,9 +58,16 @@ async function install(t) {
 const planArgs = (order, name, planArg) => ["work-plan", "--fake-cli", "--task-file", order, "--owner", "Fortes", "--work-package", name,
   "--breakpoint", "return after review", "--rounds", "1", "--call-timeout", "120000", "--out", planArg];
 
+// A work order saved as a person's editor saves it: the id Bridge wrote into the front matter on the
+// first yes stays, so a new text is the next version of that work order (DECISIONS 2026-11-08 10:4x).
+async function save(file, text) {
+  const id = workOrderIdOf(await fsp.readFile(file, "utf8").catch(() => ""));
+  await fsp.writeFile(file, id ? withWorkOrderId(text, id) : text);
+}
+
 async function planWork(rt, name, text) {
   const order = ".review-bridge/work-packages/" + name + ".md";
-  await fsp.writeFile(path.join(rt.root, order), text);
+  await save(path.join(rt.root, order), text);
   const planArg = ".review-bridge/review-queue/" + name + "-" + Math.random().toString(16).slice(2, 8) + ".plan.json";
   const planned = rt.bridge(planArgs(order, name, planArg));
   assert.equal(planned.status, 0, planned.stderr);
@@ -68,7 +76,7 @@ async function planWork(rt, name, text) {
 
 // A plan for a work order at a given path, with its own work package id.
 async function planAt(rt, order, id, text) {
-  await fsp.writeFile(path.join(rt.root, order), text);
+  await save(path.join(rt.root, order), text);
   const planArg = ".review-bridge/review-queue/" + id + "-" + Math.random().toString(16).slice(2, 8) + ".plan.json";
   const planned = rt.bridge(planArgs(order, id, planArg));
   assert.equal(planned.status, 0, planned.stderr);
@@ -146,6 +154,42 @@ test("the plan carries the contract code cut from the work order; no model is ca
   assert.equal(events.find((event) => event.event === "usage").role, "writer", "the first model call is the writer's");
   assert.equal(events.some((event) => ["contract.translation", "contract.check"].includes(event.event)), false);
   assert.match(await resultOf(rt, "farm"), /\| contract \| 0 \| 0 \| 0 \| 0 \| 0 \| 0 \|/);
+});
+
+// The work order is the id Bridge writes into the front matter at the yes (DECISIONS 2026-11-08 10:4x):
+// an edit that keeps it is the next version; a file without one is a new work order at the card and at
+// the yes, whatever name the records last saw (Fortes 2026-11-09). One yes starts each.
+test("the yes writes the work order's id into the file; an edit keeping it is the next version, a file without it a new work order", async (t) => {
+  const rt = await install(t);
+  const order = ".review-bridge/work-packages/farm.md";
+  const file = path.join(rt.root, order);
+  const orders = async () => await queryRecords(
+    "select w.work_order_id, max(v.version_no)::int as versions from work_orders w join work_order_versions v using (work_order_id)"
+    + " where w.project_id = $1 group by w.work_order_id order by min(w.created_at)", [rt.paths.projectId]);
+  const startOnce = (says) => {
+    const card = rt.bridge(["start", order, "--fake-cli"]);
+    assert.match(card.stdout, says, card.stdout);
+    const started = rt.bridge(["start", order, "--fake-cli", "--yes"]);
+    assert.equal(started.status, 0, started.stderr + started.stdout);
+  };
+  await fsp.writeFile(file, SINGLE);
+  startOnce(/New work order/);
+  const marked = await fsp.readFile(file, "utf8");
+  const id = workOrderIdOf(marked);
+  assert.match(id ?? "", /^[0-9a-f-]{36}$/);
+  assert.equal(marked, withWorkOrderId(SINGLE, id), "only the id line is added; the person's text is as written");
+  assert.deepEqual(await orders(), [{ work_order_id: id, versions: 1 }]);
+  // Edited as an editor saves it, the id kept: the next version of that work order.
+  await save(file, SINGLE + "- The cart is red.\n");
+  startOnce(/Updates ".*": version 1 → 2/);
+  assert.equal(workOrderIdOf(await fsp.readFile(file, "utf8")), id);
+  assert.deepEqual(await orders(), [{ work_order_id: id, versions: 2 }]);
+  // The same name written over without the id: a new work order at the card, and the yes takes it.
+  await fsp.writeFile(file, SINGLE + "- The barn is blue.\n");
+  startOnce(/New work order/);
+  const other = workOrderIdOf(await fsp.readFile(file, "utf8"));
+  assert.notEqual(other, id);
+  assert.deepEqual(await orders(), [{ work_order_id: id, versions: 2 }, { work_order_id: other, versions: 1 }]);
 });
 
 test("a work order with two runs keeps its run plan as data; each run's own list belongs to it; Bridge still starts one run", async (t) => {
@@ -255,7 +299,7 @@ test("editing the work order never changes a running contract; only starting aga
   }
   assert.ok(sealed, "the writer never started");
   const edited = SINGLE + "- The cart is red.\n";
-  await fsp.writeFile(path.join(rt.root, first.order), edited);
+  await save(path.join(rt.root, first.order), edited);
   assert.equal(await exit, 0);
   const firstRun = await runOf(rt, first);
   assert.equal(firstRun.conclusion, "success");
@@ -323,7 +367,7 @@ test("starting an edited work order again stops the running version first, and n
   t.after(() => { try { process.kill(old.record.pid); } catch {} });
   const edited = SINGLE + "- The cart is red.\n";
   // Saving the work order stops nothing.
-  await fsp.writeFile(path.join(rt.root, first.order), edited);
+  await save(path.join(rt.root, first.order), edited);
   await pause(1000);
   assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
@@ -454,7 +498,8 @@ test("the new version waits for the old work-start to let go of its run, and ref
 // start lock, and only the person's later retry replaces the running version. Saving changes nothing
 // already authorized. The first start is held in its wait for the old version's work-start to close.
 const savedByRenaming = async (file, text) => {
-  await fsp.writeFile(file + ".tmp", text);
+  const id = workOrderIdOf(await fsp.readFile(file, "utf8").catch(() => ""));
+  await fsp.writeFile(file + ".tmp", id ? withWorkOrderId(text, id) : text);
   await fsp.rename(file + ".tmp", file);
 };
 
@@ -544,20 +589,38 @@ test("between two starts a save by renaming keeps the place: the same text is re
   assert.equal((await runOf(rt, changed)).conclusion, "success");
 });
 
-test("two hard links to one file in one folder are two places, so two work orders", async (t) => {
+// Fortes 2026-11-09: two names of one file are one work order, as find -samefile and rsync -H tell a hard
+// link (the same device and inode); Docusaurus and Astro treat one id twice as an error, never as two.
+test("two hard links to one file are one work order: the other name finds the running one, and the id both hold stays", async (t) => {
   const rt = await install(t);
   const first = await planWork(rt, "farm", SINGLE);
   const linked = ".review-bridge/work-packages/farm-link.md";
   await fsp.link(path.join(rt.root, first.order), path.join(rt.root, linked));
   assert.equal((await fsp.stat(path.join(rt.root, first.order), { bigint: true })).ino, (await fsp.stat(path.join(rt.root, linked), { bigint: true })).ino);
-  const second = await planAt(rt, linked, "farm-link", SINGLE);
-  assert.notEqual(await workOrderLocation(rt.paths, first.plan.task_file), await workOrderLocation(rt.paths, second.plan.task_file));
+  // A card for the other name made before any yes, while the file held no id.
+  const early = await planAt(rt, linked, "farm-link", SINGLE);
+  assert.equal(early.plan.work_order.decision, "new");
   const old = await startSleeping(rt, first);
   t.after(() => { try { process.kill(old.record.pid); } catch {} });
-  // The other link is another work order: it neither waits for, nor stops, nor is refused by the first.
-  const started = start(rt, second);
-  assert.equal(started.status, 0, started.stderr);
-  assert.equal((await runOf(rt, second)).conclusion, "success");
+  // The first yes wrote its id into the one file, so both names hold it.
+  const id = workOrderIdOf(await fsp.readFile(path.join(rt.root, first.order), "utf8"));
+  assert.match(String(id), /^[0-9a-f-]{36}$/);
+  assert.equal(workOrderIdOf(await fsp.readFile(path.join(rt.root, linked), "utf8")), id);
+  // The early card shows a new work order the file no longer is: refused, nothing created.
+  const refused = start(rt, early);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, new RegExp("changed after the plan was built: its front matter now holds work order id " + id + "; nothing was created"));
+  await assert.rejects(runOf(rt, early));
+  // A card made now under the other name is that work order, not a copy; the same text is running.
+  const now = await planAt(rt, linked, "farm-link-now", SINGLE);
+  assert.deepEqual([now.plan.work_order.decision, now.plan.work_order.work_order_id, now.plan.work_order.copy_of], ["same", id, undefined]);
+  const running = start(rt, now);
+  assert.notEqual(running.status, 0);
+  assert.match(running.stderr, new RegExp("already running unchanged as run " + first.plan.proposed_run_id + "; nothing was created"));
+  // One work order in the project, and the id both names hold is still the first's.
+  const [{ count }] = await queryRecords("select count(*)::int as count from work_orders where project_id = (select project_id from work_orders where work_order_id = $1)", [id]);
+  assert.equal(count, 1);
+  assert.equal(workOrderIdOf(await fsp.readFile(path.join(rt.root, first.order), "utf8")), id);
   assert.equal((await runOf(rt, first)).status, "in_progress");
   assert.equal(alive(old.record.pid), true);
   const stopped = rt.bridge(["stop", first.plan.proposed_run_id]);
@@ -644,11 +707,12 @@ test("a second start of an unchanged work order that is already running is refus
   // The first run exists and its start has let go of the start lock.
   const old = await startSleeping(rt, first);
   t.after(() => { try { process.kill(old.record.pid); } catch {} });
-  // The second card was made before the file became the first's work order (step 4: the records
-  // know a work order by its id): it is out of date, and refused before anything is touched.
+  // The second card was made while the file held no id; the first's yes wrote one since, so the file is
+  // that work order now, not the new one this card shows (the card's rule, at the yes): refused before
+  // anything is touched.
   const stale = start(rt, second);
   assert.notEqual(stale.status, 0);
-  assert.match(stale.stderr, /This card was made before \.review-bridge\/work-packages\/farm\.md became work order [0-9a-f-]{36}; nothing was created/);
+  assert.match(stale.stderr, /The work order \.review-bridge\/work-packages\/farm\.md changed after the plan was built: its front matter now holds work order id [0-9a-f-]{36}; nothing was created/);
   await assert.rejects(runOf(rt, second));
   // A card made now names that work order; its start is refused because the same text is running.
   const current = await planWork(rt, "farm", SINGLE);

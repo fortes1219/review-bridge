@@ -9,7 +9,7 @@ import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
 import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
 import {
-  clearOldServer, clusterPaths, connect, connectionSettings, ensureCluster, postgresBinaries, serverState, startServer, stopServer,
+  clearOldServer, clusterPaths, connect, connectionSettings, dataDirectoryProblem, ensureCluster, postgresBinaries, serverState, startServer, stopServer,
 } from "./postgresServer.mjs";
 
 export const DATABASE_NAME = "bridge";
@@ -113,9 +113,13 @@ export async function openDatabase({ dataHome = bridgeDataHome(), migrationsDir 
   return await opened.get(dataHome);
 }
 
-// Whether the person's database server is running, for `status`: nothing is started.
-export async function databaseRunning({ dataHome = bridgeDataHome() } = {}) {
-  return (await serverState(databaseRoot(dataHome), { binaries: await postgresBinaries() })).running;
+// The person's database as `status` says it, nothing started: `running`, `stopped`, or `unusable` with
+// what pg_ctl status would say about its data directory (dataDirectoryProblem) and where it is.
+export async function databaseStatus({ dataHome = bridgeDataHome() } = {}) {
+  const root = databaseRoot(dataHome);
+  const unusable = await dataDirectoryProblem(root);
+  if (unusable) return { state: "unusable", ...unusable };
+  return { state: (await serverState(root, { binaries: await postgresBinaries() })).running ? "running" : "stopped" };
 }
 
 // The database half of `review-bridge down`, in the order docker compose down takes (the page first,

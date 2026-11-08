@@ -16,6 +16,7 @@ import { consumeRun, readRun } from "../service/records/runStore.mjs";
 import { isPidAlive } from "../service/agentCli/process.mjs";
 import { recordProcessOrKill, runMustStop } from "../features/workOrder/writerLoop.mjs";
 import { authorizeWorkPackage, createWorkPackagePlan, FORBIDDEN_PATHS } from "../features/workOrder/workPackage.mjs";
+import { WorkOrderFormError } from "../features/workOrder/workOrderFormat.mjs";
 import { createWorkspaceBaseline, createWorkspaceDelta, matchesForbiddenPath, recordWindow, snapshotWorkspace } from "../features/workOrder/workspaceEvidence.mjs";
 import { headCommit, isGitWorkTree } from "../features/workOrder/gitWorkspace.mjs";
 
@@ -42,18 +43,22 @@ async function runtime(t) {
   return { repoRoot, paths };
 }
 
-// A work order in the human template's shape; any headings and any language would do.
+// A work order in the human template's shape: what to do and the acceptance list are the marked blocks
+// the form check needs (RC3-COST-01); any headings and any language would do.
 function order({ references = "" } = {}) {
   return `# Work order: farm
 
+<!-- bridge:requested_work -->
 ## Work
 
 Build a small farm.
 
+<!-- bridge:acceptance -->
 ## Acceptance
 
 - The farm is visible.
 
+<!-- bridge:references -->
 ## References, attachments and dependencies (optional)
 
 ${references}
@@ -83,8 +88,11 @@ test("T6 default scope is everything minus the fixed forbidden list", async (t) 
   assert.deepEqual(created.scope.allowed_paths, ["**"]);
   assert.deepEqual(created.scope.forbidden_paths, [...FORBIDDEN_PATHS]);
   assert.equal(created.scope.source, "default");
-  // The work order is sealed as text; it becomes a contract only after the human starts the work.
+  // The work order is sealed as text and its contract is cut from it by code, here, with no model call;
+  // the plan names the contract the card shows.
   assert.match(created.task_file, /\.md$/);
+  assert.match(created.contract_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(created.contract_conditions, 1);
   assert.equal(created.work_order, undefined);
   for (const forbidden of [".git/config", ".env", ".env.local", "deploy/key.pem", "package-lock.json", "a/b/package-lock.json",
     ".github/workflows/ci.yml", "Dockerfile", "Dockerfile.dev", "infra/main.tf", ".review-bridge/x", ".claude/settings.json"]) {
@@ -126,6 +134,22 @@ test("T8 an explicit --allow-paths must exist and stay out of the forbidden list
     paths: r.paths, task: "plain task", owner: "o", workPackage: "legacy-1", breakpoint: "b",
     rounds: 1, callTimeout: 300_000, outPath: path.join(r.paths.privateRoot, "legacy.plan.json"),
   }), /allowed path is required/);
+});
+
+// RC3-COST-01: turning a work order into a contract is a form check. One without what to do or without
+// an acceptance list, or with a line of the list that is no item, makes no plan and seals no contract.
+test("a work order without what to do or an acceptance list is refused before a plan, naming each", async (t) => {
+  const r = await runtime(t);
+  const contracts = async () => (await fsp.readdir(r.paths.contractsDir).catch(() => [])).length;
+  const before = await contracts();
+  const plain = "# Work order: farm\n\n## Work\n\nBuild a small farm.\n\n## Acceptance\n\n- The farm is visible.\n";
+  await assert.rejects(plan(r, { task: plain, id: "form-plain" }), (error) => error instanceof WorkOrderFormError
+    && /requested_work is empty or missing; acceptance is empty or missing;/.test(error.message));
+  const loose = "# Farm\n\n<!-- bridge:requested_work -->\nBuild a small farm.\n\n<!-- bridge:acceptance -->\n一、The farm is visible.\n";
+  await assert.rejects(plan(r, { task: loose, id: "form-loose" }), (error) => error instanceof WorkOrderFormError
+    && /line 7 is no item of the acceptance list;/.test(error.message));
+  assert.equal(await contracts(), before, "no contract was sealed");
+  await assert.rejects(fsp.access(path.join(r.paths.privateRoot, "form-plain.plan.json")));
 });
 
 test("T9 the plan seals the rules digest and the work-order text; a changed work order changes the sha", async (t) => {

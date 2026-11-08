@@ -83,10 +83,13 @@ test("every sealed condition is reported, judged and proven before the work is d
   assert.deepEqual(review.verdicts.map((item) => [item.id, item.verdict]), [["AC1", "pass"], ["AC2", "pass"]]);
   const decided = events.find((event) => event.event === "acceptance");
   assert.equal(decided.decision, "proven");
-  assert.deepEqual(decided.rows.map((row) => [row.id, row.test, row.result]), [["AC1", "passed", "proven"], ["AC2", "passed", "proven"]]);
+  // Each condition is the reviewer's verdict and its evidence; the tests are not a column of it (they ran on
+  // the version the reviewer read), and no condition carries a way to verify it of its own (RC3-COST-01).
+  assert.deepEqual(decided.rows.map((row) => [row.id, row.result]), [["AC1", "proven"], ["AC2", "proven"]]);
+  assert.ok(decided.rows.every((row) => !("test" in row)), JSON.stringify(decided.rows));
   // No Git in this project: the work proof is unknown, and the result says so.
   assert.equal(events.find((event) => event.event === "test_result").work_version.kind, "unknown");
-  assert.match(result, /## Acceptance\n- AC1 proven: The greeting is printed\. \(reviewer: pass; tests: passed; evidence: fake: /);
+  assert.match(result, /## Acceptance\n- AC1 proven: The greeting is printed\. \(reviewer: pass; evidence: fake: /);
   assert.match(result, /Version checked: unknown \(no Git\)/);
 });
 
@@ -134,7 +137,10 @@ test("answers that skip, repeat or contradict a condition are refused, from the 
   }
 });
 
-test("usage Bridge cannot read stops the run at the writer and at the reviewer, instead of counting as zero", async (t) => {
+// The budget is the writer's (Owner 2026-11-08): a writer call whose usage cannot be read stops the run,
+// since the budget cannot be kept without it; the reviewer's usage is recorded and counts against no
+// budget, so an unreadable one is shown as unknown and the work goes on.
+test("writer usage Bridge cannot read stops the run instead of counting as zero; the reviewer's is recorded as unknown and stops nothing", async (t) => {
   const rt = await install(t);
   const writer = await run(rt, "writer-usage", { env: { FAKE_CLAUDE_USAGE: "none" } });
   assert.equal(writer.exit, 76);
@@ -142,10 +148,12 @@ test("usage Bridge cannot read stops the run at the writer and at the reviewer, 
   assert.equal(writer.events.some((event) => event.event === "test_result" || event.event === "review.input"), false);
   assert.match(writer.result, /could not read how many tokens the writer call used/);
   const reviewer = await run(rt, "reviewer-usage", { env: { FAKE_CODEX_USAGE: "none" } });
-  assert.equal(reviewer.exit, 76);
-  assert.equal(reviewer.record.closed_reason, "usage_unknown");
-  assert.equal(reviewer.record.last_state.token_limit_role, "reviewer");
-  assert.equal(reviewer.events.some((event) => event.event === "acceptance"), false);
+  assert.equal(reviewer.exit, 0, JSON.stringify(reviewer.record.last_state));
+  assert.equal(reviewer.record.conclusion, "success");
+  assert.equal(reviewer.events.some((event) => event.event === "stop" && event.status === "usage_unknown"), false);
+  const usage = reviewer.events.find((event) => event.event === "usage" && event.role === "reviewer");
+  assert.equal(usage.parse_error, true, JSON.stringify(usage));
+  assert.match(reviewer.result, /^\| reviewer \| 1 \(1 unreadable\) \| unknown \|/m);
 });
 
 test("a project whose rules give no test command still runs: its tests are not configured and each condition rests on the reviewer", async (t) => {
@@ -156,9 +164,11 @@ test("a project whose rules give no test command still runs: its tests are not c
   assert.equal(exit, 0, JSON.stringify(record.last_state));
   assert.equal(record.conclusion, "success");
   assert.equal(events.find((event) => event.event === "test_result").kind, "not_configured");
-  assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => [row.test, row.result]), [["not_used", "proven"], ["not_used", "proven"]]);
+  assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => row.result), ["proven", "proven"]);
   assert.match(result, /Tests: not configured for this project/);
-  assert.match(result, /tests: not used/);
+  // The conditions rest on the reviewer's verdicts; no condition line speaks of tests.
+  assert.match(result, /- AC1 proven: The greeting is printed\. \(reviewer: pass; evidence: /);
+  assert.doesNotMatch(result, /tests: not used/);
 });
 
 test("a writer that rewrites the Git history stops the run before the tests or review; the human decides", async (t) => {

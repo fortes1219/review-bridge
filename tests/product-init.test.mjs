@@ -11,6 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createTranslator, resolveLocale } from "../review-bridge/features/workOrder/i18n.mjs";
+import { sealedText } from "../review-bridge/features/workOrder/workOrderFormat.mjs";
 import { localTimestamp } from "../review-bridge/utils/dates.mjs";
 import { getBridgePaths } from "../review-bridge/utils/paths.mjs";
 
@@ -69,12 +71,15 @@ async function databaseLines(indent = "  ") {
 }
 const databasePassword = async () => (await fsp.readFile(path.join(dataHome, "postgres", "secret"), "utf8")).trim();
 
-// init starts the resident page service; stop it before the workspace is removed.
-function removeWorkspace(root, env = process.env) {
-  spawnSync(process.execPath, [path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "down"], {
-    cwd: root, encoding: "utf8", windowsHide: true, env,
-  });
-  return fsp.rm(root, { recursive: true, force: true });
+// init starts the resident page service; it is stopped before the workspace is removed, by serviceDown,
+// the way `down` stops the page. The database is left running: `down` stops the person's database too
+// (RC3-DOWN-01) and refuses while any project has a run running, and this process's own pool (inProcess)
+// keeps pointing at that server; the fixture stops it when the file's tests end.
+const { serviceDown } = await import("../review-bridge/features/setupCheck/pageService.mjs");
+async function removeWorkspace(root, env = isolatedEnv()) {
+  const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge", env });
+  await serviceDown({ paths, out: { write() {} } }).catch(() => {});
+  await fsp.rm(root, { recursive: true, force: true });
 }
 
 // Scripted init: JSON output, fake service adapter, and a free port instead of the default.
@@ -358,11 +363,23 @@ test("init starts the resident service and ends with cd, the work folder, the st
 
   const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const run = (...args) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true });
-  assert.equal(run("up", "--fake-cli").stdout.trim(), "已在跑：" + url);
-  assert.equal(run("down").status, 0);
+  // up says the database's line, then the page's, both in the language init gave the project (the
+  // system's: English in the Linux container, Chinese on a Chinese Windows).
+  const words = await createTranslator(await resolveLocale(projectPaths(root)));
+  const databasePort = Number((await fsp.readFile(path.join(dataHome, "postgres", "data", "postmaster.pid"), "utf8")).split(/\r?\n/)[3]);
+  assert.deepEqual(run("up", "--fake-cli").stdout.trim().split(/\r?\n/), [words("up.database", { port: databasePort }), words("page.up.already_running", { url })]);
+  // ps prints the page's address and nothing counted from files (Fortes 2026-11-09).
+  const running = run("ps");
+  assert.equal(running.status, 0, running.stderr);
+  assert.deepEqual(running.stdout.trim().split(/\r?\n/), [url]);
+  // down stops the page and then the database, as docker compose down stops what up started.
+  const down = run("down");
+  assert.equal(down.status, 0, down.stdout + down.stderr);
+  assert.deepEqual(down.stdout.trim().split(/\r?\n/), [words("down.page.stopped"), words("down.database.stopped")]);
+  assert.equal(await fsp.stat(path.join(dataHome, "postgres", "data", "postmaster.pid")).catch(() => null), null, "the database is stopped");
   const ps = run("ps");
   assert.equal(ps.status, 1);
-  assert.equal(ps.stdout.trim(), "Bridge 沒在跑，執行 review-bridge up");
+  assert.equal(ps.stdout.trim(), words("page.not_running"));
 });
 
 test("init --json adds the service URL", async (t) => {
@@ -388,9 +405,20 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
-  await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "add-readme.md"), "# Work order: add a README\n\nA README exists.\n");
+  // A work order says what to do and gives an acceptance list (the form check, DECISIONS 2026-11-08).
+  await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "add-readme.md"), "# Work order: add a README\n\n<!-- bridge:requested_work -->\nAdd a README.\n\n<!-- bridge:acceptance -->\n- A README exists.\n");
   const file = ".review-bridge/work-packages/add-readme.md";
   const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ...args, "--fake-cli"], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true });
+
+  // Without them it is not a contract, and no plan is written: the form check, not a model, says so.
+  const loose = ".review-bridge/work-packages/loose.md";
+  await fsp.writeFile(path.join(root, loose), "# Work order: add a README\n\nA README exists.\n");
+  const refused = run(loose, "--breakpoint", "after the review");
+  assert.equal(refused.status, 2, refused.stdout);
+  assert.match(refused.stderr, /The work order lacks what it must say:/);
+  assert.match(refused.stderr, / requested_work is empty or missing;/);
+  assert.match(refused.stderr, / acceptance is empty or missing;/);
+  assert.equal(refused.stdout, "");
 
   // D4: two lines by default; JSON only with --json.
   const plain = run(file, "--breakpoint", "after the review");
@@ -436,7 +464,7 @@ test("a chosen project type that does not fit the folder is set up, and its work
   assert.equal(config.profile_id, "vue-frontend");
   assert.deepEqual(config.test.rules, [{ command: "npm test", package_script: "test" }]);
 
-  await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "fix.md"), "# Work order: fix\n\nIt works.\n");
+  await fsp.writeFile(path.join(root, ".review-bridge", "work-packages", "fix.md"), "# Work order: fix\n\n<!-- bridge:requested_work -->\nFix it.\n\n<!-- bridge:acceptance -->\n- It works.\n");
   const run = (...args) => spawnSync(process.execPath, [bridge, "work-plan", ".review-bridge/work-packages/fix.md", "--fake-cli", ...args], {
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
   });
@@ -551,9 +579,11 @@ test("an agent's start prints the card and stops; with --yes it runs, and record
   const [authorizationFile] = await listed("authorizations");
   const authorization = JSON.parse(await fsp.readFile(path.join(queue, "authorizations", authorizationFile), "utf8"));
   assert.equal(authorization.authorized_via, "agent");
+  // The yes wrote the work order's id into the front matter; the hash is of what the person wrote, without it.
   const text = await fsp.readFile(path.join(root, order), "utf8");
+  assert.match(text, /^---\nid: [0-9a-f-]{36}\n---\n/);
   const { createHash } = await import("node:crypto");
-  assert.equal(authorization.work_order_sha256, createHash("sha256").update(text.trim()).digest("hex"));
+  assert.equal(authorization.work_order_sha256, createHash("sha256").update(sealedText(text).trim()).digest("hex"));
   const [runFile] = await listed("runs");
   const run = JSON.parse(await fsp.readFile(path.join(queue, "runs", runFile), "utf8"));
   assert.equal(run.authorized_via, "agent");
@@ -664,6 +694,14 @@ test("the card names the work order by its id: new, updated, moved or copied; a 
   await fsp.appendFile(path.join(root, moved), "3. 一行說明。\n");
   assert.equal(decision([moved]), "Updates \"工單：新增 README\": version 2 → 3, 1 line(s) changed (was at .review-bridge/work-packages/hello.md)");
   yes(moved);
+  // Written over without its id (a whole text pasted in): a new work order at the card, and its yes is
+  // taken, though the records last saw another work order under that name (Fortes 2026-11-09).
+  await fsp.writeFile(path.join(root, moved), (await read(moved)).replace(/^---\nid: [0-9a-f-]{36}\n---\n/, ""));
+  assert.equal(await idOf(moved), null);
+  assert.equal(decision([moved]), "New work order \"工單：新增 README\"");
+  yes(moved);
+  const pasted = await idOf(moved);
+  assert.ok(pasted && pasted !== id, "its yes gave it an id of its own");
   // Two short work orders from one template, without ids or source_id: two new work orders, never a rename.
   const twin = (name, sentence) => fsp.writeFile(path.join(root, ".review-bridge/work-packages", name), "# 工單\n\n<!-- bridge:requested_work -->\n" + sentence + "\n\n<!-- bridge:acceptance -->\n- 做好了。\n");
   await twin("one.md", "加一行。");
@@ -672,10 +710,11 @@ test("the card names the work order by its id: new, updated, moved or copied; a 
   assert.equal(decision([".review-bridge/work-packages/two.md"]), "New work order \"工單\"");
 
   const rows = async (sql) => await queryRecords(sql, [projectId]);
-  assert.deepEqual((await rows("select last_file_name from work_orders where project_id = $1 order by created_at")).map((row) => row.last_file_name), [moved, copy]);
+  assert.deepEqual((await rows("select work_order_id, last_file_name from work_orders where project_id = $1 order by created_at")).map((row) => [row.work_order_id === id ? "original" : row.work_order_id === pasted ? "pasted" : "copy", row.last_file_name]),
+    [["original", moved], ["copy", copy], ["pasted", moved]]);
   assert.deepEqual((await rows("select v.version_no from work_order_versions v where v.work_order_id = '" + id + "' order by 1")).map((row) => row.version_no), [1, 2, 3]);
   const claims = await rows("select c.run_id from authorization_claims c join authorizations a using (authorization_id) join plans p using (plan_sha256) where p.project_id = $1");
-  assert.equal(claims.length, 4, "one claim per yes");
+  assert.equal(claims.length, 5, "one claim per yes");
   const contracts = await rows("select c.contract_sha256 from contracts c join work_orders w using (work_order_id) where w.project_id = $1");
   for (const { run_id: runId } of claims) {
     const run = JSON.parse(await fsp.readFile(path.join(projectPaths(root).runsDir, runId + ".json"), "utf8"));
@@ -796,10 +835,22 @@ test("a run whose database goes away stops as database_unavailable; reads withou
   const events = (await fsp.readFile(path.join(queue, "events", runId + ".io.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   const lost = events.findIndex((event) => event.event === "stop" && event.status === "database_unavailable");
   assert.ok(lost > 0, "the stop is recorded");
-  assert.equal(events.slice(lost).some((event) => ["task.input", "review.input", "contract.translation", "contract.check"].includes(event.event)), false, "no model call after it");
+  // The writer's and the reviewer's calls are the only model calls (the contract is a form check).
+  assert.equal(events.slice(lost).some((event) => ["task.input", "review.input"].includes(event.event)), false, "no model call after it");
   const file = JSON.parse(await fsp.readFile(path.join(queue, "runs", runId + ".json"), "utf8"));
   assert.deepEqual([file.status, file.conclusion, file.closed_reason], ["completed", "cancelled", "database_unavailable"]);
-  // status opens the database again (it starts the server) and writes what the run kept meanwhile.
+  // status only looks (RC3-DOWN-01): the database is stopped, it says so in the project's language and
+  // starts nothing; the runs are shown once the database is up again.
+  const words = await createTranslator(await resolveLocale(projectPaths(root)));
+  const looked = cli(["status"]);
+  assert.equal(looked.status, 0, looked.stderr);
+  assert.ok(looked.stdout.split(/\r?\n/).includes(words("status.database.stopped")), looked.stdout);
+  assert.equal(looked.stdout.includes(runId), false, looked.stdout);
+  assert.equal(await fsp.stat(path.join(dataHome, "postgres", "data", "postmaster.pid")).catch(() => null), null, "status did not start it");
+  // up starts it again; the next status writes what the run kept meanwhile and lists the run as it ended.
+  const up = cli(["up", "--fake-cli"]);
+  assert.equal(up.status, 0, up.stdout + up.stderr);
+  assert.equal(up.stdout.split(/\r?\n/)[0], words("up.database", { port: Number((await fsp.readFile(path.join(dataHome, "postgres", "data", "postmaster.pid"), "utf8")).split(/\r?\n/)[3]) }));
   const status = cli(["status"]);
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, new RegExp("\\n  " + runId + "  completed +  cancelled +  database_unavailable +\\.review-bridge/work-packages/hello\\.md  "));
@@ -819,7 +870,16 @@ test("a run whose database goes away stops as database_unavailable; reads withou
   await fsp.writeFile(path.join(broken, "postgres", "notes.txt"), "not a cluster\n");
   await reachSameState(broken);
   t.after(() => leaveBrokenHome(broken));
-  for (const command of ["status", "work-status", "doctor"]) {
+  // status only looks, as pg_ctl status does (Fortes 2026-11-09): the data directory it would use does not
+  // exist, so it says so with where, exits 4, starts and creates nothing, and never says up would start it.
+  const data = path.join(broken, "postgres", "data");
+  const unusable = cli(["status"], { REVIEW_BRIDGE_DATA_HOME: broken });
+  assert.equal(unusable.status, 4, unusable.stdout + unusable.stderr);
+  assert.ok(unusable.stdout.split(/\r?\n/).includes(words("status.database.missing", { path: data })), unusable.stdout);
+  assert.equal(unusable.stdout.includes(words("status.database.stopped")), false);
+  assert.equal(await fsp.stat(data).then(() => true, () => false), false, "status created no data directory");
+  // The reads that open the database say why it cannot be opened, and exit 2.
+  for (const command of ["work-status", "doctor"]) {
     const read = cli([command], { REVIEW_BRIDGE_DATA_HOME: broken });
     assert.equal(read.status, 2, command + ": " + read.stdout);
     assert.match(read.stderr, /^Review bridge failed closed: Bridge's database at .*postgres is not available: The folder .* holds files but no PostgreSQL cluster; Bridge will not touch it\. Run the command again; if it fails the same way, look at that folder \(the server's log is in .*log\)\n$/, command);
@@ -1118,9 +1178,13 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
 
   const status = cli(["status"]);
   assert.equal(status.status, 0, status.stderr);
-  // From the database: the run, its status, why it stopped, its work order file and when it began.
-  assert.match(status.stdout, new RegExp("^Page: .*\\nWork: 0 running\\n  " + runId + "  completed +  cancelled +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d [+-]\\d{4}\\n", "m"));
-  assert.match(status.stdout, /\nReview queue: pending \d+, running \d+, done \d+, failed \d+\n/);
+  // From the database: the page, the database's line in the project's language, the runs listed and not
+  // totalled (gh run list), each with its status, why it stopped, its work order file and when it began.
+  const words = await createTranslator(await resolveLocale(projectPaths(root)));
+  const databaseRunning = words("status.database.running").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(status.stdout, new RegExp("^Page: .*\\n" + databaseRunning + "\\nWork: 0 running\\n  " + runId + "  completed +  cancelled +  stopped +  \\.review-bridge/work-packages/hello\\.md  \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d [+-]\\d{4}\\n", "m"));
+  // No counts from the page service's queue folders (they went back to 0 when it restarted).
+  assert.doesNotMatch(status.stdout, /Review queue/);
   assert.ok(status.stdout.endsWith("\n" + (await databaseLines("")).slice(1).join("\n") + "\n"), status.stdout);
   assert.equal(status.stdout.includes(await databasePassword()), false, "the password itself is not printed");
 
@@ -1155,13 +1219,15 @@ test("without the reviewer proof a real start is refused before any model call, 
   assert.equal(refused.status, 1, refused.stderr);
   assert.match(refused.stdout, fakePage);
   // No page at all: start starts one; with the CLIs absent the check cannot run, so nothing starts.
-  cli(["down"]);
+  // down stops the page and the database; no run is running anywhere, so it is not refused.
+  const down = cli(["down"]);
+  assert.equal(down.status, 0, down.stdout + down.stderr);
   const noPage = cli(["start", order, "--yes"]);
   assert.equal(noPage.status, 1, noPage.stderr);
   assert.match(noPage.stdout, /\nReviewer read-only check: not passed \((the reviewer CLI is not installed and signed in|this platform's adapter is not verified, so the check is not available here)\)\n/);
   assert.doesNotMatch(noPage.stdout, /Checking that the reviewer/);
   // work-start goes through the same gate: no running page, no start.
-  cli(["down"]);
+  assert.equal(cli(["down"]).status, 0);
   const workStart = cli(["work-start", "--plan", ".review-bridge/review-queue/hello.plan.json", "--yes"]);
   assert.equal(workStart.status, 2);
   assert.match(workStart.stderr, /Native execution is unavailable: the Bridge page service is not running/);
@@ -1512,7 +1578,9 @@ test("after a run the project holds only its settings, work orders and results/<
   assert.equal(await fsp.stat(paths.runLogDir(newest)).catch(() => null), null);
 });
 
-test("the budget check asks the database for one number by primary key, equal to the sum of the run's usage events", async (t) => {
+// The budget is the writer's (Owner 2026-11-08): what its calls read new, wrote to the cache and wrote
+// out; what it read back from the cache and what the reviewer used are recorded and count against nothing.
+test("the budget check asks the database for one number by primary key: the writer's usage without cache reads", async (t) => {
   const { root, order, cli } = await fourActionsProject(t, "review-bridge-usage-total-");
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   assert.equal(yesTo(cli, order).status, 0);
@@ -1529,7 +1597,13 @@ test("the budget check asks the database for one number by primary key, equal to
   const total = await service.usageTotalForRun(paths, runId);
   assert.deepEqual(asked, ["select tokens_used from runs where run_id = $1"]);
   const usage = (await queryRecords("select payload from run_events where run_id = $1 and type = 'usage' order by sequence", [runId])).map((row) => row.payload);
-  assert.ok(usage.length >= 2, "the writer and the reviewer each used tokens");
-  assert.equal(total, usage.reduce((sum, event) => sum + service.tokenTotal(event.tokens), 0));
+  const writer = usage.filter((event) => event.role === "writer");
+  const reviewer = usage.filter((event) => event.role === "reviewer");
+  assert.ok(writer.length >= 1 && reviewer.length >= 1, "the writer and the reviewer each used tokens");
+  assert.equal(total, writer.reduce((sum, event) => sum + service.budgetTokens(event.tokens), 0));
   assert.ok(total > 0);
+  // The fake writer reads most of its context back from the cache: recorded, not counted.
+  assert.ok(writer.every((event) => event.tokens.cache_read > 0), JSON.stringify(writer));
+  assert.equal(total, writer.reduce((sum, event) => sum + event.tokens.input + event.tokens.cache_write + event.tokens.output, 0));
+  assert.ok(total < usage.reduce((sum, event) => sum + service.tokenTotal(event.tokens), 0), "the reviewer's tokens and the cache reads are left out");
 });

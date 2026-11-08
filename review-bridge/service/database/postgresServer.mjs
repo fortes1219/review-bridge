@@ -496,6 +496,20 @@ export async function startServer(root, {
   return { port: await runningPort(paths) };
 }
 
+// What makes this data home's data directory unusable, as pg_ctl status finds it before it looks for a
+// server (pg_ctl.c get_pgpid, REL_18_STABLE 246-273, exit 4): a directory that does not exist or cannot
+// be read, or one without PG_VERSION, which is no database cluster directory. Null when it is usable.
+export async function dataDirectoryProblem(root) {
+  const { data } = clusterPaths(root);
+  try {
+    await fsp.stat(data);
+  } catch (error) {
+    return error.code === "ENOENT" ? { problem: "missing", path: data } : { problem: "unreadable", path: data, code: error.code || "error" };
+  }
+  const version = await fsp.stat(path.join(data, "PG_VERSION")).then(() => null, (error) => error);
+  return version?.code === "ENOENT" ? { problem: "not_cluster", path: data } : null;
+}
+
 // Whether this data home's server is running, without starting it: no cluster is a server not running.
 export async function serverState(root, { binaries, tool = runTool }) {
   if (!(await isCluster(clusterPaths(root)))) return { running: false, cluster: false };

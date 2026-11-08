@@ -73,12 +73,13 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
 
   const notRunning = bridge("ps");
   assert.equal(notRunning.status, 1);
-  assert.equal(notRunning.stdout.trim(), "Bridge 沒在跑，執行 review-bridge up");
+  assert.equal(notRunning.stdout.trim(), "Bridge is not running. Run: review-bridge up");
 
   const up = bridge("up", "--fake-cli");
   assert.equal(up.status, 0, up.stderr);
-  // RC3-DOWN-01: up starts the database first and says so (this project has no locale: English).
-  assert.deepEqual(withoutDatabaseLine(up.stdout), ["網頁：" + url]);
+  // RC3-DOWN-01: up starts the database first and says so; this project has no locale, so the database's
+  // and the page's lines are English alike.
+  assert.deepEqual(withoutDatabaseLine(up.stdout), ["Page: " + url]);
   assert.equal((await fsp.readFile(path.join(privateRoot, "watch-url.txt"), "utf8")).trim(), url);
   // C1 + C3: the watch process recorded itself and /api/status echoes the same identity.
   const session = JSON.parse(await fsp.readFile(path.join(privateRoot, "watch-session.json"), "utf8"));
@@ -96,12 +97,25 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
 
   const again = bridge("up", "--fake-cli");
   assert.equal(again.status, 0);
-  assert.deepEqual(withoutDatabaseLine(again.stdout), ["已在跑：" + url]);
+  assert.deepEqual(withoutDatabaseLine(again.stdout), ["Already running: " + url]);
   assert.equal(JSON.parse(await fsp.readFile(path.join(privateRoot, "watch-session.json"), "utf8")).pid, session.pid);
 
   const ps = bridge("ps");
   assert.equal(ps.status, 0);
-  assert.deepEqual(ps.stdout.trim().split(/\r?\n/), [url, "進行中 0"]);
+  // The page's address only; no count (a hard-coded 0 used to follow it).
+  assert.deepEqual(ps.stdout.trim().split(/\r?\n/), [url]);
+
+  // status: the page, the database's line, then the runs from the database, listed and not totalled (as
+  // gh run list); nothing counted from the page service's folders.
+  const running = bridge("status");
+  assert.equal(running.status, 0, running.stderr);
+  const statusLines = running.stdout.trim().split(/\r?\n/);
+  assert.deepEqual(statusLines.slice(0, 3), [
+    "Page: " + url,
+    "Database: running",
+    "Work: none yet. Put a work order in .review-bridge/work-packages/ and run: review-bridge start <file>",
+  ]);
+  assert.equal(statusLines.some((line) => /^Review queue:/.test(line)), false, running.stdout);
 
   // RC3-DOWN-01: down stops the page and then the database, as docker compose down does.
   const down = bridge("down");
@@ -110,7 +124,15 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
   assert.equal(await fsp.stat(path.join(privateRoot, "watch-session.json")).catch(() => null), null);
   const after = bridge("ps");
   assert.equal(after.status, 1);
-  assert.equal(after.stdout.trim(), "Bridge 沒在跑，執行 review-bridge up");
+  assert.equal(after.stdout.trim(), "Bridge is not running. Run: review-bridge up");
+  // status only looks: a stopped database is said to be stopped and is not started to answer
+  // (the down below finds it still not running).
+  const stopped = bridge("status");
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.deepEqual(stopped.stdout.trim().split(/\r?\n/), [
+    "Page: not running; start it with review-bridge up",
+    "Database: stopped; review-bridge up starts it, and so does the next start.",
+  ]);
   // B7: nothing is left to stop, which is not a failure.
   const downAgain = bridge("down");
   assert.equal(downAgain.status, 0, downAgain.stderr);
@@ -131,7 +153,7 @@ test("occupied port moves the service to the next port and writes the real URL f
   assert.ok(bumped > port && bumped <= port + 20);
   const lines = withoutDatabaseLine(up.stdout);
   assert.match(lines[0], new RegExp(`^${port} 被.*占用，改用 http://localhost:${bumped}/$`));
-  assert.equal(lines.at(-1), "網頁：" + url);
+  assert.equal(lines.at(-1), "Page: " + url);
 });
 
 test("strict_port refuses an occupied port with a clear line and leaves nothing running", async (t) => {
@@ -143,7 +165,7 @@ test("strict_port refuses an occupied port with a clear line and leaves nothing 
 
   const up = bridge("up", "--fake-cli");
   assert.equal(up.status, 2);
-  assert.match(withoutDatabaseLine(up.stdout).join("\n"), new RegExp(`^Bridge 沒有啟動：.*port ${port} 被占用，watch.strict_port 為 true`));
+  assert.match(withoutDatabaseLine(up.stdout).join("\n"), new RegExp(`^Bridge did not start: .*port ${port} 被占用，watch.strict_port 為 true`));
   assert.equal(await fsp.stat(path.join(privateRoot, "watch-session.json")).catch(() => null), null);
   assert.equal(bridge("ps").status, 1);
 });
@@ -157,7 +179,7 @@ test("T2 stale session with a dead pid: ps says not running and up restarts the 
 
   const up = bridge("up", "--fake-cli");
   assert.equal(up.status, 0, up.stderr);
-  assert.deepEqual(withoutDatabaseLine(up.stdout), ["網頁：" + `http://localhost:${port}/`]);
+  assert.deepEqual(withoutDatabaseLine(up.stdout), ["Page: " + `http://localhost:${port}/`]);
   const check = await checkService(paths);
   assert.equal(check.reason, "running");
   assert.ok(check.session.pid !== process.pid);
@@ -174,7 +196,7 @@ test("T3 a foreign server answering 200 on the recorded port is wrong_service, n
   assert.equal((await checkService(paths)).reason, "wrong_service");
   const ps = bridge("ps");
   assert.equal(ps.status, 1);
-  assert.equal(ps.stdout.trim(), "Bridge 沒在跑，執行 review-bridge up");
+  assert.equal(ps.stdout.trim(), "Bridge is not running. Run: review-bridge up");
 });
 
 test("T4 a session pointing at a port nobody listens on is unreachable; a malformed record is no_session", async (t) => {

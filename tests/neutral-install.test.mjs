@@ -105,7 +105,7 @@ test("reinit: .review-bridge/ without its install record gets the record back an
   const privateRoot = path.join(root, ".review-bridge");
   assert.equal(await reinitializeNeutralInstall({ target: root }), null, "with its record it is an install, which upgrade moves");
   await fsp.appendFile(path.join(privateRoot, "rules.md"), "- Mine.\n");
-  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "<!-- bridge:requested_work -->\nBuild a farm.\n");
+  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "<!-- bridge:requested_work -->\nBuild a farm.\n\n<!-- bridge:acceptance -->\n- The farm shows.\n");
   await fsp.rm(path.join(privateRoot, "work-packages", "TEMPLATE.md"));
   const configText = await fsp.readFile(path.join(privateRoot, "bridge.json"), "utf8");
   const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" });
@@ -192,10 +192,14 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   // the install records each one's hash. rules.md is installed and owner-editable.
   const template = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), "utf8");
   assert.equal(template, await fsp.readFile(new URL("../project-templates/work-package.md", import.meta.url), "utf8"));
-  assert.match(template, /^<!-- bridge:acceptance -->\n## Acceptance$/m);
+  // A work order becomes a contract by form check: what to do and an acceptance list are the two blocks
+  // every work order needs, and each template says so on their headings.
+  assert.match(template, /^<!-- bridge:requested_work -->\n## Work \(required\)$/m);
+  assert.match(template, /^<!-- bridge:acceptance -->\n## Acceptance \(required: one result per item, each starting with "- "/m);
   const chinese = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.zh-TW.md"), "utf8");
   assert.equal(chinese, await fsp.readFile(new URL("../project-templates/work-package.zh-TW.md", import.meta.url), "utf8"));
-  assert.match(chinese, /^<!-- bridge:acceptance -->\n## 驗收$/m);
+  assert.match(chinese, /^<!-- bridge:requested_work -->\n## 要做的事（必填）$/m);
+  assert.match(chinese, /^<!-- bridge:acceptance -->\n## 驗收（必填：一條一個結果，每條用「- 」開頭/m);
   const { createHash } = await import("node:crypto");
   const hashOf = (text) => createHash("sha256").update(text).digest("hex");
   assert.deepEqual(JSON.parse(await fsp.readFile(getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" }).installManifestPath, "utf8")).work_template_sha256, {

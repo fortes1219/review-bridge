@@ -73,13 +73,19 @@ async function startRun(runtime, { workPackageId, runId, timestamp }) {
   });
 }
 
+// A work order says what to do and gives an acceptance list (the form check, RC3-COST-01); inside its
+// blocks the person's text is kept as written.
 test("R1 multiline task files allow newline, tab, and backticks", async () => {
   const runtime = await makeRuntime("review-bridge-r1-");
   const task = [
     "# Work",
     "",
+    "<!-- bridge:requested_work -->",
     "Update the `README.md` example.",
-    "\tKeep this indented acceptance note.",
+    "\tKeep this indented note.",
+    "",
+    "<!-- bridge:acceptance -->",
+    "- The `README.md` example is updated.",
   ].join("\n");
   const taskFile = path.join(runtime.paths.privateRoot, "work-packages", "r1.md");
   const outPath = path.join(runtime.paths.privateRoot, "r1.plan.json");

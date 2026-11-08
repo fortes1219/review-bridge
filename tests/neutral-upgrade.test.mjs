@@ -52,11 +52,17 @@ const lockOf = (root) => path.join(root, ".review-bridge-install.lock");
 const { getBridgePaths } = await import(sourceModule("utils/paths.mjs"));
 const projectPaths = (root) => getBridgePaths(root, sourceRuntime, { privateRootName: ".review-bridge" });
 const manifestOf = (root) => projectPaths(root).installManifestPath;
+// These tests stop the page service, the way `down` stops it, and leave the database alone: `down` stops
+// the person's database too (RC3-DOWN-01), and the check after an upgrade runs in this process, which
+// keeps its one pool to that database open (database/index.mjs). This file's database is stopped when
+// its tests end (isolatedDataHome).
+const { serviceDown } = await import(sourceModule("features/setupCheck/pageService.mjs"));
+const stopPage = (root) => serviceDown({ paths: projectPaths(root), out: { write() {} } });
 
 async function workspace(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-upgrade-"));
   t.after(async () => {
-    spawnSync(process.execPath, [sourceBootstrap, "down"], { cwd: root, windowsHide: true, stdio: "ignore" });
+    await stopPage(root).catch(() => {});
     await fsp.rm(root, { recursive: true, force: true });
   });
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "vue-test", dependencies: { vue: "latest" }, devDependencies: { vite: "latest" } }));
@@ -327,7 +333,7 @@ test("W2 a failure at each step rolls back: persistent data bit for bit, the old
     assert.equal(await serviceRunning(root), true, hook + ": the page service is back");
   }
   // Without the page service it stays off.
-  bootstrapRun(root, ["down"]);
+  assert.equal((await stopPage(root)).exitCode, 0);
   const before = await persistent(root);
   await assert.rejects(upgrade(root, { afterConfig: fail }), /rolled back/);
   sameTree(await persistent(root), before, "no service");
@@ -394,7 +400,7 @@ test("W3b interrupted after the page service stopped and before the backup: the 
   assert.equal(await serviceRunning(root), true);
   sameTree(await persistent(root), before, "release with service");
   // The same point when nothing was running: only the marker goes.
-  bootstrapRun(root, ["down"]);
+  assert.equal((await stopPage(root)).exitCode, 0);
   crashAt(root, "afterServiceStop");
   const quiet = await planNeutralUpgradeRollback({ target: root });
   assert.equal(quiet.restart_service, false);
@@ -838,7 +844,12 @@ test("W13 an upgrade from the older layout moves every old file out of the proje
   }
   await verifyNeutralInstall(root);
   const status = bootstrapRun(root, ["status"]);
-  assert.ok(status.stdout.split("\n").includes("Logs: " + projectPaths(root).logRoot), status.stdout);
+  const statusLines = status.stdout.split(/\r?\n/);
+  assert.ok(statusLines.includes("Logs: " + projectPaths(root).logRoot), status.stdout);
+  // The check after the upgrade opened the database, and status says so (RC3-DOWN-01); the runs come
+  // from the database, with no queue totals counted from the files the upgrade moved.
+  assert.ok(statusLines.includes("Database: running"), status.stdout);
+  assert.equal(statusLines.some((line) => /^Review queue:/.test(line)), false, status.stdout);
   assert.equal((await planNeutralUpgrade({ target: root })).up_to_date, true);
 });
 

@@ -10,7 +10,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { orderWorkOrders, signedOutProvider, stepOf, stopOfRun } from "../features/workOrder/line.mjs";
-import { latestCardsOfFiles, latestRunsOfFiles } from "../features/workOrder/workOrderRecords.mjs";
+import { sealedText, workOrderIdOf } from "../features/workOrder/workOrderFormat.mjs";
+import { latestCardsOfFiles, latestRunsOfWorkOrders } from "../features/workOrder/workOrderRecords.mjs";
 import { isPidAlive } from "../service/agentCli/process.mjs";
 import { activeLineSteps } from "../service/records/runRecords.mjs";
 import { connect } from "../service/database/postgresServer.mjs";
@@ -191,14 +192,18 @@ test("one failing does not stop the next, and the table says each", LIMIT, async
   assert.doesNotMatch(table, /Stopped at/);
 });
 
-test("Bridge's own token budget, spent on a run, is that work order's: the next one still runs", LIMIT, async (t) => {
+// The budget is the writer's and counts what it read new, wrote to the cache and wrote out, never what it
+// read back from the cache (Owner 2026-11-08). The fake writer's counted tokens are 94 + 454 + 2352 per
+// call, so a work order whose own budget is 1000 spends it on its first call; its cache reads, however
+// many, count for nothing.
+test("Bridge's own token budget, spent on a run, is that work order's: the next one still runs; cache reads spend none of it", LIMIT, async (t) => {
   const rt = await install(t);
-  await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
+  await directory(rt, "demo", { "01-a.md": "---\nbudget:\n  tokens: 1000\n---\n" + order("01-a"), "02-b.md": null });
   const env = { FAKE_CLAUDE_TOKENS: "99999999", FAKE_WRITER_ONLY: "1" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
   const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   assert.equal(ran.status, 1, ran.stdout + ran.stderr);
-  assert.deepEqual((await runsOf(rt)).map((run) => run.closed_reason), ["token_limit", "token_limit"]);
+  assert.deepEqual((await runsOf(rt)).map((run) => [run.closed_reason, run.conclusion]), [["token_limit", "failure"], ["review_pass", "success"]]);
   assert.doesNotMatch(ran.stdout, /Stopped at/);
 });
 
@@ -406,13 +411,20 @@ test("delivered is what the records say: skipped until its record is cleaned; a 
   // The results folder says nothing either way.
   await fsp.rm(path.join(rt.root, ".review-bridge", "results"), { recursive: true, force: true });
   assert.match(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).stdout, /1 delivered/);
-  // Renamed: the id the yes wrote into it says it is the same work order, and the card says so.
+  // Delivered is the work order's, by the card's rule (Fortes 2026-11-09): renamed, the id the yes wrote
+  // into it says it is the same work order, still delivered.
   const dir = path.join(rt.root, rt.dirOf("demo"));
   await fsp.rename(path.join(dir, "01-a.md"), path.join(dir, "01-renamed.md"));
   const renamed = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
-  assert.match(renamed.stdout, /0 delivered, 0 not a work order, 1 to run/);
-  assert.match(renamed.stdout, /01-renamed\.md +contract sha256 [0-9a-f]{4}…, 1 condition\(s\) {3}\(was at \.review-bridge\/work-packages\/demo\/01-a\.md; the same work order\)/);
+  assert.equal(renamed.status, 0, renamed.stdout + renamed.stderr);
+  assert.match(renamed.stdout, /1 delivered, 0 not a work order, 0 to run/);
   await fsp.rename(path.join(dir, "01-renamed.md"), path.join(dir, "01-a.md"));
+  // The same text with its id taken out is a new work order, though its name is the delivered one's.
+  const withId = await fsp.readFile(path.join(dir, "01-a.md"), "utf8");
+  await fsp.writeFile(path.join(dir, "01-a.md"), sealedText(withId));
+  const idless = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
+  assert.match(idless.stdout, /0 delivered, 0 not a work order, 1 to run/);
+  await fsp.writeFile(path.join(dir, "01-a.md"), withId);
   assert.match(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).stdout, /1 delivered/);
   assert.equal(rt.bridge(["clean", runId]).status, 0);
   const cleaned = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
@@ -492,51 +504,60 @@ test("every query a line adds reads what this directory needs, whatever the hist
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).status, 1);
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]).status, 0);
   const client = await connect(path.join(dataHome, "postgres"), { database: "bridge" });
-  t.after(() => client.end());
-  const projectId = rt.paths.projectId;
-  const files = [rt.dirOf("demo") + "/01-a.md", rt.dirOf("demo") + "/02-b.md"];
-  // A history a small table would hide: other work orders of this project, and many plans and runs of
-  // this very work order, finished. On a table of a few rows a planner's choice of index proves nothing.
-  const HISTORY = 3000;
-  await client.query("begin");
-  await client.query("create temp table seed_orders on commit drop as select w.* from work_orders w cross join generate_series(1, $1::int) where w.project_id = $2 and w.last_file_name = $3", [HISTORY, projectId, files[0]]);
-  await client.query("update seed_orders set work_order_id = gen_random_uuid(), last_file_name = 'old/' || gen_random_uuid()");
-  await client.query("insert into work_orders select * from seed_orders");
-  await client.query("create temp table seed_plans on commit drop as select p.* from plans p cross join generate_series(1, $1::int) where p.project_id = $2 and p.source_file = $3", [HISTORY, projectId, files[0]]);
-  await client.query("update seed_plans set plan_sha256 = md5(random()::text) || md5(random()::text), proposed_run_id = gen_random_uuid(), shown_at = shown_at - interval '1 day'");
-  await client.query("insert into plans select * from seed_plans");
-  await client.query("create temp table seed_runs on commit drop as select r.* from runs r join plans p using (plan_sha256) cross join generate_series(1, $1::int) where p.project_id = $2 and p.source_file = $3", [HISTORY, projectId, files[0]]);
-  await client.query("alter table seed_runs add column row_id serial");
-  await client.query("alter table seed_plans add column row_id serial");
-  await client.query("update seed_runs r set run_id = gen_random_uuid(), created_at = r.created_at - interval '1 day', plan_sha256 = s.plan_sha256 from seed_plans s where s.row_id = r.row_id");
-  await client.query("alter table seed_runs drop column row_id");
-  await client.query("insert into runs select * from seed_runs");
-  await client.query("commit");
-  const [{ work_order_id: workOrderId }] = (await client.query("select work_order_id from work_orders where project_id = $1 and last_file_name = $2", [projectId, files[0]])).rows;
-  // A closed run's entry stays in a partial index until vacuum, and each costs a look at the table, so
-  // what this file's earlier tests left would count against the query being measured.
-  await client.query("vacuum analyze work_orders, plans, runs");
-  const explained = async (read) => {
-    let plan = "";
-    await read({ query: async (sql, values) => { plan = (await client.query("explain (analyze, buffers) " + sql, values)).rows.map((row) => row["QUERY PLAN"]).join("\n"); return { rows: [{ work_order_id: workOrderId }] }; } });
-    t.diagnostic(plan);
-    return plan;
-  };
-  // The blocks the lookup of these two files touched when it ran (planning has its own count), far below
-  // the history behind them.
-  const buffers = (plan) => Math.max(...[...plan.split("Planning:")[0].matchAll(/Buffers: shared (?:hit=(\d+))?(?: read=(\d+))?/g)].map((match) => Number(match[1] || 0) + Number(match[2] || 0)));
-  const latest = await explained((db) => latestRunsOfFiles(db, { projectId, files }));
-  assert.match(latest, /work_orders_by_file/);
-  assert.match(latest, /runs_by_work_order/);
-  assert.ok(buffers(latest) < 60, latest);
-  const cards = await explained((db) => latestCardsOfFiles(db, { projectId, files }));
-  assert.match(cards, /plans_shown_by_file/);
-  assert.ok(buffers(cards) < 60, cards);
-  // Blocks say nothing here: vacuum does not shrink an index, so this one's pages depend on what ran
-  // before it (1 on one machine, 83 on another). What must hold is that a partial index holding only
-  // running runs gives nothing to throw away, however long the history behind it.
-  const active = await explained((db) => activeLineSteps(db, projectId));
-  assert.match(active, /Index Scan using runs_active\w* on runs r .*rows=0(?:\.0+)? loops=1/, active);
-  assert.doesNotMatch(active, /Rows Removed by Filter: [1-9]/, active);
-  t.diagnostic("runs_active_by_work_order: " + (await client.query("select pg_relation_size('runs_active_by_work_order') as bytes")).rows[0].bytes + " bytes");
+  // Closed by the test itself: install added its cleanup first, and node:test runs after hooks in the
+  // order they were added, so `down` would stop the server under this open connection (57P01).
+  try {
+    const projectId = rt.paths.projectId;
+    const files = [rt.dirOf("demo") + "/01-a.md", rt.dirOf("demo") + "/02-b.md"];
+    // A history a small table would hide: other work orders of this project, and many plans and runs of
+    // this very work order, finished. On a table of a few rows a planner's choice of index proves nothing.
+    const HISTORY = 3000;
+    await client.query("begin");
+    await client.query("create temp table seed_orders on commit drop as select w.* from work_orders w cross join generate_series(1, $1::int) where w.project_id = $2 and w.last_file_name = $3", [HISTORY, projectId, files[0]]);
+    await client.query("update seed_orders set work_order_id = gen_random_uuid(), last_file_name = 'old/' || gen_random_uuid()");
+    await client.query("insert into work_orders select * from seed_orders");
+    await client.query("create temp table seed_plans on commit drop as select p.* from plans p cross join generate_series(1, $1::int) where p.project_id = $2 and p.source_file = $3", [HISTORY, projectId, files[0]]);
+    await client.query("update seed_plans set plan_sha256 = md5(random()::text) || md5(random()::text), proposed_run_id = gen_random_uuid(), shown_at = shown_at - interval '1 day'");
+    await client.query("insert into plans select * from seed_plans");
+    await client.query("create temp table seed_runs on commit drop as select r.* from runs r join plans p using (plan_sha256) cross join generate_series(1, $1::int) where p.project_id = $2 and p.source_file = $3", [HISTORY, projectId, files[0]]);
+    await client.query("alter table seed_runs add column row_id serial");
+    await client.query("alter table seed_plans add column row_id serial");
+    await client.query("update seed_runs r set run_id = gen_random_uuid(), created_at = r.created_at - interval '1 day', plan_sha256 = s.plan_sha256 from seed_plans s where s.row_id = r.row_id");
+    await client.query("alter table seed_runs drop column row_id");
+    await client.query("insert into runs select * from seed_runs");
+    await client.query("commit");
+    const [{ work_order_id: workOrderId }] = (await client.query("select work_order_id from work_orders where project_id = $1 and last_file_name = $2", [projectId, files[0]])).rows;
+    // A closed run's entry stays in a partial index until vacuum, and each costs a look at the table, so
+    // what this file's earlier tests left would count against the query being measured.
+    await client.query("vacuum analyze work_orders, plans, runs");
+    const explained = async (read) => {
+      let plan = "";
+      await read({ query: async (sql, values) => { plan = (await client.query("explain (analyze, buffers) " + sql, values)).rows.map((row) => row["QUERY PLAN"]).join("\n"); return { rows: [{ work_order_id: workOrderId }] }; } });
+      t.diagnostic(plan);
+      return plan;
+    };
+    // The blocks the lookup of these two files touched when it ran (planning has its own count), far below
+    // the history behind them.
+    const buffers = (plan) => Math.max(...[...plan.split("Planning:")[0].matchAll(/Buffers: shared (?:hit=(\d+))?(?: read=(\d+))?/g)].map((match) => Number(match[1] || 0) + Number(match[2] || 0)));
+    // Each file is the work order its front matter id names (the yes above wrote both ids): one probe of
+    // the primary key, however many other work orders the project holds.
+    const orders = await Promise.all(files.map(async (file) => ({ file, id: workOrderIdOf(await fsp.readFile(path.join(rt.root, file), "utf8")) })));
+    assert.ok(orders.every((order) => order.id), "the yes wrote each file's id");
+    const latest = await explained((db) => latestRunsOfWorkOrders(db, { projectId, repoRoot: rt.root, orders }));
+    assert.match(latest, /work_orders_pkey/);
+    assert.match(latest, /runs_by_work_order/);
+    assert.ok(buffers(latest) < 60, latest);
+    const cards = await explained((db) => latestCardsOfFiles(db, { projectId, files }));
+    assert.match(cards, /plans_shown_by_file/);
+    assert.ok(buffers(cards) < 60, cards);
+    // Blocks say nothing here: vacuum does not shrink an index, so this one's pages depend on what ran
+    // before it (1 on one machine, 83 on another). What must hold is that a partial index holding only
+    // running runs gives nothing to throw away, however long the history behind it.
+    const active = await explained((db) => activeLineSteps(db, projectId));
+    assert.match(active, /Index Scan using runs_active\w* on runs r .*rows=0(?:\.0+)? loops=1/, active);
+    assert.doesNotMatch(active, /Rows Removed by Filter: [1-9]/, active);
+    t.diagnostic("runs_active_by_work_order: " + (await client.query("select pg_relation_size('runs_active_by_work_order') as bytes")).rows[0].bytes + " bytes");
+  } finally {
+    await client.end();
+  }
 });

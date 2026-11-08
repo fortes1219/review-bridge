@@ -244,5 +244,15 @@
   "down.database.in_use": "資料庫本來就沒在跑；另一套 PostgreSQL 在用它記的號碼（{pid}），Bridge 沒有停它，也沒有刪任何檔案。",
   "up.database": "資料庫在跑（port {port}）。",
   "status.database.running": "資料庫：在跑",
-  "status.database.stopped": "資料庫：已停止；review-bridge up 會把它起來，下一次 start 也會。"
+  "status.database.stopped": "資料庫：已停止；review-bridge up 會把它起來，下一次 start 也會。",
+  "page.not_running": "Bridge 沒在跑，執行 review-bridge up",
+  "page.up.already_running": "已在跑：{url}",
+  "page.up.failed": "Bridge 沒有啟動：{reason}",
+  "page.up.started": "網頁：{url}",
+  "page.down.not_running": "Bridge 沒在跑",
+  "page.down.failed": "Bridge 沒有停下來（pid {pid}）。",
+  "page.down.stopped": "Bridge 已停止。",
+  "status.database.missing": "資料庫：資料目錄 {path} 不存在。",
+  "status.database.unreadable": "資料庫：資料目錄 {path} 讀不到（{code}）。",
+  "status.database.not_cluster": "資料庫：{path} 不是資料庫叢集目錄。"
 }

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { serviceDown, serviceStatus } from "../features/setupCheck/pageService.mjs";
 import { createTranslator, DEFAULT_LOCALE, systemLocale } from "../features/workOrder/i18n.mjs";
 
 const locales = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "features", "workOrder", "locales");
@@ -32,4 +35,31 @@ test("every pack has the same keys, and the card and its stop line are in each p
   for (const key of ["yes.no_card", "yes.directory_card", "yes.old_card", "yes.changed", "yes.option", "yes.used", "yes.expired", "line.yes.no_card", "line.yes.changed", "line.yes.used", "line.yes.ran_meanwhile"]) {
     assert.ok(zh.has(key) && en.has(key), key);
   }
+});
+
+// The page service's lines follow the project's locale, as the database's lines beside them do (Fortes
+// 2026-11-09); they used to be Chinese in every project. No page runs here: no session is recorded.
+test("ps and down say the page's state in the project's language", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-page-words-"));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const paths = {
+    bridgeConfigPath: path.join(root, "bridge.json"), watchSessionPath: path.join(root, "watch-session.json"),
+    watchUrlPath: path.join(root, "watch-url.txt"), logRoot: path.join(root, "logs"),
+  };
+  const said = async (call) => {
+    const lines = [];
+    await call({ paths, out: { write: (text) => lines.push(text) } });
+    return lines.join("");
+  };
+  for (const [locale, notRunning, wasNot] of [
+    ["zh-TW", "Bridge 沒在跑，執行 review-bridge up\n", "Bridge 沒在跑\n"],
+    ["en", "Bridge is not running. Run: review-bridge up\n", "Bridge was not running.\n"],
+  ]) {
+    await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ locale }));
+    assert.equal(await said(serviceStatus), notRunning, locale);
+    assert.equal(await said(serviceDown), wasNot, locale);
+  }
+  // A project with no locale is English, the default.
+  await fsp.writeFile(paths.bridgeConfigPath, "{}");
+  assert.equal(await said(serviceStatus), "Bridge is not running. Run: review-bridge up\n");
 });
