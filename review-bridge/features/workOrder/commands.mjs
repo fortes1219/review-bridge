@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  activeLineSteps, activeRuns, assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
-  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, writeJson,
+  activeLineSteps, activeRuns, assertRunResumable, bridgeDataHome, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
+  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, updateGraph, writeJson,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
 import { askYes, cardTranslator, confirmWorkStart, contractLine, needsAuthorizationLine, readiness, startCard } from "./confirmStart.mjs";
@@ -68,6 +68,11 @@ async function openRecords(paths) {
   const db = await database();
   await ensureProject(db, { projectId: config.project_id, root: paths.repoRoot });
   return { db, projectId: config.project_id };
+}
+
+// The project's row, which the graph's rows point at; the router hands this to the graph feature.
+export async function recordProject(db, paths) {
+  await ensureProject(db, { projectId: paths.projectId, root: paths.repoRoot });
 }
 
 // The work order's path in the project, spelled as the file system spells it (the records' key).
@@ -214,6 +219,16 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
       await started.workLock();
     }
     throw error;
+  }
+  // The project's graph is brought up to date before the writer's first call, from the files Git says
+  // changed (T0-GRAPH-01). The work does not depend on it: a graph that cannot be updated is said, and
+  // the writer and reviewer read it as it was.
+  if (records) {
+    try {
+      await updateGraph({ db: records.db, projectId: records.projectId, projectRoot: paths.repoRoot, dataHome: bridgeDataHome() });
+    } catch (error) {
+      process.stderr.write("The project's graph was not brought up to date (" + String(error?.message || error) + "); the writer and reviewer read it as it was. Run: review-bridge graph\n");
+    }
   }
   // The replaced version is delivered here too, in case its own work-start is gone.
   for (const runId of authorization.superseded) {
@@ -500,7 +515,8 @@ export async function clearProjectRecords({ paths, runId, options }) {
     return 0;
   }
   write("Cleared this project's records: " + counts.work_orders + " work order(s), " + counts.work_order_versions + " version(s), "
-    + counts.plans + " plan(s), " + counts.authorizations + " authorization(s), " + counts.contracts + " contract(s), " + counts.runs + " run(s).");
+    + counts.plans + " plan(s), " + counts.authorizations + " authorization(s), " + counts.contracts + " contract(s), " + counts.runs + " run(s), "
+    + counts.graph_files + " graph file(s).");
   write("This project's id is not used again. To use Bridge here again: review-bridge uninstall --target ., then review-bridge init");
   return 0;
 }

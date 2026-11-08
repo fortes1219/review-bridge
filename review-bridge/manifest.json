@@ -8,6 +8,8 @@
     "review",
     "bounded-resume",
     "work-plan",
+    "graph",
+    "graph-mcp",
     "work-start",
     "work-status",
     "work-cancel",

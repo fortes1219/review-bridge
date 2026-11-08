@@ -677,6 +677,32 @@ Options:
       The project folder (string; default: the current folder)
 ```
 
+#### graph
+
+```text
+Usage: review-bridge graph [options]
+
+Read this project's code into its graph again, whole (init does this; start brings it up to date)
+
+Options:
+  --json
+      Print each step as one JSON line, the last one the summary (boolean)
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
+#### graph-mcp
+
+```text
+Usage: review-bridge graph-mcp [options]
+
+Bridge's read-only MCP server on this project's graph, over stdio (the writer's and reviewer's CLIs start it)
+
+Options:
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
 #### roles-check
 
 ```text

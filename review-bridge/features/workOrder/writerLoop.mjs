@@ -27,6 +27,7 @@ import {
   writeFailureRecord,
   writeJson,
   writeText,
+  graphMcpServer,
 } from "../../service/index.mjs";
 import { assertUnder, assertUnderOne } from "../../utils/pathGuard.mjs";
 import { enqueueReview, hasPendingMessageHash } from "./reviewQueue.mjs";
@@ -458,6 +459,8 @@ export async function runBoundedResume({
         maxTurns: limits.max_turns,
         disallowedTools: validation.disallowed_tools,
         mcpOff: workPackage.writer?.mcp_off,
+        // Bridge's read-only graph server: where things are and who refers to them (T0-GRAPH-01).
+        graph: graphMcpServer({ bridgeRoot: paths.bridgeRoot, repoRoot: paths.repoRoot }),
         stdoutPath: streamPath,
         stderrPath,
         timeoutMs: writerTimeout,

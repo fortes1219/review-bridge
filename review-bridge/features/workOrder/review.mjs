@@ -13,6 +13,7 @@ import {
   writeFailureRecord,
   writeJson,
   writeText,
+  graphMcpServer,
 } from "../../service/index.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
 import { EvidenceUnavailableError } from "./workspaceEvidence.mjs";
@@ -259,6 +260,9 @@ export async function runReviewWorker({
             maxTurns: control.run?.policy_snapshot?.effective_policy?.limits?.max_turns ?? null,
             mcp: control.run?.work_package?.reviewer?.mcp,
             mcpOff: control.run?.work_package?.reviewer?.mcp_off,
+            // Bridge's read-only graph server: what a change touches (T0-GRAPH-01); the read-only check
+            // ran with it.
+            graph: graphMcpServer({ bridgeRoot: paths.bridgeRoot, repoRoot: paths.repoRoot }),
             stdoutPath,
             stderrPath,
             answerPath: resultPath,

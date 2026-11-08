@@ -113,6 +113,22 @@ export async function openDatabase({ dataHome = bridgeDataHome(), migrationsDir 
   return await opened.get(dataHome);
 }
 
+// The person's database for reading only, as Bridge's MCP server reads the graph: nothing is started,
+// created or migrated, and every transaction is read-only with a server-side time limit
+// (default_transaction_read_only and statement_timeout, PostgreSQL's runtime-config-client; postgres-mcp
+// reads in a READ ONLY transaction the same way). A statement past the limit is ended by the server,
+// so none is left running when the reader goes. A server that is not running is an error to the caller.
+export async function openReadOnlyDatabase({ dataHome = bridgeDataHome(), statementTimeoutMs = 10_000 } = {}) {
+  const root = databaseRoot(dataHome);
+  const pool = new pg.Pool({
+    ...(await connectionSettings(root, { database: DATABASE_NAME })),
+    options: "-c default_transaction_read_only=on -c statement_timeout=" + statementTimeoutMs,
+    max: 2, allowExitOnIdle: true, idleTimeoutMillis: 1000,
+  });
+  pool.on("error", () => {});
+  return { query: (sql, values) => pool.query(sql, values).catch((error) => { throw unavailable(error); }), close: () => pool.end() };
+}
+
 // The person's database as `status` says it, nothing started: `running`, `stopped`, or `unusable` with
 // what pg_ctl status would say about its data directory (dataDirectoryProblem) and where it is.
 export async function databaseStatus({ dataHome = bridgeDataHome() } = {}) {

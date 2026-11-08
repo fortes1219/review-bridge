@@ -38,12 +38,19 @@
     "node": ">=22.8"
   },
   "dependencies": {
+    "@ast-grep/napi": "0.51.1",
     "@clack/prompts": "1.8.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@vue/compiler-sfc": "3.5.45",
     "embedded-postgres": "18.4.0-beta.17",
     "jsonc-parser": "3.3.1",
     "markdown-it": "14.3.3",
+    "oxc-resolver": "11.24.2",
     "pg": "8.23.1",
-    "yaml": "2.9.1"
+    "picomatch": "4.0.7",
+    "tinyglobby": "0.2.17",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@lydell/node-pty": "1.1.0",

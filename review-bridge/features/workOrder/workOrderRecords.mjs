@@ -395,6 +395,9 @@ export async function clearProject(db, projectId) {
     await remove("plans", "delete from plans where project_id = $1");
     await remove("work_order_versions", "delete from work_order_versions where work_order_id in (" + orders + ")");
     await remove("work_orders", "delete from work_orders where project_id = $1");
+    // The graph's definitions, references and imports go with their files (on delete cascade).
+    await remove("graph_files", "delete from graph_files where project_id = $1");
+    await remove("graph_states", "delete from graph_states where project_id = $1");
     await tx.query("update projects set cleared_at = now() where project_id = $1", [projectId]);
     return counts;
   });

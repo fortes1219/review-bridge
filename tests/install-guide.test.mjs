@@ -55,6 +55,7 @@ function recordingUi(answers = []) {
     spinner() {
       return {
         start: (label) => calls.push({ start: label }),
+        message: (text) => calls.push({ progress: text }),
         stop: (label) => calls.push({ done: label }),
         error: (label) => calls.push({ failed: label }),
       };
@@ -126,6 +127,27 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
   assert.equal(result.ok, true);
   assert.equal(result.printed, true);
   assert.equal(run.written(), "");
+});
+
+// T0-GRAPH-01: mapping the project says how far it is on its own line, and init ends with what it read.
+test("a long step shows its progress on its spinner line, and the Done message begins with what was mapped", async (t) => {
+  const project = await tempDir(t, "review-bridge-guide-project-");
+  const dataHome = await tempDir(t, "review-bridge-guide-home-");
+  const ui = recordingUi();
+  const lines = ["Mapped 2 file(s): 3 definition(s), 1 reference(s), 1 import(s)."];
+  await runGuide({}, {
+    packageRoot, cwd: project, interactive: true, ui, dataHome, asRoot: () => false,
+    inspectProvider: async () => signedIn,
+    setUpProject: async (settings, step) => {
+      await step("Mapping the project", async (update) => { update("1/2 files, 1 definitions"); update("2/2 files, 3 definitions"); });
+      return { ok: true, target: settings.target, url: "http://localhost:8080/", database: DATABASE, graph_lines: lines };
+    },
+  });
+  const mapped = ui.calls.slice(ui.calls.findIndex((call) => call.start === "Mapping the project"));
+  assert.deepEqual(mapped.slice(0, 4), [
+    { start: "Mapping the project" }, { progress: "Mapping the project: 1/2 files, 1 definitions" }, { progress: "Mapping the project: 2/2 files, 3 definitions" }, { done: "Mapping the project" },
+  ]);
+  assert.match(ui.calls.at(-1).outro, /^Mapped 2 file\(s\): 3 definition\(s\), 1 reference\(s\), 1 import\(s\)\.\n\nDone\. Now:\n/);
 });
 
 // RC3-VSCODE-01: the last question, before any work; nothing outside .review-bridge/ without a yes.
@@ -369,7 +391,7 @@ test("--help lists the commands for people; --help --all adds the ones for agent
   const run = (...args) => spawnSync(process.execPath, [bridge, ...args], { cwd: packageRoot, encoding: "utf8", windowsHide: true });
   const listed = (text) => text.split("\n").filter((line) => /^  [a-z]/.test(line)).map((line) => line.trim().split(/\s/)[0]);
   const human = ["init", "start", "stop", "resume", "clean", "status", "logs", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor", "backup"];
-  const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "roles-check"];
+  const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "graph", "graph-mcp", "roles-check"];
   assert.deepEqual(listed(run("--help").stdout), human);
   assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());
   assert.match(run("init", "--help").stdout, /\n\nAfterwards you start work through your agent: in Claude Code type \/review-bridge start <file>; in Codex, \$review-bridge start <file>\. review-bridge start <file> at a terminal is for advanced use and CI\.\n/);

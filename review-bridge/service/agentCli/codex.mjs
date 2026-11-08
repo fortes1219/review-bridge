@@ -92,6 +92,16 @@ export function reviewerUsageEvent({ usage, trailerTokens, call, durationMs }) {
 export const NO_CONNECTORS_ARGS = Object.freeze(["--disable", "apps", "--disable", "plugins"]);
 export const mcpOffArgs = (names = []) => names.flatMap((name) => ["-c", "mcp_servers." + name + ".enabled=false"]);
 
+// Bridge's own graph server (T0-GRAPH-01), defined for this call only: `-c` takes a dotted path and a
+// TOML value (codex-rs config_override.rs), the stdio server's keys are `command` and `args`, and
+// `enabled_tools` registers only the listed tools (config mcp_types.rs). A JSON string or array of
+// strings is also a TOML one.
+export const graphServerArgs = (graph) => (graph ? [
+  "-c", "mcp_servers." + graph.name + ".command=" + JSON.stringify(graph.command),
+  "-c", "mcp_servers." + graph.name + ".args=" + JSON.stringify(graph.args),
+  "-c", "mcp_servers." + graph.name + ".enabled_tools=" + JSON.stringify(graph.tools),
+] : []);
+
 // The MCP servers a session of Bridge's would load. Calls no model and starts no server. A name that
 // cannot be put in a config path cannot be turned off, so it is an error like an unreadable list.
 export async function listCodexMcpServers(adapter) {
@@ -116,11 +126,12 @@ const commandRead = (command) => {
 
 // `codex exec` has no switch that removes every tool, so a session with no business reading files
 // still gets the read-only sandbox: it can write nothing, and it can read the project.
-async function callExec({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
+async function callExec({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], graph = null, stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
   const executable = await adapter.resolveExecutable("codex");
   const args = [
     ...NO_CONNECTORS_ARGS,
     ...mcpOffArgs(mcpOff),
+    ...graphServerArgs(graph),
     "--ask-for-approval", "never",
     "-c", "model_reasoning_effort=\"" + effort + "\"",
     // A model of null leaves the choice to the CLI.
@@ -179,11 +190,11 @@ async function commandsOf(eventsPath) {
 
 // The writer: a thread whose sandbox writes to the workspace only and asks nobody. The app server
 // takes the model and the effort in its requests; it has no -m, and `-c` would only say the same.
-async function callWriter({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
+async function callWriter({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], graph = null, stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
   const executable = await adapter.resolveExecutable("codex");
   const startedAt = Date.now();
   const result = await runCodexAppServerTurn({
-    invocation: adapter.buildInvocation("codex", executable, [...NO_CONNECTORS_ARGS, ...mcpOffArgs(mcpOff), "app-server"]),
+    invocation: adapter.buildInvocation("codex", executable, [...NO_CONNECTORS_ARGS, ...mcpOffArgs(mcpOff), ...graphServerArgs(graph), "app-server"]),
     cwd,
     prompt,
     // A model of null leaves the choice to the CLI.

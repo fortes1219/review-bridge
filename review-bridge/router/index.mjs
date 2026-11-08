@@ -6,11 +6,12 @@
 import { parseOptions } from "./args.mjs";
 import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mjs";
 import * as backup from "../features/backup/index.mjs";
+import * as graph from "../features/graph/index.mjs";
 import * as records from "../features/records/index.mjs";
 import * as setupCheck from "../features/setupCheck/index.mjs";
 import * as workOrder from "../features/workOrder/index.mjs";
 import {
-  createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, rebuildRunFiles, recordsDatabase, replayUnrecorded,
+  bridgeDataHome, createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, rebuildRunFiles, recordsDatabase, replayUnrecorded,
 } from "../service/index.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 
@@ -301,6 +302,26 @@ export const COMMANDS = {
     summary: "Same as clean <run_id>",
     options: {},
     run: (context) => records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context), forget: forgetRunRecords(context) }),
+  },
+  graph: {
+    audience: "agent",
+    summary: "Read this project's code into its graph again, whole (init does this; start brings it up to date)",
+    options: { "--json": { ...JSON_OUT, help: "Print each step as one JSON line, the last one the summary" } },
+    run: (context) => graph.mapProject({
+      ...context,
+      dataHome: bridgeDataHome(),
+      ensureProject: workOrder.recordProject,
+      openDatabase: async () => (await import("../service/database/index.mjs")).openDatabase(),
+    }),
+  },
+  "graph-mcp": {
+    audience: "agent",
+    summary: "Bridge's read-only MCP server on this project's graph, over stdio (the writer's and reviewer's CLIs start it)",
+    options: {},
+    run: (context) => graph.serveGraphMcp({
+      ...context,
+      openReadOnlyDatabase: async () => (await import("../service/database/index.mjs")).openReadOnlyDatabase(),
+    }),
   },
   "roles-check": {
     audience: "agent",

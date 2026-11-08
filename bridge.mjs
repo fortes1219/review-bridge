@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import "./review-bridge/utils/nodeVersion.mjs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -11,7 +11,7 @@ import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
+import { assertSupportedStateFilesystem, graphSummaryLines } from "./review-bridge/service/index.mjs";
 import { databaseLines, runGuide } from "./installer/install-guide.mjs";
 import { projectTasksFile, userTasksFile, writeVscodeTasks } from "./installer/vscode-tasks.mjs";
 import { renderCommandHelp, renderMainHelp } from "./review-bridge/router/help.mjs";
@@ -300,6 +300,10 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
   }
   const realMode = await inspectNativeReadiness(roles);
   const service = await step("Starting the local page", () => startService(target, fakeCli));
+  // The project's graph (T0-GRAPH-01). The setup stands without it, as it does without the page: a
+  // graph that could not be built is said, with the command that builds it.
+  const graph = await step("Mapping the project", (update) => mapProject(target, update))
+    .then((summary) => ({ summary, lines: graphSummaryLines(summary) }), (error) => ({ summary: null, lines: ["The project's graph was not built: " + error.message + " Run: review-bridge graph"] }));
   const database = await databaseConnection();
   return {
     ok: true,
@@ -321,12 +325,49 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
     service_started: service.started,
     service_reason: service.reason,
     service_notice: service.notice,
+    graph: graph.summary && {
+      files: graph.summary.files, definitions: graph.summary.definitions, references: graph.summary.references, imports: graph.summary.imports,
+      folders: graph.summary.folders, incomplete: graph.summary.incomplete, problems: graph.summary.problems,
+    },
+    graph_lines: graph.lines,
     next_step: {
       action: "open_work_template",
       path: ".review-bridge/work-packages/TEMPLATE.md",
       note: "The local page shows role readiness without model calls; the reviewer write-denial check runs only when you press its button.",
     },
   };
+}
+
+// Reads the project into its graph through Bridge's runtime (`graph --json`): each line it prints is
+// one step, shown on the step's own line, and the last is the summary. Nothing is written in the project.
+function mapProject(target, update) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [bootstrapPath, "graph", "--project", target, "--json"], { cwd: target, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let pending = "";
+    let stderr = "";
+    let summary = null;
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      pending += chunk;
+      let newline;
+      while ((newline = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        let event;
+        try { event = JSON.parse(line); } catch { continue; }
+        if (event.phase === "found") update("0/" + event.total + " files");
+        else if (event.phase === "installed") update("installed " + event.spec);
+        else if (event.phase === "parsed") update(event.done + "/" + event.total + " files, " + event.definitions + " definitions");
+        else if (event.phase === "done") summary = event;
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0 && summary) resolve(summary);
+      else reject(new Error(stderr.trim() || "the graph command exited with " + code + "."));
+    });
+  });
 }
 
 // Starts the project's resident page service through Bridge's runtime, then verifies it with

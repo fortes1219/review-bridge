@@ -152,46 +152,61 @@ export async function projectMcpServers(cwd) {
   return config?.mcpServers && typeof config.mcpServers === "object" ? config.mcpServers : {};
 }
 
-// The allowed servers only, as the one string --mcp-config takes: the file as a whole may hold others.
-export async function mcpConfigFor(cwd, names) {
-  const servers = await projectMcpServers(cwd);
+// Bridge's own graph server (T0-GRAPH-01) as an --mcp-config entry: an entry with no `type` is a stdio
+// server (Claude Code's MCP docs).
+const graphServers = (graph) => (graph ? { [graph.name]: { command: graph.command, args: graph.args } } : {});
+
+// The allowed servers only, plus Bridge's graph server, as the one string --mcp-config takes: the file
+// as a whole may hold others.
+export async function mcpConfigFor(cwd, names, graph = null) {
+  const servers = names.length ? await projectMcpServers(cwd) : {};
   const absent = names.filter((name) => !servers[name]);
   if (absent.length) throw new Error("This project's .mcp.json no longer defines " + absent.join(", ") + ".");
-  return JSON.stringify({ mcpServers: Object.fromEntries(names.map((name) => [name, servers[name]])) });
+  return JSON.stringify({ mcpServers: { ...Object.fromEntries(names.map((name) => [name, servers[name]])), ...graphServers(graph) } });
 }
 
-// The reviewer's flags, plus the servers the policy lets through. --strict-mcp-config stays: only these
-// load. In print mode nobody can answer a prompt, so a let-through server is allowed by name too.
+// The reviewer's flags, plus the servers the policy lets through and Bridge's graph server.
+// --strict-mcp-config stays: only these load. In print mode nobody can answer a prompt, so each is
+// allowed by its server name (`mcp__<server>`, Claude Code's permission rules).
 export function readOnlyArgs({ mcpConfig = null, mcp = [] } = {}) {
   return [...READ_ONLY_ARGS, ...(mcpConfig ? ["--mcp-config", mcpConfig, "--allowedTools", mcp.map((name) => "mcp__" + name).join(",")] : [])];
 }
 
-const ACCESS_ARGS = Object.freeze({
+export const ACCESS_ARGS = Object.freeze({
   none: () => ["--tools", "", "--strict-mcp-config"],
   read: (_disallowedTools, _projectMcp, readOnly) => [...readOnlyArgs(readOnly), "--no-session-persistence"],
   // Sub-agents are allowed for implementation; a project override can still disallow tools. The MCP
   // servers a writer has are the project's own, from its .mcp.json, which --strict-mcp-config would
-  // otherwise drop along with the person's.
-  write: (disallowedTools, projectMcp) => [
-    "--permission-mode", "auto",
-    ...(disallowedTools.length ? ["--disallowedTools", disallowedTools.join(",")] : []),
-    "--strict-mcp-config",
-    ...(projectMcp ? ["--mcp-config", PROJECT_MCP_CONFIG] : []),
-  ],
+  // otherwise drop along with the person's, and Bridge's graph server, allowed by name.
+  write: (disallowedTools, projectMcp, _readOnly, graph) => {
+    const configs = [...(projectMcp ? [PROJECT_MCP_CONFIG] : []), ...(graph ? [JSON.stringify({ mcpServers: graphServers(graph) })] : [])];
+    return [
+      "--permission-mode", "auto",
+      ...(disallowedTools.length ? ["--disallowedTools", disallowedTools.join(",")] : []),
+      "--strict-mcp-config",
+      ...(configs.length ? ["--mcp-config", ...configs] : []),
+      ...(graph ? ["--allowedTools", "mcp__" + graph.name] : []),
+    ];
+  },
 });
 
 // One call: `access` is what the session may do (none, read or write). The session id is the
 // caller's where it has one. The answer is written to `answerPath`, like Codex's last message.
 export async function callClaude({
-  adapter, access, role, call = 0, prompt, schemaPath, model = null, effort, cwd, sessionId = null, maxTurns = null, disallowedTools = [], mcp = [],
+  adapter, access, role, call = 0, prompt, schemaPath, model = null, effort, cwd, sessionId = null, maxTurns = null, disallowedTools = [], mcp = [], graph = null,
   stdoutPath, stderrPath, answerPath = null, timeoutMs, onSpawn,
 }) {
   const executable = await adapter.resolveExecutable("claude");
   const projectMcp = access === "write" && Boolean(await fsp.stat(path.join(cwd, PROJECT_MCP_CONFIG)).then((stat) => stat.isFile(), () => false));
+  const readGraph = access === "read" ? graph : null;
+  const readOnly = {
+    mcp: [...mcp, ...(readGraph ? [readGraph.name] : [])],
+    mcpConfig: access === "read" && (mcp.length || readGraph) ? await mcpConfigFor(cwd, mcp, readGraph) : null,
+  };
   const args = [
     "-p",
     ...(sessionId ? ["--session-id", sessionId] : []),
-    ...ACCESS_ARGS[access](disallowedTools, projectMcp, { mcp, mcpConfig: access === "read" && mcp.length ? await mcpConfigFor(cwd, mcp) : null }),
+    ...ACCESS_ARGS[access](disallowedTools, projectMcp, readOnly, access === "write" ? graph : null),
     // A model of null leaves the choice to the CLI.
     ...(model ? ["--model", model] : []),
     "--effort", effort,

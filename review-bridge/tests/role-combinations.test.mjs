@@ -12,7 +12,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { mergePolicy } from "../policy/policyRules.mjs";
-import { callRole, RoleCliNotReadyError, settleMcp } from "../service/index.mjs";
+import { callRole, GRAPH_MCP_NAME, RoleCliNotReadyError, settleMcp } from "../service/index.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
@@ -165,7 +165,9 @@ test("Claude's sessions: a reviewer only reads, a writer keeps its own", { timeo
   const writer = calls.find((call) => call.mode === "writer");
   assert.equal(argAfter(writer.args, "--permission-mode"), "auto");
   assert.ok(writer.args.includes("--strict-mcp-config"), "the person's connectors are in no session");
-  assert.equal(writer.args.includes("--mcp-config"), false, "this project has no .mcp.json");
+  // This project has no .mcp.json: the writer's one server is Bridge's graph (T0-GRAPH-01), allowed by name.
+  assert.deepEqual(Object.keys(JSON.parse(argAfter(writer.args, "--mcp-config")).mcpServers), [GRAPH_MCP_NAME]);
+  assert.equal(argAfter(writer.args, "--allowedTools"), "mcp__" + GRAPH_MCP_NAME);
 });
 
 test("Codex's sessions turn apps and plugins off, in every call: work and review", { timeout: 240_000 }, async (t) => {
@@ -186,6 +188,7 @@ test("a Claude writer in a project with .mcp.json gets that file", { timeout: 24
   const writer = calls.find((call) => call.mode === "writer");
   assert.ok(writer.args.includes("--strict-mcp-config"));
   assert.equal(argAfter(writer.args, "--mcp-config"), ".mcp.json");
+  assert.deepEqual(Object.keys(JSON.parse(writer.args[writer.args.indexOf("--mcp-config") + 2]).mcpServers), [GRAPH_MCP_NAME], "and Bridge's graph server beside it");
 });
 
 test("a model that is not the role's CLI's is refused before any card, naming its line", { timeout: 120_000 }, async (t) => {
@@ -248,7 +251,9 @@ test("--writer and --reviewer fill the roles for one run; beside --yes they must
 
 const MCP_LIST = JSON.stringify([{ name: "node_repl", enabled: true }, { name: "docs_search", enabled: true }]);
 const allowInPolicy = async (rt, names) => fsp.writeFile(rt.paths.policyOverridePath, JSON.stringify({ schema_version: 5, reviewer: { mcp_allow: names } }));
-const offFlags = (args) => args.filter((arg) => /^mcp_servers\./.test(arg));
+const offFlags = (args) => args.filter((arg) => /^mcp_servers\.[^.]+\.enabled=false$/.test(arg));
+// Bridge's graph server, defined for each call by `-c` (T0-GRAPH-01): beside the list, never on it.
+const graphFlags = (args) => args.filter((arg) => arg.startsWith("mcp_servers." + GRAPH_MCP_NAME + ".")).map((arg) => arg.slice(0, arg.indexOf("=")));
 
 test("Codex: every server not on the list is off by name in every call, sealed in the plan; the card, the run and the result say the reviewer has none", { timeout: 240_000 }, async (t) => {
   const rt = await install(t, "codex", "codex");
@@ -261,6 +266,9 @@ test("Codex: every server not on the list is off by name in every call, sealed i
   const calls = await rt.calls();
   assert.equal(calls.length, 2);
   for (const call of calls) assert.deepEqual(offFlags(call.args), ["mcp_servers.node_repl.enabled=false", "mcp_servers.docs_search.enabled=false"], call.mode);
+  for (const call of calls) {
+    assert.deepEqual(graphFlags(call.args), ["command", "args", "enabled_tools"].map((key) => "mcp_servers." + GRAPH_MCP_NAME + "." + key), call.mode);
+  }
   const [row] = await queryRecords("select reviewer_mcp from runs where run_id = $1", [work.plan.proposed_run_id]);
   assert.deepEqual(row.reviewer_mcp, []);
   assert.match(await latestResultCopy(rt.root, "farm"), /^reviewer:\n  provider: codex\n(?:.*\n){2}  mcp: \[\]\n---/m);
@@ -358,7 +366,7 @@ test("at the command line: a missing Codex is said as such in the role it fills;
   assert.doesNotMatch((checked.stdout + checked.stderr).replace("Reviewer MCP: none", ""), /MCP|codex/i);
 });
 
-test("a Claude reviewer: nothing on the list, no server at all; on the list, only those from .mcp.json; the writer's rule does not change", { timeout: 240_000 }, async (t) => {
+test("a Claude reviewer: nothing on the list, only Bridge's graph server; on the list, those from .mcp.json beside it; the writer's rule does not change", { timeout: 240_000 }, async (t) => {
   const rt = await install(t, "claude", "claude");
   await fsp.writeFile(path.join(rt.root, ".mcp.json"), JSON.stringify({ mcpServers: { docs_search: { command: "a" }, deploy: { command: "b" } } }));
   const none = start(rt, await plan(rt));
@@ -367,7 +375,8 @@ test("a Claude reviewer: nothing on the list, no server at all; on the list, onl
   for (const mode of ["review"]) {
     const call = first.find((entry) => entry.mode === mode);
     assert.ok(call.args.includes("--strict-mcp-config"), mode);
-    assert.equal(call.args.includes("--mcp-config"), false, mode);
+    assert.deepEqual(Object.keys(JSON.parse(argAfter(call.args, "--mcp-config")).mcpServers), [GRAPH_MCP_NAME], mode);
+    assert.equal(argAfter(call.args, "--allowedTools"), "mcp__" + GRAPH_MCP_NAME, mode);
   }
   await fsp.rm(path.join(rt.root, "calls.jsonl"));
   await allowInPolicy(rt, ["docs_search"]);
@@ -379,8 +388,8 @@ test("a Claude reviewer: nothing on the list, no server at all; on the list, onl
   for (const mode of ["review"]) {
     const call = calls.find((entry) => entry.mode === mode);
     assert.ok(call.args.includes("--strict-mcp-config"), mode);
-    assert.deepEqual(Object.keys(JSON.parse(argAfter(call.args, "--mcp-config")).mcpServers), ["docs_search"], mode);
-    assert.equal(argAfter(call.args, "--allowedTools"), "mcp__docs_search", mode);
+    assert.deepEqual(Object.keys(JSON.parse(argAfter(call.args, "--mcp-config")).mcpServers), ["docs_search", GRAPH_MCP_NAME], mode);
+    assert.equal(argAfter(call.args, "--allowedTools"), "mcp__docs_search,mcp__" + GRAPH_MCP_NAME, mode);
   }
   const writer = calls.find((call) => call.mode === "writer");
   assert.equal(argAfter(writer.args, "--mcp-config"), ".mcp.json", "the writer takes the project's whole file, as before");

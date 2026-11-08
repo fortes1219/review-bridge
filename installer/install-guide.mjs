@@ -43,9 +43,10 @@ export function databaseLines(database) {
   ];
 }
 
-// `vscodeTasks`: added to the project (`true`), or why that failed. Setup is done either way.
-export function doneMessage(target, cwd, url, database, vscodeTasks = null) {
-  const lines = ["Done. Now:", ""];
+// `vscodeTasks`: added to the project (`true`), or why that failed. Setup is done either way, and so
+// with `graph`: the lines of what was mapped, or why the project's graph was not built.
+export function doneMessage(target, cwd, url, database, vscodeTasks = null, graph = null) {
+  const lines = [...(graph ?? []), ...(graph?.length ? [""] : []), "Done. Now:", ""];
   const relative = path.relative(cwd, target);
   if (relative) lines.push("  cd " + (relative.includes(" ") ? "\"" + relative + "\"" : relative));
   lines.push("  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:");
@@ -137,7 +138,7 @@ export async function runGuide(options, {
     addVscodeTasks = answer;
   }
 
-  const step = interactive ? spinnerStep(ui) : options.json ? (label, work) => work() : lineStep(write);
+  const step = interactive ? spinnerStep(ui) : options.json ? (label, work) => work(() => {}) : lineStep(write);
   const result = await setUpProject({
     target, roles, profileId, watchPort: options.port === undefined ? undefined : Number(options.port), fakeCli: Boolean(options["fake-cli"]),
   }, step);
@@ -148,7 +149,7 @@ export async function runGuide(options, {
     vscodeTasks = await step("Adding VS Code tasks", () => writeVscodeTasks(projectTasksFile(target)))
       .then(() => true, (error) => error.message);
   }
-  const message = doneMessage(target, cwd, result.url, result.database, vscodeTasks);
+  const message = doneMessage(target, cwd, result.url, result.database, vscodeTasks, result.graph_lines ?? null);
   if (interactive) ui.outro(message);
   else if (!options.json) write(message + "\n");
   return { ...result, printed: !options.json };
@@ -159,13 +160,14 @@ function cancel(ui) {
   return { ok: false, cancelled: true, printed: true };
 }
 
-// One spinner line per step; a failed step is marked and its error goes on to the caller.
+// One spinner line per step; a failed step is marked and its error goes on to the caller. A long step
+// says how far it is on that line (`update`, clack's spinner message).
 function spinnerStep(ui) {
   return async (label, work) => {
     const spin = ui.spinner();
     spin.start(label);
     try {
-      const value = await work();
+      const value = await work((text) => spin.message(label + ": " + text));
       spin.stop(label);
       return value;
     } catch (error) {
@@ -178,6 +180,6 @@ function spinnerStep(ui) {
 function lineStep(write) {
   return async (label, work) => {
     write(label + "...\n");
-    return await work();
+    return await work(() => {});
   };
 }

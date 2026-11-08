@@ -112,6 +112,10 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     "Checking the setup...",
     "Running the four fake self-tests...",
     "Starting the local page...",
+    // T0-GRAPH-01: init reads the project into its graph and says how much it read; this one holds no code.
+    "Mapping the project...",
+    "Mapped 0 file(s): 0 definition(s), 0 reference(s), 0 import(s).",
+    "",
     "Done. Now:",
     "",
     "  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:",
@@ -533,6 +537,59 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
   assert.match(done.stdout, /\nDelivered: .*\nResult file: .*[\\/]\.review-bridge[\\/]results[\\/]hello[\\/]hello \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} success\.md\nTokens: /);
 });
 
+// T0-GRAPH-01: init reads a Git project's code into its graph in the person's database and writes nothing
+// in the project; a start re-reads only the file that changed since. The file Git sees as changed and the
+// file whose content is new are the same here; a file left as it was keeps the time it was parsed.
+test("init maps a Git project's code into its graph and leaves git status as it was; a start re-reads only the changed file", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-graph-init-"));
+  t.after(() => removeWorkspace(root));
+  const gitDir = path.dirname(spawnSync(process.platform === "win32" ? "where.exe" : "which", ["git"], { encoding: "utf8" }).stdout.split(/\r?\n/)[0].trim());
+  const env = (overrides = {}) => isolatedEnv({ PATH: isolatedEnv().PATH + path.delimiter + gitDir, ...overrides });
+  const git = (...args) => {
+    const done = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root, encoding: "utf8", windowsHide: true });
+    assert.equal(done.status, 0, done.stderr);
+    return done.stdout;
+  };
+  await fsp.mkdir(path.join(root, "src"));
+  await fsp.writeFile(path.join(root, "src", "a.ts"), "import { b } from \"./b\";\nexport function a() {\n  return b();\n}\n");
+  await fsp.writeFile(path.join(root, "src", "b.ts"), "export function b() {\n  return 1;\n}\n");
+  await fsp.writeFile(path.join(root, "src", "broken.ts"), "export function broken( {\n");
+  await fsp.writeFile(path.join(root, "notes.md"), "# not code\n");
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "start");
+  const statusBefore = git("status", "--porcelain=v1", "--untracked-files=all");
+
+  const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: env(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(init.status, 0, init.stderr);
+  const output = JSON.parse(init.stdout);
+  assert.equal(output.graph.files, 3, "three TypeScript files; notes.md is not read");
+  assert.deepEqual(output.graph.incomplete, [{ path: "src/broken.ts", parse_status: "parsed", error_count: 1 }]);
+  assert.equal(git("status", "--porcelain=v1", "--untracked-files=all"), statusBefore, "nothing outside .review-bridge/, which Git does not see");
+
+  const projectId = projectPaths(root).projectId;
+  assert.deepEqual(await queryRecords("select f.path, d.kind from graph_definitions d join graph_files f using (file_id) where d.project_id = $1 and d.name = 'b'", [projectId]), [{ path: "src/b.ts", kind: "function" }]);
+  assert.deepEqual(await queryRecords("select f.path, r.line from graph_references r join graph_files f using (file_id) where r.project_id = $1 and r.name = 'b'", [projectId]), [{ path: "src/a.ts", line: 3 }]);
+  assert.deepEqual(await queryRecords("select f.path, i.status, i.target_path from graph_imports i join graph_files f using (file_id) where i.project_id = $1", [projectId]), [{ path: "src/a.ts", status: "resolved", target_path: "src/b.ts" }]);
+  const parsedAt = async () => Object.fromEntries((await queryRecords("select path, parsed_at from graph_files where project_id = $1", [projectId])).map((row) => [row.path, row.parsed_at.toISOString()]));
+  const before = await parsedAt();
+
+  await fsp.writeFile(path.join(root, "src", "b.ts"), "export function b() {\n  return 1;\n}\nexport function c() {\n  return 2;\n}\n");
+  const order = ".review-bridge/work-packages/hello.md";
+  await fsp.writeFile(path.join(root, order), "# Add a README\n\n<!-- bridge:requested_work -->\nAdd a README.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n1. README.md exists.\n");
+  const started = spawnSync(process.execPath, [bridge, "start", order, "--fake-cli", "--yes", "--breakpoint", "after the review"], {
+    cwd: root, encoding: "utf8", env: env(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(started.status, 0, started.stderr);
+  const after = await parsedAt();
+  assert.equal(after["src/a.ts"], before["src/a.ts"], "a file that did not change is not read again");
+  assert.equal(after["src/broken.ts"], before["src/broken.ts"]);
+  assert.notEqual(after["src/b.ts"], before["src/b.ts"], "the changed file is read again");
+  assert.deepEqual(await queryRecords("select f.path from graph_definitions d join graph_files f using (file_id) where d.project_id = $1 and d.name = 'c'", [projectId]), [{ path: "src/b.ts" }]);
+});
+
 // An agent's one yes, to the card the start before it printed (Owner 2026-11-08: one card, one yes).
 function yesTo(cli, order, args = [], env = {}) {
   return cli(["start", order, "--fake-cli", ...args, "--yes"], env);
@@ -743,7 +800,7 @@ test("two --yes to one card at once start one run; clean --all clears the projec
 
   const cleared = cli(["clean", "--all"]);
   assert.equal(cleared.status, 0, cleared.stderr);
-  assert.match(cleared.stdout, /^Cleared this project's records: 1 work order\(s\), 1 version\(s\), 1 plan\(s\), 1 authorization\(s\), 1 contract\(s\), 1 run\(s\)\.\n/);
+  assert.match(cleared.stdout, /^Cleared this project's records: 1 work order\(s\), 1 version\(s\), 1 plan\(s\), 1 authorization\(s\), 1 contract\(s\), 1 run\(s\), \d+ graph file\(s\)\.\n/);
   assert.equal((await queryRecords("select count(*)::int as n from plans where project_id = $1", [projectId]))[0].n, 0);
   assert.ok((await queryRecords("select cleared_at from projects where project_id = $1", [projectId]))[0].cleared_at);
   const after = cli(["start", order, "--fake-cli"]);
