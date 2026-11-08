@@ -80,7 +80,7 @@ alter table run_events add constraint run_events_type_check check (type in (
   'test_result', 'fix.input', 'contract.translation', 'contract.check', 'contract.sealed', 'acceptance',
   'notified', 'delivery_skipped'));
 
--- The two reads of 2026-10-25-1400-run-queries.sql, on the new status: a work order's running runs,
+-- The two reads of 20261025033621_run_queries.sql, on the new status: a work order's running runs,
 -- and a project's ended runs that have no delivery yet.
 drop index runs_active_by_work_order;
 create index runs_active_by_work_order on runs (work_order_id) where status = 'in_progress';

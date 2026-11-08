@@ -58,12 +58,12 @@ test("an upgrade from a database with the contract gatherings drops those two ta
   const { client } = await database(t);
   const before = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-migrations-before-"));
   t.after(() => fsp.rm(before, { recursive: true, force: true }));
-  for (const file of await migrationFiles()) if (file.name < "2026-11-08") await fsp.writeFile(path.join(before, file.name), file.sql);
+  for (const file of await migrationFiles()) if (file.name < "20261108012648_drop_contract_gatherings.sql") await fsp.writeFile(path.join(before, file.name), file.sql);
   await applyMigrations(client, { dir: before });
   assert.ok((await tables(client)).includes("contract_gatherings"));
   const at = new Date().toISOString();
   await client.query("insert into projects (project_id, root_path, name, created_at, last_activity_at) values ('00000000-0000-4000-8000-000000000001', 'C:/farm', 'farm', $1, $1)", [at]);
-  assert.deepEqual(await applyMigrations(client), ["2026-11-08-1000-drop-contract-gatherings.sql"]);
+  assert.deepEqual(await applyMigrations(client), ["20261108012648_drop_contract_gatherings.sql", "20261108195620_project_graph.sql"]);
   const after = await tables(client);
   assert.equal(after.includes("contract_gatherings") || after.includes("contract_gathering_events"), false);
   assert.deepEqual((await client.query("select name, root_path from projects")).rows, [{ name: "farm", root_path: "C:/farm" }]);
@@ -96,8 +96,8 @@ test("cards for new work orders print without pointing at a work order; with no 
 
 test("a migration that fails is rolled back whole; the ones before it stay", { timeout: 120_000 }, async (t) => {
   const { client } = await database(t);
-  const dir = await migrationCopy(t, { "2099-01-01-0000-broken.sql": "create table half_made (id int);\nselect * from no_such_table;\n" });
-  await assert.rejects(applyMigrations(client, { dir }), /Migration 2099-01-01-0000-broken\.sql failed and was rolled back: relation "no_such_table" does not exist/);
+  const dir = await migrationCopy(t, { "20990101000000_broken.sql": "create table half_made (id int);\nselect * from no_such_table;\n" });
+  await assert.rejects(applyMigrations(client, { dir }), /Migration 20990101000000_broken\.sql failed and was rolled back: relation "no_such_table" does not exist/);
   assert.ok(!(await tables(client)).includes("half_made"), "nothing of the failed migration is left");
   assert.ok((await tables(client)).includes("contracts"), "the migrations before it are kept");
   assert.equal((await client.query("select count(*)::int as n from schema_migrations where name like '2099%'")).rows[0].n, 0);
@@ -109,12 +109,24 @@ test("a migration changed after it was applied stops every later migration", { t
   await applyMigrations(client, { dir });
   const first = (await migrationFiles(dir))[0].name;
   await fsp.appendFile(path.join(dir, first), "\n-- edited later\n");
-  await fsp.writeFile(path.join(dir, "2099-01-01-0000-later.sql"), "create table later (id int);\n");
+  await fsp.writeFile(path.join(dir, "20990101000000_later.sql"), "create table later (id int);\n");
   await assert.rejects(applyMigrations(client, { dir }), new RegExp("Migration " + first.replaceAll(".", "\\.") + " changed after it was applied"));
   assert.ok(!(await tables(client)).includes("later"));
 });
 
-test("a migration file not named <yyyy-mm-dd-hhmm>-<what>.sql is refused", async (t) => {
-  const dir = await migrationCopy(t, { "v5-add-things.sql": "select 1;\n" });
-  await assert.rejects(migrationFiles(dir), /Migration file name is not <yyyy-mm-dd-hhmm>-<what>\.sql: v5-add-things\.sql/);
+// Named as Knex and Prisma name theirs: a 14-digit UTC time, an underscore, the name in Rails's characters.
+test("a migration file not named <yyyymmddhhmmss>_<what>.sql is refused, the earlier dated names among them", async (t) => {
+  for (const name of ["v5-add-things.sql", "2026-11-09-1000-project-graph.sql", "202611081956_short.sql", "20261108195620-dash.sql", "20261108195620_Upper.sql"]) {
+    const dir = await migrationCopy(t, { [name]: "select 1;\n" });
+    await assert.rejects(migrationFiles(dir), new RegExp("Migration file name is not <yyyymmddhhmmss>_<what>\\.sql \\(UTC\\): " + name.replaceAll(".", "\\.")), name);
+  }
+});
+
+test("the migrations are named in time order: each one's 14 digits follow the one before it", async () => {
+  const names = (await migrationFiles()).map((file) => file.name);
+  assert.ok(names.length > 0);
+  for (const [index, name] of names.entries()) {
+    assert.match(name, /^\d{14}_[a-z0-9_]+\.sql$/);
+    if (index) assert.ok(name.slice(0, 14) > names[index - 1].slice(0, 14), name + " comes after " + names[index - 1]);
+  }
 });

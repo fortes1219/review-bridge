@@ -8,7 +8,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "migrations");
-const MIGRATION_NAME = /^\d{4}-\d{2}-\d{2}-\d{4}-[a-z0-9-]+\.sql$/;
+// <UTC yyyymmddhhmmss>_<what>.sql, as Knex (util/timestamp.js, MigrationGenerator `_getNewMigrationName`)
+// and Prisma (schema-engine create_migration.rs, `{timestamp}_{migration_name}`) name theirs; the name
+// takes Rails's characters (MigrationFilenameRegexp `[_a-z0-9]*`). Two made in one second take the next
+// second, as Rails's next_migration_number does. Name order is time order.
+const MIGRATION_NAME = /^\d{14}_[a-z0-9_]+\.sql$/;
 // One key for every Bridge that migrates this database, so two processes never apply one file twice.
 const MIGRATION_LOCK = 7_420_251;
 
@@ -16,7 +20,7 @@ export async function migrationFiles(dir = MIGRATIONS_DIR) {
   const names = (await fsp.readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
   const files = [];
   for (const name of names) {
-    if (!MIGRATION_NAME.test(name)) throw new Error("Migration file name is not <yyyy-mm-dd-hhmm>-<what>.sql: " + name);
+    if (!MIGRATION_NAME.test(name)) throw new Error("Migration file name is not <yyyymmddhhmmss>_<what>.sql (UTC): " + name);
     const sql = await fsp.readFile(path.join(dir, name), "utf8");
     files.push({ name, sql, sha256: createHash("sha256").update(sql, "utf8").digest("hex") });
   }

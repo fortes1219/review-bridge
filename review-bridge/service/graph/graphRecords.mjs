@@ -1,4 +1,4 @@
-// The graph's rows (migration 2026-11-09-1000-project-graph.sql). Every query here is one statement
+// The graph's rows (migration 20261108195620_project_graph.sql). Every query here is one statement
 // whose cost follows what it is asked, never the project's size: each reads through the index named
 // beside it, takes a page (`limit`, keyset `after`), and none counts or reads a whole project. The
 // EXPLAIN of each is in tests/graph-records.test.mjs.
