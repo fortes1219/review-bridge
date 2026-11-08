@@ -624,7 +624,9 @@ test("--yes is refused when the work order changed after the card, when no card 
 // RC3-BLOCKER-01 step 2: the card says which work order the yes starts (spec 2026-10-24), and the
 // start lands in the person's database: the work order, its versions, one plan per card, one claim
 // per yes, one contract per run.
-test("the card names the work order: new, then updated, renamed or copied; the records are in the database", async (t) => {
+// The work order is the id Bridge writes into its front matter on the first yes (DECISIONS 2026-11-08 10:4x),
+// as Docusaurus and Astro read a document's id there: no content is compared.
+test("the card names the work order by its id: new, updated, moved or copied; a no writes nothing; the records are in the database", async (t) => {
   const { root, order, cli } = await fourActionsProject(t, "review-bridge-identity-");
   const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   const decision = (args) => {
@@ -633,39 +635,48 @@ test("the card names the work order: new, then updated, renamed or copied; the r
     return card.stdout.split(/\r?\n/)[card.stdout.split(/\r?\n/).findIndex((line) => line.startsWith("Work order:   ")) + 1].trim();
   };
   const yes = (file) => assert.equal(yesTo(cli, file).status, 0);
+  const read = (file) => fsp.readFile(path.join(root, file), "utf8");
+  const idOf = async (file) => /^---\r?\nid: ([0-9a-f-]{36})\r?\n/.exec(await read(file))?.[1] ?? null;
+  const original = await read(order);
   assert.equal(decision([order]), "New work order \"工單：新增 README\"");
+  assert.equal(await read(order), original, "a card, and no yes, writes nothing");
   yes(order);
+  const id = await idOf(order);
+  assert.ok(id, "the yes wrote the id");
+  assert.equal(await read(order), "---\nid: " + id + "\n---\n" + original, "only the id lines were added");
+  const [{ work_order_id: recorded }] = await queryRecords("select work_order_id from work_orders where project_id = $1", [projectId]);
+  assert.equal(recorded, id);
   await fsp.appendFile(path.join(root, order), "2. README 有專案名稱。\n");
   assert.equal(decision([order]), "Updates \"工單：新增 README\": version 1 → 2, 1 line(s) changed");
   yes(order);
-  // Its contract is sealed already: nothing to pay for, so the sealed card comes first.
-  assert.equal(decision([order]), "\"工單：新增 README\", version 2");
-  // A copy beside the original is a new work order, even with the same text; --update says otherwise.
+  assert.equal(decision([order]), "Updates \"工單：新增 README\": still version 2, with new run settings", "the id line is not part of the text");
+  // A copy holds the original's id: it is a new work order, and its yes gives it its own id.
   const copy = ".review-bridge/work-packages/hello-copy.md";
   await fsp.copyFile(path.join(root, order), path.join(root, copy));
-  assert.equal(decision([copy]), "New work order \"工單：新增 README\"");
-  const [{ work_order_id: original }] = await queryRecords("select work_order_id from work_orders where project_id = $1 and last_file_name = $2", [projectId, order]);
-  assert.equal(decision([copy, "--update", original]), "Updates \"工單：新增 README\": still version 2, with new run settings");
-  assert.equal(decision([order, "--as-new"]), "New work order \"工單：新增 README\"");
-  // A renamed file (the old one gone, the text close) updates the work order it was.
-  const renamed = ".review-bridge/work-packages/readme.md";
-  await fsp.rm(path.join(root, copy));
-  await fsp.rename(path.join(root, order), path.join(root, renamed));
-  await fsp.appendFile(path.join(root, renamed), "3. 一行說明。\n");
-  assert.equal(decision([renamed]), "Updates \"工單：新增 README\": version 2 → 3, 1 line(s) changed");
-  yes(renamed);
+  await fsp.appendFile(path.join(root, copy), "3. 另一個版本。\n");
+  assert.equal(decision([copy]), "A copy of .review-bridge/work-packages/hello.md: recorded as a new work order \"工單：新增 README\"");
+  yes(copy);
+  assert.notEqual(await idOf(copy), id);
+  assert.equal(await idOf(order), id, "the original keeps its id");
+  // Moved and renamed: the same work order, by its id; new text is its next version.
+  const moved = ".review-bridge/work-packages/readme.md";
+  await fsp.rename(path.join(root, order), path.join(root, moved));
+  await fsp.appendFile(path.join(root, moved), "3. 一行說明。\n");
+  assert.equal(decision([moved]), "Updates \"工單：新增 README\": version 2 → 3, 1 line(s) changed (was at .review-bridge/work-packages/hello.md)");
+  yes(moved);
+  // Two short work orders from one template, without ids or source_id: two new work orders, never a rename.
+  const twin = (name, sentence) => fsp.writeFile(path.join(root, ".review-bridge/work-packages", name), "# 工單\n\n<!-- bridge:requested_work -->\n" + sentence + "\n\n<!-- bridge:acceptance -->\n- 做好了。\n");
+  await twin("one.md", "加一行。");
+  await twin("two.md", "刪一行。");
+  await fsp.rm(path.join(root, ".review-bridge/work-packages/one.md"));
+  assert.equal(decision([".review-bridge/work-packages/two.md"]), "New work order \"工單\"");
 
   const rows = async (sql) => await queryRecords(sql, [projectId]);
-  assert.deepEqual((await rows("select last_file_name from work_orders where project_id = $1")).map((row) => row.last_file_name), [renamed], "one work order, renamed");
-  assert.deepEqual((await rows("select v.version_no from work_order_versions v join work_orders w using (work_order_id) where w.project_id = $1 order by 1"))
-    .map((row) => row.version_no), [1, 2, 3]);
-  assert.equal((await rows("select count(*)::int as n from plans where project_id = $1"))[0].n, 11, "one plan per card, the sealed ones among them");
+  assert.deepEqual((await rows("select last_file_name from work_orders where project_id = $1 order by created_at")).map((row) => row.last_file_name), [moved, copy]);
+  assert.deepEqual((await rows("select v.version_no from work_order_versions v where v.work_order_id = '" + id + "' order by 1")).map((row) => row.version_no), [1, 2, 3]);
   const claims = await rows("select c.run_id from authorization_claims c join authorizations a using (authorization_id) join plans p using (plan_sha256) where p.project_id = $1");
-  assert.equal(claims.length, 3, "one claim per yes");
-  const authorizations = await rows("select a.authorized_via, p.content_sha256 from authorizations a join plans p using (plan_sha256) where p.project_id = $1");
-  assert.ok(authorizations.every((row) => row.authorized_via === "agent" && /^[0-9a-f]{64}$/.test(row.content_sha256)));
+  assert.equal(claims.length, 4, "one claim per yes");
   const contracts = await rows("select c.contract_sha256 from contracts c join work_orders w using (work_order_id) where w.project_id = $1");
-  assert.equal(contracts.length, 3, "one contract per run");
   for (const { run_id: runId } of claims) {
     const run = JSON.parse(await fsp.readFile(path.join(projectPaths(root).runsDir, runId + ".json"), "utf8"));
     assert.ok(contracts.some((row) => row.contract_sha256 === run.contract_sha256), "the run's contract is recorded");

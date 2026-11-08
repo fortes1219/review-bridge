@@ -73,6 +73,53 @@ export class WorkOrderFormError extends Error {
   }
 }
 
+// The work order's id, which Bridge writes into the front matter on the person's first yes (Owner
+// 2026-11-08 10:4x), as Docusaurus reads a document's `id` from its front matter: the work order is that
+// id wherever its file goes. It is Bridge's line, not the person's text, so what is sealed and hashed is
+// the text without it (sealedText), and writing it changes nothing that was said yes to.
+const ID_LINE = /^id:[ \t]*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[ \t]*$/;
+
+function bridgeIdLine(lines) {
+  if (lines[0] !== FENCE) return null;
+  const close = lines.indexOf(FENCE, 1);
+  if (close === -1) return null;
+  for (let index = 1; index < close; index += 1) {
+    const match = ID_LINE.exec(lines[index]);
+    if (match) return { index, close, id: match[1] };
+  }
+  return null;
+}
+
+export function workOrderIdOf(text) {
+  return bridgeIdLine(String(text ?? "").split(/\r?\n/))?.id ?? null;
+}
+
+// The text as the person wrote it: without Bridge's id line, and without the front matter Bridge opened
+// only to hold it.
+export function sealedText(text) {
+  const raw = String(text ?? "");
+  const lines = raw.split(/\r?\n/);
+  const found = bridgeIdLine(lines);
+  if (!found) return raw;
+  lines.splice(found.index, 1);
+  if (found.close === 2) lines.splice(0, 2);
+  return lines.join(raw.includes("\r\n") ? "\r\n" : "\n");
+}
+
+// The file's text with `id` as its work order's id: the person's front matter keeps its lines and gets
+// the id first; a file without front matter gets one that holds only the id. An id there already is
+// replaced (a copy gets its own).
+export function withWorkOrderId(text, id) {
+  const raw = String(text ?? "");
+  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+  const lines = raw.split(/\r?\n/);
+  const found = bridgeIdLine(lines);
+  if (found) lines[found.index] = "id: " + id;
+  else if (lines[0] === FENCE && lines.indexOf(FENCE, 1) !== -1) lines.splice(1, 0, "id: " + id);
+  else lines.unshift(FENCE, "id: " + id, FENCE);
+  return lines.join(eol);
+}
+
 export function workOrderLines(text) {
   const lines = String(text || "").split(/\r?\n/);
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();

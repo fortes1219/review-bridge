@@ -393,7 +393,7 @@ test("at a terminal: one yes, recorded as the terminal's; n authorizes nothing; 
   assert.equal((await queryRecords("select status from runs where run_id = $1", [runId]))[0].status, "completed");
 });
 
-test("delivered is what the records say: skipped until its record is cleaned, and a guess at a rename does not count", LIMIT, async (t) => {
+test("delivered is what the records say: skipped until its record is cleaned; a renamed file is its work order by the id the yes wrote", LIMIT, async (t) => {
   const rt = await install(t);
   await directory(rt, "demo", { "01-a.md": null });
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).status, 1);
@@ -406,12 +406,12 @@ test("delivered is what the records say: skipped until its record is cleaned, an
   // The results folder says nothing either way.
   await fsp.rm(path.join(rt.root, ".review-bridge", "results"), { recursive: true, force: true });
   assert.match(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).stdout, /1 delivered/);
-  // Renamed: Bridge reads it as the same work order and says so, and does not skip it.
+  // Renamed: the id the yes wrote into it says it is the same work order, and the card says so.
   const dir = path.join(rt.root, rt.dirOf("demo"));
   await fsp.rename(path.join(dir, "01-a.md"), path.join(dir, "01-renamed.md"));
   const renamed = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
   assert.match(renamed.stdout, /0 delivered, 0 not a work order, 1 to run/);
-  assert.match(renamed.stdout, /01-renamed\.md +contract sha256 [0-9a-f]{4}…, 1 condition\(s\) {3}\(reads as \.review-bridge\/work-packages\/demo\/01-a\.md renamed; recorded as the same work order\)/);
+  assert.match(renamed.stdout, /01-renamed\.md +contract sha256 [0-9a-f]{4}…, 1 condition\(s\) {3}\(was at \.review-bridge\/work-packages\/demo\/01-a\.md; the same work order\)/);
   await fsp.rename(path.join(dir, "01-renamed.md"), path.join(dir, "01-a.md"));
   assert.match(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).stdout, /1 delivered/);
   assert.equal(rt.bridge(["clean", runId]).status, 0);

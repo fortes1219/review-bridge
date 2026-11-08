@@ -10,18 +10,8 @@ import { insertRun, runRecorder } from "../../service/index.mjs";
 import { canonical, digest } from "../../utils/digest.mjs";
 import { nfc } from "../../utils/workOrderName.mjs";
 import { workOrderChange } from "./delivery.mjs";
-import { parseWorkOrder, UNTITLED } from "./workOrderFormat.mjs";
+import { parseWorkOrder, UNTITLED, workOrderIdOf } from "./workOrderFormat.mjs";
 
-// "Content close enough" for a renamed file (spec 2026-10-24, numbers set by Opus and kept by Fable
-// 2026-10-25): the unchanged lines are more than half of the longer version, among at most 50 work
-// orders of the project whose last file is gone.
-const RENAME_CANDIDATES = 50;
-const sameLinesShare = (change, left, right) => {
-  const lines = (text) => String(text).split(/\r?\n/).filter((line) => line.trim()).length;
-  const longer = Math.max(lines(left), lines(right));
-  if (!change) return 1;
-  return longer ? (longer - Math.max(change.removed.length, change.added.length)) / longer : 0;
-};
 const changedLines = (change) => (change ? Math.max(change.removed.length, change.added.length) : 0);
 
 // The work order's file as the records name it: its path in the project, spelled the way the file
@@ -94,8 +84,9 @@ async function latestVersion(db, workOrderId) {
   return rows[0] || null;
 }
 
+// A new work order's id is made with its card, so the yes can write it into the file before any work.
 function decided(kind, workOrderId, title, latest, text) {
-  if (kind === "new") return { decision: "new", work_order_id: null, title, from_version: null, to_version: 1, changed_lines: null };
+  if (kind === "new") return { decision: "new", work_order_id: workOrderId ?? randomUUID(), title, from_version: null, to_version: 1, changed_lines: null };
   if (latest && latest.content_sha256 === digest(text)) {
     return { decision: "same", work_order_id: workOrderId, title, from_version: latest.version_no, to_version: latest.version_no, changed_lines: 0 };
   }
@@ -106,35 +97,27 @@ function decided(kind, workOrderId, title, latest, text) {
   };
 }
 
-// Q13, no model: the work order this file is, as the card will show it. `fileName` is the file's
-// path in the project as canonicalTaskFile names it; `update` (a work order id) and `asNew` are how
-// the person or an agent overrides it. The decision names the file, and says when it was forced new.
+// Q13, no model: the work order this file is, as the card will show it (Owner 2026-11-08 10:4x). It is
+// the id in the file's front matter, which Bridge wrote on the first yes, as Docusaurus and Astro take a
+// document's id from its front matter: a new name, folder or step number is the same work order, and new
+// text is its next version. A file without an id is a new work order. Two files with one id: the one the
+// records last saw is the work order, the other a copy, which is a new one. No content is compared (git's
+// similarity only shows a rename; it is no identity). `fileName` is the file's path in the project as
+// canonicalTaskFile names it, `text` its sealed text (sealedText) and `id` the id its front matter holds;
+// `update` (a work order id) and `asNew` are how the person or an agent overrides it.
 export async function identifyWorkOrder(db, options) {
   const decision = await decide(db, options);
   return { ...decision, file: options.fileName, ...(options.asNew ? { as_new: true } : {}) };
 }
 
-// A renamed file: the work orders whose last file is gone, newest first; a copy keeps its original,
-// so the original is never a candidate and the copy is a new work order. `memo` (one card's worth of
-// files) reads them once, and lets each be taken by one file of that card.
-async function renameCandidates(db, { projectId, repoRoot, memo }) {
-  if (memo?.candidates) return memo.candidates;
-  const { rows } = await db.query(
-    "select w.work_order_id, w.last_file_name, v.version_no, v.content_sha256, v.source_text"
-    + " from work_orders w cross join lateral (select version_no, content_sha256, source_text from work_order_versions"
-    + " where work_order_id = w.work_order_id order by version_no desc limit 1) v"
-    + " where w.project_id = $1 order by w.last_activity_at desc, w.work_order_id desc limit $2",
-    [projectId, RENAME_CANDIDATES],
-  );
-  const gone = [];
-  for (const row of rows) {
-    if (!(await recordedFileThere(repoRoot, row.last_file_name))) gone.push(row);
-  }
-  if (memo) memo.candidates = gone;
-  return gone;
+// Whether the file the records last saw for a work order still holds that work order's id.
+async function stillHolds(repoRoot, relative, id) {
+  if (!(await recordedFileThere(repoRoot, relative))) return false;
+  const raw = await fsp.readFile(path.join(repoRoot, ...relative.split("/")), "utf8").catch(() => null);
+  return raw !== null && workOrderIdOf(raw) === id;
 }
 
-async function decide(db, { projectId, fileName, text, repoRoot, update = null, asNew = false, memo = null }) {
+async function decide(db, { projectId, fileName, text, id = null, repoRoot, update = null, asNew = false }) {
   const title = titleOf(text);
   if (asNew) return decided("new", null, title, null, text);
   if (update) {
@@ -142,17 +125,15 @@ async function decide(db, { projectId, fileName, text, repoRoot, update = null, 
     if (!rows.length) throw new Error("There is no work order " + update + " in this project. Run: review-bridge status");
     return decided("update", update, title, await latestVersion(db, update), text);
   }
-  const named = await workOrderOfFile(db, { projectId, fileName });
-  if (named) return decided("update", named, title, await latestVersion(db, named), text);
-  let best = null;
-  for (const row of await renameCandidates(db, { projectId, repoRoot, memo })) {
-    if (memo?.taken.has(row.work_order_id)) continue;
-    const share = sameLinesShare(workOrderChange(row.source_text, text), row.source_text, text);
-    if (share > 0.5 && (!best || share > best.share)) best = { share, row };
+  if (!id) return decided("new", null, title, null, text);
+  const { rows } = await db.query("select last_file_name from work_orders where work_order_id = $1 and project_id = $2", [id, projectId]);
+  // An id the records do not know (its records were cleared, or the file came from elsewhere) is kept.
+  if (!rows.length) return decided("new", id, title, null, text);
+  const recorded = rows[0].last_file_name;
+  if (recorded !== fileName && await stillHolds(repoRoot, recorded, id)) {
+    return { ...decided("new", null, title, null, text), copy_of: recorded };
   }
-  if (!best) return decided("new", null, title, null, text);
-  memo?.taken.add(best.row.work_order_id);
-  return { ...decided("update", best.row.work_order_id, title, best.row, text), renamed_from: best.row.last_file_name };
+  return { ...decided("update", id, title, await latestVersion(db, id), text), ...(recorded !== fileName ? { moved_from: recorded } : {}) };
 }
 
 // A project is recorded at its first use and found again by its id wherever its folder is now.
@@ -295,7 +276,9 @@ async function writeWorkOrderVersion(tx, { projectId, plan, file, now }) {
   const workOrder = plan.work_order || { decision: "new", title: titleOf(plan.task) };
   let workOrderId = workOrder.work_order_id;
   if (workOrder.decision === "new") {
-    workOrderId = randomUUID();
+    // The card made the id, and the yes wrote it into the file (a plan without one is from work-plan's
+    // inline task, which has no file to write it into).
+    workOrderId ??= randomUUID();
     await tx.query(
       "insert into work_orders (work_order_id, project_id, last_file_name, created_at, last_activity_at) values ($1, $2, $3, $4, $4)",
       [workOrderId, projectId, file, now],

@@ -37,7 +37,7 @@ import { recheckTest, selectTest } from "./test.mjs";
 import { buildContract, sealContract } from "./contract.mjs";
 import { processFile, startLockFile, workLockFile } from "./processRecords.mjs";
 import { priorityChoice } from "../../policy/policyRules.mjs";
-import { BUDGET_KEYS, budgetProblems, formProblems, MIN_CALL_TIMEOUT, parseWorkOrder, WorkOrderFormatError, WorkOrderFormError } from "./workOrderFormat.mjs";
+import { BUDGET_KEYS, budgetProblems, formProblems, MIN_CALL_TIMEOUT, parseWorkOrder, sealedText, WorkOrderFormatError, WorkOrderFormError } from "./workOrderFormat.mjs";
 import { stopRun } from "./writerLoop.mjs";
 
 // Who fills each role in this run: the flag given at the terminal, else bridge.json. The plan seals
@@ -281,7 +281,8 @@ export async function createWorkPackagePlan({
   if (taskFile) {
     const resolved = assertUnder(path.resolve(taskFile), paths.privateRoot, "Task file");
     if (!(await fileExists(resolved))) throw new Error("Task file is missing.");
-    taskText = await fsp.readFile(resolved, "utf8");
+    // Sealed without the id line Bridge keeps in the front matter: that line is Bridge's, not the work order.
+    taskText = sealedText(await fsp.readFile(resolved, "utf8"));
     // T0-07 V2.1: the result file is written beside this path later.
     taskFileRelative = path.relative(paths.repoRoot, resolved).split(path.sep).join("/");
   }
@@ -352,7 +353,7 @@ export function planFilePath(paths, plan, planName = null) {
 // E8: whether the work-order file still reads as the plan sealed it (the SHA-256 the card showed).
 export async function workOrderUnchanged(plan, taskFile) {
   const now = await fsp.readFile(path.resolve(taskFile), "utf8").catch(() => null);
-  return now !== null && digest(now.trim()) === plan.task_sha256;
+  return now !== null && digest(sealedText(now).trim()) === plan.task_sha256;
 }
 
 // E10: the first option given beside --yes that is not what the card showed, or null. The card is
@@ -586,7 +587,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
   // Starting authorizes the work order as it is now; one edited since the plan is not what was sealed.
   if (plan.task_file) {
     const current = await fsp.readFile(path.resolve(paths.repoRoot, ...plan.task_file.split("/")), "utf8").catch(() => null);
-    if (current === null || digest(current.trim()) !== plan.task_sha256) {
+    if (current === null || digest(sealedText(current).trim()) !== plan.task_sha256) {
       throw new Error("The work order " + plan.task_file + " changed after the plan was built. Build a new plan.");
     }
   }

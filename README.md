@@ -106,6 +106,8 @@ source_id: SHOP-412         # your own tracker's id; Bridge stores it and never 
 ---
 ```
 
+- After your first yes, Bridge writes the work order's `id` at the top of the front matter (`id: <uuid>`, as Docusaurus reads a document's `id`); do not delete it. That id is the work order: a new file name, folder or step number is the same work order, and changed text is its next version. A file without one is a new work order, and a copy holding another file's id gets its own. The `id` line is Bridge's, so it is not part of the sealed text or the contract's hash.
+
 - Any other key is refused, with its line. So is a value out of range: a priority or effort that is not one of the values above, a budget value that is not a positive whole number, or one above the policy's limit (the refusal names the limit).
 - `writer` holds for every writer call: the work and each fix. `reviewer` holds for every reviewer call: each review. A key you leave out comes from the policy's priority table. Who fills each role is not here: that is `bridge.json`, or `--writer` and `--reviewer` for one run, and the card names them.
 - A model must belong to the role's CLI, or the work order is refused before the card: for `claude`, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a name with `claude-` in it; for `codex`, a name starting `gpt-`, `codex-` or `o` and a digit. A model from a custom Codex provider goes in Codex's own config, with `model` left out here.

@@ -24,7 +24,7 @@ import {
   anyCardUsed, canonicalTaskFile, latestCardsOfFiles, latestRunsOfFiles, markCardsShown, recordDirectoryYes, withdrawCards,
 } from "./workOrderRecords.mjs";
 import { refuseForm } from "./workOrderForm.mjs";
-import { formProblems, parseWorkOrder, WorkOrderFormError } from "./workOrderFormat.mjs";
+import { formProblems, parseWorkOrder, sealedText, WorkOrderFormError } from "./workOrderFormat.mjs";
 import { authorizeCard, optionAgainstCard, planFilePath, PLAN_SCHEMA_VERSION, workLockReleased, workOrderChecker } from "./workPackage.mjs";
 import { uncommittedNow } from "./workspaceEvidence.mjs";
 import { stopRun } from "./writerLoop.mjs";
@@ -150,7 +150,9 @@ async function surveyDirectory({ paths, records, directory, check }) {
   const rows = [];
   for (const { name, step } of orderWorkOrders(entries.filter((entry) => entry.isFile() && /\.md$/i.test(entry.name)).map((entry) => entry.name))) {
     const absolute = path.join(directory.absolute, name);
-    const text = await fsp.readFile(absolute, "utf8").catch(() => null);
+    // What the person wrote: the id line Bridge keeps in the front matter is not part of it.
+    const raw = await fsp.readFile(absolute, "utf8").catch(() => null);
+    const text = raw === null ? null : sealedText(raw);
     const taskFile = canonicalTaskFile(paths.repoRoot, absolute);
     // Where a disk keeps both spellings of one name they are two files and one work order by name.
     const twin = rows.find((row) => row.taskFile === taskFile);
@@ -194,7 +196,8 @@ function cardLines({ t, directory, rows, place, uncommitted }) {
     const notes = [
       ...(row.step !== null && before?.step === row.step ? [t("line.card.same_step", { name: before.name })] : []),
       ...(row.interrupted ? [t("line.card.interrupted")] : []),
-      ...(row.plan.work_order?.renamed_from ? [t("line.card.renamed", { from: row.plan.work_order.renamed_from })] : []),
+      ...(row.plan.work_order?.copy_of ? [t("line.card.copy", { from: row.plan.work_order.copy_of })] : []),
+      ...(row.plan.work_order?.moved_from ? [t("line.card.moved", { from: row.plan.work_order.moved_from })] : []),
     ];
     return t("line.card.contract", { sha: row.plan.contract_sha256.slice(0, 4), count: row.plan.contract_conditions }) + notes.map((note) => t("line.card.note", { note })).join("");
   };
@@ -276,7 +279,7 @@ async function runLine({ paths, records, directory, rows, plans, authorizedVia, 
       const { plan } = outcome;
       if (watcher.hadSignal()) { stop = { kind: "stopped", position: plan.line.position }; break; }
       const now = await fsp.readFile(path.join(paths.repoRoot, ...plan.task_file.split("/")), "utf8").catch(() => null);
-      if (now === null || digest(now.trim()) !== plan.task_sha256) {
+      if (now === null || digest(sealedText(now).trim()) !== plan.task_sha256) {
         Object.assign(outcome, { conclusion: "skipped", why: now === null ? "no longer there" : "changed after the card" });
         write(tag(outcome) + " skipped: " + outcome.why);
         continue;
@@ -339,7 +342,7 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
     write(busy.map(({ name, runId }) => name + " is running (run " + runId + ")").join("; ") + ". Stop it or wait for it, then run: " + again);
     return 1;
   }
-  const newBatch = () => ({ records, cache: {}, memo: { candidates: null, taken: new Set() } });
+  const newBatch = () => ({ records, cache: {} });
   const t = await createTranslator(await resolveLocale(paths));
   let plans;
   if (options.yes) {

@@ -30,8 +30,8 @@ import {
 import {
   canonicalTaskFile, cardFor, cardUsed, clearProject, ensureProject, identifyWorkOrder, markCardShown, recordCard, recordContract, recordStart, withdrawCard,
 } from "./workOrderRecords.mjs";
-import { refuseForm } from "./workOrderForm.mjs";
-import { formProblems, parseWorkOrder, WorkOrderFormError } from "./workOrderFormat.mjs";
+import { refuseForm, writeWorkOrderIds } from "./workOrderForm.mjs";
+import { formProblems, parseWorkOrder, sealedText, WorkOrderFormError, workOrderIdOf } from "./workOrderFormat.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
 
 export const DEFAULT_BREAKPOINT = "after the review";
@@ -92,7 +92,9 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
   const defaults = command === "start" && !interactive();
   const breakpoint = options.breakpoint || answers.breakpoint || (defaults ? DEFAULT_BREAKPOINT : undefined);
   if (options.taskFile && !breakpoint) throw new Error("A breakpoint is required. Add --breakpoint \"<where to stop>\" or answer the prompt.");
-  const text = options.taskFile ? await fsp.readFile(path.resolve(options.taskFile), "utf8").catch(() => null) : null;
+  const raw = options.taskFile ? await fsp.readFile(path.resolve(options.taskFile), "utf8").catch(() => null) : null;
+  // What the person wrote, without the id line Bridge keeps in the front matter; the id says which work order.
+  const text = raw === null ? null : sealedText(raw);
   // A work order Bridge cannot split, or one without what it must say, is refused, with its lines, before
   // anything about it is recorded.
   const format = text !== null ? parseWorkOrder(text.trim()) : null;
@@ -100,8 +102,8 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
   if (form && !form.ok) throw new WorkOrderFormError(form);
   const records = text !== null ? batch?.records ?? await openRecords(paths) : null;
   const workOrder = records ? await identifyWorkOrder(records.db, {
-    projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), repoRoot: paths.repoRoot,
-    update: options.update, asNew: Boolean(options.asNew), memo: batch?.memo ?? null,
+    projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), id: workOrderIdOf(raw), repoRoot: paths.repoRoot,
+    update: options.update, asNew: Boolean(options.asNew),
   }) : null;
   // Calls no model, so it uses the adapter for model-free checks; a fake run's is the fake CLI.
   const modelFree = async () => (adapter?.resolveExecutable ? adapter : await inspectionAdapter());
@@ -202,6 +204,10 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
         workOrderId: authorization.workOrderId, contentSha256: plan.task_sha256, contractSha256: plan.contract_sha256, contract: await loadContract(paths, plan.contract_sha256),
       });
     }
+    // The work order and its authorization are in the records now, so its id goes into the file, as Jira
+    // gives an issue its key before the key is printed on it (Owner 2026-11-08). A check that failed before
+    // this point left neither. Before any model call; a file it cannot write closes this start.
+    if (records) await writeWorkOrderIds(paths, [{ ...plan, work_order: { ...plan.work_order, work_order_id: authorization.workOrderId } }]);
   } catch (error) {
     if (started) {
       await closeFailedStart(paths, started.run.run_id, error);

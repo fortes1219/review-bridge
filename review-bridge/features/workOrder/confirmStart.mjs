@@ -54,9 +54,11 @@ export async function cardTranslator(paths) {
 // Which work order the yes starts (spec 2026-10-24's three lines, in the card's language): y starts
 // it as the card says, n does not start; --update <work_order_id> or --as-new prints another card.
 export function decisionLine(t, workOrder) {
+  if (workOrder.copy_of) return t("card.decision.copy", { title: workOrder.title, from: workOrder.copy_of });
   if (workOrder.decision === "new") return t("card.decision.new", { title: workOrder.title });
-  if (workOrder.decision === "same") return t("card.decision.same", { title: workOrder.title, version: workOrder.from_version });
-  return t("card.decision.changed", { title: workOrder.title, from: workOrder.from_version ?? 0, to: workOrder.to_version, lines: workOrder.changed_lines });
+  const moved = workOrder.moved_from ? t("card.decision.moved", { from: workOrder.moved_from }) : "";
+  if (workOrder.decision === "same") return t("card.decision.same", { title: workOrder.title, version: workOrder.from_version }) + moved;
+  return t("card.decision.changed", { title: workOrder.title, from: workOrder.from_version ?? 0, to: workOrder.to_version, lines: workOrder.changed_lines }) + moved;
 }
 
 // Where each value the card shows came from, in the person's words.

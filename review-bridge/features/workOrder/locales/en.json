@@ -210,7 +210,6 @@
   "line.card.appeared": "appeared after the card",
   "line.card.same_step": "same number as {name}; runs after it, by name",
   "line.card.interrupted": "interrupted last time; starts a new run",
-  "line.card.renamed": "reads as {from} renamed; recorded as the same work order",
   "line.card.contract": "contract sha256 {sha}…, {count} condition(s)",
   "line.card.note": "   ({note})",
   "line.card.in_place": "Runs in place, one after another. A failed step does not stop the next.",
@@ -228,5 +227,9 @@
   "line.yes.no_card": "No card was shown for this directory, so there is no yes to run on. Run: {again} and show the person the card.",
   "line.yes.changed": "The directory changed after you saw the card. Run: {again} and look again.",
   "line.yes.used": "This card was already said yes to; one card starts its line once. Run: {again} and show the person the new card.",
-  "line.yes.ran_meanwhile": "The directory changed after you saw the card: a work order on it ran meanwhile. Nothing was authorized. Run: {again} and look again."
+  "line.yes.ran_meanwhile": "The directory changed after you saw the card: a work order on it ran meanwhile. Nothing was authorized. Run: {again} and look again.",
+  "card.decision.copy": "A copy of {from}: recorded as a new work order \"{title}\"",
+  "card.decision.moved": " (was at {from})",
+  "line.card.copy": "a copy of {from}; recorded as a new work order",
+  "line.card.moved": "was at {from}; the same work order"
 }

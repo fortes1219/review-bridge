@@ -210,7 +210,6 @@
   "line.card.appeared": "卡片之後才出現",
   "line.card.same_step": "和 {name} 同號；照檔名排在它後面",
   "line.card.interrupted": "上次被中斷；這次開新的 run",
-  "line.card.renamed": "看起來是 {from} 改名；記為同一張工單",
   "line.card.contract": "合約 sha256 {sha}…，{count} 條條件",
   "line.card.note": "   （{note}）",
   "line.card.in_place": "在原地依序跑；一張失敗不會擋下一張。",
@@ -228,5 +227,9 @@
   "line.yes.no_card": "這個目錄沒有顯示過卡片，所以沒有可以照著跑的「好」。請執行：{again}，並把卡片給人看。",
   "line.yes.changed": "看過卡片之後目錄改過了。請執行：{again}，重新看一次。",
   "line.yes.used": "這張卡已經說過「好」了；一張卡只跑一次這條線。請執行：{again}，並把新卡給人看。",
-  "line.yes.ran_meanwhile": "看過卡片之後目錄改過了：卡上有一張工單在這段時間跑過。沒有授權任何東西。請執行：{again}，重新看一次。"
+  "line.yes.ran_meanwhile": "看過卡片之後目錄改過了：卡上有一張工單在這段時間跑過。沒有授權任何東西。請執行：{again}，重新看一次。",
+  "card.decision.copy": "是 {from} 的複製，記為新工單「{title}」",
+  "card.decision.moved": "（原本在 {from}）",
+  "line.card.copy": "是 {from} 的複製，記為新工單",
+  "line.card.moved": "原本在 {from}，是同一張工單"
 }

@@ -27,7 +27,7 @@ import { nfc } from "../../utils/workOrderName.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
 import { contractPath, loadContract } from "./contract.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
-import { parseWorkOrder, UNTITLED } from "./workOrderFormat.mjs";
+import { parseWorkOrder, sealedText, UNTITLED } from "./workOrderFormat.mjs";
 import { resultIdentity } from "./workOrderRecords.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
@@ -77,7 +77,7 @@ export function workOrderChange(sealed, current) {
 
 async function currentWorkOrder(paths, taskFile) {
   try {
-    return await fsp.readFile(path.resolve(paths.repoRoot, ...taskFile.split("/")), "utf8");
+    return sealedText(await fsp.readFile(path.resolve(paths.repoRoot, ...taskFile.split("/")), "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return null;
     return { unreadable: error.code || "error" };

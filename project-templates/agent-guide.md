@@ -15,7 +15,8 @@ What to do:
    person the card exactly as printed, word for word, and ask whether to go on. There is one card: it
    names the contract Bridge cut from the work order, and its yes starts the work.
 3. Only if the person says yes, run the same command again with `--yes`. If they do not say yes,
-   do not run it: do not guess and do not decide for them. stop and clean need no card.
+   do not run it: do not guess and do not decide for them. stop and clean need no card. After the yes,
+   Bridge writes the work order's `id` at the top of the file (its front matter); do not delete it.
 4. When start says a work order cannot start yet (what to do or the acceptance list is missing, a line
    of the list is not an item, a question in it is still open), show the person what it printed, word
    for word. The work order is theirs to fill in: do not write it for them. Run start again once they
