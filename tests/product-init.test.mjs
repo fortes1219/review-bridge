@@ -712,7 +712,8 @@ test("the card names the work order by its id: new, updated, moved or copied; a 
   const rows = async (sql) => await queryRecords(sql, [projectId]);
   assert.deepEqual((await rows("select work_order_id, last_file_name from work_orders where project_id = $1 order by created_at")).map((row) => [row.work_order_id === id ? "original" : row.work_order_id === pasted ? "pasted" : "copy", row.last_file_name]),
     [["original", moved], ["copy", copy], ["pasted", moved]]);
-  assert.deepEqual((await rows("select v.version_no from work_order_versions v where v.work_order_id = '" + id + "' order by 1")).map((row) => row.version_no), [1, 2, 3]);
+  // This one names its work order in the SQL and takes no parameter.
+  assert.deepEqual((await queryRecords("select v.version_no from work_order_versions v where v.work_order_id = '" + id + "' order by 1")).map((row) => row.version_no), [1, 2, 3]);
   const claims = await rows("select c.run_id from authorization_claims c join authorizations a using (authorization_id) join plans p using (plan_sha256) where p.project_id = $1");
   assert.equal(claims.length, 5, "one claim per yes");
   const contracts = await rows("select c.contract_sha256 from contracts c join work_orders w using (work_order_id) where w.project_id = $1");

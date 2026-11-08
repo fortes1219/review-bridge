@@ -308,9 +308,13 @@ test("uninstall without --target says how npm removes Review Bridge", () => {
   assert.match(result.stderr, /uninstall needs --target <folder>\. To remove Review Bridge itself, run: npm uninstall -g review-bridge/);
 });
 
-test("Node older than 22 is named in one line", () => {
+// The minimum is 22.8 (utils/nodeVersion.mjs MINIMUM_NODE: util.styleText honours the colour variables from there).
+test("Node older than 22.8 is named in one line", () => {
   assert.equal(nodeTooOld("20.11.0"), true);
-  assert.equal(nodeTooOld("22.0.0"), false);
+  assert.equal(nodeTooOld("22.0.0"), true);
+  assert.equal(nodeTooOld("22.7.9"), true);
+  assert.equal(nodeTooOld("22.8.0"), false);
+  assert.equal(nodeTooOld("24.0.0"), false);
 });
 
 test("an unreadable settings file is refused, never taken as nothing saved", async (t) => {

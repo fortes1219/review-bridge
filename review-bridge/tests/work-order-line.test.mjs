@@ -270,7 +270,7 @@ test("a line whose process is killed: the run closes as cancelled, and starting 
   await line.exited;
   const card = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
   assert.equal(card.status, 1, card.stdout + card.stderr);
-  assert.match(card.stdout, /01-a\.md +contract sha256 [0-9a-f]{4}… {3}version 1 {3}\(interrupted last time; starts a new run\)/);
+  assert.match(card.stdout, /01-a\.md +contract sha256 [0-9a-f]{4}…, 1 condition\(s\) {3}\(interrupted last time; starts a new run\)/);
   assert.equal((await queryRecords("select conclusion from runs where run_id = $1", [firstRun]))[0].conclusion, "cancelled");
   for (let waited = 0; isPidAlive(writer) && waited < 50; waited += 1) await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(isPidAlive(writer), false, "nothing of the old run keeps writing");
@@ -309,7 +309,7 @@ test("stop on the running step stops the whole line, and same-directory starts a
   assert.match(line.output(), /03-c\.md +not run/);
   assert.equal((await runsOf(rt)).length, 2);
   const again = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
-  assert.match(again.stdout, /02-b\.md +contract sha256 [0-9a-f]{4}… {3}version 1 {3}\(interrupted last time; starts a new run\)/);
+  assert.match(again.stdout, /02-b\.md +contract sha256 [0-9a-f]{4}…, 1 condition\(s\) {3}\(interrupted last time; starts a new run\)/);
 });
 
 test("after the yes: a new file does not run, a renamed one is gone, an edited one is not what was said yes to", LIMIT, async (t) => {
