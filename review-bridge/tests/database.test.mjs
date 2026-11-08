@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { recordCard } from "../features/workOrder/workOrderRecords.mjs";
 import { applyMigrations, migrationFiles, MIGRATIONS_DIR } from "../service/database/migrate.mjs";
 import { connect, ensureCluster, postgresBinaries, startServer, stopServer } from "../service/database/postgresServer.mjs";
 
@@ -64,6 +66,31 @@ test("an upgrade from a database with the contract gatherings drops those two ta
   const after = await tables(client);
   assert.equal(after.includes("contract_gatherings") || after.includes("contract_gathering_events"), false);
   assert.deepEqual((await client.query("select name, root_path from projects")).rows, [{ name: "farm", root_path: "C:/farm" }]);
+});
+
+// The 2026-11-08 canary: a card for a work order without an id failed on plans_work_order_id_fkey, because
+// the id made with the card was written as the plan's work order before any work order existed. A card
+// names no work order until the yes records it (the column's null always meant a new one).
+test("cards for new work orders print without pointing at a work order; with no yes there is no work order", { timeout: 120_000 }, async (t) => {
+  const { client } = await database(t);
+  await applyMigrations(client);
+  const projectId = randomUUID();
+  const now = new Date().toISOString();
+  await client.query("insert into projects (project_id, root_path, name, created_at, last_activity_at) values ($1, 'C:/farm', 'farm', $2, $2)", [projectId, now]);
+  const snapshot = { effective_policy_sha256: "a".repeat(64), policy_schema_version: 5, package_default_policy_sha256: "b".repeat(64), project_override_sha256: null, effective_policy: {} };
+  // One card for a file, and two of a directory's card: each a new work order with the id its yes will use.
+  for (const [index, file] of ["farm.md", "line/01-a.md", "line/02-b.md"].entries()) {
+    const plan = {
+      plan_sha256: String(index).repeat(64), task_sha256: "d".repeat(64), task_file: ".review-bridge/work-packages/" + file, proposed_run_id: randomUUID(),
+      effective_policy_sha256: snapshot.effective_policy_sha256, repo_root: "C:/farm", authorization_expires_at: now, created_at: now,
+      work_order: { decision: "new", work_order_id: randomUUID(), title: "Farm", file: ".review-bridge/work-packages/" + file },
+    };
+    await recordCard(client, { projectId, plan, snapshot, shown: true });
+  }
+  const plans = (await client.query("select work_order_id, body->'work_order'->>'work_order_id' as card_id from plans order by source_file")).rows;
+  assert.equal(plans.length, 3);
+  assert.ok(plans.every((row) => row.work_order_id === null && /^[0-9a-f-]{36}$/.test(row.card_id)), "the id the yes will use is in the card, not in the column");
+  assert.equal((await client.query("select count(*)::int as n from work_orders")).rows[0].n, 0, "no yes, no work order");
 });
 
 test("a migration that fails is rolled back whole; the ones before it stay", { timeout: 120_000 }, async (t) => {

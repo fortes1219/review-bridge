@@ -158,10 +158,14 @@ export async function recordCard(db, { projectId, plan, snapshot, shown }) {
     [snapshot.effective_policy_sha256, snapshot.policy_schema_version, snapshot.package_default_policy_sha256, snapshot.project_override_sha256, snapshot.effective_policy],
   );
   const { plan_path: _ignored, ...body } = plan;
+  // A card for a new work order names no work order yet: its id is made with the card and kept in the plan's
+  // body, and the work order is recorded only by the yes (recordStart), as the column's null always meant.
+  // A card prints with nothing in the records pointing at a work order that does not exist.
+  const existing = plan.work_order?.decision === "new" ? null : plan.work_order?.work_order_id || null;
   await db.query(
     "insert into plans (plan_sha256, project_id, work_order_id, content_sha256, source_file, proposed_run_id, effective_policy_sha256,"
     + " repo_root, authorization_expires_at, body, created_at, shown_at) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-    [plan.plan_sha256, projectId, plan.work_order?.work_order_id || null, plan.task_sha256, plan.work_order?.file ?? plan.task_file, plan.proposed_run_id,
+    [plan.plan_sha256, projectId, existing, plan.task_sha256, plan.work_order?.file ?? plan.task_file, plan.proposed_run_id,
       plan.effective_policy_sha256, plan.repo_root, plan.authorization_expires_at, body, plan.created_at, shown ? new Date().toISOString() : null],
   );
 }
