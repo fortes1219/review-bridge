@@ -129,14 +129,14 @@ Features never import each other. When one flow needs another feature's capabili
 | `start` | Passes the start gate (reviewer read-only proof in the running page) as `guard`, and the setup check's `ensureReviewerChecked` (start the page if needed; run the check there, as the page's button does) as `reviewerCheck` | `workOrder.startWorkOrder`: plan → card → without a terminal and without `--yes`, stop at `Needs authorization` → the person's yes (asked at a terminal, or `--yes` relayed by an agent; `authorized_via` is `terminal` or `agent`) → `reviewerCheck()` unless already proven in this page session → `guard()` → authorize → writer loop, one line per step → deliver. The plan before the card cut and sealed the contract, and a work order short of what it must say stopped there |
 | `resume` | The same `guard` and `reviewerCheck` | `workOrder.resumeWorkOrder`: a stopped run is closed, so its work order is planned again with that run's breakpoint and scope (priority, effort and budget come from the work order again), then the same steps as `start` |
 | `clean` | Passes `deliver` | `records.removeRecord` with a run id, `records.runPrune` without |
-| `status` | Passes the setup check's `checkService` as `page` | `workOrder.statusOverview`: the page, the latest runs, the review queue |
+| `status` | Passes the setup check's `checkService` as `page` | `workOrder.statusOverview`: the page and the latest runs from the database |
 | `work-start` | Passes the start gate (reviewer read-only proof in the running page) as `guard` | `workOrder.startWork`: check options → `guard()` → human confirms → authorize → writer loop → deliver |
 | `prune` | Passes the work order's delivery as `deliver` | `records.runPrune`: deliver pending results → fold → delete past retention |
 | `rm` | Passes `deliver` | `records.removeRecord`: deliver → fold → remove → report an undelivered result |
 | `watch` | Passes `daily`, which runs the records' prune with the work order's delivery | `setupCheck.startWatch`: start the page → record the session → run `daily` now and once a day |
 | `stop`, `work-cancel` | None | `workOrder`: stop or cancel the run, then deliver |
 
-`status` and `wait` only read the review queue and work without `bridge.json`. Every other command requires the configuration created by `init`.
+`status` and `wait` work without `bridge.json`; `wait` only reads the review queue. Every other command requires the configuration created by `init`.
 
 ## 5. Service
 

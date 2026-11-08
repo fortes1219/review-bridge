@@ -187,7 +187,7 @@ Commands:
   stop <run_id>           Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
   resume <run_id>         Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them
   clean [<run_id>]        Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
-  status                  Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
+  status                  Show what Bridge is doing now: the page, this project's runs, and how to look at the database
   logs <run_id|file>      Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
   up                      Start the database and the local page service in the background
   down                    Stop the local page service and the database; refused while a run is running
@@ -324,7 +324,7 @@ Options:
 ```text
 Usage: review-bridge status [options]
 
-Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
+Show what Bridge is doing now: the page, this project's runs, and how to look at the database
 
 Options:
   --after <run_id>

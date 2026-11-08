@@ -52,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A plan or a contract made before this release is not read again; `start` makes a new card.
 - Requires Node.js 22.8 or newer.
 - Native work no longer requires an interactive terminal (T0-08's terminal rule is withdrawn); the reviewer read-only proof is still required before any model call.
-- `status` shows what Bridge is doing now: the page, the runs and the review queue (`--json` for all of it).
+- `status` shows what Bridge is doing now: the page and the runs from the database, listed and not totalled as `gh run list` lists them (`--json` for all of it). The review queue's counts are gone: they were the page service's working copy and went back to 0 when it restarted.
 - `start` without a terminal takes the default breakpoint and change types instead of refusing.
 - The main way in is your agent: `init`, its `--help` and README start a work order with `/review-bridge start <file>` in Claude Code (`$review-bridge start <file>` in Codex); `review-bridge start <file>` at a terminal is for advanced use and CI.
 - `work-plan` prints two lines (the plan and the next command); `--json` prints the JSON.

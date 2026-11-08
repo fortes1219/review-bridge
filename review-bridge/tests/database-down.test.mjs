@@ -319,3 +319,43 @@ test("status says the database is stopped and does not start it", async (t) => {
   }
   assert.deepEqual(lines, ["Page: not running; start it with review-bridge up", "資料庫：已停止；review-bridge up 會把它起來，下一次 start 也會。"]);
 });
+
+// Fortes 2026-11-08: the runs come from the database only and are listed, not totalled (gh run list).
+// The page service restarts with new folders (its review queue emptied); what status lists stays.
+test("after the page service restarts, status lists the same runs and prints no review-queue totals", async (t) => {
+  const paths = await project(t, "en");
+  const state = path.join(paths.repoRoot, "state");
+  Object.assign(paths, { latestPath: path.join(state, "reviews", "LATEST.txt"), doneDir: path.join(state, "done") });
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ locale: "en", roles: { writer: { provider_id: "claude" }, reviewer: { provider_id: "codex" } } }) + "\n");
+  await fsp.mkdir(paths.doneDir, { recursive: true });
+  for (const n of [1, 2, 3, 4]) await fsp.writeFile(path.join(paths.doneDir, "job-" + n + ".json"), "{}");
+  const runs = [1, 2, 3, 4].map((n) => ({
+    run_id: "00000000-0000-4000-8000-00000000000" + n, status: "completed", conclusion: "success", closed_reason: "delivered",
+    source_file: ".review-bridge/work-packages/0" + n + ".md", created_at: new Date(Date.UTC(2026, 10, 8, 12, n)).toISOString(),
+  }));
+  // The database's answer is the same before and after: only the page service restarted.
+  const records = async () => ({
+    db: { connection: { host: "127.0.0.1", port: 5432, database: "review_bridge", user: "bridge", passwordFile: "/secret" } },
+    projectId: "p", runs, more: false, active: [], lines: [], logs: "/logs",
+  });
+  const show = async (page) => {
+    const lines = [];
+    const write = process.stdout.write;
+    process.stdout.write = (text) => { lines.push(...String(text).split("\n").filter(Boolean)); return true; };
+    try {
+      assert.equal(await statusOverview({ paths, options: {}, page, databaseRunning: async () => true, records }), 0);
+    } finally {
+      process.stdout.write = write;
+    }
+    return lines;
+  };
+  const before = await show(async () => ({ running: true, url: "http://localhost:4173/", reason: "running" }));
+  // The restart: a new page service whose review-queue folders start empty.
+  await fsp.rm(paths.doneDir, { recursive: true, force: true });
+  const after = await show(async () => ({ running: true, url: "http://localhost:4174/", reason: "running" }));
+  const runLines = (lines) => lines.filter((line) => runs.some((run) => line.includes(run.run_id)));
+  assert.equal(runLines(before).length, 4);
+  assert.deepEqual(runLines(after), runLines(before));
+  assert.ok(after.includes("Work: 0 running"));
+  for (const lines of [before, after]) assert.equal(lines.filter((line) => /review queue/i.test(line)).length, 0, "no totals from the page service's folders");
+});

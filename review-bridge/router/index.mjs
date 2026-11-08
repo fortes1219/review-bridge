@@ -120,7 +120,7 @@ export const COMMANDS = {
   status: {
     audience: "human",
     configFree: true,
-    summary: "Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database",
+    summary: "Show what Bridge is doing now: the page, this project's runs, and how to look at the database",
     options: { "--after": AFTER, "--json": { ...JSON_OUT } },
     run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.checkService(context.paths) }),
   },

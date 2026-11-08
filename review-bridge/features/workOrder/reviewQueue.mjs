@@ -1,8 +1,7 @@
-import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
-import { ensureDir, fileExists, listJson, readJson, writeJsonAtomic } from "../../service/index.mjs";
+import { ensureDir, listJson, writeJsonAtomic } from "../../service/index.mjs";
 import { timestampId } from "../../utils/dates.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
@@ -112,37 +111,6 @@ export async function enqueueReview({
   };
   await writeJsonAtomic(jobPath, job);
   return { accepted: true, duplicate: false, job, jobPath };
-}
-
-export async function queueStatus(paths) {
-  const counts = {};
-  for (const [state, directory] of Object.entries({
-    pending: paths.pendingDir,
-    running: paths.runningDir,
-    done: paths.doneDir,
-    failed: paths.failedDir,
-  })) {
-    counts[state] = (await listJson(directory)).length;
-  }
-
-  let latestReview = null;
-  if (await fileExists(paths.latestPath)) {
-    latestReview = (await fsp.readFile(paths.latestPath, "utf8")).trim();
-  }
-  let latestPriority = null;
-  let latestReasoningEffort = null;
-  const done = await listJson(paths.doneDir);
-  if (done.length) {
-    const latest = await readJson(done.at(-1));
-    latestPriority = latest.priority || "LEGACY_UNRECORDED";
-    latestReasoningEffort = latest.reasoning_effort || "LEGACY_UNRECORDED";
-  }
-  return {
-    ...counts,
-    latest_review: latestReview,
-    latest_priority: latestPriority,
-    latest_reasoning_effort: latestReasoningEffort,
-  };
 }
 
 export async function hasPendingMessageHash(paths, messageHash) {

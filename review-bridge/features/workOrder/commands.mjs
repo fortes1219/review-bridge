@@ -15,7 +15,7 @@ import { deliverOutcome, stdoutLines } from "./delivery.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
 import { directoryOfTarget, fileLineRunning, startDirectory } from "./line.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
-import { queueStatus, waitForPending } from "./reviewQueue.mjs";
+import { waitForPending } from "./reviewQueue.mjs";
 import {
   authorizeWorkPackage,
   cancelWorkPackage,
@@ -532,8 +532,10 @@ export async function statusRecords(paths, { after = null } = {}) {
 
 // `status` only looks (RC3-DOWN-01): a database that `down` stopped is said to be stopped, never started
 // to answer, as brew services list reports a service; its runs are shown once it is up again.
-// `databaseRunning` is a seam for tests.
-export async function statusOverview({ paths, options, page, databaseRunning = null }) {
+// `databaseRunning` and `records` are seams for tests.
+// The runs are the database's alone, listed and not totalled, as gh run list does (Fortes 2026-11-08):
+// the page service's review-queue folders are its working copy, emptied when it restarts.
+export async function statusOverview({ paths, options, page, databaseRunning = null, records = statusRecords }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
     write("This folder is not set up for Review Bridge. Run: review-bridge init");
     return 0;
@@ -550,15 +552,15 @@ export async function statusOverview({ paths, options, page, databaseRunning = n
     write(t("status.database.stopped"));
     return 0;
   }
-  const { db, projectId, runs, more, active, lines, logs } = await statusRecords(paths, { after: options.after || null });
-  const queue = await queueStatus(paths);
+  const { db, projectId, runs, more, active, lines, logs } = await records(paths, { after: options.after || null });
+  const latestReview = (await fsp.readFile(paths.latestPath, "utf8").catch(() => "")).trim() || null;
   // Who the next start uses, from the one place that says it; a run keeps what its card showed.
   const { roles: configured } = await readJson(paths.bridgeConfigPath);
   const roles = { writer: configured?.writer?.provider_id ?? null, reviewer: configured?.reviewer?.provider_id ?? null };
   if (options.json) {
     write(JSON.stringify({
       page: { running: service.running, url: service.url, reason: service.reason },
-      roles, project_id: projectId, active_runs: active.length, lines, runs, more, review_queue: queue, logs, database: { running: true, ...db.connection },
+      roles, project_id: projectId, active_runs: active.length, lines, runs, more, latest_review: latestReview, logs, database: { running: true, ...db.connection },
     }, null, 2));
     return 0;
   }
@@ -576,8 +578,7 @@ export async function statusOverview({ paths, options, page, databaseRunning = n
     }
     if (more) write("  More: review-bridge status --after " + runs.at(-1).run_id);
   }
-  write("Review queue: pending " + queue.pending + ", running " + queue.running + ", done " + queue.done + ", failed " + queue.failed);
-  if (queue.latest_review) write("Latest review: " + queue.latest_review);
+  if (latestReview) write("Latest review: " + latestReview);
   write("Roles: writer " + roles.writer + ", reviewer " + roles.reviewer);
   // The run's call logs live outside the project, one folder per run (review-bridge logs <run_id>).
   write("Logs: " + logs);
