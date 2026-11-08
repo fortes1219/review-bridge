@@ -15,6 +15,8 @@ const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "s
 export const WRITER_RESULT_SCHEMA = path.join(schemasDir, "writer.result.schema.json");
 export const REVIEW_RESULT_SCHEMA = path.join(schemasDir, "review.result.schema.json");
 export const MALFORMED_EXIT_CODE = 79;
+// A review.result that breaks its rules is asked for again once, with what was wrong; the second ends the run.
+export const REVIEW_FORMAT_ATTEMPTS = 2;
 export const SEVERITY_RANK = Object.freeze({ HIGH: 3, MEDIUM: 2, LOW: 1 });
 
 const schemaCache = new Map();

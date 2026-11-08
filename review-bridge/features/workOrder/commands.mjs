@@ -70,6 +70,9 @@ async function openRecords(paths) {
   return { db, projectId: config.project_id };
 }
 
+// The project's language for what another feature prints; the router hands this to the graph feature.
+export const projectTranslator = (paths) => cardTranslator(paths);
+
 // The project's row, which the graph's rows point at; the router hands this to the graph feature.
 export async function recordProject(db, paths) {
   await ensureProject(db, { projectId: paths.projectId, root: paths.repoRoot });

@@ -92,14 +92,16 @@ export function reviewerUsageEvent({ usage, trailerTokens, call, durationMs }) {
 export const NO_CONNECTORS_ARGS = Object.freeze(["--disable", "apps", "--disable", "plugins"]);
 export const mcpOffArgs = (names = []) => names.flatMap((name) => ["-c", "mcp_servers." + name + ".enabled=false"]);
 
-// Bridge's own graph server (T0-GRAPH-01), defined for this call only: `-c` takes a dotted path and a
-// TOML value (codex-rs config_override.rs), the stdio server's keys are `command` and `args`, and
-// `enabled_tools` registers only the listed tools (config mcp_types.rs). A JSON string or array of
-// strings is also a TOML one.
+// Bridge's own graph server, defined for this call only: `-c` takes a dotted path and a TOML value
+// (codex-rs config_override.rs), the stdio server's keys are `command` and `args`, and `enabled_tools`
+// registers only the listed tools (config mcp_types.rs). `omit_tools_from = ["deferred"]` puts its tools
+// in the model's first tool list instead of behind tool search (core mcp_tool_exposure.rs, spec_plan.rs).
+// A JSON string or array of strings is also a TOML one.
 export const graphServerArgs = (graph) => (graph ? [
   "-c", "mcp_servers." + graph.name + ".command=" + JSON.stringify(graph.command),
   "-c", "mcp_servers." + graph.name + ".args=" + JSON.stringify(graph.args),
   "-c", "mcp_servers." + graph.name + ".enabled_tools=" + JSON.stringify(graph.tools),
+  "-c", "mcp_servers." + graph.name + ".omit_tools_from=" + JSON.stringify(["deferred"]),
 ] : []);
 
 // The MCP servers a session of Bridge's would load. Calls no model and starts no server. A name that

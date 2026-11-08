@@ -190,14 +190,18 @@ export function reviewAnswer(prompt) {
     findings = [finding("F9", "HIGH", deltaPath)];
   }
   if (gate === "MALFORMED") return { event: "review.result", gate: "MAYBE" };
+  // PASS_HARD_STOP: a PASS that asks for a hard stop, which the review's rules forbid (run f645ccf5).
+  // PASS_HARD_STOP_ONCE: only until Bridge asks again with what was wrong (previous_answer_problems).
+  const passStop = gate === "PASS_HARD_STOP" || (gate === "PASS_HARD_STOP_ONCE" && !input.previous_answer_problems);
+  const passing = gate === "PASS" || gate === "PASS_WITH_HIGH" || gate === "PASS_HARD_STOP" || gate === "PASS_HARD_STOP_ONCE";
   return {
     event: "review.result",
     work_order: input.work_order || "unknown",
     contract_sha256: process.env.FAKE_CODEX_CONTRACT === "other" ? "0".repeat(64) : input.contract_sha256 ?? null,
     call: input.call || 1,
-    gate: gate === "PASS" || gate === "PASS_WITH_HIGH" ? "PASS" : "FAIL",
-    hard_stop: gate === "HARD_STOP",
-    hard_stop_reason: gate === "HARD_STOP" ? "needs_human_decision" : null,
+    gate: passing ? "PASS" : "FAIL",
+    hard_stop: gate === "HARD_STOP" || passStop,
+    hard_stop_reason: gate === "HARD_STOP" || passStop ? "needs_human_decision" : null,
     findings: gate === "FAIL_EMPTY" ? [] : findings,
     verified: ["fake: read the delta"],
     not_run: ["fake: project tests"],

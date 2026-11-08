@@ -48,6 +48,7 @@ const NEXT_STEP = Object.freeze({
   rate_limited: "result.next.quota", token_limit: "result.next.quota",
   review_hard_stop: "result.next.findings", rounds_exhausted: "result.next.findings", acceptance_unverified: "result.next.findings",
   run_timeout: "result.next.timeout", writer_timeout: "result.next.timeout",
+  needs_human: "result.next.needs_human",
 });
 
 // The work order as sealed at the start against the file as it is now. Null when they match
@@ -238,6 +239,9 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
     if (run.closed_reason === "version_changed") why.push(t(state.changed_after === "test" ? "result.why.version_changed.test" : "result.why.version_changed"));
     if (run.closed_reason === "evidence_unconfirmable") why.push(t("result.why.evidence_unconfirmable"));
     if (run.closed_reason === "scope_unverified") why.push(t("result.why.scope_unverified"));
+    // The writer stopped for the person (Owner 2026-11-06: a person stopped is met on their own document,
+    // in their words): what is theirs to decide, and that the work order is where they answer it.
+    if (run.closed_reason === "needs_human") why.push(t("result.why.needs_human.decide", { file: workPackage?.task_file || name }));
     if (writer?.needs_human?.length) {
       why.push(t("result.why.needs_human.questions"));
       for (const item of writer.needs_human) why.push("- " + t("result.why.needs_human.question", { question: item.question, options: (item.options || []).join(" / ") }));
@@ -313,7 +317,8 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
 
   // Every way a run ends short of success is met by starting the work order again, said in one line
   // with no command; the closed reason only picks what to do first (Owner 2026-11-04).
-  const next = [t(kind === "success" ? "result.next.success" : NEXT_STEP[run.closed_reason] || "result.next.start_again")];
+  // The work order is named by its file name only: the next step is plain words, with no path or command.
+  const next = [t(kind === "success" ? "result.next.success" : NEXT_STEP[run.closed_reason] || "result.next.start_again", { file: path.basename(workPackage?.task_file || name) })];
 
   // The changed list is computed at delivery time. A late delivery (prune after a crash, days on)
   // would otherwise present the owner's later edits as the run's work; it says so instead.
@@ -367,9 +372,12 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
 }
 
 // RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
-// checked on. A run that stopped before the decision still lists every condition, unknown.
+// checked on. A run the reviewer never judged lists none here (Fortes 2026-11-09, runs 8709b3f5 and
+// f645ccf5): every line would read "unknown, reviewer none, evidence none", beside the writer's own
+// account of each condition, which is the one with something in it.
 function acceptanceSection({ t, contract, events, writer, review, gate }) {
   const decided = last(events, "acceptance");
+  if (!decided && !review) return [];
   const reviewInput = last(events, "review.input");
   const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review }) : []);
   if (!rows.length) return [];

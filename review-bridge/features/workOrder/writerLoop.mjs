@@ -43,6 +43,7 @@ import {
 } from "./writerPrompt.mjs";
 import {
   MALFORMED_EXIT_CODE,
+  REVIEW_FORMAT_ATTEMPTS,
   recheckFindings,
   unknownAddressedFindings,
   validateReviewResult,
@@ -672,6 +673,16 @@ export async function runBoundedResume({
         throw new Error("Work package authorization was cancelled before review enqueue.");
       }
 
+      // A review.result that breaks its rules is asked for once more, with what was wrong in the packet; the
+      // second that breaks them ends the run (the rule the contract translation kept: one more ask, then
+      // closed). Both reviews are of this call's work, each with its own job and records.
+      let reviewVersion;
+      let ownOutcome;
+      let latestReviewPath;
+      let afterReview;
+      let reviewResult;
+      let formatProblems = [];
+      for (let reviewAttempt = 1; ; reviewAttempt += 1) {
       const payload = {
         session_id: sessionId,
         cwd: paths.repoRoot,
@@ -680,7 +691,7 @@ export async function runBoundedResume({
       };
       await writeJson(payloadPath, payload);
       // The version the reviewer will read; a test result for another version proves nothing here.
-      const reviewVersion = await workVersion(paths.repoRoot);
+      reviewVersion = await workVersion(paths.repoRoot);
       // Decision 2026-10-19: what the tests ran on must be what the reviewer reads. A project that changed
       // since the tests, whoever changed it (another run in this folder, or a person), stops here, before
       // a review is paid for.
@@ -700,6 +711,8 @@ export async function runBoundedResume({
         testResult,
         workVersion: reviewVersion,
         sealedEvidence: evidenceSeal,
+        attempt: reviewAttempt,
+        formatProblems,
       });
       const hookQueuedDuplicate = enqueued.accepted
         && enqueued.duplicate
@@ -717,7 +730,7 @@ export async function runBoundedResume({
       if (ownOutcomes.length !== 1) {
         throw new Error("Review worker returned no unambiguous outcome for job " + ownJobId + ".");
       }
-      const [ownOutcome] = ownOutcomes;
+      [ownOutcome] = ownOutcomes;
       // Stopped during the review: the killed review's output is not taken, and nothing is recorded.
       if (ownOutcome.status === "stopped" || await runStopped(paths, runId)) return 130;
       const afterReviewProof = await proofStop({ paths, runtimeState, control, baselinePath, sealed: evidenceSeal, state: proofState, after: "review" });
@@ -746,10 +759,10 @@ export async function runBoundedResume({
       if (ownOutcome.status !== "done" || !ownOutcome.result_path) {
         throw new Error("Review job " + ownJobId + " did not complete.");
       }
-      const latestReviewPath = ownOutcome.result_path;
+      latestReviewPath = ownOutcome.result_path;
       assertUnder(latestReviewPath, paths.reviewsRoot, "Latest review");
       if (!(await fileExists(latestReviewPath))) throw new Error("Reviewer result is missing.");
-      const afterReview = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
+      afterReview = await checkedContract({ paths, runtimeState, control, contractSha256, state: boundaryState });
       if (afterReview.exitCode !== null) return afterReview.exitCode;
       // The reviewer judged the version recorded before the review; if the work changed meanwhile,
       // its verdicts do not belong to any version Bridge can name.
@@ -763,7 +776,7 @@ export async function runBoundedResume({
       const review = await fsp.readFile(latestReviewPath, "utf8");
       lastChangedFiles = await changedFilesForJob(paths, ownJobId);
       // T0-05 D3: the typed verdict is checked against the fixed rules; prose is not read.
-      let reviewResult = null;
+      reviewResult = null;
       try { reviewResult = parseJson(review); } catch { reviewResult = null; }
       // A controller-decided verdict (D2.5) is the harness's own; only a reviewer's answer is checked.
       const check = ownOutcome.controller_decided ? { ok: true, errors: [] } : await validateReviewResult(reviewResult, {
@@ -771,6 +784,11 @@ export async function runBoundedResume({
         previousFindings: lastFindings, deltaPaths: call > 1 ? lastChangedFiles.map((entry) => entry.path) : null, contractSha256,
         contract: afterReview.contract?.contract || null,
       });
+      if (!check.ok && reviewAttempt < REVIEW_FORMAT_ATTEMPTS) {
+        formatProblems = check.errors.slice(0, 20);
+        onStep("Reviewer answering again (its answer broke the review's rules)");
+        continue;
+      }
       if (!check.ok) {
         await writeBoundedState(paths, runtimeState, {
           writer_model: writerModel, status: "malformed_review_result", session_id: sessionId, call,
@@ -779,6 +797,8 @@ export async function runBoundedResume({
         await recordIo(paths, runId, { event: "stop", status: "malformed_event", role: "reviewer", provider: reviewerProvider, detail_ref: check.errors[0] || "review.result" });
         await consumeAuthorization(paths, control, "malformed_review_result");
         return MALFORMED_EXIT_CODE;
+      }
+      break;
       }
       await recordIo(paths, runId, { ...reviewResult });
       // The review is recorded, unknown usage as unknown, and counts against no budget: the budget is the

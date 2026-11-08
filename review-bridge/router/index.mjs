@@ -311,6 +311,7 @@ export const COMMANDS = {
       ...context,
       dataHome: bridgeDataHome(),
       ensureProject: workOrder.recordProject,
+      translator: () => workOrder.projectTranslator(context.paths),
       openDatabase: async () => (await import("../service/database/index.mjs")).openDatabase(),
     }),
   },

@@ -19,14 +19,15 @@ import { updateRunGraph } from "../features/workOrder/commands.mjs";
 import { composeSections } from "../features/workOrder/delivery.mjs";
 import { createTranslator } from "../features/workOrder/i18n.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { graphTools } from "../features/graph/graphMcp.mjs";
+import { GRAPH_INSTRUCTIONS, GRAPH_TOOL_DESCRIPTIONS, graphToolInputs, graphTools } from "../features/graph/graphMcp.mjs";
+import { graphSummaryLines, mapProject } from "../features/graph/index.mjs";
 import { buildProbeArgs, evaluateProbe } from "../features/setupCheck/reviewerProbe.mjs";
 import { ACCESS_ARGS, mcpConfigFor, readOnlyArgs } from "../service/agentCli/claude.mjs";
 import { graphServerArgs } from "../service/agentCli/codex.mjs";
 import { buildGraph, updateGraph } from "../service/graph/build.mjs";
 import { extractSource, extractVue } from "../service/graph/extract.mjs";
 import { blobIds, changedSince, listFiles } from "../service/graph/git.mjs";
-import { GRAPH_MCP_NAME, graphMcpServer, graphSummaryLines } from "../service/graph/index.mjs";
+import { GRAPH_MCP_NAME, GRAPH_TOOLS, graphMcpServer } from "../service/graph/index.mjs";
 import { languageOf } from "../service/graph/languages.mjs";
 import { createResolver } from "../service/graph/resolve.mjs";
 import { graphScope } from "../service/graph/scope.mjs";
@@ -251,12 +252,13 @@ test("start does not bring up to date a project with no graph, or one without Gi
   assert.deepEqual(await updateGraph({ db, projectId: "p", projectRoot: root, dataHome: root }), { updated: false, reason: "no_git" });
 });
 
-test("init's summary names how much it read and every file the graph cannot vouch for", () => {
+test("init's summary names how much it read and every file the graph cannot vouch for, in the project's language", async () => {
   const lines = graphSummaryLines({
     files: 3, definitions: 7, references: 2, imports: 1, folders: ["", "../shared"],
     problems: { rust: "npm could not install @ast-grep/lang-rust@0.0.7: offline" },
     incomplete: [{ path: "src/x.ts", parse_status: "parsed", error_count: 2 }, { path: "lib.rs", parse_status: "no_parser", error_count: 0 }],
-  });
+  }, await createTranslator("en"));
+  assert.deepEqual(graphSummaryLines({ files: 1, definitions: 2, references: 0, imports: 0, incomplete: [] }, await createTranslator("zh-TW")), ["已讀 1 個檔：2 個定義、0 個引用、0 個 import。"]);
   assert.deepEqual(lines, [
     "Mapped 3 file(s): 7 definition(s), 2 reference(s), 1 import(s).",
     "  workspace packages: ., ../shared",
@@ -266,6 +268,29 @@ test("init's summary names how much it read and every file the graph cannot vouc
     "    lib.rs  no parser",
   ]);
   assert.match(doneMessage("/p", "/p", "http://localhost:1/", { host: "h", port: 1, user: "u", database: "d", passwordFile: "f" }, null, lines), /^Mapped 3 file\(s\)[\s\S]*no parser\n\nDone\. Now:/);
+});
+
+test("`graph` prints what it reads in the project's language, and its JSON's last line carries those lines for init", async (t) => {
+  const root = await tempDir(t);
+  await files(root, { "src/a.ts": "export function a() {}\n", "README.md": "# x\n" });
+  const run = async (json) => {
+    let printed = "";
+    const write = process.stdout.write;
+    process.stdout.write = (text) => { printed += text; return true; };
+    try {
+      await mapProject({
+        paths: { projectId: "p", repoRoot: root }, options: { json }, dataHome: root, ensureProject: async () => {},
+        openDatabase: async () => memoryDb(), translator: () => createTranslator("zh-TW"),
+      });
+    } finally {
+      process.stdout.write = write;
+    }
+    return printed;
+  };
+  assert.equal(await run(false), "讀取 1 個檔……\n已讀 1 個檔：1 個定義、0 個引用、0 個 import。\n");
+  const last = JSON.parse((await run(true)).trimEnd().split("\n").at(-1));
+  assert.equal(last.phase, "done");
+  assert.deepEqual(last.lines, ["已讀 1 個檔：1 個定義、0 個引用、0 個 import。"], "init prints these as they are");
 });
 
 test("the MCP tools answer one page at a time from the graph, say when there is none, and refuse nothing silently", async () => {
@@ -281,15 +306,19 @@ test("the MCP tools answer one page at a time from the graph, say when there is 
     },
   };
   const tools = graphTools({ projectId: "p", db: async () => db });
-  const none = await tools.find_definitions({ name: "a" });
+  const none = await tools.find_definitions({ symbol: "a" });
   assert.equal(none.isError, true);
   assert.match(none.content[0].text, /no graph yet\. Run: review-bridge graph/);
   graph = { scope: [""], git_commit: "abc" };
-  const page = JSON.parse((await tools.find_definitions({ name: "a", limit: 2 })).content[0].text);
-  assert.deepEqual(page.next, { after_file_id: 9, after_line: 5 }, "a full page says where the next starts");
-  assert.equal(page.definitions[0].file_id, undefined);
-  const last = JSON.parse((await tools.find_definitions({ name: "a", limit: 3 })).content[0].text);
-  assert.equal(last.next, null);
+  const page = JSON.parse((await tools.find_definitions({ symbol: "a", limit: 2 })).content[0].text);
+  assert.equal(page.next_cursor, "9.5", "a full page says where the next starts");
+  assert.equal(page.definitions[0].file_id, undefined, "no internal id reaches the model");
+  asked.length = 0;
+  await tools.find_definitions({ symbol: "a", cursor: page.next_cursor });
+  assert.deepEqual(asked.at(-1)[1].slice(2, 4), [9, 5], "the cursor continues after the last row");
+  const last = JSON.parse((await tools.find_definitions({ symbol: "a", limit: 3 })).content[0].text);
+  assert.equal(last.next_cursor, null);
+  assert.match((await tools.find_definitions({ symbol: "a", cursor: "page 2" })).content[0].text, /^`cursor` is not one this tool returned/);
   const broken = graphTools({ projectId: "p", db: async () => { throw new Error("connect ECONNREFUSED"); } });
   assert.match((await broken.graph_state({})).content[0].text, /^The graph could not be read: connect ECONNREFUSED/);
 });
@@ -322,6 +351,29 @@ test("a graph that cannot be brought up to date at a start goes into the run's r
   assert.doesNotMatch(without.acceptance.join("\n"), /graph/, "an up-to-date graph adds no line");
 });
 
+// How a model comes to use a tool is the clients' own rule (knowledge base, 2026-11-09): Anthropic's tool
+// definition practices (what it does, when to use it and not, each parameter, what it leaves out; 3–4
+// sentences at least), the MCP schema's `instructions` for when to use the server, and Claude Code's
+// 4,096-character cut on instructions and on descriptions of tools loaded up front.
+test("each graph tool says what it does, when to use it instead of Grep or Read, and what each parameter means; the server says when to use it", async () => {
+  const { z } = await import("zod");
+  assert.deepEqual(Object.keys(GRAPH_TOOL_DESCRIPTIONS), [...GRAPH_TOOLS]);
+  const inputs = graphToolInputs(z);
+  for (const [name, description] of Object.entries(GRAPH_TOOL_DESCRIPTIONS)) {
+    assert.ok(description.length <= 4096, name + " fits the cut Claude Code makes");
+    assert.ok(description.split(/(?<=[.:])\s+(?=[A-Z`])/).length >= 3, name + " has at least three sentences");
+    if (name !== "graph_state") assert.match(description, /\bUse it\b/, name + " says when to use it");
+    for (const [parameter, schema] of Object.entries(inputs[name])) {
+      assert.ok(schema.description, name + "." + parameter + " says what it means");
+      assert.match(description, new RegExp("`" + parameter + "`"), name + " names its parameter " + parameter);
+    }
+  }
+  for (const name of ["find_definitions", "find_references", "importers", "impact"]) assert.match(GRAPH_TOOL_DESCRIPTIONS[name], /instead of (Grep|grepping|searching)/, name);
+  assert.ok(GRAPH_INSTRUCTIONS.length <= 4096);
+  for (const name of GRAPH_TOOLS.filter((tool) => tool !== "graph_state")) assert.ok(GRAPH_INSTRUCTIONS.includes(name), "the instructions name " + name);
+  assert.match(GRAPH_INSTRUCTIONS, /Use these tools first whenever you need to find code by name/);
+});
+
 test("the writer and the reviewer are given Bridge's graph server, by name, and the read-only check runs with it", async (t) => {
   const bridgeRoot = path.join(os.tmpdir(), "rb");
   const graph = graphMcpServer({ bridgeRoot, repoRoot: path.join(os.tmpdir(), "my project") });
@@ -329,17 +381,18 @@ test("the writer and the reviewer are given Bridge's graph server, by name, and 
   assert.deepEqual(graph.args, [path.join(bridgeRoot, "bootstrap.mjs"), "graph-mcp", "--project", path.join(os.tmpdir(), "my project")]);
   const cwd = await tempDir(t);
   const config = JSON.parse(await mcpConfigFor(cwd, [], graph));
-  assert.deepEqual(config, { mcpServers: { [GRAPH_MCP_NAME]: { command: process.execPath, args: graph.args } } });
+  assert.deepEqual(config, { mcpServers: { [GRAPH_MCP_NAME]: { command: process.execPath, args: graph.args, alwaysLoad: true } } }, "its tools load up front, not behind ToolSearch");
   const reviewer = readOnlyArgs({ mcpConfig: JSON.stringify(config), mcp: [GRAPH_MCP_NAME] });
   assert.deepEqual(reviewer.slice(-4), ["--mcp-config", JSON.stringify(config), "--allowedTools", "mcp__" + GRAPH_MCP_NAME]);
   assert.deepEqual(reviewer.slice(0, 4), ["--permission-mode", "plan", "--tools", "Read,Grep,Glob"], "still only the three read tools");
   const writer = ACCESS_ARGS.write([], true, null, graph);
   assert.deepEqual(writer.slice(writer.indexOf("--mcp-config")), ["--mcp-config", ".mcp.json", JSON.stringify(config), "--allowedTools", "mcp__" + GRAPH_MCP_NAME]);
   const codex = graphServerArgs(graph);
-  assert.deepEqual(codex.filter((_, index) => index % 2 === 0), ["-c", "-c", "-c"]);
+  assert.deepEqual(codex.filter((_, index) => index % 2 === 0), ["-c", "-c", "-c", "-c"]);
   assert.equal(codex[1], "mcp_servers." + GRAPH_MCP_NAME + ".command=" + JSON.stringify(process.execPath));
   assert.deepEqual(JSON.parse(codex[3].split("=").slice(1).join("=")), graph.args);
   assert.deepEqual(JSON.parse(codex[5].split("=").slice(1).join("=")), graph.tools);
+  assert.equal(codex[7], "mcp_servers." + GRAPH_MCP_NAME + ".omit_tools_from=[\"deferred\"]", "Codex puts them in the first tool list too");
 
   const probe = buildProbeArgs("claude", "<dir>", { off: [], allow: [], graph, config: JSON.stringify(config) });
   assert.ok(probe.includes("mcp__" + GRAPH_MCP_NAME), "the check is allowed the graph's tools as the review is");

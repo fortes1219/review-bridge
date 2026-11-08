@@ -8,6 +8,7 @@ import { BackupRefusedError, backupDatabase, runLines, runningRuns } from "./bac
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
 import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
+import { databaseBackedUp } from "./notices.mjs";
 import { UnknownMigrationsError } from "./serverErrors.mjs";
 import {
   clearOldServer, clusterPaths, connect, connectionSettings, dataDirectoryProblem, ensureCluster, postgresBinaries, serverState, startServer, stopServer,
@@ -57,8 +58,8 @@ async function open(dataHome, dir) {
   await startServer(root, { binaries });
   await ensureDatabase(root);
   const backup = await backUpBeforeMigrating(root, { dataHome, dir });
-  // stderr: a command's stdout may be JSON.
-  if (backup) process.stderr.write("Backed up the database to " + backup + " before upgrading it.\n");
+  // One line, in the project's language when the command entry gave it (notices.mjs).
+  if (backup) await databaseBackedUp(backup);
   const pool = new pg.Pool({ ...(await connectionSettings(root, { database: DATABASE_NAME })), max: 4, allowExitOnIdle: true, idleTimeoutMillis: 1000 });
   // A connection the server ends between queries is reported here; the next query reports it again.
   pool.on("error", () => {});

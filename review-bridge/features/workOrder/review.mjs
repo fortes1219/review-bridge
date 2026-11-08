@@ -107,6 +107,8 @@ export async function buildReviewInput({ paths, job, control }) {
     test_result: job.test_result || null,
     work_version: job.work_version || null,
     open_findings: openFindings,
+    // What broke the review's rules in this call's previous answer, when this is the second ask.
+    ...(Array.isArray(job.previous_answer_problems) && job.previous_answer_problems.length ? { previous_answer_problems: job.previous_answer_problems } : {}),
     read_list: buildReadList({ deltaPaths: proofless ? claimed : changed.map((entry) => entry.path), findings: openFindings }),
     output_schema: "review.result",
   };

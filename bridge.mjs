@@ -11,7 +11,7 @@ import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-import { assertSupportedStateFilesystem, graphSummaryLines } from "./review-bridge/service/index.mjs";
+import { assertSupportedStateFilesystem } from "./review-bridge/service/index.mjs";
 import { databaseLines, runGuide } from "./installer/install-guide.mjs";
 import { projectTasksFile, userTasksFile, writeVscodeTasks } from "./installer/vscode-tasks.mjs";
 import { renderCommandHelp, renderMainHelp } from "./review-bridge/router/help.mjs";
@@ -263,11 +263,14 @@ async function init(options) {
     write: (text) => process.stdout.write(text),
     inspectProvider: async (provider) => (await inspectSelectedRoles({ writer: provider, reviewer: provider })).checks.writer,
     setUpProject,
-    // The record rebuilt, then the setup checked as init checks it.
+    // The record rebuilt, the setup checked as init checks it, and the project read into its graph again,
+    // as a first init does.
     reinitialize: async (target) => {
       const done = await reinitializeNeutralInstall({ target });
-      if (done) await verifyNeutralInstall(target);
-      return done;
+      if (!done) return done;
+      await verifyNeutralInstall(target);
+      const graph = await mapProject(target, () => {}).then(graphOutcome, graphFailure);
+      return { ...done, graph_lines: graph.lines };
     },
   });
 }
@@ -302,8 +305,7 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
   const service = await step("Starting the local page", () => startService(target, fakeCli));
   // The project's graph (T0-GRAPH-01). The setup stands without it, as it does without the page: a
   // graph that could not be built is said, with the command that builds it.
-  const graph = await step("Mapping the project", (update) => mapProject(target, update))
-    .then((summary) => ({ summary, lines: graphSummaryLines(summary) }), (error) => ({ summary: null, lines: ["The project's graph was not built: " + error.message + " Run: review-bridge graph"] }));
+  const graph = await step("Mapping the project", (update) => mapProject(target, update)).then(graphOutcome, graphFailure);
   const database = await databaseConnection();
   return {
     ok: true,
@@ -337,6 +339,11 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
     },
   };
 }
+
+// What init says about the graph: the lines `graph` rendered in the project's language, or why it was not
+// built. The setup stands either way.
+const graphOutcome = (summary) => ({ summary, lines: summary.lines ?? [] });
+const graphFailure = (error) => ({ summary: null, lines: ["The project's graph was not built: " + error.message + " Run: review-bridge graph"] });
 
 // Reads the project into its graph through Bridge's runtime (`graph --json`): each line it prints is
 // one step, shown on the step's own line, and the last is the summary. Nothing is written in the project.

@@ -137,6 +137,25 @@ test("answers that skip, repeat or contradict a condition are refused, from the 
   }
 });
 
+// Run f645ccf5 (2026-11-09): a reviewer answered PASS with a hard stop, which the review's rules forbid,
+// and the run ended at once. An answer that breaks the rules is asked for once more with what was wrong;
+// only the second one that breaks them ends the run.
+test("a review that breaks the review's rules is asked for again with what was wrong; a second such answer ends the run", async (t) => {
+  const rt = await install(t);
+  const once = await run(rt, "pass-stop-once", { env: { FAKE_CODEX_GATE: "PASS_HARD_STOP_ONCE" } });
+  assert.equal(once.exit, 0, JSON.stringify(once.record.last_state));
+  assert.equal(once.record.conclusion, "success");
+  const inputs = once.events.filter((event) => event.event === "review.input");
+  assert.equal(inputs.length, 2, "asked twice for the one call");
+  assert.equal(inputs[0].previous_answer_problems, undefined);
+  assert.deepEqual(inputs[1].previous_answer_problems, ["$.hard_stop: PASS cannot request a hard stop"]);
+  const twice = await run(rt, "pass-stop-twice", { env: { FAKE_CODEX_GATE: "PASS_HARD_STOP" } });
+  assert.equal(twice.exit, 79);
+  assert.equal(twice.record.closed_reason, "malformed_review_result");
+  assert.equal(twice.events.filter((event) => event.event === "review.input").length, 2, "one more ask, not more");
+  assert.ok(twice.record.last_state.errors.includes("$.hard_stop: PASS cannot request a hard stop"));
+});
+
 // The budget is the writer's (Owner 2026-11-08): a writer call whose usage cannot be read stops the run,
 // since the budget cannot be kept without it; the reviewer's usage is recorded and counts against no
 // budget, so an unreadable one is shown as unknown and the work goes on.

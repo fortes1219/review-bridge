@@ -590,6 +590,31 @@ test("init maps a Git project's code into its graph and leaves git status as it 
   assert.deepEqual(await queryRecords("select f.path from graph_definitions d join graph_files f using (file_id) where d.project_id = $1 and d.name = 'c'", [projectId]), [{ path: "src/b.ts" }]);
 });
 
+// init on a folder whose install record is gone rebuilds the record, as git init reinitializes, and reads
+// the project into its graph again, as a first init does (Fortes 2026-11-09).
+test("init that reinitializes a set-up folder reads the project into its graph again and says what it read", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-graph-reinit-"));
+  t.after(() => removeWorkspace(root));
+  await fsp.mkdir(path.join(root, "src"));
+  await fsp.writeFile(path.join(root, "src", "a.ts"), "export function a() {\n  return 1;\n}\n");
+  const first = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(first.status, 0, first.stderr);
+  // The page is stopped while its session file is still there; then the install record goes.
+  await serviceDown({ paths: projectPaths(root), out: { write() {} } });
+  await fsp.writeFile(path.join(root, "src", "b.ts"), "export class B {}\n");
+  await fsp.rm(projectPaths(root).stateRoot, { recursive: true, force: true });
+  const again = spawnSync(process.execPath, [bridge, "init", "--target", root, "--yes", "--fake-cli"], {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(again.status, 0, again.stderr);
+  assert.deepEqual(again.stdout.trimEnd().split(/\r?\n/).slice(1), ["Mapped 2 file(s): 2 definition(s), 0 reference(s), 0 import(s)."]);
+  assert.match(again.stdout, /^Reinitialized existing Review Bridge setup in /);
+  const projectId = projectPaths(root).projectId;
+  assert.deepEqual((await queryRecords("select path from graph_files where project_id = $1 order by path", [projectId])).map((row) => row.path), ["src/a.ts", "src/b.ts"]);
+});
+
 // An agent's one yes, to the card the start before it printed (Owner 2026-11-08: one card, one yes).
 function yesTo(cli, order, args = [], env = {}) {
   return cli(["start", order, "--fake-cli", ...args, "--yes"], env);

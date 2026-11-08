@@ -35,6 +35,9 @@ export async function enqueueReview({
   testResult = null,
   workVersion = null,
   sealedEvidence = null,
+  // The second ask after an answer that broke the review's rules: its own job, with what was wrong.
+  attempt = 1,
+  formatProblems = [],
 }) {
   const shape = validateHookPayload(payload);
   if (!shape.valid) {
@@ -60,7 +63,7 @@ export async function enqueueReview({
   // The reviewer's priority and effort come from the policy's table, never from the work order's words.
   const policy = { priority: control.reviewer_policy?.priority, reasoning_effort: control.reviewer_policy?.effort };
   const sessionId = String(payload.session_id || "");
-  const hash = createHash("sha256").update(sessionId + "\n" + message, "utf8").digest("hex");
+  const hash = createHash("sha256").update(sessionId + "\n" + message + (attempt > 1 ? "\nreview attempt " + attempt : ""), "utf8").digest("hex");
   const shortHash = hash.slice(0, 16);
 
   for (const directory of [paths.pendingDir, paths.runningDir, paths.doneDir]) {
@@ -92,6 +95,7 @@ export async function enqueueReview({
     call,
     writer_result: writerResult,
     open_findings: openFindings,
+    ...(formatProblems.length ? { previous_answer_problems: formatProblems } : {}),
     test_result: testResult,
     // The version of the work the reviewer reads (RC3-BLOCKER-00).
     work_version: workVersion,

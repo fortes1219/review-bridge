@@ -152,9 +152,11 @@ export async function projectMcpServers(cwd) {
   return config?.mcpServers && typeof config.mcpServers === "object" ? config.mcpServers : {};
 }
 
-// Bridge's own graph server (T0-GRAPH-01) as an --mcp-config entry: an entry with no `type` is a stdio
-// server (Claude Code's MCP docs).
-const graphServers = (graph) => (graph ? { [graph.name]: { command: graph.command, args: graph.args } } : {});
+// Bridge's own graph server as an --mcp-config entry: an entry with no `type` is a stdio server, and
+// `alwaysLoad` loads its tools into the first prompt instead of deferring them behind ToolSearch (Claude
+// Code's MCP docs, "Exempt a server from deferral"). Without it a session sees only their names, and a
+// reviewer's `--tools Read,Grep,Glob` leaves out ToolSearch itself, so it could never load them.
+const graphServers = (graph) => (graph ? { [graph.name]: { command: graph.command, args: graph.args, alwaysLoad: true } } : {});
 
 // The allowed servers only, plus Bridge's graph server, as the one string --mcp-config takes: the file
 // as a whole may hold others.

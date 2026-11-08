@@ -80,7 +80,7 @@ export async function runGuide(options, {
   if (fs.existsSync(path.join(target, ".review-bridge"))) {
     const reinitialized = await reinitialize(target);
     if (!reinitialized) throw new Error("This folder is already set up (" + path.join(target, ".review-bridge") + "). To move it to this version, run: review-bridge upgrade");
-    if (!options.json) write("Reinitialized existing Review Bridge setup in " + reinitialized.private_root + "\n");
+    if (!options.json) write("Reinitialized existing Review Bridge setup in " + reinitialized.private_root + "\n" + (reinitialized.graph_lines ?? []).map((line) => line + "\n").join(""));
     return { ...reinitialized, printed: !options.json };
   }
   if (asRoot()) throw new Error(ROOT_REFUSAL);

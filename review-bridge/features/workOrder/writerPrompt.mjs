@@ -174,7 +174,6 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
       "Run them if you can. If they cannot run where you are, write that in unverified and keep status done: it is not a reason to be blocked.",
     ] : []),
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",
-    "To find where something is defined or what refers to it, ask the review-bridge-graph tools (find_definitions, find_references, importers, file_outline) before searching files; they read the project's graph, which names references by name only.",
     "Your final answer must be one writer.result object that matches the JSON schema given to the CLI; no prose outside it.",
     "Set needs_human when a decision only the owner can make is missing; set status to blocked or out_of_scope instead of guessing.",
     "",

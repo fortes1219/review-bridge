@@ -166,6 +166,7 @@ test("Claude's sessions: a reviewer only reads, a writer keeps its own", { timeo
   assert.equal(argAfter(writer.args, "--permission-mode"), "auto");
   assert.ok(writer.args.includes("--strict-mcp-config"), "the person's connectors are in no session");
   // This project has no .mcp.json: the writer's one server is Bridge's graph (T0-GRAPH-01), allowed by name.
+  assert.deepEqual(JSON.parse(argAfter(writer.args, "--mcp-config")).mcpServers[GRAPH_MCP_NAME].alwaysLoad, true, "its tools load up front, not behind ToolSearch");
   assert.deepEqual(Object.keys(JSON.parse(argAfter(writer.args, "--mcp-config")).mcpServers), [GRAPH_MCP_NAME]);
   assert.equal(argAfter(writer.args, "--allowedTools"), "mcp__" + GRAPH_MCP_NAME);
 });
@@ -267,7 +268,7 @@ test("Codex: every server not on the list is off by name in every call, sealed i
   assert.equal(calls.length, 2);
   for (const call of calls) assert.deepEqual(offFlags(call.args), ["mcp_servers.node_repl.enabled=false", "mcp_servers.docs_search.enabled=false"], call.mode);
   for (const call of calls) {
-    assert.deepEqual(graphFlags(call.args), ["command", "args", "enabled_tools"].map((key) => "mcp_servers." + GRAPH_MCP_NAME + "." + key), call.mode);
+    assert.deepEqual(graphFlags(call.args), ["command", "args", "enabled_tools", "omit_tools_from"].map((key) => "mcp_servers." + GRAPH_MCP_NAME + "." + key), call.mode);
   }
   const [row] = await queryRecords("select reviewer_mcp from runs where run_id = $1", [work.plan.proposed_run_id]);
   assert.deepEqual(row.reviewer_mcp, []);

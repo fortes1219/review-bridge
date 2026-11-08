@@ -128,7 +128,9 @@ test("S1 every closed reason delivers once: two files, the right title, three se
     // Whatever stopped it, the next step is one line in plain words, picked by the closed reason, with
     // no command in it (Owner 2026-11-04).
     const next = /## 下一步\n([\s\S]*?)\n\n## /.exec(runCopy)[1];
-    if (closed.conclusion !== "success") assert.equal(next, NEXT_LINE[status] || "再 start 一次。", status);
+    // A writer that stopped for the person: the answer goes in the work order, named by its file name.
+    const expected = status === "needs_human" ? "在 " + path.basename(taskFile) + " 寫清楚上面 writer 問的或卡住的地方（或改掉它做不到的條件），存檔後再 start 一次。" : NEXT_LINE[status] || "再 start 一次。";
+    if (closed.conclusion !== "success") assert.equal(next, expected, status);
     assert.doesNotMatch(next, /plan|批准|node |review-bridge|\//, status);
     const delivered = (await projectionEvents(rt, runId)).filter((event) => event.type === "run_delivered");
     assert.equal(delivered.length, 1, status);

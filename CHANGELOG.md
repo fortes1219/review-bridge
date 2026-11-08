@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading
 
-- **Your database is backed up, then migrated.** The first command after you install this version backs up your database before it applies this version's migrations, and prints one line: `Backed up the database to <folder> before upgrading it.` The backup is refused while a run is running; let it end or stop it, then run the command again. Backups are in `backups/database/<time>/` under Bridge's data folder. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
+- **Your database is backed up, then migrated.** The first command after you install this version backs up your database before it applies this version's migrations, and prints one line, in the project's language, naming the backup's folder (in English: `Backed up the database to <folder> before upgrading it.`). The backup is refused while a run is running; let it end or stop it, then run the command again. Backups are in `backups/database/<time>/` under Bridge's data folder. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
 - **Migrations in this version:**
   - `20261108012648_drop_contract_gatherings.sql` drops `contract_gatherings` and `contract_gathering_events`, which no step uses any more, and the `test` column of `acceptance_rows`.
   - `20261108195620_project_graph.sql` adds the project graph's tables: `graph_states`, `graph_files`, `graph_definitions`, `graph_references`, `graph_imports`.
