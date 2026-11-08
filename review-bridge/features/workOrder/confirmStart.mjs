@@ -6,10 +6,42 @@ import { assertUnderOne } from "../../utils/pathGuard.mjs";
 import { BUDGET_KEYS } from "./workOrderFormat.mjs";
 import { assertCurrentPlan, runningVersions } from "./workPackage.mjs";
 
-// The model calls before the work, as the plan seals them; the human approves them with the plan.
-export function contractStepsLine(steps) {
-  return "Before the work: up to " + steps.max_attempts + " work-order translation(s) by the writer (" + steps.translate.provider + ")"
-    + " and " + steps.max_attempts + " check(s) by the reviewer (" + steps.check.provider + "), " + steps.call_timeout / 60_000 + " minute(s) per call";
+export async function askYes(question) {
+  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return /^y(?:es)?$/i.test((await terminal.question(question)).trim());
+  } finally {
+    terminal.close();
+  }
+}
+
+const write = (line) => process.stdout.write(line + "\n");
+
+// The one model-free moment before the first model call of this command, after the yes: the reviewer's
+// read-only check and the gate, once a process, and this machine's adapter only after them. Null when the
+// check refused.
+export function readiness({ options, adapter, loadAdapter, guard, reviewerCheck, plan, again, checkFailureLines }) {
+  let ready = null;
+  return async () => {
+    if (ready) return ready;
+    if (options.fakeCli) {
+      write("Reviewer read-only check: not needed with the fake CLI (no model is called)");
+    } else {
+      const check = await reviewerCheck({
+        reviewer: plan.reviewer.provider,
+        mcp: { off: plan.reviewer.mcp_off, allow: plan.reviewer.mcp },
+        onStart: (reviewer) => write("Checking that the reviewer (" + reviewer + ") cannot write files: one model call..."),
+      });
+      if (!check.ok) {
+        for (const line of checkFailureLines(check, again)) write(line);
+        return null;
+      }
+      write("Reviewer read-only check: passed" + (check.already ? " (earlier in this page session)" : ""));
+    }
+    await guard(plan.reviewer.provider, { off: plan.reviewer.mcp_off, allow: plan.reviewer.mcp });
+    ready = { adapter: adapter || await loadAdapter() };
+    return ready;
+  };
 }
 
 // Which work order the yes starts (spec 2026-10-24's three lines, in the card's language): y starts
@@ -37,15 +69,19 @@ export function reviewerMcpLine(plan) {
   return plan.reviewer.mcp.length ? plan.reviewer.mcp.join(", ") + " (allowed by the policy, not checked to be read-only)" : "none";
 }
 
+// The contract the plan sealed: Bridge cut it from the work order, so no model call comes before the work.
+export function contractLine(plan) {
+  return "sha256 " + plan.contract_sha256 + ", " + plan.contract_conditions + " condition(s) cut from the acceptance list";
+}
+
 // The six budget values in their fixed order (a card read back from the database has its keys
 // reordered), each with where it came from: the work order, a flag, or the config.
 export function budgetLine(plan) {
   return BUDGET_KEYS.map((key) => key + " " + plan.budget[key] + " (" + SOURCE[plan.budget_source[key]] + ")").join(", ");
 }
 
-// start's two cards: what the answer authorizes, in the words a person checks it by. Every line comes
-// from the sealed plan. The first card's yes pays for the translation and the questions, so its
-// contract line names those calls; the second's opens the run, and names the contract they sealed.
+// start's one card (Owner 2026-11-08): what the yes authorizes, in the words a person checks it by. Every
+// line comes from the sealed plan, the contract Bridge cut from the work order among them.
 export async function startCard(paths, plan) {
   const replaced = await runningVersions(paths, plan);
   const gate = plan.test?.kind === "command" ? "runs " + plan.test.command + " after each writer call" : "not configured (no test rule matched; the work starts without tests)";
@@ -54,9 +90,7 @@ export async function startCard(paths, plan) {
     : "the whole project except protected files (" + plan.scope.forbidden_paths.length + " patterns)";
   return [
     "Work order:   " + plan.task_file,
-    ...(plan.contract_sha256
-      ? ["              \"" + plan.work_order.title + "\", version " + plan.work_order.to_version]
-      : plan.work_order ? ["              " + decisionLine(plan.work_order)] : []),
+    ...(plan.work_order ? ["              " + decisionLine(plan.work_order)] : []),
     "Stops:        " + plan.breakpoint,
     "Scope:        " + scope,
     "Tests:        " + gate,
@@ -65,15 +99,13 @@ export async function startCard(paths, plan) {
     "Reviewer:     " + roleLine(plan.reviewer),
     "Reviewer MCP: " + reviewerMcpLine(plan),
     "Budget:       " + budgetLine(plan),
-    ...(plan.contract_sha256
-      ? ["Contract:     sealed, sha256 " + plan.contract_sha256]
-      : plan.contract_steps ? ["Contract:     " + contractStepsLine(plan.contract_steps).replace(/^Before the work: /, ""), "Next:         it is turned into a contract and you are asked what it leaves open. A second card comes before any work."] : []),
+    ...(plan.contract_sha256 ? ["Contract:     " + contractLine(plan)] : []),
     "Valid until:  " + plan.authorization_expires_at,
     ...replaced.map(({ runId, unchanged }) => (unchanged
       ? "This work order is already running unchanged as run " + runId + "; this start will be refused."
       : "Starting stops the version still running from this work order: run " + runId)),
     "",
-    plan.contract_sha256 ? "The work order, as sealed:" : "The work order, as it will be sealed:",
+    "The work order, as sealed:",
     ...plan.task.trimEnd().split(/\r?\n/).map((line) => "  │ " + line),
     "",
   ].join("\n");
@@ -99,7 +131,7 @@ export async function confirmWorkStart(paths, planPath, { assumeYes = false, ask
     "Reviewer: " + roleLine(plan.reviewer),
     "Reviewer MCP: " + reviewerMcpLine(plan),
     "Budget: " + budgetLine(plan),
-    ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
+    ...(plan.contract_sha256 ? ["Contract: " + contractLine(plan)] : []),
     "Authorization expires at: " + plan.authorization_expires_at,
     ...replaced.map(({ runId, unchanged }) => (unchanged
       ? "This work order is already running unchanged as run " + runId + "; this start will be refused."

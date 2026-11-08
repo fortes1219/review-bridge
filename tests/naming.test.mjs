@@ -83,8 +83,6 @@ test("every enum in the schemas holds the new values", () => {
     ["contract.schema.json properties.ticket.properties.priority", ["low", "medium", "high", "urgent", null]],
     ["contract.schema.json properties.ticket.properties.effort", ["low", "medium", "high", null]],
     ["contract.schema.json properties.run_plan.properties.runs.items.properties.effort", ["low", "medium", "high", null]],
-    ["contract.schema.json properties.acceptance.items.properties.verify.items.properties.kind", ["test", "reviewer"]],
-    ["contract.translation.schema.json properties.acceptance.items.properties.verify.items.properties.kind", ["test", "reviewer"]],
     ["review.result.schema.json properties.findings.items.properties.severity", ["HIGH", "MEDIUM", "LOW"]],
     ["review.result.schema.json properties.gate", ["PASS", "FAIL"]],
     ["review.result.schema.json properties.hard_stop_reason", ["needs_human_decision", "scope_expansion", "release_action", null]],
@@ -114,7 +112,9 @@ test("after every migration the tables and CHECK values carry the new names", { 
   assert.ok(!tables.has("gate_a_results"));
   const columns = async (table) => new Set((await client.query(
     "select column_name from information_schema.columns where table_schema = 'public' and table_name = $1", [table])).rows.map((row) => row.column_name));
-  assert.ok((await columns("acceptance_rows")).has("test"));
+  // gate_a became test (2026-10-27), and the column went (2026-11-08): no condition leans on the tests by itself.
+  assert.ok(!(await columns("acceptance_rows")).has("test"));
+  assert.ok(!(await columns("acceptance_rows")).has("gate_a"));
   assert.ok(!(await columns("runs")).has("outcome"));
   assert.ok((await columns("runs")).has("delivered_at"));
   assert.ok((await columns("runs")).has("timeout_at"));

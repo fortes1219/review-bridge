@@ -98,7 +98,7 @@ test("P7 stop: unknown and finished runs exit 1; a running writer is killed and 
   let record = null;
   while (Date.now() < deadline) {
     record = await readJson(processFile).catch(() => null);
-    // The contract translation runs first and briefly; the sleeping call is the writer's.
+    // The writer's call is the first model call, and the sleeping one.
     if (record?.pid && record.role === "writer") break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -171,11 +171,11 @@ test("live: a fake work-start leaves task.input, read and usage events and an in
   assert.ok(reads.some((event) => event.role !== "reviewer" && event.outside_list === null));
   const usage = events.find((event) => event.event === "usage" && event.role === "writer");
   assert.equal(usage.tokens.cache_read, 150346);
-  // The work order became a sealed contract before the writer's first call.
-  assert.deepEqual(kinds.slice(0, 5), ["usage", "contract.translation", "usage", "contract.check", "contract.sealed"]);
-  assert.equal(events[0].role, "translator");
+  // The contract was cut when the plan was made: no model call comes before the writer's.
+  assert.equal(events.find((event) => event.event === "usage").role, "writer");
+  assert.equal(kinds.some((kind) => ["contract.translation", "contract.check"].includes(kind)), false);
   const run = await readJson(path.join(paths.runsDir, plan.proposed_run_id + ".json"));
-  const contractSha = events.find((event) => event.event === "contract.sealed").contract_sha256;
+  const contractSha = plan.contract_sha256;
   assert.equal(run.contract_sha256, contractSha);
   // T0-05: typed results on both sides, the reviewer packet, and the reviewer's own usage and read.
   assert.deepEqual(kinds.filter((kind) => /result|input$/.test(kind)), ["task.input", "writer.result", "test_result", "review.input", "review.result"]);

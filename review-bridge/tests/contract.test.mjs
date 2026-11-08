@@ -8,34 +8,21 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  buildContract,
-  checkTranslation,
-  CHECK_MODE_HEADER,
-  composeCheckPrompt,
-  composeTranslationPrompt,
-  CONTRACT_MODE_HEADER,
-  ContractChangedError,
-  contractPath,
-  decideCheck,
-  loadContract,
-  sealContract,
-  workOrderQuestions,
-} from "../features/workOrder/contract.mjs";
-import { parseWorkOrder } from "../features/workOrder/workOrderFormat.mjs";
+import { buildContract, ContractChangedError, contractPath, loadContract, missingFields, sealContract } from "../features/workOrder/contract.mjs";
+import { createTranslator } from "../features/workOrder/i18n.mjs";
+import { formLines, writeBackBlocks } from "../features/workOrder/workOrderForm.mjs";
+import { conditionsOf, formProblems, parseWorkOrder } from "../features/workOrder/workOrderFormat.mjs";
 import { canonical, digest } from "../utils/digest.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
-import { fakeQuestion } from "./fixtures/fakeAnswers.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const packageRoot = path.resolve(bridgeRoot, "..");
 
 // The project's id names its state and logs (RC3-FIX-02); a project built by hand gets one.
 async function withProjectId(paths) {
   await fsp.mkdir(paths.privateRoot, { recursive: true });
   await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4, project_id: randomUUID() }));
 }
-const GATE = { kind: "command", command: "npm test" };
-const NO_GATE = { kind: "not_configured", command: null };
 
 const TEXT = [
   "# Work order: farm",                                              // 1
@@ -56,26 +43,11 @@ const TEXT = [
   "## Acceptance",                                                   // 16
   "1. Trees and a barn show; the cart drives with the arrow keys.",  // 17
   "2. The cart stops at the barn.",                                  // 18
+  "   It does not drive through it.",                                // 19
 ].join("\n");
 const format = parseWorkOrder(TEXT);
-const { lines } = format;
-
-const criterion = (id, statement, quote, line, verify = [{ kind: "test", check: null }]) => ({
-  id, statement, quote, source_refs: [{ start: line, end: line }], verify,
-});
-function translation(acceptance = [
-  criterion("AC1", "Trees and a barn are shown.", "Trees and a barn show", 17, [{ kind: "reviewer", check: "the screen shows trees and a barn" }]),
-  criterion("AC2", "The cart drives with the arrow keys.", "the cart drives with the arrow keys", 17),
-  criterion("AC3", "The cart stops at the barn.", "The cart stops at the barn.", 18),
-]) {
-  return { event: "contract.translation", acceptance };
-}
-
-const check = (value, rule = GATE) => checkTranslation(value, { lines, format, test: rule });
 const workPackage = { work_package_id: "farm-1", task: TEXT, task_file: ".review-bridge/work-packages/farm.md" };
-const translator = { role: "writer", provider: "claude", model: "opus", attempt: 1 };
-const checker = { role: "reviewer", provider: "codex" };
-const build = (value = translation()) => buildContract({ workPackage, lines, format, translation: value, translator, checker });
+const build = (from = format) => buildContract({ workPackage, format: from });
 
 test("Bridge fills every field from its block, as written; headings and markers go nowhere, text outside the blocks is unused", () => {
   const contract = build();
@@ -83,108 +55,96 @@ test("Bridge fills every field from its block, as written; headings and markers 
   assert.deepEqual(contract.scope_notes, { include: null, exclude: { text: "- Payment work.", source_refs: [{ start: 13, end: 13 }] }, must_keep: null, expected_locations: null });
   assert.deepEqual(contract.ticket, { title: { text: "Work order: farm", source_refs: [{ start: 1, end: 1 }] }, source_id: null, priority: null, effort: null, budget: null });
   assert.deepEqual(contract.unused_lines, [{ text: "A note before any block.", source_refs: [{ start: 3, end: 3 }] }]);
-  assert.deepEqual([contract.context, contract.run_plan, contract.reproduction, contract.verification_hints, contract.references, contract.open_questions], [null, null, null, [], [], []]);
-  assert.equal(contract.schema_version, 3);
-  assert.equal(contract.event, undefined);
-  assert.deepEqual(contract.checked_by, checker);
+  assert.deepEqual([contract.context, contract.run_plan, contract.reproduction, contract.verification_hints, contract.references], [null, null, null, [], []]);
+  assert.equal(contract.schema_version, 4);
+  // No model made it, so nothing names one.
+  for (const key of ["translated_by", "checked_by", "clarifications", "assumptions", "open_questions"]) assert.equal(key in contract, false, key);
 });
 
-test("one source line may give several conditions; each quotes its own lines verbatim", async () => {
-  assert.deepEqual(await check(translation()), { ok: true, problems: [] });
-  const items = translation().acceptance;
-  const invented = await check(translation([criterion("AC1", "The farm has a pond.", "a pond", 17), ...items.slice(1).map((item, index) => ({ ...item, id: "AC" + (index + 2) }))]));
-  assert.deepEqual(invented.problems, ["$.acceptance[0].quote: not found verbatim in its source lines"]);
-  // Spacing differences do not matter; words do.
-  const spaced = await check(translation([{ ...items[0], quote: "Trees  and a\tbarn show" }, ...items.slice(1)]));
-  assert.equal(spaced.ok, true);
+test("the acceptance list is cut into conditions the way Markdown cuts a list: one per item, the lines under it included", () => {
+  assert.deepEqual(build().acceptance, [
+    { id: "AC1", statement: "Trees and a barn show; the cart drives with the arrow keys.", source_refs: [{ start: 17, end: 17 }], run_refs: [] },
+    { id: "AC2", statement: "The cart stops at the barn.\nIt does not drive through it.", source_refs: [{ start: 18, end: 19 }], run_refs: [] },
+  ]);
+  const nested = parseWorkOrder([
+    "<!-- bridge:requested_work -->", "Build it.", "",
+    "<!-- bridge:acceptance -->", "## Done when", "- The page loads.", "  - on a phone", "  - on a laptop", "", "* The menu opens.", "+ The footer shows.",
+  ].join("\n"));
+  assert.deepEqual(conditionsOf(nested).conditions.map((condition) => [condition.statement, condition.source_refs]), [
+    ["The page loads.\n- on a phone\n- on a laptop", [{ start: 6, end: 8 }]],
+    ["The menu opens.", [{ start: 10, end: 10 }]],
+    ["The footer shows.", [{ start: 11, end: 11 }]],
+  ]);
+  assert.equal(formProblems(nested).ok, true);
 });
 
-test("a condition points inside one acceptance block, and every line of that block belongs to a condition", async () => {
-  const items = translation().acceptance;
-  const outside = await check(translation([{ ...items[0], source_refs: [{ start: 7, end: 7 }] }, ...items.slice(1)]));
-  assert.deepEqual(outside.problems, ["$.acceptance[0].source_refs: not inside one acceptance block"]);
-  const pastEnd = await check(translation([...items.slice(0, 2), { ...items[2], source_refs: [{ start: 18, end: 99 }] }]));
-  assert.deepEqual(pastEnd.problems, ["$.acceptance[2].source_refs: not inside one acceptance block", "line 18 belongs to no condition"]);
-  const backwards = await check(translation([...items.slice(0, 2), { ...items[2], source_refs: [{ start: 18, end: 17 }] }]));
-  assert.deepEqual(backwards.problems, ["$.acceptance[2].source_refs[0]: start is after end", "line 18 belongs to no condition"]);
-  // A dropped condition cannot vanish: its line is left over.
-  const dropped = await check(translation(items.slice(0, 2)));
-  assert.deepEqual(dropped.problems, ["line 18 belongs to no condition"]);
-  const skipped = await check(translation([items[0], items[1], { ...items[2], id: "AC4" }]));
-  assert.deepEqual(skipped.problems, ["$.acceptance[2].id: expected AC3"]);
+test("a run's own list, indented under - acceptance:, is cut the same way and belongs to that run", () => {
+  const planned = parseWorkOrder([
+    "<!-- bridge:run_plan -->",
+    "### Barn", "Build the barn.", "- acceptance:", "    - The barn stands.", "    - It has a door.",
+    "### Cart", "Build the cart.", "- acceptance:", "    1. The cart drives.",
+  ].join("\n"));
+  const problems = formProblems(planned);
+  assert.equal(problems.ok, true, JSON.stringify(problems));
+  assert.deepEqual(buildContract({ workPackage, format: planned }).acceptance.map((item) => [item.id, item.statement, item.run_refs]), [
+    ["AC1", "The barn stands.", ["Barn"]], ["AC2", "It has a door.", ["Barn"]], ["AC3", "The cart drives.", ["Cart"]],
+  ]);
 });
 
-test("the translation writes conditions only: no field text, command, path, budget, role or run", async () => {
-  const items = translation().acceptance;
-  const command = await check(translation([{ ...items[0], verify: [{ kind: "test", check: null, command: "rm -rf /" }] }, ...items.slice(1)]));
-  assert.deepEqual(command.problems, ["$.acceptance[0].verify[0]: unexpected command"]);
-  const fields = await check({ ...translation(), context: { text: "invented background", source_refs: [{ start: 7, end: 7 }] }, allowed_paths: ["**"], budget: { rounds: 99 } });
-  assert.deepEqual(fields.problems, ["$: unexpected context", "$: unexpected allowed_paths", "$: unexpected budget"]);
-  const runs = await check(translation([{ ...items[0], run_refs: ["RUN A"] }, ...items.slice(1)]));
-  assert.deepEqual(runs.problems, ["$.acceptance[0]: unexpected run_refs"]);
-  const noGate = await check(translation(), NO_GATE);
-  assert.deepEqual(noGate.problems, ["$.acceptance[1].verify[0]: Bridge runs no verification command for this work", "$.acceptance[2].verify[0]: Bridge runs no verification command for this work"]);
-  const vague = await check(translation([{ ...items[0], verify: [{ kind: "reviewer", check: null }] }, ...items.slice(1)]));
-  assert.deepEqual(vague.problems, ["$.acceptance[0].verify[0].check: say what the reviewer checks"]);
+test("what a work order must say: what to do and an acceptance list; a missing one is named, and a deleted marker is one Bridge writes back", () => {
+  const oneSentence = formProblems(parseWorkOrder("Make the farm page greener."));
+  assert.deepEqual([oneSentence.ok, oneSentence.missing, oneSentence.unmarked], [false, ["requested_work", "acceptance"], ["requested_work", "acceptance"]]);
+  const emptyList = formProblems(parseWorkOrder("<!-- bridge:requested_work -->\nBuild it.\n\n<!-- bridge:acceptance -->\n## Acceptance\n"));
+  assert.deepEqual([emptyList.missing, emptyList.unmarked], [["acceptance"], []], "the marker is there: nothing to write back, only to fill in");
+  const noWork = formProblems(parseWorkOrder("<!-- bridge:acceptance -->\n- It works."));
+  assert.deepEqual(noWork.missing, ["requested_work"]);
+  const question = formProblems(parseWorkOrder("<!-- bridge:requested_work -->\nBuild it.\n<!-- bridge:acceptance -->\n- It works.\n<!-- bridge:open_questions -->\nWhich colour?"));
+  assert.deepEqual([question.ok, question.questions], [false, [{ line: 6, question: "Which colour?" }]]);
 });
 
-test("an open question stops before any model call; a work order with nothing to check does not, the reviewer proposes", () => {
-  assert.deepEqual(workOrderQuestions(format), []);
-  const asked = parseWorkOrder(TEXT + "\n\n<!-- bridge:open_questions -->\n## Open questions\nWhich barn colour?\nHow many trees?");
-  assert.deepEqual(workOrderQuestions(asked), ["Which barn colour?", "How many trees?"]);
-  for (const none of ["無", "none", "None", ""]) {
-    assert.deepEqual(workOrderQuestions(parseWorkOrder(TEXT + "\n\n<!-- bridge:open_questions -->\n## Open questions\n" + none)), [], JSON.stringify(none));
+test("\"一、\" and \"（1）\" are no list markers: those lines are loose, and the refusal tells how to write a list", async () => {
+  const chinese = parseWorkOrder(["<!-- bridge:requested_work -->", "做一個農場頁。", "", "<!-- bridge:acceptance -->", "## 驗收", "一、樹和穀倉出現", "（1）車子用方向鍵開"].join("\n"));
+  const problems = formProblems(chinese);
+  assert.deepEqual([problems.ok, problems.missing, problems.loose], [false, [], [6, 7]]);
+  const t = await createTranslator("zh-TW");
+  const said = formLines(t, problems, { file: "work-packages/farm.md", again: "review-bridge start work-packages/farm.md" }).join("\n");
+  assert.match(said, /第 6 行不是驗收清單的一條：每條用「- 」開頭/);
+  assert.match(said, /補好後再執行：review-bridge start work-packages\/farm\.md/);
+});
+
+test("the templates init gives are work orders that can start as they are", async () => {
+  for (const name of ["work-package.md", "work-package.zh-TW.md"]) {
+    const text = await fsp.readFile(path.join(packageRoot, "project-templates", name), "utf8");
+    const problems = formProblems(parseWorkOrder(text.trim()));
+    assert.equal(problems.ok, true, name + ": " + JSON.stringify(problems));
+    assert.equal(conditionsOf(parseWorkOrder(text.trim())).conditions.length, 2, name);
   }
-  const empty = parseWorkOrder("# farm\n\n<!-- bridge:requested_work -->\nBuild it.\n\n<!-- bridge:acceptance -->\n## Acceptance\n");
-  assert.deepEqual(workOrderQuestions(empty), []);
-  assert.deepEqual(workOrderQuestions(parseWorkOrder("# farm\n\n<!-- bridge:requested_work -->\nBuild it.")), []);
 });
 
-test("the translation sees only the acceptance blocks, the reviewer the whole work order, both with its own line numbers and in its language", () => {
-  const prompt = composeTranslationPrompt({ workPackageId: "farm-1", lines, format, test: GATE, attempt: 2, feedback: ["AC1 does not match its lines"] });
-  assert.equal(prompt.split("\n")[0], CONTRACT_MODE_HEADER);
-  assert.match(prompt, /^--- acceptance ---\n17\| 1\. Trees and a barn show/m);
-  assert.doesNotMatch(prompt, /Build a small farm|Payment work|A note before/);
-  assert.match(prompt, /in the language the work order itself is written in/);
-  assert.doesNotMatch(prompt, /BCP 47/);
-  assert.match(prompt, /Attempt: 2/);
-  assert.match(prompt, /- AC1 does not match its lines/);
-  assert.match(composeTranslationPrompt({ workPackageId: "farm-1", lines, format, test: NO_GATE }), /Bridge runs no verification command/);
-  const candidate = build();
-  const checkPrompt = composeCheckPrompt({ workPackageId: "farm-1", lines, format, candidate, sha256: digest(candidate), attempt: 1 });
-  assert.equal(checkPrompt.split("\n")[0], CHECK_MODE_HEADER);
-  assert.match(checkPrompt, new RegExp("Candidate: " + digest(candidate)));
-  assert.match(checkPrompt, /^18\| 2\. The cart stops at the barn\./m);
-  assert.match(checkPrompt, /=== CANDIDATE CONDITIONS ===\n\[\n  \{\n    "id": "AC1"/);
-  assert.doesNotMatch(checkPrompt, /"unused_lines"/);
-  // A reviewer that sees only the conditions cannot ask how the work should be done.
-  assert.match(checkPrompt, /\| .*Build a small farm/);
-  assert.match(checkPrompt, /in the language the work order itself is written in/);
+test("a deleted required block comes back as its marker and heading at the end of the file; nothing before it changes", async (t) => {
+  const folder = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-form-"));
+  t.after(() => fsp.rm(folder, { recursive: true, force: true }));
+  const file = path.join(folder, "farm.md");
+  const before = "# 農場\r\n\r\n<!-- bridge:requested_work -->\r\n做一個農場頁。";
+  await fsp.writeFile(file, before);
+  const translator = await createTranslator("zh-TW");
+  const form = formProblems(parseWorkOrder(before));
+  assert.deepEqual(await writeBackBlocks(translator, file, form.unmarked), ["acceptance"]);
+  const after = await fsp.readFile(file, "utf8");
+  assert.equal(after.slice(0, before.length), before);
+  assert.equal(after.slice(before.length), "\r\n\r\n<!-- bridge:acceptance -->\r\n## 驗收\r\n");
+  // Still empty, so still refused, with nothing more written back.
+  assert.deepEqual(formProblems(parseWorkOrder(after)).unmarked, []);
+  await fsp.appendFile(file, "- 樹和穀倉出現\r\n");
+  assert.equal(formProblems(parseWorkOrder(await fsp.readFile(file, "utf8"))).ok, true);
 });
 
-test("Bridge decides from every condition the reviewer judged: a mistake is redone, an ambiguity goes to the human, doubt stops", async () => {
-  const candidate = build();
-  const sha256 = digest(candidate);
-  const answer = (overrides = {}) => ({
-    event: "contract.check", candidate_sha256: sha256,
-    acceptance: ["AC1", "AC2", "AC3"].map((id) => ({ id, faithful: true, note: null })),
-    missing: [], ambiguities: [], cannot_confirm: false, cannot_confirm_reason: null, ...overrides,
-  });
-  const decide = (value) => decideCheck(value, { candidate, sha256 });
-  assert.equal((await decide(answer())).decision, "pass");
-  const wrong = await decide(answer({ acceptance: [{ id: "AC1", faithful: false, note: "adds a barn colour" }, { id: "AC2", faithful: true, note: null }, { id: "AC3", faithful: true, note: null }] }));
-  assert.deepEqual(wrong, { decision: "retranslate", problems: [], feedback: ["AC1 does not match its lines: adds a barn colour"], questions: [], assumptions: [] });
-  const missing = await decide(answer({ missing: [{ source_refs: [{ start: 17, end: 17 }], note: "the barn itself" }] }));
-  assert.deepEqual(missing.feedback, ["missing condition at lines 17-17: the barn itself"]);
-  const unclear = await decide(answer({ ambiguities: [fakeQuestion({ question: "Which page?" })] }));
-  assert.equal(unclear.decision, "needs_human");
-  assert.deepEqual(unclear.questions.map((entry) => entry.question), ["Which page?"]);
-  assert.equal((await decide(answer({ cannot_confirm: true, cannot_confirm_reason: "design not given" }))).decision, "unconfirmed");
-  // A reviewer that skips a condition, judges another hash, or answers off-schema is asked again; the run counts it.
-  assert.deepEqual((await decide(answer({ acceptance: answer().acceptance.slice(0, 2) }))).problems, ["$.acceptance: must judge exactly AC1, AC2, AC3"]);
-  assert.deepEqual((await decide(answer({ candidate_sha256: "0".repeat(64) }))).problems, ["$.candidate_sha256: expected " + sha256]);
-  assert.equal((await decide(answer({ fields: [] }))).decision, "malformed");
-  assert.equal((await decide({ event: "contract.check", verdict: "PASS" })).decision, "malformed");
+test("the writer's lock: a contract without what to do or without a condition is not taken, whoever made it", () => {
+  const contract = build();
+  assert.deepEqual(missingFields(contract), []);
+  assert.deepEqual(missingFields({ ...contract, acceptance: [] }), ["acceptance"]);
+  assert.deepEqual(missingFields({ ...contract, requested_work: null }), ["requested_work"]);
+  assert.deepEqual(missingFields({ ...contract, requested_work: null, run_plan: { runs: [{ name: "Barn" }] } }), []);
 });
 
 test("a sealed contract matches its schema, is stored once under its hash, and any change is caught on the next read", async (t) => {
@@ -195,9 +155,11 @@ test("a sealed contract matches its schema, is stored once under its hash, and a
   const contract = build();
   const sealed = await sealContract(paths, contract);
   assert.equal(sealed.sha256, digest(contract));
-  assert.equal(sealed.contract.source.lines[16], lines[16]);
+  assert.equal(sealed.contract.source.lines[16], format.lines[16]);
   assert.deepEqual(await loadContract(paths, sealed.sha256), contract);
   assert.equal((await sealContract(paths, contract)).sha256, sealed.sha256);
+  // The same text is the same contract: cutting it again costs nothing and changes nothing.
+  assert.equal(digest(build(parseWorkOrder(TEXT))), sealed.sha256);
   await assert.rejects(sealContract(paths, { ...contract, allowed_paths: ["**"] }), /does not match its schema: \$: unexpected allowed_paths/);
   const file = contractPath(paths, sealed.sha256);
   const edited = JSON.parse(await fsp.readFile(file, "utf8"));
@@ -214,66 +176,10 @@ test("a contract an older Bridge sealed is refused by name, and the person is to
   t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
   const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
   await withProjectId(paths);
-  const old = { ...build(), schema_version: 1 };
+  const old = { ...build(), schema_version: 3 };
   await fsp.mkdir(paths.contractsDir, { recursive: true });
   await fsp.writeFile(contractPath(paths, digest(old)), JSON.stringify(old));
   await assert.rejects(loadContract(paths, digest(old)), (error) => error instanceof ContractChangedError && /made by an older Bridge and is not read again; run: review-bridge clean/.test(error.message));
-});
-
-test("a stop between two contract calls is honoured before the next call starts", async (t) => {
-  const { establishContract, runTrail } = await import("../features/workOrder/translation.mjs");
-  const { createFakeAdapter } = await import("../service/agentCli/fakeAdapter.mjs");
-  const { readIoEvents } = await import("../service/records/ioEvents.mjs");
-  const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-stop-"));
-  t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await withProjectId(paths);
-  const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, call_timeout: 60_000 };
-  const limits = { tokens_per_call: 10_000_000, tokens: 10_000_000 };
-  let calls = 0;
-  // Not stopped before the translation; stopped by the time the check would start.
-  const isStopped = async () => (calls++ > 0);
-  const result = await establishContract({
-    paths, trail: runTrail(paths, "run-stop-between-calls"), workPackage: { ...workPackage, test: GATE, contract_steps: steps },
-    adapter: createFakeAdapter(bridgeRoot, "PASS"), limits, effort: "low", translateEffort: "low", executionMode: "fake_cli", isStopped, onSpawn: async () => {},
-  });
-  assert.equal(result.status, "stopped");
-  const events = await readIoEvents(paths, "run-stop-between-calls");
-  assert.deepEqual(events.filter((event) => event.event === "usage").map((event) => event.role), ["translator"]);
-  assert.equal(events.some((event) => event.event === "contract.check"), false);
-});
-
-// Codex review 2026-10-18, round 3: a stop that lands after the check before a call but before
-// the call has recorded its pid. The call must find the stop once it has its pid and kill itself.
-test("a stop between the pre-call check and the pid record kills the call that just started", { timeout: 30_000 }, async (t) => {
-  const { establishContract, runTrail } = await import("../features/workOrder/translation.mjs");
-  const { createFakeAdapter } = await import("../service/agentCli/fakeAdapter.mjs");
-  const { readIoEvents } = await import("../service/records/ioEvents.mjs");
-  const repoRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-race-"));
-  t.after(() => fsp.rm(repoRoot, { recursive: true, force: true }));
-  const previous = process.env.FAKE_CONTRACT_SLEEP_MS;
-  process.env.FAKE_CONTRACT_SLEEP_MS = "20000";
-  t.after(() => { if (previous === undefined) delete process.env.FAKE_CONTRACT_SLEEP_MS; else process.env.FAKE_CONTRACT_SLEEP_MS = previous; });
-  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName: ".review-bridge" });
-  await withProjectId(paths);
-  const steps = { translate: { role: "writer", provider: "claude", model: "opus" }, check: { role: "reviewer", provider: "codex" }, max_attempts: 2, call_timeout: 60_000 };
-  const seen = [];
-  // Running at the check before the call; stopped by the time the call has its pid.
-  const isStopped = async () => seen.push("status") > 1;
-  const recorded = [];
-  const startedAt = Date.now();
-  const result = await establishContract({
-    paths, trail: runTrail(paths, "run-stop-race-0001"), workPackage: { ...workPackage, test: GATE, contract_steps: steps },
-    adapter: createFakeAdapter(bridgeRoot, "PASS"), limits: { tokens_per_call: 1e7, tokens: 1e7 }, effort: "low", translateEffort: "low",
-    executionMode: "fake_cli", isStopped, onSpawn: async (pid, role) => { recorded.push(role); },
-  });
-  assert.equal(result.status, "stopped");
-  // The 20-second translation was killed, not waited for, and no check call followed.
-  assert.ok(Date.now() - startedAt < 15_000, "the started call was not killed");
-  assert.deepEqual(recorded, ["translator"]);
-  const events = await readIoEvents(paths, "run-stop-race-0001");
-  assert.deepEqual(events.filter((event) => event.event === "usage").map((event) => [event.role, event.partial === true]), [["translator", true]]);
-  assert.equal(events.some((event) => event.event === "contract.check"), false);
 });
 
 // The canonical walk used to call itself; the expected values were recorded from that version, so

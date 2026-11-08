@@ -22,7 +22,7 @@ import {
   STOP_REASONS,
   stopRunRecord,
   DatabaseUnavailableError,
-  tokenTotal,
+  budgetTokens,
   usageTotalForRun,
   writeFailureRecord,
   writeJson,
@@ -54,9 +54,8 @@ import { validateWriterPolicy } from "../../policy/policyChecks.mjs";
 import { priorityChoice } from "../../policy/policyRules.mjs";
 import { budgetStop, controllerError, failureSummary } from "./budget.mjs";
 import { acceptanceRows, decideAcceptance, sameVersion, workVersion, testsDecideBlockedWriter } from "./acceptance.mjs";
-import { ContractChangedError, loadContract } from "./contract.mjs";
-import { establishContract, runTrail } from "./translation.mjs";
-import { callStamp, callTimeLeft, clearProcess, killConfirmed, processFile, recordProcess, recordProcessOrKill, runMustStop, runStopped, workLockFile } from "./processRecords.mjs";
+import { ContractChangedError, loadContract, missingFields } from "./contract.mjs";
+import { callStamp, callTimeLeft, clearProcess, killConfirmed, processFile, recordProcessOrKill, runMustStop, runStopped, workLockFile } from "./processRecords.mjs";
 
 export { recordProcessOrKill, runMustStop } from "./processRecords.mjs";
 
@@ -172,69 +171,46 @@ async function checkedContract({ paths, runtimeState, control, contractSha256, s
   }
 }
 
-// A stop before the work exits with the code the writer's or reviewer's own stop of that kind uses;
-// one that needs the human (an unclear work order, an unconfirmed check) exits 0 like needs_human.
 // sysexits' EX_UNAVAILABLE: something the run needs is gone (the database, the change list).
 const UNAVAILABLE_EXIT = 69;
 
-export const CONTRACT_EXIT_CODES = Object.freeze({
-  needs_human: 0, contract_unconfirmed: 0, writer_failed: 1, reviewer_failed: 1, policy_failure: 1, rate_limited: 75, token_limit: 76, usage_unknown: 76,
-  // The status could not be read when a stop check failed closed; the run is closed as stopped.
-  stopped: 130,
-  writer_timeout: 77, contract_rejected: MALFORMED_EXIT_CODE,
-});
-
-// A work-order run gets its contract once, before the writer's first call. One a start gathered came
-// sealed with the yes that opened the run (gather.mjs), so nothing is translated here; only the low-level
-// work-start still translates inside its run. A resumed run keeps its own.
-async function sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep, onContractSealed }) {
+// A work-order run works on the contract its plan sealed, which code cut from the work order when the
+// plan was made; nothing is translated in a run. The writer does not take a contract that lacks what a
+// work order must say, whoever made it (the second lock, Owner 2026-11-08): the run stops before any
+// model call. A resumed run keeps its own.
+async function sealedContractFor({ paths, runtimeState, control, writerModel, sessionId }) {
   const workPackage = control.run.work_package;
   if (!workPackage.task_file) return { sha256: null, exitCode: null };
   if (control.run.contract_sha256) return { sha256: control.run.contract_sha256, exitCode: null };
-  if (workPackage.contract_sha256) {
-    await runtimeState.recordContract(workPackage.contract_sha256);
-    return { sha256: workPackage.contract_sha256, exitCode: null };
-  }
-  if (!workPackage.contract_steps) throw new Error("The work package names no contract steps; build a new plan.");
-  const runId = runtimeState.runId;
-  onStep("Writer (" + workPackage.contract_steps.translate.provider + ") turns the work order into a contract; reviewer ("
-    + workPackage.contract_steps.check.provider + ") checks it");
-  const translated = await establishContract({
-    paths, trail: runTrail(paths, runId), workPackage, adapter, limits: effectiveLimits(control),
-    isStopped: () => runMustStop(paths, runId),
-    effort: control.reviewer_policy?.effort || "medium",
-    model: control.reviewer_policy?.model ?? null,
-    translateEffort: control.token_policy.writer_effort,
-    onSpawn: (pid, role, provider) => recordProcess(paths, runId, { pid, role, provider, call: 0 }),
+  const sha256 = workPackage.contract_sha256;
+  if (!sha256) throw new Error("The work package names no contract; build a new plan.");
+  // A file that no longer reads back is stopped at the first boundary that reads it (checkedContract).
+  const contract = await loadContract(paths, sha256).catch((error) => {
+    if (error instanceof ContractChangedError) return null;
+    throw error;
   });
-  await clearProcess(paths, runId);
-  if (await runStopped(paths, runId)) return { sha256: null, exitCode: 130 };
-  if (translated.status === "sealed") {
-    await runtimeState.recordContract(translated.sha256);
-    if (onContractSealed) await onContractSealed(translated.sha256);
-    onStep("Contract sealed");
-    return { sha256: translated.sha256, exitCode: null };
+  const missing = contract ? missingFields(contract) : [];
+  if (missing.length) {
+    await writeBoundedState(paths, runtimeState, {
+      writer_model: writerModel, status: "contract_rejected", session_id: sessionId, call: 0, updated_at: new Date().toISOString(),
+      contract_problems: missing.map((key) => key + " is empty or missing"),
+    });
+    await recordIo(paths, runtimeState.runId, { event: "stop", status: "contract_rejected", role: "controller", provider: null, detail_ref: "contract:" + missing.join(",") });
+    await consumeAuthorization(paths, control, "contract_rejected");
+    return { sha256: null, exitCode: MALFORMED_EXIT_CODE };
   }
-  const { status, detail, problems = [], questions = [], failure = null, ...ceiling } = translated;
-  await writeBoundedState(paths, runtimeState, {
-    writer_model: writerModel, status, session_id: sessionId, call: 0, updated_at: new Date().toISOString(),
-    contract_problems: problems, contract_questions: questions, ...(failure ? { failure } : {}), ...ceiling,
-  });
-  await recordIo(paths, runId, { event: "stop", status, role: "controller", provider: null, detail_ref: "contract:" + detail });
-  await consumeAuthorization(paths, control, status);
-  return { sha256: null, exitCode: CONTRACT_EXIT_CODES[status] };
+  await runtimeState.recordContract(sha256);
+  return { sha256, exitCode: null };
 }
 
 // T0-04 D4.1: the token and test ceilings are the run's budget, which the plan settled from the
 // work order and the policy; max_turns comes from the policy snapshot. Missing ones use the package
 // defaults. test_timeout was missing here until RC3-BLOCKER-00, which left the tests with no limit.
-export const DEFAULT_LIMITS = Object.freeze({ clarify_questions: 3, clarify_rounds: 3, max_turns: 20, tokens_per_call: 1_500_000, tokens: 4_000_000, max_output_chars: 4_000, test_timeout: 600_000 });
+export const DEFAULT_LIMITS = Object.freeze({ max_turns: 20, tokens_per_call: 1_500_000, tokens: 4_000_000, max_output_chars: 4_000, test_timeout: 600_000 });
 export function effectiveLimits(control) {
   const limits = control?.run?.policy_snapshot?.effective_policy?.limits || {};
   const budget = control?.run?.work_package?.budget || {};
   return {
-    clarify_questions: limits.clarify_questions ?? DEFAULT_LIMITS.clarify_questions,
-    clarify_rounds: limits.clarify_rounds ?? DEFAULT_LIMITS.clarify_rounds,
     max_turns: limits.max_turns ?? DEFAULT_LIMITS.max_turns,
     tokens_per_call: budget.tokens_per_call ?? limits.tokens_per_call ?? DEFAULT_LIMITS.tokens_per_call,
     tokens: budget.tokens ?? limits.tokens ?? DEFAULT_LIMITS.tokens,
@@ -372,8 +348,6 @@ export async function runBoundedResume({
   workLock = null,
   // One line per step for the person watching (start); the run's records do not depend on it.
   onStep = () => {},
-  // The sealed contract's SHA-256, as soon as it is sealed (start records it in the database).
-  onContractSealed = null,
 }) {
   control.runtime_state = runtimeState;
   const invocationStartedAt = Date.now();
@@ -399,7 +373,7 @@ export async function runBoundedResume({
     let handoffReason = "correction";
     const unconfirmable = await unconfirmableEvidenceStop({ paths, runtimeState, control, writerModel, sessionId });
     if (unconfirmable !== null) return unconfirmable;
-    const sealed = await sealedContractFor({ paths, runtimeState, control, adapter, writerModel, sessionId, onStep, onContractSealed });
+    const sealed = await sealedContractFor({ paths, runtimeState, control, writerModel, sessionId });
     if (sealed.exitCode !== null) return sealed.exitCode;
     const contractSha256 = sealed.sha256;
     // The work-proof seal: the baseline hash as authorized, and every window this controller writes.
@@ -513,7 +487,9 @@ export async function runBoundedResume({
         const usage = called.usage;
         writerUsage = usage;
         await recordIo(paths, runId, usage);
-        const callTotal = tokenTotal(usage.tokens);
+        // What the budget counts leaves out the cache reads (Owner 2026-11-08): a writer carrying a long
+        // context is not stopped halfway by it. Every kind is still recorded as it was.
+        const callTotal = budgetTokens(usage.tokens);
         const runTotal = await usageTotalForRun(paths, runId);
         if (callTotal > limits.tokens_per_call || runTotal > limits.tokens) {
           const which = callTotal > limits.tokens_per_call ? "per_call" : "per_run";
@@ -608,7 +584,7 @@ export async function runBoundedResume({
         return MALFORMED_EXIT_CODE;
       }
       await recordIo(paths, runId, { ...writerResult, unknown_addressed_findings: unknownAddressedFindings(writerResult, lastFindings) });
-      const testsDecide = testsDecideBlockedWriter(writerResult, afterWriter.contract?.contract || null, workPackage.test);
+      const testsDecide = testsDecideBlockedWriter(writerResult, workPackage.test);
       if (testsDecide) onStep("Writer could not check the conditions the tests decide; Bridge's tests and the reviewer judge the work");
       if (!testsDecide && (writerResult.needs_human.length || writerResult.status !== "done")) {
         // D1.4: the writer asked for a decision or declared itself blocked; no review, back to the owner.
@@ -802,41 +778,14 @@ export async function runBoundedResume({
         return MALFORMED_EXIT_CODE;
       }
       await recordIo(paths, runId, { ...reviewResult });
-      // A reviewer call whose usage cannot be read cannot be shown to stay under the ceilings.
-      if (!ownOutcome.controller_decided && (!ownOutcome.usage || ownOutcome.usage.parse_error)) {
-        await writeBoundedState(paths, runtimeState, {
-          writer_model: writerModel, status: "usage_unknown", session_id: sessionId, call, updated_at: new Date().toISOString(),
-          token_limit_role: "reviewer", missing: ownOutcome.usage?.missing || [], review_path: latestReviewPath, writer_stdout_path: stdoutPath,
-        });
-        await recordIo(paths, runId, { event: "stop", status: "usage_unknown", role: "reviewer", provider: reviewerProvider, detail_ref: "usage" });
-        await consumeAuthorization(paths, control, "usage_unknown");
-        return 76;
-      }
-      // D5.3: the reviewer's call is measured against the same ceilings as the writer's.
-      if (ownOutcome.usage && !ownOutcome.controller_decided) {
-        const callTotal = tokenTotal(ownOutcome.usage.tokens);
-        const runTotal = await usageTotalForRun(paths, runId);
-        if (callTotal > limits.tokens_per_call || runTotal > limits.tokens) {
-          const which = callTotal > limits.tokens_per_call ? "per_call" : "per_run";
-          await writeBoundedState(paths, runtimeState, {
-            writer_model: writerModel, status: "token_limit", session_id: sessionId, call, updated_at: new Date().toISOString(),
-            token_limit: which, token_limit_role: "reviewer", tokens_this_call: callTotal, tokens_this_run: runTotal,
-            review_path: latestReviewPath, writer_stdout_path: stdoutPath,
-          });
-          await recordIo(paths, runId, {
-            event: "stop", status: "token_limit", role: "reviewer", provider: reviewerProvider,
-            detail_ref: which + ":" + (which === "per_call" ? callTotal : runTotal),
-          });
-          await consumeAuthorization(paths, control, "token_limit");
-          return 76;
-        }
-      }
+      // The review is recorded, unknown usage as unknown, and counts against no budget: the budget is the
+      // writer's (Owner 2026-11-08, replacing T0-05 D5.3's one ceiling for both).
       // D4.3 / D4.4: ids that survive a correction are unresolved; one survival on FAIL is a loop.
       // Bridge decides every sealed condition from the records; the reviewer's PASS alone does not
       // deliver. A condition that is not proven stops the run for the human instead of passing.
       const sealedContract = afterReview.contract?.contract || null;
       const rows = sealedContract && !ownOutcome.controller_decided
-        ? acceptanceRows({ contract: sealedContract, writer: writerResult, review: reviewResult, test: testResult, reviewVersion })
+        ? acceptanceRows({ contract: sealedContract, writer: writerResult, review: reviewResult })
         : [];
       const accepted = rows.length ? decideAcceptance(rows) : null;
       if (rows.length) await recordIo(paths, runId, { event: "acceptance", call, decision: accepted, review_version: reviewVersion, rows });

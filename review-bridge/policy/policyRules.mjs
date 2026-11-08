@@ -40,8 +40,6 @@ export function validateDefaultPolicy(policy) {
   const limits = policy.limits || {};
   for (const key of [
     "rounds",
-    "clarify_questions",
-    "clarify_rounds",
     "call_timeout",
     "max_turns",
     "tokens_per_call",

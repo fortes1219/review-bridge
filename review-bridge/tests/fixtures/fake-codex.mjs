@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import readline from "node:readline";
 
-import { checkAnswer, logCall, modeOf, reviewAnswer, reviewInput, reviewWork, translationAnswer, writerAnswer } from "./fakeAnswers.mjs";
+import { logCall, modeOf, reviewAnswer, reviewInput, reviewWork, writerAnswer } from "./fakeAnswers.mjs";
 
 const rateLimited = (process.env.FAKE_CLAUDE_RESULT || "OK") === "RATE_LIMIT";
 
@@ -82,30 +82,6 @@ if (process.argv[process.argv.indexOf("--sandbox") + 1] !== "read-only") {
   process.stderr.write("this session must be read-only\n");
   process.exit(2);
 }
-const usageEvents = (tokens) => [
-  { type: "thread.started", thread_id: threadId },
-  { type: "turn.started" },
-  { type: "turn.completed", usage: { input_tokens: tokens, cached_input_tokens: Math.floor(tokens / 2), cache_write_input_tokens: 0, output_tokens: 410, reasoning_output_tokens: 0 } },
-];
-
-if (mode === "translation") {
-  if (rateLimited) {
-    process.stderr.write("ERROR: You've hit your usage limit. Try again later.\n");
-    process.exit(1);
-  }
-  await fsp.writeFile(outputPath, JSON.stringify(translationAnswer(prompt), null, 2), "utf8");
-  for (const event of usageEvents(Number(process.env.FAKE_CODEX_TOKENS || 12_000))) process.stdout.write(JSON.stringify(event) + "\n");
-  process.exit(0);
-}
-
-if (mode === "check") {
-  await fsp.writeFile(outputPath, JSON.stringify(checkAnswer(prompt), null, 2), "utf8");
-  // FAKE_CONTRACT_CHECK_USAGE=none leaves out turn.completed, so Bridge cannot read the usage.
-  const events = usageEvents(Number(process.env.FAKE_CODEX_TOKENS || 12_000));
-  for (const event of process.env.FAKE_CONTRACT_CHECK_USAGE === "none" ? events.slice(0, 2) : events) process.stdout.write(JSON.stringify(event) + "\n");
-  process.exit(0);
-}
-
 if (mode !== "review") {
   process.stderr.write("review prompt did not reach fake Codex\n");
   process.exit(3);

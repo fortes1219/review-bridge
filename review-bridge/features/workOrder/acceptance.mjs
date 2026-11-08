@@ -1,8 +1,10 @@
 // The acceptance chain (RC3-BLOCKER-00). Every condition sealed in the contract is reported by the
-// writer, judged by the reviewer, and decided here by code: the writer's and reviewer's answers
-// must name exactly the sealed ids, and a condition the reviewer passes counts as proven only
-// when its evidence holds: a condition that leans on the tests needs them to have passed on the
-// same version of the work the reviewer saw. Anything else is failed or unknown, never a pass.
+// writer, judged by the reviewer, and decided here by code: the writer's and reviewer's answers must
+// name exactly the sealed ids, and a condition counts as proven only when the reviewer passes it with
+// evidence. Code cuts the conditions from the person's list and cannot tell which of them the tests
+// show (Owner 2026-11-08, choice A): the project's own tests run on every writer call and send failed
+// work back before any review, and the reviewer judges every condition. Anything else is failed or
+// unknown, never a pass.
 import { fileSha256, headCommit, isGitWorkTree, runGit as git, sha256 } from "./gitWorkspace.mjs";
 
 // Which version of the work a check ran against. With Git: the commit, every tracked change and
@@ -41,35 +43,24 @@ function idProblems(items, ids, at) {
 
 const contractIds = (contract) => (contract?.acceptance || []).map((item) => item.id);
 
-const leansOnTest = (condition) => (condition.verify || []).some((check) => check.kind === "test");
-
-// Conditions the writer reports as not done, apart from those that lean on the tests: Bridge runs the
-// tests itself, outside the writer's sandbox, and decides those (rowResult never reads the writer's
-// word), so a writer that could not run them has not left anything open.
-function openConditions(writerResult, contract) {
-  const decidedByTests = new Set((contract?.acceptance || []).filter(leansOnTest).map((condition) => condition.id));
-  return writerResult.criteria.filter((item) => item.status !== "done" && !decidedByTests.has(item.id)).map((item) => item.id);
-}
-
-// A writer that calls itself blocked for no other reason than a condition the tests decide, and asks
-// the person nothing, is not stopped: Bridge's own tests and the reviewer judge the work. Code decides
-// this from the sealed contract, so it does not rest on the model reading its instructions (Owner
-// 2026-11-03). Only with a test command to run; without one nothing would decide those conditions.
-export function testsDecideBlockedWriter(writerResult, contract, test) {
+// A writer that calls itself blocked, asks the person nothing, and has a project whose tests Bridge runs
+// is not stopped: Bridge's own tests and the reviewer judge the work (Owner 2026-11-03; 2026-11-08 choice
+// A, now for every condition, since code cannot tell which ones the tests show). A writer working in a
+// sandbox often cannot run the tests itself. Code decides this, so it does not rest on the model reading
+// its instructions; without a test command nothing but the writer's word would stand, so it stops.
+export function testsDecideBlockedWriter(writerResult, test) {
   return writerResult.status === "blocked"
     && test?.kind === "command"
     && !writerResult.needs_human.length
-    && writerResult.criteria.some((item) => item.status !== "done")
-    && !openConditions(writerResult, contract).length;
+    && writerResult.criteria.some((item) => item.status !== "done");
 }
 
-// The writer reports every sealed condition by id, and calls the work done only if each one is,
-// apart from those the tests decide.
+// The writer reports every sealed condition by id, and calls the work done only if each one is.
 export function criteriaProblems(writerResult, contract) {
   const ids = contractIds(contract);
   if (!contract) return writerResult.criteria.length ? ["$.criteria: there is no contract; leave it empty"] : [];
   const problems = idProblems(writerResult.criteria, ids, "$.criteria");
-  const open = openConditions(writerResult, contract);
+  const open = writerResult.criteria.filter((item) => item.status !== "done").map((item) => item.id);
   if (writerResult.status === "done" && open.length) problems.push("$.status: done while " + open.join(", ") + " is not done");
   return problems;
 }
@@ -91,8 +82,9 @@ export function verdictProblems(reviewResult, contract) {
   return problems;
 }
 
-// One row per sealed condition, decided from records only.
-export function acceptanceRows({ contract, writer = null, review = null, test = null, reviewVersion = null }) {
+// One row per sealed condition, decided from records only. The tests are not a column: they ran on the
+// version the reviewer saw (the run stops on version_changed otherwise) and failed work never reached it.
+export function acceptanceRows({ contract, writer = null, review = null }) {
   return (contract?.acceptance || []).map((condition) => {
     const reported = writer?.criteria?.find((item) => item.id === condition.id) || null;
     const judged = review?.verdicts?.find((item) => item.id === condition.id) || null;
@@ -102,20 +94,9 @@ export function acceptanceRows({ contract, writer = null, review = null, test = 
       writer: reported?.status || null,
       verdict: judged?.verdict || null,
       evidence: judged?.evidence || null,
-      test: leansOnTest(condition) ? (test?.kind === "command" ? (test.passed ? "passed" : "failed") : "not_run") : "not_used",
     };
-    return { ...row, result: rowResult(row, { test, reviewVersion }) };
+    return { ...row, result: row.verdict === "fail" ? "failed" : row.verdict === "pass" ? "proven" : "unknown" };
   });
-}
-
-function rowResult(row, { test, reviewVersion }) {
-  if (row.verdict === "fail" || row.test === "failed") return "failed";
-  if (row.verdict !== "pass") return "unknown";
-  if (row.test === "not_used") return "proven";
-  if (row.test !== "passed") return "unknown";
-  // Without Git neither version is known; the work proof is unknown, not the test result.
-  if (test.work_version?.kind === "unknown" && reviewVersion?.kind === "unknown") return "proven";
-  return sameVersion(test.work_version, reviewVersion) ? "proven" : "unknown";
 }
 
 // Bridge's decision once the reviewer's answer is valid: every condition proven delivers; any

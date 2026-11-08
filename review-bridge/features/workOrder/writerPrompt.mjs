@@ -167,11 +167,10 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     ...(contract ? [
       "Contract: " + contract.sha256 + ". It is the work order as sealed when the human started the work; it is read-only.",
       "Answer with this contract_sha256. If the contract looks wrong, ask through needs_human; never edit it or work from another version.",
-      "The contract's clarifications are the person's own answers and its assumptions are what was settled for them; both bind the work as the rest of the contract does.",
-      "In criteria, report every acceptance condition of the contract by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done, apart from the ones the project's tests decide.",
+      "Each acceptance condition is the person's own words, cut from their list. In criteria, report every one by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done.",
     ] : ["There is no contract for this task; leave criteria empty."]),
     ...(workPackage.test?.kind === "command" ? [
-      "Bridge itself runs the project's tests (" + workPackage.test.command + ") outside your sandbox after this call, and their result decides every condition whose verify is test.",
+      "Bridge itself runs the project's tests (" + workPackage.test.command + ") outside your sandbox after this call; work they fail comes back to you before any review.",
       "Run them if you can. If they cannot run where you are, write that in unverified and keep status done: it is not a reason to be blocked.",
     ] : []),
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",

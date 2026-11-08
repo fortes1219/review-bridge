@@ -6,15 +6,12 @@ import path from "node:path";
 
 import {
   activeLineSteps, activeRuns, assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
-  inspectProvider, listCodexMcpServers, projectRuns, readJson, readRun, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, writeJson,
+  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, writeJson,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
-import { digest } from "../../utils/digest.mjs";
-import { answersFromOption, clarifyForPlan, nextClarify, pendingQuestions, writeAnswers } from "./clarify.mjs";
-import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
+import { askYes, confirmWorkStart, contractLine, readiness, startCard } from "./confirmStart.mjs";
 import { loadContract } from "./contract.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
-import { askYes, gatherContracts, readiness, runTakesGathering, sealedContractOf, yesOf } from "./gather.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
 import { directoryOfTarget, fileLineRunning, startDirectory } from "./line.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
@@ -31,9 +28,10 @@ import {
   workPackageStatus,
 } from "./workPackage.mjs";
 import {
-  anyCardGathered, canonicalTaskFile, cardFor, cardUsed, clearProject, ensureProject, identifyWorkOrder, latestGathering, markCardShown, recordCard, recordContract, recordStart, withdrawCard,
+  canonicalTaskFile, cardFor, cardUsed, clearProject, ensureProject, identifyWorkOrder, markCardShown, recordCard, recordContract, recordStart, withdrawCard,
 } from "./workOrderRecords.mjs";
-import { parseWorkOrder } from "./workOrderFormat.mjs";
+import { refuseForm } from "./workOrderForm.mjs";
+import { formProblems, parseWorkOrder, WorkOrderFormError } from "./workOrderFormat.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
 
 export const DEFAULT_BREAKPOINT = "after the review";
@@ -95,8 +93,11 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
   const breakpoint = options.breakpoint || answers.breakpoint || (defaults ? DEFAULT_BREAKPOINT : undefined);
   if (options.taskFile && !breakpoint) throw new Error("A breakpoint is required. Add --breakpoint \"<where to stop>\" or answer the prompt.");
   const text = options.taskFile ? await fsp.readFile(path.resolve(options.taskFile), "utf8").catch(() => null) : null;
-  // A work order Bridge cannot split is refused, with its lines, before anything about it is recorded.
+  // A work order Bridge cannot split, or one without what it must say, is refused, with its lines, before
+  // anything about it is recorded.
   const format = text !== null ? parseWorkOrder(text.trim()) : null;
+  const form = format ? formProblems(format) : null;
+  if (form && !form.ok) throw new WorkOrderFormError(form);
   const records = text !== null ? batch?.records ?? await openRecords(paths) : null;
   const workOrder = records ? await identifyWorkOrder(records.db, {
     projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), repoRoot: paths.repoRoot,
@@ -124,7 +125,6 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
     planName: options.planName,
     workOrder,
     line,
-    clarify: format ? await clarifyForPlan(options.clarify ?? null, format) : null,
   });
   if (records) await recordCard(records.db, { projectId: records.projectId, plan, snapshot: (await loadOrCreatePolicySnapshot(paths)).snapshot, shown: false });
   return { plan, records };
@@ -140,7 +140,7 @@ export async function planWork({ paths, options, adapter, inspectionAdapter }) {
       plan.task_file ? "工單：" + plan.task_file : "工作包：" + plan.work_package_id,
       "範圍：" + ({ default: "預設（整個專案減禁改清單）", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
       "驗收：" + (plan.test?.kind === "command" ? "會跑 " + plan.test.command + "（profile 核准）" : plan.test?.label || "沒有設定測試"),
-      ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
+      ...(plan.contract_sha256 ? ["合約：" + contractLine(plan)] : []),
       "plan：" + plan.plan_path,
       "sha：" + plan.plan_sha256,
       // T0-08: native work-start refuses --approve; the human confirms the card at the terminal.
@@ -196,7 +196,12 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
   let authorization;
   try {
     authorization = records ? await recordStart(records.db, { planSha256: approval, authorize }) : await authorize();
-    if (plan.contract_gathering) await runTakesGathering({ paths, db: records.db, planSha256: plan.contract_gathering, runId: authorization.run.run_id });
+    // The contract the plan sealed is recorded under its SHA-256, against the work order version it came from.
+    if (records && plan.contract_sha256) {
+      await recordContract(records.db, {
+        workOrderId: authorization.workOrderId, contentSha256: plan.task_sha256, contractSha256: plan.contract_sha256, contract: await loadContract(paths, plan.contract_sha256),
+      });
+    }
   } catch (error) {
     if (started) {
       await closeFailedStart(paths, started.run.run_id, error);
@@ -204,12 +209,6 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
     }
     throw error;
   }
-  // The sealed contract is recorded under its SHA-256, against the work order version it came from.
-  const onContractSealed = records
-    ? async (contractSha256) => await recordContract(records.db, {
-      workOrderId: authorization.workOrderId, contentSha256: plan.task_sha256, contractSha256, contract: await loadContract(paths, contractSha256),
-    })
-    : null;
   // The replaced version is delivered here too, in case its own work-start is gone.
   for (const runId of authorization.superseded) {
     await deliverOutcome({ paths, runId, adapter, notify: true })
@@ -228,7 +227,6 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
       runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
       workLock: authorization.workLock,
       onStep,
-      onContractSealed,
     });
   } finally {
     endSteps();
@@ -335,7 +333,7 @@ async function cardForYes({ paths, planName = null, taskFile, options, again }) 
   if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) return refuse("The work order changed after you saw the card. Run: " + again + " and look again.");
   const option = optionAgainstCard(card.body, options);
   if (option) return refuse(option + " is not what the card showed. Run: " + again + " --yes without it, or " + again + " to show the person a new card.");
-  if (await cardUsed(db, card.plan_sha256) || await anyCardGathered(db, [card.plan_sha256])) return refuse("This card was already said yes to; one card starts one run. Run: " + again + " and show the person the new card.");
+  if (await cardUsed(db, card.plan_sha256)) return refuse("This card was already said yes to; one card starts one run. Run: " + again + " and show the person the new card.");
   if (!(card.authorization_expires_at > new Date())) return refuse("The card was valid until " + card.authorization_expires_at.toISOString() + ". Run: " + again + " and show the person the new card.");
   const planPath = options.outPath || planFilePath(paths, card.body, planName);
   await writeJson(planPath, card.body);
@@ -361,6 +359,11 @@ async function planOrSay({ paths, options, command, adapter, inspectionAdapter, 
   try {
     planned = await planFromOptions({ paths, options, command, adapter, inspectionAdapter, batch, line });
   } catch (error) {
+    if (error instanceof WorkOrderFormError) {
+      const absolute = path.resolve(options.taskFile);
+      await refuseForm(await createTranslator(await resolveLocale(paths)), error, { absolute, file: taskFileOf(paths, absolute), again, write });
+      return null;
+    }
     if (!(error instanceof RoleCliNotReadyError)) throw error;
     for (const line of notReadyLines(error, again)) write(line);
     return null;
@@ -369,86 +372,26 @@ async function planOrSay({ paths, options, command, adapter, inspectionAdapter, 
   return planned.plan || null;
 }
 
-// --answer: the questions come from this file's latest gathering. Written back here; the plan after it is the
-// new version's, and it goes on under the yes that paid for the questions, up to the sealed card.
-async function clarifyFromOption({ paths, options, again }) {
-  if (options.yes) throw new Error("--answer and --yes go in two runs: the answer ends at a new card, and the person says yes to that. Run: " + again + " --answer <n|ai|text>");
-  const { db, projectId } = await openRecords(paths);
-  const found = await latestGathering(db, { projectId, fileName: taskFileOf(paths, options.taskFile) });
-  const questions = found?.status === "asking" ? found.outcome.questions : null;
-  if (!questions) throw new Error("This work order is waiting for no answer. Run: " + again);
-  // An answer spends model calls on that yes, so the yes must still hold, as any card's must.
-  if (!(new Date(found.plan.authorization_expires_at) > new Date())) throw new Error("The yes these questions came under was valid until " + found.plan.authorization_expires_at + ". Run: " + again + " and show the person the new card.");
-  const answers = answersFromOption(options.answer, questions);
-  const t = await createTranslator(await resolveLocale(paths));
-  const lines = await writeAnswers({ t, file: path.resolve(options.taskFile), sealedSha256: found.plan.task_sha256, questions, answers });
-  return {
-    clarify: nextClarify(found.plan.clarify || null, { questions, answers, lines }),
-    yesPlanSha256: found.yes_plan_sha256,
-    yes: { by: found.authorized_by, via: found.authorized_via, at: found.authorized_at },
-  };
-}
-
-// One work order, the same way a line goes (DECISIONS 2026-11-06): the card and a first yes, which pays for
-// the gathering; the sealed card and a second yes; the run. --yes says yes to the card printed last, whichever
-// of the two that was. A contract already sealed for this text takes no first card: nothing is left to pay for.
-async function startFile({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again, answered = null, planOptions = {}, planName = null, command = "start" }) {
-  const records = await openRecords(paths);
-  const { db } = records;
+// One work order (Owner 2026-11-08): one card, one yes, the run. The contract was cut by code when the
+// plan was made and the card names it, so no model is called before the yes and nothing is asked after it.
+// --yes says yes to the card printed last.
+async function startFile({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again, planOptions = {}, planName = null, command = "start" }) {
+  const { db } = await openRecords(paths);
   const taskFile = planOptions.taskFile ?? options.taskFile;
-  const planWith = (extra) => planOrSay({ paths, options: { ...options, ...planOptions, ...extra }, command, adapter, inspectionAdapter, again });
-  let plan = options.yes
+  const plan = options.yes
     ? await cardForYes({ paths, planName, taskFile, options, again })
-    : await planWith({ clarify: answered?.clarify ?? null });
+    : await planOrSay({ paths, options: { ...options, ...planOptions }, command, adapter, inspectionAdapter, again });
   if (!plan) return 1;
   const ready = readiness({ options, adapter, loadAdapter, guard, reviewerCheck, plan, again, checkFailureLines });
-  const needsAuthorization = () => write("Needs authorization. If the person says yes, run again: " + again + " --yes");
-  const sealedCard = Boolean(plan.contract_sha256);
-  const t = await createTranslator(await resolveLocale(paths));
-  if (!sealedCard) {
-    const reused = await sealedContractOf(db, paths, plan);
-    // No model call before a yes (Owner 2026-11-06): the read-only check counts, so it comes after this one.
-    if (!reused && !answered) {
-      write("");
-      write(await startCard(paths, plan));
-      await markCardShown(db, plan.plan_sha256);
-      if (!options.yes) {
-        if (!interactive()) { needsAuthorization(); return 1; }
-        if (!(await askYes("Turn it into a contract and ask what it leaves open? [y/N] "))) {
-          await withdrawCard(db, plan.plan_sha256);
-          write("Not started. Nothing was authorized.");
-          return 1;
-        }
-      }
-      write("");
-    }
-    const prepared = reused ? null : await ready();
-    if (!reused && !prepared) {
-      if (!options.yes) await withdrawCard(db, plan.plan_sha256);
-      return 1;
-    }
-    const name = path.posix.basename(plan.task_file);
-    const gathered = await gatherContracts({
-      t, paths, records, adapter: prepared?.adapter, planName,
-      items: [{ plan, name, label: name, absolute: path.resolve(taskFile), reused, yesPlanSha256: answered?.yesPlanSha256 ?? plan.plan_sha256 }],
-      yes: answered?.yes ?? yesOf(options.yes ? "agent" : "terminal"),
-      interactive: interactive(), isLine: false,
-      answerCommand: () => again,
-      // What the person already chose at this terminal is not asked again.
-      planAnswered: (item, clarify) => planWith({ yes: false, breakpoint: item.plan.breakpoint, clarify }),
-    });
-    if (gathered.code !== null) return gathered.code;
-    [plan] = gathered.plans;
-  }
   write("");
   write(await startCard(paths, plan));
   await markCardShown(db, plan.plan_sha256);
-  const yesGiven = sealedCard && options.yes;
+  const yesGiven = Boolean(options.yes);
   if (!yesGiven) {
-    if (!interactive()) { needsAuthorization(); return 1; }
+    if (!interactive()) { write("Needs authorization. If the person says yes, run again: " + again + " --yes"); return 1; }
     if (!(await askYes("Start this work? [y/N] "))) {
       await withdrawCard(db, plan.plan_sha256);
-      write(t("gather.kept"));
+      write("Not started. Nothing was authorized.");
       return 1;
     }
   }
@@ -476,16 +419,15 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, ins
   }
   const directory = await directoryOfTarget(paths, options.taskFile);
   if (directory) {
-    if (options.answer) throw new Error("--answer is about one work order's questions: give its file, not a directory. Run: review-bridge start <file> --answer <n|ai|text>");
     const again = "review-bridge start " + shownPath(directory.absolute).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
     return await startDirectory({
       paths, options, adapter, loadAdapter, guard, reviewerCheck, directory,
       tools: {
         openRecords, interactive, shownPath, checkFailureLines,
         // A role's CLI not ready is said once and ends the card; no card was shown yet to take back.
-        planOne: ({ row, batch, line, clarify = null }) => planOrSay({
+        planOne: ({ row, batch, line }) => planOrSay({
           paths, command: "start", adapter, inspectionAdapter, batch, line, again,
-          options: { ...options, yes: false, taskFile: row.absolute, breakpoint: options.breakpoint || DEFAULT_BREAKPOINT, clarify },
+          options: { ...options, yes: false, taskFile: row.absolute, breakpoint: options.breakpoint || DEFAULT_BREAKPOINT },
         }),
         runPlan: ({ plan, adapter: runAdapter, authorizedVia, onStep }) => runAuthorized({
           paths, options: { ...options, planPath: plan.plan_path }, adapter: runAdapter, approval: plan.plan_sha256, authorizedVia, onStep,
@@ -497,8 +439,7 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, ins
   if (running) { write(running); return 1; }
   // Forward slashes: the command is pasted into any shell, bash included, and Windows takes them.
   const again = "review-bridge start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
-  const answered = options.answer ? await clarifyFromOption({ paths, options, again }) : null;
-  return await startFile({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again, answered });
+  return await startFile({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again });
 }
 
 // `resume <run_id>`: a stopped run is closed for good (its records were sealed by the controller
@@ -517,10 +458,6 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
   const workPackage = control.run.work_package;
   if (!workPackage.task_file) throw new Error("Run " + runId + " was not started from a work order file. Run: review-bridge start <file>");
   const taskFile = path.join(paths.repoRoot, ...workPackage.task_file.split("/"));
-  // A question is answered on start, which writes it back; there is no half-done work here to carry on.
-  if (pendingQuestions(await readRun(paths, runId).catch(() => null))) {
-    throw new Error("Run " + runId + " stopped on questions for you, and resume does not answer those. Run: review-bridge start " + workPackage.task_file);
-  }
   // resume saves one work order and has nothing to do with its directory's line; it waits for that line.
   const running = await fileLineRunning(paths, openRecords, taskFile);
   if (running) { write(running); return 1; }

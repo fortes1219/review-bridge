@@ -70,7 +70,9 @@ test("a budget over the policy's limit is refused with its line and the limit", 
 });
 
 test("blocks run from their marker to the next; an unknown or repeated key is refused with its line", () => {
-  assert.equal(BLOCK_KEYS.length, 18);
+  // clarifications went with the questions (2026-11-08): a work order is a form, filled in by the person.
+  assert.equal(BLOCK_KEYS.length, 17);
+  assert.equal(BLOCK_KEYS.includes("clarifications"), false);
   const read = parseWorkOrder(BODY);
   assert.deepEqual([...read.blocks.keys()], ["requested_work", "acceptance"]);
   assert.deepEqual(read.blocks.get("requested_work").content, [4]);

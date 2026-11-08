@@ -68,14 +68,14 @@ test("blocked only on conditions the tests decide, asking nothing: Bridge's test
   const { run } = await project(t);
   const { started, modes, row } = await run(COULD_NOT_RUN);
   assert.equal(started.status, 0, started.stderr + started.stdout);
-  assert.deepEqual(modes, ["translation", "check", "writer", "review"], "the review is reached");
+  assert.deepEqual(modes, ["writer", "review"], "the review is reached");
   assert.deepEqual(row, { conclusion: "success", closed_reason: "review_pass" });
 });
 
 test("the tests really do decide: a blocked writer whose tests fail is not delivered, and nothing reviews it", { timeout: 180_000 }, async (t) => {
   const { run } = await project(t, { testExit: 1 });
   const { modes, row } = await run(COULD_NOT_RUN);
-  assert.deepEqual(modes, ["translation", "check", "writer"], "failed tests skip the review");
+  assert.deepEqual(modes, ["writer"], "failed tests skip the review");
   assert.notEqual(row.conclusion, "success");
   assert.equal(row.closed_reason, "rounds_exhausted");
 });
@@ -84,7 +84,7 @@ test("status done with a test-decided condition not done is not refused", { time
   const { run } = await project(t);
   const { started, modes, row } = await run({ FAKE_WRITER_CRITERIA: "open", FAKE_WRITER_UNVERIFIED: "could not run the tests here" });
   assert.equal(started.status, 0, started.stderr + started.stdout);
-  assert.deepEqual(modes, ["translation", "check", "writer", "review"]);
+  assert.deepEqual(modes, ["writer", "review"]);
   assert.equal(row.conclusion, "success");
 });
 
@@ -94,7 +94,7 @@ test("blocked and asking the person stops, and says it: the Why has the writer's
   await fsp.writeFile(path.join(root, "left-behind.txt"), "from before\n");
   await fsp.appendFile(path.join(root, "README.md"), "edited before the run\n");
   const { modes, row, result } = await run({ ...COULD_NOT_RUN, FAKE_WRITER_ASKS: "1" });
-  assert.deepEqual(modes, ["translation", "check", "writer"], "no review");
+  assert.deepEqual(modes, ["writer"], "no review");
   assert.equal(row.closed_reason, "needs_human");
   assert.match(result, /Writer reported status: blocked/);
   assert.match(result, /What the writer says it could not check:\n- npm test: spawn EPERM in the sandbox/);
@@ -110,7 +110,7 @@ test("blocked and asking the person stops, and says it: the Why has the writer's
 test("blocked with no test to decide it stops as before", { timeout: 180_000 }, async (t) => {
   const { run } = await project(t, { tests: false });
   const { modes, row, result } = await run(COULD_NOT_RUN);
-  assert.deepEqual(modes, ["translation", "check", "writer"]);
+  assert.deepEqual(modes, ["writer"]);
   assert.equal(row.closed_reason, "needs_human");
   assert.match(result, /npm test: spawn EPERM in the sandbox/);
 });
@@ -119,7 +119,7 @@ test("status done with a condition only the reviewer can judge still not done is
   const { run } = await project(t, { tests: false });
   const { started, modes, row, result } = await run({ FAKE_WRITER_CRITERIA: "open" });
   assert.equal(started.status, 79, started.stderr + started.stdout);
-  assert.deepEqual(modes, ["translation", "check", "writer"]);
+  assert.deepEqual(modes, ["writer"]);
   assert.equal(row.closed_reason, "malformed_writer_result");
   assert.match(result, /\$\.status: done while AC1 is not done/);
 });

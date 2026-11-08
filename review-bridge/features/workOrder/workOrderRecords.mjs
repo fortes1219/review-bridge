@@ -317,88 +317,6 @@ async function writeWorkOrderVersion(tx, { projectId, plan, file, now }) {
   return { workOrderId, versionNo: version.rows[0].version_no };
 }
 
-// The first yes, or an answer that makes a new version under it: for each plan its work order and version
-// exist from here, and a gathering is opened for it, in one transaction. `yes` is who said it, how, when.
-export async function openGatherings(db, { projectId, items, yes }) {
-  return await db.transaction(async (tx) => {
-    const opened = [];
-    for (const { plan, settingsSha256, yesPlanSha256 } of items) {
-      const file = plan.work_order?.file ?? plan.task_file;
-      await lockWorkOrder(tx, { projectId, plan, file });
-      const now = new Date().toISOString();
-      const { workOrderId, versionNo } = await writeWorkOrderVersion(tx, { projectId, plan, file, now });
-      await tx.query(
-        "insert into contract_gatherings (plan_sha256, yes_plan_sha256, work_order_id, content_sha256, settings_sha256, authorized_by, authorized_via, authorized_at, created_at, status)"
-        + " values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'translating')",
-        [plan.plan_sha256, yesPlanSha256, workOrderId, plan.task_sha256, settingsSha256, yes.by, yes.via, yes.at, now],
-      );
-      opened.push({ workOrderId, versionNo });
-    }
-    await tx.query("update projects set last_activity_at = $2 where project_id = $1", [projectId, new Date().toISOString()]);
-    return opened;
-  });
-}
-
-export async function recordGatheringEvent(db, { planSha256, sequence, event }) {
-  const occurredAt = new Date().toISOString();
-  await db.query(
-    "insert into contract_gathering_events (plan_sha256, sequence, occurred_at, event) values ($1, $2, $3, $4)",
-    [planSha256, sequence, occurredAt, { occurred_at: occurredAt, ...event }],
-  );
-}
-
-export async function closeGathering(db, { planSha256, status, contractSha256 = null, outcome = null }) {
-  await db.query("update contract_gatherings set status = $2, contract_sha256 = $3, outcome = $4 where plan_sha256 = $1", [planSha256, status, contractSha256, outcome]);
-}
-
-// The contract this very text was sealed into under these settings, if any: one probe of
-// contract_gatherings_sealed, whatever the history holds.
-export async function sealedGathering(db, { workOrderId, contentSha256, settingsSha256 }) {
-  const { rows } = await db.query(
-    "select g.plan_sha256, g.contract_sha256, v.version_no from contract_gatherings g"
-    + " join work_order_versions v on v.work_order_id = g.work_order_id and v.content_sha256 = g.content_sha256"
-    + " where g.work_order_id = $1 and g.content_sha256 = $2 and g.settings_sha256 = $3 and g.status = 'sealed'"
-    + " order by g.created_at desc limit 1",
-    [workOrderId, contentSha256, settingsSha256],
-  );
-  return rows[0] || null;
-}
-
-// This file's work order's latest gathering, with its plan, for --answer.
-export async function latestGathering(db, { projectId, fileName }) {
-  const workOrderId = await workOrderOfFile(db, { projectId, fileName });
-  if (!workOrderId) return null;
-  const { rows } = await db.query(
-    "select g.plan_sha256, g.yes_plan_sha256, g.authorized_by, g.authorized_via, g.authorized_at, g.status, g.outcome, p.body as plan"
-    + " from contract_gatherings g join plans p on p.plan_sha256 = g.plan_sha256"
-    + " where g.work_order_id = $1 order by g.created_at desc limit 1",
-    [workOrderId],
-  );
-  return rows[0] || null;
-}
-
-// Whether these cards were said yes to as first cards: one card, one yes.
-export async function anyCardGathered(db, planShas) {
-  const { rows } = await db.query("select 1 from contract_gatherings where plan_sha256 = any($1::text[]) limit 1", [planShas]);
-  return rows.length > 0;
-}
-
-// The events of the gathering a run opens on, for the run's own record (bounded by that one gathering).
-// The first run on a contract takes them all, its tokens among them; a later run on the same contract spent
-// none of those, so it takes only the line that says what was sealed.
-export async function takeGatheringEvents(db, planSha256) {
-  const first = await db.query("update contract_gatherings set events_taken_at = now() where plan_sha256 = $1 and events_taken_at is null", [planSha256]);
-  const { rows } = await db.query("select event from contract_gathering_events where plan_sha256 = $1 order by sequence", [planSha256]);
-  const events = rows.map((row) => row.event);
-  return first.rowCount ? events : events.filter((event) => event.event === "contract.sealed");
-}
-
-// The folder a gathering's calls wrote to: its plan's, by primary key.
-export async function gatheringFolderOf(db, planSha256) {
-  const { rows } = await db.query("select proposed_run_id from plans where plan_sha256 = $1", [planSha256]);
-  return rows[0].proposed_run_id;
-}
-
 export async function recordStart(db, { planSha256, authorize }) {
   const recorder = runRecorder();
   if (!recorder) throw new Error("This process keeps no run records; a start is refused.");
@@ -457,7 +375,6 @@ export async function clearProject(db, projectId) {
     await remove("runs", "delete from runs where project_id = $1");
     await remove("authorization_claims", "delete from authorization_claims where authorization_id in (select authorization_id from authorizations where plan_sha256 in (" + plans + "))");
     await remove("authorizations", "delete from authorizations where plan_sha256 in (" + plans + ")");
-    await remove("contract_gatherings", "delete from contract_gatherings where work_order_id in (" + orders + ")");
     await remove("contracts", "delete from contracts where work_order_id in (" + orders + ")");
     await remove("plans", "delete from plans where project_id = $1");
     await remove("work_order_versions", "delete from work_order_versions where work_order_id in (" + orders + ")");

@@ -189,7 +189,7 @@ function bootstrapRun(root, args, expected = 0) {
 async function fakeRun(root, id) {
   const planPath = path.join(projectPaths(root).logRoot, id + ".plan.json");
   const taskPath = path.join(privateOf(root), "work-packages", id + ".md");
-  // A work order with something to check; one without stops at translation and asks the human.
+  // A work order with what it must say; one without is refused before any card.
   await fsp.writeFile(taskPath, "# Update the README\n\n<!-- bridge:requested_work -->\nUpdate README.md only.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n- README.md says hello.\n");
   bootstrapRun(root, ["work-plan", "--fake-cli", "--task-file", taskPath, "--owner", "o", "--work-package", id, "--breakpoint", "b",
     "--allow-paths", "README.md", "--rounds", "2", "--call-timeout", "60000", "--out", planPath]);

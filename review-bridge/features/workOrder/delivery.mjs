@@ -26,7 +26,6 @@ import { workOrderDirectory } from "../../utils/paths.mjs";
 import { nfc } from "../../utils/workOrderName.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
 import { contractPath, loadContract } from "./contract.mjs";
-import { assumptionLines, exhaustedLines, questionLines } from "./clarify.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
 import { parseWorkOrder, UNTITLED } from "./workOrderFormat.mjs";
 import { resultIdentity } from "./workOrderRecords.mjs";
@@ -148,20 +147,21 @@ function number(value) {
 // missing (Codex 2026-10-14: a partial sum was presented as the whole). Calls are counted from
 // the run's own records: one task.input per writer call, one review.input per review minus the
 // reviews the controller decided itself (scope violations), which never called the reviewer.
+// The contract has a row of its own, always: code cuts it from the work order, so it spent nothing (Owner
+// 2026-11-08). A run from before that day shows what translating and checking it spent.
+const CONTRACT_ROLES = Object.freeze(["translator", "contract_checker"]);
+const rowOf = (event) => (CONTRACT_ROLES.includes(event.role) ? "contract" : event.role);
+
 export function tokenRows(events) {
   const count = (predicate) => events.filter(predicate).length;
   const expected = {
+    contract: count((event) => event.event === "usage" && rowOf(event) === "contract"),
     writer: count((event) => event.event === "task.input"),
     reviewer: count((event) => event.event === "review.input") - count((event) => event.event === "review.result" && event.source === "controller"),
   };
-  // Translating and checking the contract come before the writer's first call; each has a row only when it ran.
-  for (const role of ["translator", "contract_checker"]) {
-    const calls = count((event) => event.event === "usage" && event.role === role);
-    if (calls) expected[role] = calls;
-  }
   const rows = {};
   for (const role of Object.keys(expected)) {
-    const usage = events.filter((event) => event.event === "usage" && event.role === role);
+    const usage = events.filter((event) => event.event === "usage" && rowOf(event) === role);
     const readable = usage.filter((event) => !event.parse_error);
     const calls = Math.max(expected[role], usage.length);
     const unreadable = (usage.length - readable.length) + Math.max(0, expected[role] - usage.length);
@@ -238,19 +238,6 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
     if (run.closed_reason === "version_changed") why.push(t(state.changed_after === "test" ? "result.why.version_changed.test" : "result.why.version_changed"));
     if (run.closed_reason === "evidence_unconfirmable") why.push(t("result.why.evidence_unconfirmable"));
     if (run.closed_reason === "scope_unverified") why.push(t("result.why.scope_unverified"));
-    if (state.contract_questions?.length) {
-      why.push(t("result.why.contract.questions"));
-      for (const question of state.contract_questions) why.push("- " + question);
-    }
-    if (state.clarify_questions?.length) {
-      why.push(t("clarify.stopped", { name }));
-      why.push(...questionLines(t, state.clarify_questions));
-    }
-    if (state.clarify_exhausted) why.push(...exhaustedLines(t, workPackage?.clarify?.history));
-    if (run.closed_reason === "contract_unconfirmed") {
-      why.push(t("result.why.contract.unconfirmed"));
-      for (const line of (state.contract_problems || []).slice(0, 10)) why.push("- " + line);
-    }
     if (writer?.needs_human?.length) {
       why.push(t("result.why.needs_human.questions"));
       for (const item of writer.needs_human) why.push("- " + t("result.why.needs_human.question", { question: item.question, options: (item.options || []).join(" / ") }));
@@ -326,7 +313,7 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
 
   // Every way a run ends short of success is met by starting the work order again, said in one line
   // with no command; the closed reason only picks what to do first (Owner 2026-11-04).
-  const next = [t(kind === "success" ? "result.next.success" : state.clarify_questions?.length ? "result.next.answer" : NEXT_STEP[run.closed_reason] || "result.next.start_again")];
+  const next = [t(kind === "success" ? "result.next.success" : NEXT_STEP[run.closed_reason] || "result.next.start_again")];
 
   // The changed list is computed at delivery time. A late delivery (prune after a crash, days on)
   // would otherwise present the owner's later edits as the run's work; it says so instead.
@@ -376,7 +363,7 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
   }
 
   const line = oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run });
-  return { name, head, acceptance, assumptions: assumptionLines(t, contract?.assumptions), orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, claimed, startUncommitted, tokens, line, calls };
+  return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, claimed, startUncommitted, tokens, line, calls };
 }
 
 // RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
@@ -384,12 +371,12 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
 function acceptanceSection({ t, contract, events, writer, review, gate }) {
   const decided = last(events, "acceptance");
   const reviewInput = last(events, "review.input");
-  const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review, test: gate, reviewVersion: reviewInput?.work_version || null }) : []);
+  const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review }) : []);
   if (!rows.length) return [];
   const version = decided?.review_version || reviewInput?.work_version || gate?.work_version || null;
   const lines = rows.map((row) => "- " + t("result.acceptance.row", {
     id: row.id, result: t("result.acceptance." + row.result), statement: row.statement,
-    verdict: row.verdict || t("result.acceptance.none"), gate: t("result.acceptance.gate." + row.test), evidence: row.evidence || t("result.acceptance.none"),
+    verdict: row.verdict || t("result.acceptance.none"), evidence: row.evidence || t("result.acceptance.none"),
   }));
   if (version?.kind === "git") lines.push(t(version.dirty ? "result.acceptance.version.dirty" : "result.acceptance.version.git", { head: String(version.head || "none").slice(0, 12) }));
   else if (version) lines.push(t("result.acceptance.version.unknown"));
@@ -456,7 +443,6 @@ export function renderResult({ t, sections, identity = [] }) {
       ...why,
       ...(trimmed ? [t("result.content_trimmed")] : []),
       "",
-      ...((sections.assumptions || []).length ? ["## " + t("result.section.assumptions"), ...(trimmed ? [] : sections.assumptions.map((line) => clipLine(line, clip))), ...(trimmed ? [t("result.content_trimmed")] : []), ""] : []),
       "## " + t("result.section.next"),
       ...sections.next,
       "",

@@ -49,7 +49,7 @@ Then, in Claude Code, type:
 /review-bridge start .review-bridge/work-packages/add-readme.md
 ```
 
-In Codex the same thing is `$review-bridge start .review-bridge/work-packages/add-readme.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, prints a card and stops with `Needs authorization`. No model has been called yet. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. That first yes pays for the contract: Bridge checks once per page session that the reviewer cannot write files, the writer and the reviewer turn the work order into a contract, and anything they cannot settle comes back to you as a question, outside any run. When the contract is sealed, a second card names it, and the agent asks you again. Only that second yes starts a run, and from there nothing is asked. The authorization records that it came through an agent. A sealed contract is kept: saying no to the second card, or starting the same text again, does not pay for it twice. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in the work order's own folder, `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. Beside it is the sealed contract the result names, `contract.v<version>.<short SHA-256>.json`. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
+In Codex the same thing is `$review-bridge start .review-bridge/work-packages/add-readme.md`. The agent runs `start`, which checks that the work order says what it must (what to do, and an acceptance list), copies each block into the contract and cuts the acceptance list into conditions, all by code, then seals the work order, the contract, its scope, budget and verification into a plan, prints one card naming the contract and stops with `Needs authorization`. No model has been called. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. That one yes starts the run: Bridge checks once per page session that the reviewer cannot write files, and from there nothing is asked. The authorization records that it came through an agent. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in the work order's own folder, `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. Beside it is the sealed contract the result names, `contract.v<version>.<short SHA-256>.json`. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
 
 `/review-bridge` takes the same four actions as the commands below: `start <file>`, `stop <run_id>`, `resume <run_id>` and `clean [<run_id>]`.
 
@@ -107,10 +107,11 @@ source_id: SHOP-412         # your own tracker's id; Bridge stores it and never 
 ```
 
 - Any other key is refused, with its line. So is a value out of range: a priority or effort that is not one of the values above, a budget value that is not a positive whole number, or one above the policy's limit (the refusal names the limit).
-- `writer` holds for every writer call: the work, each fix and the contract translation. `reviewer` holds for every reviewer call: the contract check and each review. A key you leave out comes from the policy's priority table. Who fills each role is not here: that is `bridge.json`, or `--writer` and `--reviewer` for one run, and the card names them.
+- `writer` holds for every writer call: the work and each fix. `reviewer` holds for every reviewer call: each review. A key you leave out comes from the policy's priority table. Who fills each role is not here: that is `bridge.json`, or `--writer` and `--reviewer` for one run, and the card names them.
 - A model must belong to the role's CLI, or the work order is refused before the card: for `claude`, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a name with `claude-` in it; for `codex`, a name starting `gpt-`, `codex-` or `o` and a digit. A model from a custom Codex provider goes in Codex's own config, with `model` left out here.
 - A top-level `effort` is still read, as `writer.effort`; writing both is refused.
 - Each value is settled in a fixed order: a flag given at the terminal (`--rounds`, `--call-timeout`), then the work order, then the policy's priority table (effort and model), then the policy's limits. The plan records each value with the layer it came from (`cli`, `work_order`, `priority`, `config`), and the card shows both.
+- `tokens` and `tokens_per_call` are the writer's budget. They count what a call reads new, writes to the cache and writes out; cache reads are listed apart in the result's token table and do not count, so a writer carrying a long context is not stopped halfway. The reviewer's usage is recorded in the same table and counts against no budget.
 - `run_timeout` is the run's own time limit, like a GitHub Actions job's `timeout-minutes` (default 6 hours). A run that reaches it is closed as `timed_out` with the reason `run_timeout`; every call is cut to the time left.
 
 ### Body
@@ -128,32 +129,22 @@ Fix the total in CheckoutSummary so it is recalculated once a discount is applie
 
 <!-- bridge:acceptance -->
 ## Acceptance
-1. After a valid discount code, the total shows the discounted amount within one second.
-2. After an invalid code, the total is unchanged and an error message is shown.
+- After a valid discount code, the total shows the discounted amount within one second.
+- After an invalid code, the total is unchanged and an error message is shown.
 ```
 
 - The first line starting with `# ` is the title. Without one the work order is `untitled`; its results go under `results/untitled/`, named after its file.
 - A block runs from its `<!-- bridge:<key> -->` line to the next marker or the end of the file. The `##` headings are for people, in any language; Bridge does not read them.
-- The keys are exactly these 18: `context`, `outcome`, `requested_work`, `run_plan`, `scope_notes.include`, `scope_notes.exclude`, `scope_notes.must_keep`, `scope_notes.expected_locations`, `acceptance`, `verification_hints`, `reproduction.environment`, `reproduction.steps`, `reproduction.actual`, `reproduction.expected`, `reproduction.frequency`, `references`, `open_questions`. An unknown key, or a key used twice, is refused with its line.
-- The smallest work order is a title and what you want, in any words. Without an `acceptance` block, the reviewer proposes conditions and you choose (see below). The `clarifications` block is Bridge's: it holds your answers. A line there that leaves the later details to the AI holds on every later start, until you delete it.
-- `open_questions`: a block holding only `none` (or `無`), or nothing, means there are none. Any other line is one question, and the work stops before any model call until you answer it in the work order.
+- The keys are exactly these 17: `context`, `outcome`, `requested_work`, `run_plan`, `scope_notes.include`, `scope_notes.exclude`, `scope_notes.must_keep`, `scope_notes.expected_locations`, `acceptance`, `verification_hints`, `reproduction.environment`, `reproduction.steps`, `reproduction.actual`, `reproduction.expected`, `reproduction.frequency`, `references`, `open_questions`. An unknown key, or a key used twice, is refused with its line.
+- A work order is a form with two required blocks: `requested_work` (or a `run_plan`) and `acceptance`. Every other block is copied when written and left empty when not. See below for what happens when one is missing.
+- `open_questions`: a block holding only `none` (or `無`), or nothing, means there are none. Any other line is one question, and `start` stops before the card until you answer it in the work order.
 - Frontmatter, the title, markers, `##` and `###` headings and blank lines are structure. Any other line outside every block is kept in the contract as an unused line.
 
-### When a work order stops to ask you
+### From work order to contract
 
-Between turning the work order into a contract and sealing it, the reviewer may find something open. Bridge asks only what would change the work or whether a condition passes, at most three questions (`limits.clarify_questions`) and for at most three rounds (`limits.clarify_rounds`). Details you would not care about, and anything the ecosystem has a convention for, take the recommended reading, and the result lists them under `Readings adopted`.
+Turning a work order into a contract is a form check, not reasoning, and no model takes part: its token count is 0 in the result's token table. Each block is copied into the contract field of its name as written, and the acceptance list is cut into conditions the way Markdown cuts a list (markdown-it's rule, the one VitePress uses): each item of the outermost list is one condition, with the lines under it. Each item starts with `- ` (or `* `, `+ `, `1. `); `一、` and `（1）` are not list markers, so a line written with them is refused, and the refusal says how to write it.
 
-Each question comes at the terminal, in yellow, with up to three ready-made ways of doing it, the most usual first, and two ways out: let the AI decide (the recommended reading, for this and every later detail), or say it yourself in a line of words. Your answer is added at the end of your work order, under its own marker, and nothing you wrote changes:
-
-```markdown
-<!-- bridge:clarifications -->
-## Clarifications
-- 2026-11-06 11:52 About "How should it shine?": A moving gradient, like the hover the project already has.
-```
-
-That makes a new version of the work order, so the card comes again and takes a new yes: you authorize the work order as it is now. Ctrl+C leaves the work order as it was; the next `start` is a new start.
-
-Through an agent, the questions are printed and the agent asks you. It passes on what you said with `start <file> --answer 2 --answer "rounder"`, one per question in order, or `--answer ai`.
+When a required block is missing or empty, or a line of the list is not an item, `start` stops before the card and names each one. If you deleted a required block's marker, Bridge writes the marker and its heading back at the end of your work order, and nothing you wrote changes. Fill it in and run `start` again. In a directory, one work order short of what it must say stops the whole line before the card, and each is named at once. The writer refuses a contract without what to do or without a condition, whatever made it.
 
 ### Run plan
 
@@ -272,8 +263,6 @@ Options:
       Make this a new work order (boolean)
   --yes
       The person said yes to the card; an agent adds this after showing them the card (boolean)
-  --answer <n|ai|text>
-      The person's answer to the question the work order stopped on: one per question, in order; a reading's number, ai to hand the work order to the AI, or their own words (string; default: asked at a terminal)
   --project <folder>
       The project folder (string; default: the current folder)
 
@@ -747,9 +736,9 @@ npm uninstall -g review-bridge    # remove a project's setup first: review-bridg
 
 - A missing, malformed, expired or consumed authorization fails closed.
 - The writer and the reviewer run in separate sessions, also when one provider fills both; the reviewer is read-only. With `codex` that is an OS sandbox that denied a real write. With `claude` it is a session in plan mode holding only `Read`, `Grep` and `Glob`, as its own `init` event shows; if your Claude Code keeps other tools there (an MCP connector, say), the check does not pass and the work does not start.
-- Your personal connectors stay out of the sessions Bridge starts. With Claude Code, none of its calls load your MCP servers, and a project's `.mcp.json` reaches the writer only. A translation session that still lists an MCP tool is not used, and the run stops and says which. With Codex, apps and plugins are off in every call, and each server in `codex mcp list` is turned off by name; if that list cannot be read, the work does not start. To let a server through to the reviewer, name it in the project policy's `reviewer.mcp_allow`: it goes through as it is, nothing shows it cannot write, and the card says so. Only the reviewer's calls keep it; the writer and the translation do not. A Claude reviewer takes it from the project's `.mcp.json`.
+- Your personal connectors stay out of the sessions Bridge starts. With Claude Code, none of its calls load your MCP servers, and a project's `.mcp.json` reaches the writer only. With Codex, apps and plugins are off in every call, and each server in `codex mcp list` is turned off by name; if that list cannot be read, the work does not start. To let a server through to the reviewer, name it in the project policy's `reviewer.mcp_allow`: it goes through as it is, nothing shows it cannot write, and the card says so. Only the reviewer's calls keep it; the writer's do not. A Claude reviewer takes it from the project's `.mcp.json`.
 - Bridge runs the verification command itself before the reviewer's verdict can pass.
-- Native model work starts only on your yes to the card (at the terminal, or through an agent with `--yes`) and only after the reviewer's read-only check passed in the local page service; `start` and `resume` run that check right after the first yes, and it is the first model call they make. The second yes, to the sealed card, is the one that starts work. Keeping an agent from saying yes on its own is the agent tool's job (its permission prompts), not Bridge's.
+- Native model work starts only on your yes to the card (at the terminal, or through an agent with `--yes`) and only after the reviewer's read-only check passed in the local page service; `start` and `resume` run that check right after the yes, and it is the first model call they make. There is one card and one yes. Keeping an agent from saying yes on its own is the agent tool's job (its permission prompts), not Bridge's.
 - Bridge state must be on a local filesystem; synchronized and network folders (OneDrive, Dropbox, iCloud Drive, UNC, NFS, SMB) are refused.
 
 ## Platforms

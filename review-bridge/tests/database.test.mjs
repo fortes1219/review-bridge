@@ -41,12 +41,29 @@ test("the migrations make the records' tables once, in name order", { timeout: 1
   const names = (await migrationFiles()).map((file) => file.name);
   assert.deepEqual(await applyMigrations(client), names);
   assert.deepEqual(await tables(client), [
-    "acceptance_decisions", "acceptance_rows", "authorization_claims", "authorizations", "contract_gathering_events", "contract_gatherings", "contracts", "plans", "policy_snapshots",
+    "acceptance_decisions", "acceptance_rows", "authorization_claims", "authorizations", "contracts", "plans", "policy_snapshots",
     "projects", "review_findings", "review_results", "review_verdicts", "run_events", "runs", "schema_migrations", "test_results", "work_order_versions", "work_orders",
   ]);
   assert.deepEqual(await applyMigrations(client), [], "nothing is applied twice");
   assert.deepEqual((await client.query("select name from schema_migrations order by name")).rows.map((row) => row.name), names);
   assert.equal(path.basename(MIGRATIONS_DIR), "migrations");
+});
+
+// RC3-COST-01 (Owner 2026-11-08): a database that gathered contracts before that day loses the two tables
+// and nothing else when it is upgraded.
+test("an upgrade from a database with the contract gatherings drops those two tables and keeps every other row", { timeout: 120_000 }, async (t) => {
+  const { client } = await database(t);
+  const before = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-migrations-before-"));
+  t.after(() => fsp.rm(before, { recursive: true, force: true }));
+  for (const file of await migrationFiles()) if (file.name < "2026-11-08") await fsp.writeFile(path.join(before, file.name), file.sql);
+  await applyMigrations(client, { dir: before });
+  assert.ok((await tables(client)).includes("contract_gatherings"));
+  const at = new Date().toISOString();
+  await client.query("insert into projects (project_id, root_path, name, created_at, last_activity_at) values ('00000000-0000-4000-8000-000000000001', 'C:/farm', 'farm', $1, $1)", [at]);
+  assert.deepEqual(await applyMigrations(client), ["2026-11-08-1000-drop-contract-gatherings.sql"]);
+  const after = await tables(client);
+  assert.equal(after.includes("contract_gatherings") || after.includes("contract_gathering_events"), false);
+  assert.deepEqual((await client.query("select name, root_path from projects")).rows, [{ name: "farm", root_path: "C:/farm" }]);
 });
 
 test("a migration that fails is rolled back whole; the ones before it stay", { timeout: 120_000 }, async (t) => {

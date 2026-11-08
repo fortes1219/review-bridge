@@ -41,12 +41,11 @@ Rules of evidence (fixed):
 11. `verdicts` has one entry for every condition in `contract.acceptance`, by id, once each:
     `pass` with the evidence that shows it (a file and line, or the test output),
     `fail` with a finding whose `acceptance_ref` is that id, or `cannot_verify` saying what is
-    missing. A condition whose `verify` names `test` leans on `test_result`; it was run on
-    `test_result.work_version`, and you read `work_version`. `gate` is PASS only when no
-    condition fails. Bridge decides from the verdicts: a condition that is not shown to pass is
+    missing. Each condition is the person's own words, cut from their list; judge what it says.
+    `test_result`, when there is one, was run on `test_result.work_version`, and you read
+    `work_version`; a test that bears on a condition is evidence for it. `gate` is PASS only when
+    no condition fails. Bridge decides from the verdicts: a condition that is not shown to pass is
     not delivered as passed. With no contract, `verdicts` is empty.
-12. The contract's `clarifications` are the person's own answers and its `assumptions` are what
-    was settled for them. Judge the work by them; a choice they settle is not a finding.
 
 Rules the owner set for this workspace:
 {{RULES}}

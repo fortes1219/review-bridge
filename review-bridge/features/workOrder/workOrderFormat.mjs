@@ -8,10 +8,13 @@ import { createRequire } from "node:module";
 import { PRIORITIES, validModel } from "../../policy/policyRules.mjs";
 
 // The YAML parser is loaded on the first work order read, like every other dependency of the
-// runtime, so a command that reads none does not need it.
+// runtime, so a command that reads none does not need it; markdown-it, which cuts the acceptance
+// lists, the same way.
 const require = createRequire(import.meta.url);
 let yaml = null;
 const yamlParser = () => (yaml ??= require("yaml"));
+let markdown = null;
+const markdownParser = () => (markdown ??= require("markdown-it")());
 const isMap = (node) => yamlParser().isMap(node);
 const isScalar = (node) => yamlParser().isScalar(node);
 const isSeq = (node) => yamlParser().isSeq(node);
@@ -28,8 +31,12 @@ export const BLOCK_KEYS = Object.freeze([
   "scope_notes.include", "scope_notes.exclude", "scope_notes.must_keep", "scope_notes.expected_locations",
   "acceptance", "verification_hints",
   "reproduction.environment", "reproduction.steps", "reproduction.actual", "reproduction.expected", "reproduction.frequency",
-  "references", "open_questions", "clarifications",
+  "references", "open_questions",
 ]);
+// What a work order must say (Owner 2026-11-08): what to do, and the list that says when it is done.
+// Everything else is copied when written and left empty when not. A work order without them is not
+// started, as a form without its required fields is not sent.
+export const REQUIRED_BLOCKS = Object.freeze(["requested_work", "acceptance"]);
 const RUN_KEYS = Object.freeze(["effort", "budget", "depends_on", "acceptance"]);
 // The shortest call timeout a work order or a flag may ask for, as before.
 export const MIN_CALL_TIMEOUT = 60_000;
@@ -49,6 +56,20 @@ export class WorkOrderFormatError extends Error {
     super("The work order does not follow the work order format:\n" + problems.map((problem) => "  " + problem).join("\n"));
     this.name = "WorkOrderFormatError";
     this.problems = problems;
+  }
+}
+
+// A work order that splits but lacks what it must say (formProblems): the person's to fix, in their
+// words, which the command prints from `form`.
+export class WorkOrderFormError extends Error {
+  constructor(form) {
+    super("The work order lacks what it must say:" + [
+      ...form.missing.map((key) => " " + key + " is empty or missing;"),
+      ...form.loose.map((line) => " line " + line + " is no item of the acceptance list;"),
+      ...form.questions.map((entry) => " line " + entry.line + " is a question still open;"),
+    ].join(""));
+    this.name = "WorkOrderFormError";
+    this.form = form;
   }
 }
 
@@ -307,7 +328,7 @@ export function parseWorkOrder(text) {
     if (current) current.content.push(number);
     else unused.push(number);
   }
-  // Only a work order that says nothing at all is refused; one sentence is enough, and has no title line.
+  // A work order that says nothing is no work order; what it must say is formProblems' to tell.
   if (!lines.slice(frontmatter.end).some((line) => !isBlank(line))) problems.push("line " + (frontmatter.end + 1) + ": the work order says nothing; write what you want done");
   title ??= { line: null, text: UNTITLED };
   // An empty run_plan block, as the template ships it, is no run plan.
@@ -330,6 +351,78 @@ export function parseWorkOrder(text) {
     ],
     open_questions: noQuestions ? [] : questions.map((number) => ({ question: lines[number - 1].trim(), source_refs: [{ start: number, end: number }] })),
     unused,
+  };
+}
+
+// A list item's own words: its first line without the marker, the lines under it as written.
+const LIST_MARKER = /^\s*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)/;
+
+// One acceptance list, cut the way Markdown cuts a list (markdown-it's list rule, the one VitePress
+// renders with): each item of the outermost list is one condition, with every line under it, a nested
+// list included. A content line no item holds is loose: the list cannot be cut there. "一、" and "（1）"
+// are no list markers in Markdown, so a line written with them is loose.
+function cutList(lines, numbers) {
+  if (!numbers.length) return { items: [], loose: [] };
+  const first = numbers[0];
+  const held = new Set(numbers);
+  // The block's stretch of the file, with what is not its content (a heading) left blank, so a token's
+  // line is a file line.
+  const stretch = [];
+  for (let number = first; number <= numbers[numbers.length - 1]; number += 1) stretch.push(held.has(number) ? lines[number - 1] : "");
+  // A run's list is written indented under "- acceptance:"; Markdown would read four spaces as code.
+  const lead = (line) => line.length - line.trimStart().length;
+  const indent = Math.min(...stretch.filter((line) => line.trim()).map(lead));
+  const text = stretch.map((line) => line.slice(Math.min(indent, lead(line)))).join("\n");
+  const items = [];
+  const covered = new Set();
+  for (const token of markdownParser().parse(text, {})) {
+    if (token.type !== "list_item_open" || token.level !== 1) continue;
+    const numbersOfItem = [];
+    for (let index = token.map[0]; index < token.map[1]; index += 1) {
+      const number = first + index;
+      if (held.has(number) && !isBlank(lines[number - 1])) numbersOfItem.push(number);
+    }
+    const words = numbersOfItem.map((number, index) => (index ? lines[number - 1].trim() : lines[number - 1].replace(LIST_MARKER, "").trim()));
+    if (!words.join("").trim()) continue;
+    for (const number of numbersOfItem) covered.add(number);
+    items.push({ source_refs: rangesOf(numbersOfItem, lines), statement: words.filter(Boolean).join("\n") });
+  }
+  return { items, loose: numbers.filter((number) => !isBlank(lines[number - 1]) && !covered.has(number)) };
+}
+
+// The conditions of a work order, cut by code: its acceptance list, then each run's own, in order.
+export function conditionsOf(format) {
+  const conditions = [];
+  const loose = [];
+  for (const block of format.acceptance) {
+    const cut = cutList(format.lines, block.lines);
+    loose.push(...cut.loose);
+    conditions.push(...cut.items.map((item) => ({ run: block.run, ...item })));
+  }
+  return { conditions, loose };
+}
+
+// What keeps a work order from being started, as a form validation would say it: each required block
+// that is missing or empty (`missing`; `unmarked` are those whose marker is gone, which Bridge writes back),
+// and each acceptance line that is no item of a list (`loose`). A run plan's runs say what to do, and each
+// run's own list counts as acceptance.
+export function formProblems(format) {
+  const has = {
+    requested_work: Boolean(format.blocks.get("requested_work")?.content.length) || Boolean(format.runs?.length),
+    acceptance: format.acceptance.length > 0,
+  };
+  const missing = REQUIRED_BLOCKS.filter((key) => !has[key]);
+  const cut = conditionsOf(format);
+  // A list with nothing cut from it and no loose line to point at (only empty items) is missing too.
+  if (has.acceptance && !cut.conditions.length && !cut.loose.length) missing.push("acceptance");
+  // The questions the person left in the work order are theirs to answer before it starts.
+  const questions = format.open_questions.map((entry) => ({ line: entry.source_refs[0].start, question: entry.question }));
+  return {
+    missing,
+    unmarked: missing.filter((key) => !format.blocks.has(key)),
+    loose: cut.loose,
+    questions,
+    ok: !missing.length && !cut.loose.length && !questions.length,
   };
 }
 

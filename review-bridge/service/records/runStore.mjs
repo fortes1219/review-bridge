@@ -31,7 +31,7 @@ export const CLOSED_REASONS = Object.freeze([
   "review_pass", "review_hard_stop", "runtime_policy_identity_changed", "stopped", "superseded", "database_unavailable",
   "rate_limited", "cancelled", "policy_failure",
   "rounds_exhausted", "writer_timeout", "writer_failed", "reviewer_failed", "controller_failure",
-  "token_limit", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
+  "token_limit", "reference_changed", "contract_rejected", "contract_changed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
   "needs_human", "malformed_writer_result", "malformed_review_result", "run_timeout", "evidence_unavailable",
 ]);
 // Closed by the stop command, by a start of a newer version, because the database went away, or
@@ -41,7 +41,7 @@ export const STOP_REASONS = Object.freeze(["stopped", "superseded", "database_un
 // closes; from then on the run is settled, and a stop cannot take it over.
 const SETTLING_STATES = new Set(["pass", "hard_stop", "rate_limited"]);
 const ACTION_REQUIRED = new Set([
-  "hard_stop", "needs_human", "rounds_exhausted", "contract_unconfirmed", "acceptance_unverified",
+  "hard_stop", "needs_human", "rounds_exhausted", "acceptance_unverified",
   "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
 ]);
 
@@ -352,9 +352,7 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     ...(input.references !== undefined ? { references: structuredClone(input.references) } : {}),
     ...(input.test !== undefined ? { test: structuredClone(input.test) } : {}),
     ...(input.task_file !== undefined ? { task_file: input.task_file } : {}),
-    ...(input.contract_steps ? { contract_steps: structuredClone(input.contract_steps) } : {}),
-    ...(input.clarify ? { clarify: structuredClone(input.clarify) } : {}),
-    // The contract the yes covered, when it was sealed before the run.
+    // The contract the yes covered: code cut it from the work order when the plan was made.
     ...(input.contract_sha256 ? { contract_sha256: input.contract_sha256 } : {}),
     // The priority this work runs at, and each role's model and effort, as the plan settled them.
     ...(input.priority ? { priority: input.priority, writer: structuredClone(input.writer), reviewer: structuredClone(input.reviewer) } : {}),

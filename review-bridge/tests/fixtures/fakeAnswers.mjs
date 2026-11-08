@@ -12,8 +12,6 @@ import { getBridgePaths } from "../../utils/paths.mjs";
 const stateRoot = () => getBridgePaths(process.cwd(), path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."), { privateRootName: ".review-bridge" }).stateRoot;
 
 export function modeOf(prompt) {
-  if (prompt.includes("[REVIEW_BRIDGE_MODE: CONTRACT_TRANSLATION]")) return "translation";
-  if (prompt.includes("[REVIEW_BRIDGE_MODE: CONTRACT_CHECK]")) return "check";
   if (prompt.includes("[REVIEW_BRIDGE_MODE: WRITER_ONLY]")) return "writer";
   if (prompt.includes("You are the independent reviewer")) return "review";
   if (prompt.includes("sandbox self-test")) return "probe";
@@ -26,27 +24,6 @@ export function logCall(cli, mode, details = {}) {
 }
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Conditions read off the numbered acceptance blocks in the prompt: every line becomes one condition
-// quoting its text, a list marker left out. FAKE_CONTRACT_FILE replaces it with a prepared answer,
-// or with an array of answers, one per attempt, so a test can hand the harness anything.
-export function translationAnswer(prompt) {
-  const attempt = Number(/Attempt: (\d+)/.exec(prompt)?.[1] || 1);
-  if (process.env.FAKE_CONTRACT_FILE) {
-    const prepared = JSON.parse(fs.readFileSync(process.env.FAKE_CONTRACT_FILE, "utf8"));
-    return Array.isArray(prepared) ? prepared[Math.min(attempt, prepared.length) - 1] : prepared;
-  }
-  const numbered = [...prompt.matchAll(/^ *(\d+)\| (.*)$/gm)].map((match) => ({ line: Number(match[1]), text: match[2] }));
-  const gate = prompt.includes("Bridge will run this verification");
-  const acceptance = numbered.map((entry, index) => {
-    const text = /^\s*(?:\d+[.)]|[-*])\s+(.+)$/.exec(entry.text)?.[1] ?? entry.text.trim();
-    return {
-      id: "AC" + (index + 1), statement: text, quote: text, source_refs: [{ start: entry.line, end: entry.line }],
-      verify: [gate ? { kind: "test", check: null } : { kind: "reviewer", check: "fake: the reviewer reads the change" }],
-    };
-  });
-  return { event: "contract.translation", acceptance };
-}
 
 // FAKE_CONTRACT_TAMPER=1 makes the writer rewrite the sealed contract file, as a model trying to
 // change its own instructions would.
@@ -141,47 +118,6 @@ export function writerAnswer(prompt) {
     needs_human: resultMode === "NEEDS_HUMAN" || process.env.FAKE_WRITER_ASKS === "1" ? [{ question: "which colour?", options: ["red", "blue"] }] : [],
     addressed_findings: [...new Set(addressed)],
     criteria: criteriaOutput(prompt),
-  };
-}
-
-// One question as the reviewer gives it.
-export const fakeQuestion = ({ question = "Which page should show the farm?", refs = [{ start: 1, end: 1 }], blocks = "verification", convention = false, acceptance_proposal = false, readings = ["The home page", "A page of its own"] } = {}) => ({
-  question, source_refs: refs, blocks, convention, acceptance_proposal,
-  readings: readings.map((text) => (typeof text === "string" ? { text, precedent: { source: "knowledge", note: "the usual way" } } : text)),
-});
-
-// FAKE_CHECK_SCRIPT=<file>: an array of { when, unless, ambiguities }; the first whose `when` the prompt
-// holds and whose `unless` it does not gives this check's questions, so a test can script the rounds.
-// `malformed` leaves the answer's shape broken (a missing field).
-function scriptedCheck(prompt) {
-  if (!process.env.FAKE_CHECK_SCRIPT) return null;
-  const script = JSON.parse(fs.readFileSync(process.env.FAKE_CHECK_SCRIPT, "utf8"));
-  return script.find((entry) => (!entry.when || prompt.includes(entry.when)) && (!entry.unless || !prompt.includes(entry.unless))) || { ambiguities: [] };
-}
-
-// The contract check: every condition judged faithful unless FAKE_CONTRACT_CHECK asks for one
-// of the other outcomes the harness must handle. "_first" outcomes apply to attempt 1 only.
-export function checkAnswer(prompt) {
-  const mode = process.env.FAKE_CONTRACT_CHECK || "faithful";
-  const attempt = Number(/Attempt: (\d+)/.exec(prompt)?.[1] || 1);
-  const sha256 = /^Candidate: ([0-9a-f]{64})$/m.exec(prompt)?.[1] || "0".repeat(64);
-  const open = prompt.indexOf("=== CANDIDATE CONDITIONS ===");
-  const close = prompt.indexOf("=== END CANDIDATE CONDITIONS ===");
-  const conditions = JSON.parse(prompt.slice(open + "=== CANDIDATE CONDITIONS ===".length, close));
-  const wrong = mode === "unfaithful_always" || (mode === "unfaithful_first" && attempt === 1);
-  const ids = conditions.map((item) => item.id);
-  const scripted = scriptedCheck(prompt);
-  if (scripted?.malformed) return { event: "contract.check", candidate_sha256: sha256, acceptance: ids.map((id) => ({ id, faithful: true, note: null })), missing: [], ambiguities: scripted.malformed, cannot_confirm: false, cannot_confirm_reason: null };
-  return {
-    event: "contract.check",
-    candidate_sha256: sha256,
-    acceptance: (mode === "skip_ac" ? ids.slice(0, -1) : ids).map((id, index) => ({
-      id, faithful: !(wrong && index === 0), note: wrong && index === 0 ? "says more than its lines" : null,
-    })),
-    missing: mode === "missing_first" && attempt === 1 ? [{ source_refs: [{ start: 1, end: 1 }], note: "fake: a stated requirement was left out" }] : [],
-    ambiguities: scripted ? scripted.ambiguities : mode === "ambiguous" ? [fakeQuestion()] : [],
-    cannot_confirm: mode === "cannot_confirm",
-    cannot_confirm_reason: mode === "cannot_confirm" ? "fake: the work order refers to a design not given" : null,
   };
 }
 

@@ -82,7 +82,7 @@ async function runFakeScenarios(target, privateName) {
   for (const scenario of scenarios) {
     const id = "init-self-test-" + scenario.name.toLowerCase().replaceAll("_", "-");
     const taskPath = path.join(workRoot, id + ".md");
-    // A minimal work order: the fake translation turns its one acceptance line into AC1.
+    // A minimal work order: its one acceptance item is cut into AC1.
     await fsp.writeFile(taskPath, [
       "# Review Bridge self-test",
       "",

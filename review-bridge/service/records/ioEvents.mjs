@@ -8,7 +8,7 @@ import path from "node:path";
 import { appendTextDurable, readLastLine, writeTextAtomicDurable } from "./fileStore.mjs";
 import {
   DatabaseUnavailableError, eventLine, eventRecordsAfter, lastEventSequence, numberedLine, recordsDatabase, replayUnrecorded, runRecorder,
-  runUsageTotal, tokenTotal,
+  budgetTokens, runUsageTotal,
 } from "./runRecords.mjs";
 import { rebuildRunFiles, RunFilesAheadError, writeUnderRunLock } from "./runStore.mjs";
 
@@ -125,9 +125,10 @@ export async function appendIoEvent(paths, runId, event, clock = Date.now) {
   return record;
 }
 
-// T0-05 D5.3: the per-run ceiling counts writer and reviewer together. With records it is the run's
-// running total, read by primary key (RC3-FIX-01); a process that keeps no records, a run the database
-// does not know, and a database that cannot be reached sum the file's usage events, as before.
+// The per-run ceiling is the writer's (Owner 2026-11-08, replacing T0-05 D5.3's writer and reviewer
+// together), without cache reads (budgetTokens). With records it is the run's running total, read by primary
+// key (RC3-FIX-01); a process that keeps no records, a run the database does not know, and a database that
+// cannot be reached sum the file's usage events, as before.
 export async function usageTotalForRun(paths, runId) {
   const database = recordsDatabase();
   if (database) {
@@ -139,5 +140,5 @@ export async function usageTotalForRun(paths, runId) {
     }
   }
   const events = parseFile(await fileText(paths, runId)).events;
-  return events.filter((event) => event.event === "usage").reduce((sum, event) => sum + tokenTotal(event.tokens), 0);
+  return events.filter((event) => event.event === "usage" && event.role === "writer").reduce((sum, event) => sum + budgetTokens(event.tokens), 0);
 }

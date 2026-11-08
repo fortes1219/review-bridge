@@ -10,7 +10,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { orderWorkOrders, signedOutProvider, stepOf, stopOfRun } from "../features/workOrder/line.mjs";
-import { latestCardsOfFiles, latestGathering, latestRunsOfFiles, sealedGathering } from "../features/workOrder/workOrderRecords.mjs";
+import { latestCardsOfFiles, latestRunsOfFiles } from "../features/workOrder/workOrderRecords.mjs";
 import { isPidAlive } from "../service/agentCli/process.mjs";
 import { activeLineSteps } from "../service/records/runRecords.mjs";
 import { connect } from "../service/database/postgresServer.mjs";
@@ -97,14 +97,6 @@ async function writerRunning(rt, runId) {
   }
 }
 
-// The first card's yes gathers the contracts and stops at the second card, whose yes opens the runs.
-function gathered(rt, target, args = [], env = {}) {
-  const first = rt.bridge(["start", target, "--fake-cli", ...args, "--yes"], env);
-  assert.equal(first.status, 1, first.stdout + first.stderr);
-  assert.match(first.stdout, /Needs authorization/);
-  return first;
-}
-
 const runsOf = (rt) => queryRecords(
   "select r.run_id, r.conclusion, r.closed_reason, p.source_file, a.authorized_via, a.authorized_at from runs r join plans p using (plan_sha256) left join authorizations a on a.plan_sha256 = p.plan_sha256"
   + " where r.project_id = $1 order by r.created_at", [rt.paths.projectId]);
@@ -149,7 +141,7 @@ test("a card lists the directory in order, prints no work order's text, and one 
   assert.match(card.stdout, /Directory \.review-bridge\/work-packages\/demo\/ {2}— 6 file\(s\): 0 delivered, 1 not a work order, 5 to run/);
   const rows = card.stdout.split("\n").filter((line) => /^ {2}\S+\.md /.test(line));
   assert.deepEqual(rows.map((line) => line.trim().split(/\s+/)[0]), ["01_a.md", "02-b.md", "02_c.md", "03-d.md", "README.md", "zz.md"]);
-  assert.match(rows[1], /sha256 [0-9a-f]{4}…$/);
+  assert.match(rows[1], /contract sha256 [0-9a-f]{4}…, 1 condition\(s\)$/);
   assert.match(rows[2], /\(same number as 02-b\.md; runs after it, by name\)/);
   assert.match(rows[4], /not a work order \(.+\) {3}\(skip\)$/);
   assert.match(card.stdout, /Runs in place, one after another\. A failed step does not stop the next\./);
@@ -162,10 +154,6 @@ test("a card lists the directory in order, prints no work order's text, and one 
   assert.equal(one.status, 1);
   assert.match(one.stdout, /The last card shown for this work order was its directory's \(demo\/\)/);
 
-  const second = gathered(rt, rt.dirOf("demo"));
-  assert.match(second.stdout, /01_a\.md +contract sha256 [0-9a-f]{4}… {3}version 1/);
-  assert.equal(second.stdout.includes(secret), false);
-  assert.deepEqual(await queryRecords("select 1 from runs where project_id = $1", [rt.paths.projectId]), [], "sealed, and no run yet");
   const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]);
   assert.equal(ran.status, 0, ran.stdout + ran.stderr);
   assert.match(ran.stdout, /\[1\/5\] 01_a\.md started .+ \(run [0-9a-f-]{36}\)/);
@@ -193,7 +181,6 @@ test("one failing does not stop the next, and the table says each", LIMIT, async
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": order("02-b", "FAILS-IN-REVIEW"), "03-c.md": null });
   const env = { FAKE_ON_REVIEW_FAIL: "02-b is printed" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--rounds", "1"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), ["--rounds", "1"], env);
   const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--rounds", "1", "--yes"], env);
   assert.equal(ran.status, 1, ran.stdout + ran.stderr);
   assert.deepEqual((await runsOf(rt)).map((run) => run.conclusion), ["success", "action_required", "success"]);
@@ -209,34 +196,31 @@ test("Bridge's own token budget, spent on a run, is that work order's: the next 
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
   const env = { FAKE_CLAUDE_TOKENS: "99999999", FAKE_WRITER_ONLY: "1" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), [], env);
   const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   assert.equal(ran.status, 1, ran.stdout + ran.stderr);
   assert.deepEqual((await runsOf(rt)).map((run) => run.closed_reason), ["token_limit", "token_limit"]);
   assert.doesNotMatch(ran.stdout, /Stopped at/);
 });
 
-test("spent on a contract, it leaves that one with none, so no work starts; once sealed, a contract is not paid for again", LIMIT, async (t) => {
+test("one work order of the line short of what it must say stops the whole line before the card; each is told, its marker written back", LIMIT, async (t) => {
   const rt = await install(t);
-  await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
-  const env = { FAKE_CLAUDE_TOKENS: "99999999" };
-  assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  const gather = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
-  assert.equal(gather.status, 1, gather.stdout + gather.stderr);
-  assert.match(gather.stdout, /\[1\/2\] 01-a\.md: no contract/);
-  assert.match(gather.stdout, /2 of 2 have no contract, so no work started/);
-  assert.doesNotMatch(gather.stdout, /Run these 2|Needs authorization/);
+  const noList = "# Work order: b\n\n<!-- bridge:requested_work -->\n## Work\nPrint b.\n";
+  const chinese = "# Work order: c\n\n<!-- bridge:requested_work -->\n## Work\nPrint c.\n\n<!-- bridge:acceptance -->\n## 驗收\n一、c 印出來\n";
+  await directory(rt, "demo", { "01-a.md": null, "02-b.md": noList, "03-c.md": chinese });
+  const refused = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stdout, /demo\/02-b\.md cannot start yet:\n- The acceptance list is missing/);
+  assert.match(refused.stdout, /demo\/03-c\.md cannot start yet:\n- Line 9 is not an item of the acceptance list: start each item with "- "/);
+  assert.doesNotMatch(refused.stdout, /Needs authorization|Directory \.review-bridge/, "no card");
+  assert.equal(await fsp.readFile(path.join(rt.root, rt.dirOf("demo"), "02-b.md"), "utf8"), noList + "\n<!-- bridge:acceptance -->\n## Acceptance\n");
+  assert.equal(await fsp.readFile(path.join(rt.root, rt.dirOf("demo"), "03-c.md"), "utf8"), chinese, "its marker is there: nothing to write back");
   assert.deepEqual(await runsOf(rt), []);
-  // The rest is translated; what is sealed by then is not again.
-  const log = path.join(rt.paths.logRoot, "calls.log");
-  await fsp.mkdir(rt.paths.logRoot, { recursive: true });
+  await fsp.appendFile(path.join(rt.root, rt.dirOf("demo"), "02-b.md"), "- b is printed.\n");
+  await fsp.writeFile(path.join(rt.root, rt.dirOf("demo"), "03-c.md"), chinese.replace("一、", "- "));
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).status, 1);
-  const second = gathered(rt, rt.dirOf("demo"), [], { FAKE_CALL_LOG: log });
-  assert.match(second.stdout, /02-b\.md +contract sha256/);
-  const third = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], { FAKE_CALL_LOG: log + ".after" });
-  assert.equal(third.status, 1);
-  assert.match(third.stdout, /Run again|Needs authorization/);
-  assert.equal(await fsp.stat(log + ".after").then(() => true, () => false), false, "a sealed contract is not paid for again, and takes no first card");
+  const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]);
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  assert.equal((await runsOf(rt)).length, 3);
 });
 
 test("a provider that signed out during the work stops the line; started again, what was delivered is skipped and the rest is pending", LIMIT, async (t) => {
@@ -244,7 +228,6 @@ test("a provider that signed out during the work stops the line; started again, 
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null, "03-c.md": null });
   const env = { FAKE_ON_SIGNED_OUT: "02-b is printed", FAKE_WRITER_ONLY: "1" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), [], env);
   const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   assert.equal(ran.status, 75, ran.stdout + ran.stderr);
   assert.match(ran.stdout, /Stopped at step 2: claude needs signing in again \(claude auth login\); 3 did not run\. After signing in, run start on this directory again: only what is pending runs\./);
@@ -257,26 +240,11 @@ test("a provider that signed out during the work stops the line; started again, 
   assert.match(again.stdout, /03-c\.md +contract sha256 /);
 });
 
-test("a provider that signed out during the gathering stops it there: no run, and what was sealed stays", LIMIT, async (t) => {
-  const rt = await install(t);
-  await directory(rt, "demo", { "01-a.md": null, "02-b.md": null, "03-c.md": null });
-  const env = { FAKE_ON_SIGNED_OUT: "02-b is printed" };
-  assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  const gather = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
-  assert.equal(gather.status, 75, gather.stdout + gather.stderr);
-  assert.match(gather.stdout, /Stopped at step 2: claude needs signing in again \(claude auth login\); 3 did not run\./);
-  assert.deepEqual(await runsOf(rt), []);
-  const again = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
-  assert.match(again.stdout, /01-a\.md +sha256 \S+ {3}\(contract sealed earlier; not translated again\)/);
-  assert.doesNotMatch(again.stdout, /02-b\.md +sha256 \S+ {3}\(contract sealed earlier/);
-});
-
 test("a provider out of quota during the work stops the line the same way, and the run says rate_limited", LIMIT, async (t) => {
   const rt = await install(t);
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
   const env = { FAKE_ON_OUT_OF_USAGE: "01-a is printed", FAKE_WRITER_ONLY: "1" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), [], env);
   const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   assert.equal(ran.status, 75, ran.stdout + ran.stderr);
   assert.match(ran.stdout, /Stopped at step 1: claude is out of quota; 2 did not run\./);
@@ -288,7 +256,6 @@ test("a line whose process is killed: the run closes as cancelled, and starting 
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
   const env = { FAKE_CLAUDE_SLEEP_MS: "90000" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), [], env);
   const line = runInBackground(t, rt, ["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   const [, firstRun] = await line.saw(/\[1\/2\] 01-a\.md started .+ \(run ([0-9a-f-]{36})\)/);
   const writer = await writerRunning(rt, firstRun);
@@ -314,7 +281,6 @@ test("stop on the running step stops the whole line, and same-directory starts a
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null, "03-c.md": null });
   const env = { FAKE_CLAUDE_SLEEP_MS: "90000", FAKE_ON_WRITER_SLEEP: "02-b is printed" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), [], env);
   const line = runInBackground(t, rt, ["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   const [, secondRun] = await line.saw(/\[2\/3\] 02-b\.md started .+ \(run ([0-9a-f-]{36})\)/);
   await writerRunning(rt, secondRun);
@@ -346,7 +312,6 @@ test("after the yes: a new file does not run, a renamed one is gone, an edited o
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null, "03-d.md": null });
   const env = { FAKE_CLAUDE_SLEEP_MS: "4000", FAKE_ON_WRITER_SLEEP: "01-a is printed" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), [], env);
   const line = runInBackground(t, rt, ["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   await line.saw(/\[1\/3\] 01-a\.md started/);
   const dir = path.join(rt.root, rt.dirOf("demo"));
@@ -367,7 +332,6 @@ test("after the yes: a changed policy and an expired authorization skip what is 
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
   const env = { FAKE_CLAUDE_SLEEP_MS: "4000", FAKE_ON_WRITER_SLEEP: "01-a is printed" };
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"], env).status, 1);
-  gathered(rt, rt.dirOf("demo"), [], env);
   const line = runInBackground(t, rt, ["start", rt.dirOf("demo"), "--fake-cli", "--yes"], env);
   const [, firstRun] = await line.saw(/\[1\/2\] 01-a\.md started .+ \(run ([0-9a-f-]{36})\)/);
   // Once the first one is past its own check of the policy.
@@ -381,7 +345,6 @@ test("after the yes: a changed policy and an expired authorization skip what is 
   await directory(rt, "later", { "01-c.md": null, "02-d.md": null });
   const laterEnv = { FAKE_CLAUDE_SLEEP_MS: "4000", FAKE_ON_WRITER_SLEEP: "01-c is printed" };
   assert.equal(rt.bridge(["start", rt.dirOf("later"), "--fake-cli"], laterEnv).status, 1);
-  gathered(rt, rt.dirOf("later"), [], laterEnv);
   const later = runInBackground(t, rt, ["start", rt.dirOf("later"), "--fake-cli", "--yes"], laterEnv);
   await later.saw(/\[1\/2\] 01-c\.md started/);
   const [{ plan_sha256: sha }] = await queryRecords("select plan_sha256 from plans where project_id = $1 and source_file = $2 and shown_at is not null order by shown_at desc limit 1", [rt.paths.projectId, rt.dirOf("later") + "/02-d.md"]);
@@ -392,7 +355,7 @@ test("after the yes: a changed policy and an expired authorization skip what is 
   assert.match(later.output(), /02-d\.md +skipped +Authorization is expired\./);
 });
 
-test("at a terminal: two yeses, recorded as the terminal's; n authorizes nothing; Ctrl+C stops the line", { ...LIMIT, skip: ptySkip }, async (t) => {
+test("at a terminal: one yes, recorded as the terminal's; n authorizes nothing; Ctrl+C stops the line", { ...LIMIT, skip: ptySkip }, async (t) => {
   const rt = await install(t);
   const shell = (args, env = {}) => {
     const screen = terminal([bootstrap, ...args], { cwd: rt.root, env: { ...process.env, ...env } });
@@ -401,7 +364,7 @@ test("at a terminal: two yeses, recorded as the terminal's; n authorizes nothing
   };
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
   const no = shell(["start", rt.dirOf("demo"), "--fake-cli"]);
-  await no.waitFor(/Turn these 2 into contracts and ask what they leave open\? \[y\/N\]/);
+  await no.waitFor(/Run these 2 in this order\? \[y\/N\]/);
   no.press("n" + KEYS.enter);
   assert.equal(await no.exited, 1);
   assert.match(no.text(), /Not started\. Nothing was authorized\./);
@@ -410,8 +373,6 @@ test("at a terminal: two yeses, recorded as the terminal's; n authorizes nothing
   assert.match(stale.stdout, /No card was shown for this directory/);
 
   const yes = shell(["start", rt.dirOf("demo"), "--fake-cli"]);
-  await yes.waitFor(/Turn these 2 into contracts/);
-  yes.press("y" + KEYS.enter);
   await yes.waitFor(/Run these 2 in this order\? \[y\/N\]/);
   yes.press("y" + KEYS.enter);
   assert.equal(await yes.exited, 0, yes.text());
@@ -419,8 +380,6 @@ test("at a terminal: two yeses, recorded as the terminal's; n authorizes nothing
 
   await directory(rt, "slow", { "01-c.md": null, "02-d.md": null });
   const slow = shell(["start", rt.dirOf("slow"), "--fake-cli"], { FAKE_CLAUDE_SLEEP_MS: "90000" });
-  await slow.waitFor(/Turn these 2 into contracts/);
-  slow.press("y" + KEYS.enter);
   await slow.waitFor(/Run these 2 in this order\? \[y\/N\]/);
   slow.press("y" + KEYS.enter);
   const [, runId] = await (async () => {
@@ -438,7 +397,6 @@ test("delivered is what the records say: skipped until its record is cleaned, an
   const rt = await install(t);
   await directory(rt, "demo", { "01-a.md": null });
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).status, 1);
-  gathered(rt, rt.dirOf("demo"));
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]).status, 0);
   const [{ run_id: runId }] = await runsOf(rt);
   const delivered = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
@@ -453,7 +411,7 @@ test("delivered is what the records say: skipped until its record is cleaned, an
   await fsp.rename(path.join(dir, "01-a.md"), path.join(dir, "01-renamed.md"));
   const renamed = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
   assert.match(renamed.stdout, /0 delivered, 0 not a work order, 1 to run/);
-  assert.match(renamed.stdout, /01-renamed\.md +sha256 [0-9a-f]{4}… {3}\(reads as \.review-bridge\/work-packages\/demo\/01-a\.md renamed; recorded as the same work order\)/);
+  assert.match(renamed.stdout, /01-renamed\.md +contract sha256 [0-9a-f]{4}…, 1 condition\(s\) {3}\(reads as \.review-bridge\/work-packages\/demo\/01-a\.md renamed; recorded as the same work order\)/);
   await fsp.rename(path.join(dir, "01-renamed.md"), path.join(dir, "01-a.md"));
   assert.match(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).stdout, /1 delivered/);
   assert.equal(rt.bridge(["clean", runId]).status, 0);
@@ -491,10 +449,9 @@ test("a file name Bridge cannot use, and a budget the policy refuses, are listed
   });
   const card = rt.bridge(["start", rt.dirOf("登入"), "--fake-cli"]);
   assert.match(card.stdout, /0 delivered, 2 not a work order, 2 to run/);
-  assert.match(card.stdout, /02-工單\.md +sha256 /);
+  assert.match(card.stdout, /02-工單\.md +contract sha256 /);
   assert.match(card.stdout, /03-over\.md +not a work order \(line 3: budget\.rounds is 999, over the policy limit/);
   assert.match(card.stdout, /04-x\.\.md +not a work order \(its file name starts or ends with a dot or a space\)/);
-  gathered(rt, rt.dirOf("登入"));
   const ran = rt.bridge(["start", rt.dirOf("登入"), "--fake-cli", "--yes"]);
   assert.equal(ran.status, 0, ran.stdout + ran.stderr);
   assert.deepEqual((await runsOf(rt)).map((run) => path.posix.basename(run.source_file)), ["01-a.md", "02-工單.md"]);
@@ -522,7 +479,6 @@ test("a card made before a file changed is not taken by --yes, and in a Git proj
   const added = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
   assert.equal(added.status, 1);
   await fsp.writeFile(path.join(rt.root, rt.dirOf("demo"), "03-c.md"), order("03-c"));
-  gathered(rt, rt.dirOf("demo"));
   const ran = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]);
   assert.equal(ran.status, 0, ran.stdout + ran.stderr);
   assert.match(ran.stdout, /03-c\.md +appeared after the card {3}\(skip\)/);
@@ -534,7 +490,6 @@ test("every query a line adds reads what this directory needs, whatever the hist
   const rt = await install(t);
   await directory(rt, "demo", { "01-a.md": null, "02-b.md": null });
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]).status, 1);
-  gathered(rt, rt.dirOf("demo"));
   assert.equal(rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]).status, 0);
   const client = await connect(path.join(dataHome, "postgres"), { database: "bridge" });
   t.after(() => client.end());
@@ -556,20 +511,14 @@ test("every query a line adds reads what this directory needs, whatever the hist
   await client.query("update seed_runs r set run_id = gen_random_uuid(), created_at = r.created_at - interval '1 day', plan_sha256 = s.plan_sha256 from seed_plans s where s.row_id = r.row_id");
   await client.query("alter table seed_runs drop column row_id");
   await client.query("insert into runs select * from seed_runs");
-  // And as many translations of it that came to nothing, each on one of those plans.
-  const [gathering] = (await client.query("select g.* from contract_gatherings g join plans p using (plan_sha256) where p.project_id = $1 and p.source_file = $2 and g.status = 'sealed' limit 1", [projectId, files[0]])).rows;
-  await client.query(
-    "insert into contract_gatherings (plan_sha256, yes_plan_sha256, work_order_id, content_sha256, settings_sha256, authorized_by, authorized_via, authorized_at, created_at, status)"
-    + " select plan_sha256, plan_sha256, $1, $2, $3, 'them', 'terminal', now(), now() - interval '1 day', 'stopped' from seed_plans",
-    [gathering.work_order_id, gathering.content_sha256, gathering.settings_sha256],
-  );
   await client.query("commit");
+  const [{ work_order_id: workOrderId }] = (await client.query("select work_order_id from work_orders where project_id = $1 and last_file_name = $2", [projectId, files[0]])).rows;
   // A closed run's entry stays in a partial index until vacuum, and each costs a look at the table, so
   // what this file's earlier tests left would count against the query being measured.
-  await client.query("vacuum analyze work_orders, plans, runs, contract_gatherings");
+  await client.query("vacuum analyze work_orders, plans, runs");
   const explained = async (read) => {
     let plan = "";
-    await read({ query: async (sql, values) => { plan = (await client.query("explain (analyze, buffers) " + sql, values)).rows.map((row) => row["QUERY PLAN"]).join("\n"); return { rows: [{ work_order_id: gathering.work_order_id }] }; } });
+    await read({ query: async (sql, values) => { plan = (await client.query("explain (analyze, buffers) " + sql, values)).rows.map((row) => row["QUERY PLAN"]).join("\n"); return { rows: [{ work_order_id: workOrderId }] }; } });
     t.diagnostic(plan);
     return plan;
   };
@@ -583,12 +532,6 @@ test("every query a line adds reads what this directory needs, whatever the hist
   const cards = await explained((db) => latestCardsOfFiles(db, { projectId, files }));
   assert.match(cards, /plans_shown_by_file/);
   assert.ok(buffers(cards) < 60, cards);
-  const sealed = await explained((db) => sealedGathering(db, { workOrderId: gathering.work_order_id, contentSha256: gathering.content_sha256, settingsSha256: gathering.settings_sha256 }));
-  assert.match(sealed, /contract_gatherings_sealed/);
-  assert.ok(buffers(sealed) < 60, sealed);
-  const answering = await explained((db) => latestGathering(db, { projectId, fileName: files[0] }));
-  assert.match(answering, /contract_gatherings_by_order/);
-  assert.ok(buffers(answering) < 60, answering);
   // Blocks say nothing here: vacuum does not shrink an index, so this one's pages depend on what ran
   // before it (1 on one machine, 83 on another). What must hold is that a partial index holding only
   // running runs gives nothing to throw away, however long the history behind it.
