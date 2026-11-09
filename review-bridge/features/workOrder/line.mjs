@@ -12,7 +12,7 @@ import { realpathSync } from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { acquireLock, activeLineSteps, inspectProvider, isPidAlive, readJson, readRun, SIGN_IN_COMMANDS, writeJson } from "../../service/index.mjs";
+import { acquireLock, activeLineSteps, inspectProvider, isPidAlive, readJson, readRun, SIGN_IN_COMMANDS, writeJsonAtomic } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
 import { digest } from "../../utils/digest.mjs";
 import { workOrderDirectory } from "../../utils/paths.mjs";
@@ -251,7 +251,7 @@ async function cardForYes({ t, paths, records, directory, rows, options, again }
   const plans = [];
   for (const card of [...onCard].sort((left, right) => left.body.line.position - right.body.line.position)) {
     const planPath = planFilePath(paths, card.body);
-    await writeJson(planPath, card.body);
+    await writeJsonAtomic(planPath, card.body);
     const plan = { ...card.body, plan_path: planPath };
     rows.find((row) => row.taskFile === card.file).plan = plan;
     plans.push(plan);

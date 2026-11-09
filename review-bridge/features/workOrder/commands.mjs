@@ -6,7 +6,7 @@ import path from "node:path";
 
 import {
   activeLineSteps, activeRuns, appendIoEvent, assertRunResumable, bridgeDataHome, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
-  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, updateGraph, writeJson,
+  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, updateGraph, writeJsonAtomic,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
 import { askYes, cardTranslator, confirmWorkStart, contractLine, needsAuthorizationLine, readiness, startCard } from "./confirmStart.mjs";
@@ -181,6 +181,9 @@ export async function planWork({ paths, options, adapter, inspectionAdapter }) {
   return 0;
 }
 
+// The plan as sealed and written: the same body without where it was written, as recordCard keeps it.
+const sealedBody = ({ plan_path: _written, ...body }) => body;
+
 // A path as the person can paste it back: relative to where they are when that is shorter.
 function shownPath(file) {
   const relative = path.relative(process.cwd(), file);
@@ -207,13 +210,17 @@ export async function updateRunGraph(paths, records, runId, { update = updateGra
 // start is one database transaction around the file authorization (recordStart): the work order and
 // its version, the authorization and its claim. When that transaction fails after the run was made,
 // the run is closed before any model call.
-async function runAuthorized({ paths, options, adapter, approval, authorizedVia, onStep, endSteps = () => {} }) {
-  const plan = await readJson(path.resolve(options.planPath));
+// A start that holds its plan in memory passes it in and the file it wrote is not read back, as Vite's
+// optimizer hands its metadata on in memory and reads _metadata.json only at the next start; work-start
+// (`held` null) reads the file it was given.
+async function runAuthorized({ paths, options, plan: held = null, adapter, approval, authorizedVia, onStep, endSteps = () => {} }) {
+  const plan = held ?? await readJson(path.resolve(options.planPath));
   const records = plan.task_file ? await openRecords(paths) : null;
   let started = null;
   const authorize = async () => (started = await authorizeWorkPackage({
     paths,
     planPath: options.planPath,
+    plan,
     approval,
     executionMode: options.fakeCli ? "fake_cli" : "native",
     authorizedVia,
@@ -372,7 +379,7 @@ async function cardForYes({ paths, planName = null, taskFile, options, again }) 
   if (await cardUsed(db, card.plan_sha256)) return refuse(t("yes.used", { again }));
   if (!(card.authorization_expires_at > new Date())) return refuse(t("yes.expired", { until: card.authorization_expires_at.toISOString(), again }));
   const planPath = options.outPath || planFilePath(paths, card.body, planName);
-  await writeJson(planPath, card.body);
+  await writeJsonAtomic(planPath, card.body);
   write(t("yes.plan_from_card", { path: shownPath(planPath) }));
   return { ...card.body, plan_path: planPath };
 }
@@ -440,7 +447,7 @@ async function startFile({ paths, options, adapter, loadAdapter, inspectionAdapt
   write("");
   const steps = await runSteps();
   return await runAuthorized({
-    paths, options: { ...options, planPath: plan.plan_path }, adapter: prepared.adapter, approval: plan.plan_sha256,
+    paths, options: { ...options, planPath: plan.plan_path }, plan: sealedBody(plan), adapter: prepared.adapter, approval: plan.plan_sha256,
     authorizedVia: yesGiven ? "agent" : "terminal",
     onStep: steps.step,
     endSteps: steps.end,
@@ -467,7 +474,7 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, ins
           options: { ...options, yes: false, taskFile: row.absolute, breakpoint: options.breakpoint || DEFAULT_BREAKPOINT },
         }),
         runPlan: ({ plan, adapter: runAdapter, authorizedVia, onStep }) => runAuthorized({
-          paths, options: { ...options, planPath: plan.plan_path }, adapter: runAdapter, approval: plan.plan_sha256, authorizedVia, onStep,
+          paths, options: { ...options, planPath: plan.plan_path }, plan: sealedBody(plan), adapter: runAdapter, approval: plan.plan_sha256, authorizedVia, onStep,
         }),
       },
     });

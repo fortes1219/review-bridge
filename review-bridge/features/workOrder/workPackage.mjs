@@ -564,9 +564,10 @@ export async function closeFailedStart(paths, runId, error) {
   await consumeRun(paths, runId, "controller_failure", null).catch(() => {});
 }
 
-export async function authorizeWorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
+// `plan` is the plan its caller already holds; only a caller without it reads the file.
+export async function authorizeWorkPackage({ paths, planPath, plan: held = null, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
   const resolvedPlan = assertUnderOne(path.resolve(planPath), [paths.logRoot, paths.privateRoot], "Work plan");
-  const plan = await readJson(resolvedPlan);
+  const plan = held ?? await readJson(resolvedPlan);
   assertCurrentPlan(plan);
   const actual = planDigest(plan);
   if (plan.plan_sha256 !== actual || String(approval || "").toLowerCase() !== actual) {

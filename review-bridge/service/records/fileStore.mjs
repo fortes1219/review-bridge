@@ -31,8 +31,14 @@ export async function writeJsonAtomic(file, value) {
   await ensureDir(path.dirname(file));
   const temp = path.join(path.dirname(file), "." + path.basename(file) + "." + randomUUID() + ".tmp");
   assertUnder(temp, path.dirname(file), "Atomic JSON temp path");
-  await fsp.writeFile(temp, JSON.stringify(value, null, 2) + "\n", "utf8");
-  await fsp.rename(temp, file);
+  // A write or rename that fails leaves the old file and takes its temp file away, as write-file-atomic's finally does.
+  try {
+    await fsp.writeFile(temp, JSON.stringify(value, null, 2) + "\n", "utf8");
+    await fsp.rename(temp, file);
+  } catch (error) {
+    await fsp.rm(temp, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function syncDirectory(directory) {
