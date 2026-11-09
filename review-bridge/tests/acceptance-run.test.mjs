@@ -142,14 +142,14 @@ test("answers that skip, repeat or contradict a condition are refused, from the 
 // only the second one that breaks them ends the run.
 test("a review that breaks the review's rules is asked for again with what was wrong; a second such answer ends the run", async (t) => {
   const rt = await install(t);
-  const once = await run(rt, "pass-stop-once", { env: { FAKE_CODEX_GATE: "PASS_HARD_STOP_ONCE" } });
+  const once = await run(rt, "pass-stop-once", { env: { FAKE_CODEX_VERDICT: "pass_hard_stop_once" } });
   assert.equal(once.exit, 0, JSON.stringify(once.record.last_state));
   assert.equal(once.record.conclusion, "success");
   const inputs = once.events.filter((event) => event.event === "review.input");
   assert.equal(inputs.length, 2, "asked twice for the one call");
   assert.equal(inputs[0].previous_answer_problems, undefined);
   assert.deepEqual(inputs[1].previous_answer_problems, ["$.hard_stop: PASS cannot request a hard stop"]);
-  const twice = await run(rt, "pass-stop-twice", { env: { FAKE_CODEX_GATE: "PASS_HARD_STOP" } });
+  const twice = await run(rt, "pass-stop-twice", { env: { FAKE_CODEX_VERDICT: "pass_hard_stop" } });
   assert.equal(twice.exit, 79);
   assert.equal(twice.record.closed_reason, "malformed_review_result");
   assert.equal(twice.events.filter((event) => event.event === "review.input").length, 2, "one more ask, not more");

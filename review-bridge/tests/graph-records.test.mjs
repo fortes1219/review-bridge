@@ -149,7 +149,9 @@ test("the MCP server's session reads the graph and cannot write to it", async ()
     const following = JSON.parse((await tools.find_definitions({ symbol: "name42", limit: 2, cursor: found.next_cursor })).content[0].text);
     assert.ok(following.definitions.length >= 1, "the cursor reaches the next page");
     const state = JSON.parse((await tools.graph_state({})).content[0].text);
-    assert.equal(state.incomplete_first_20.length, 20);
+    // projectA's 3,000 files: every 300th has a parse error (10), every 500th has no parser (6), every
+    // 1,500th is both (2), so 14 are incomplete, under the cap of 20.
+    assert.equal(state.incomplete_first_20.length, 14);
   } finally {
     await reader.close();
   }

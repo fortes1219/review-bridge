@@ -396,14 +396,30 @@ test("with no model set the writer's CLI is given no --model, and the bounded st
   assert.equal(status.latest_state.writer_model, null);
 });
 
-test("the writer's MCP servers are the project's own .mcp.json or none, never the person's", async (t) => {
+// --mcp-config takes several values (files or JSON strings) up to the next flag.
+const mcpConfigs = (args) => {
+  const at = args.indexOf("--mcp-config");
+  if (at < 0) return [];
+  const end = args.findIndex((arg, index) => index > at && String(arg).startsWith("--"));
+  return args.slice(at + 1, end < 0 ? undefined : end);
+};
+const serverNames = (config) => Object.keys(JSON.parse(config).mcpServers);
+
+// Bridge's own read-only graph server reaches every writer (Fortes 2026-11-09); besides it, only the
+// project's .mcp.json, never the person's servers.
+test("the writer's MCP servers are Bridge's graph server and the project's own .mcp.json, never the person's", async (t) => {
   const without = await start(t);
   assert.equal(without.exitCode, 0);
   assert.ok(without.claudeArgs.includes("--strict-mcp-config"));
-  assert.equal(without.claudeArgs.includes("--mcp-config"), false);
+  const alone = mcpConfigs(without.claudeArgs);
+  assert.equal(alone.length, 1, JSON.stringify(alone));
+  assert.deepEqual(serverNames(alone[0]), ["review-bridge-graph"]);
+  assert.equal(without.claudeArgs[without.claudeArgs.indexOf("--allowedTools") + 1], "mcp__review-bridge-graph");
   const withFile = await start(t, { beforeResume: async (runtime) => fsp.writeFile(path.join(runtime.paths.repoRoot, ".mcp.json"), "{\"mcpServers\":{}}\n") });
   assert.ok(withFile.claudeArgs.includes("--strict-mcp-config"));
-  assert.equal(withFile.claudeArgs[withFile.claudeArgs.indexOf("--mcp-config") + 1], ".mcp.json");
+  const both = mcpConfigs(withFile.claudeArgs);
+  assert.equal(both[0], ".mcp.json");
+  assert.deepEqual(both.slice(1).map(serverNames), [["review-bridge-graph"]]);
 });
 
 test("the writer may start sub-agents by default; a project override can still disallow Agent", async (t) => {

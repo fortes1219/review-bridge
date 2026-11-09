@@ -170,8 +170,9 @@ export function reviewAnswer(prompt) {
   // One verdict per contract condition in review.input. FAKE_CODEX_VERDICT picks the outcome Bridge
   // must handle: "cannot_verify" or "fail_under_pass" on the first condition, "missing" drops the
   // last, "no_evidence" passes the first with no evidence. A FAIL gate fails the first condition.
+  // It is not FAKE_CODEX_GATE, which --fake-cli sets from its scenario (fakeAdapter.mjs).
+  const mode = process.env.FAKE_CODEX_VERDICT || "";
   const verdictsOutput = () => {
-    const mode = process.env.FAKE_CODEX_VERDICT || "";
     const failing = gate === "FAIL" || gate === "HARD_STOP";
     const items = conditionIds.map((id, index) => {
       if (index === 0 && (failing || mode === "fail_under_pass")) return { id, verdict: "fail", evidence: "fake: blocked by the first finding" };
@@ -190,10 +191,10 @@ export function reviewAnswer(prompt) {
     findings = [finding("F9", "HIGH", deltaPath)];
   }
   if (gate === "MALFORMED") return { event: "review.result", gate: "MAYBE" };
-  // PASS_HARD_STOP: a PASS that asks for a hard stop, which the review's rules forbid (run f645ccf5).
-  // PASS_HARD_STOP_ONCE: only until Bridge asks again with what was wrong (previous_answer_problems).
-  const passStop = gate === "PASS_HARD_STOP" || (gate === "PASS_HARD_STOP_ONCE" && !input.previous_answer_problems);
-  const passing = gate === "PASS" || gate === "PASS_WITH_HIGH" || gate === "PASS_HARD_STOP" || gate === "PASS_HARD_STOP_ONCE";
+  // FAKE_CODEX_VERDICT "pass_hard_stop": a PASS that asks for a hard stop, which the review's rules forbid
+  // (run f645ccf5); "pass_hard_stop_once": only until Bridge asks again with what was wrong.
+  const passStop = gate === "PASS" && (mode === "pass_hard_stop" || (mode === "pass_hard_stop_once" && !input.previous_answer_problems));
+  const passing = gate === "PASS" || gate === "PASS_WITH_HIGH";
   return {
     event: "review.result",
     work_order: input.work_order || "unknown",

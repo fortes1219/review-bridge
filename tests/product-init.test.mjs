@@ -579,10 +579,15 @@ test("init maps a Git project's code into its graph and leaves git status as it 
   await fsp.writeFile(path.join(root, "src", "b.ts"), "export function b() {\n  return 1;\n}\nexport function c() {\n  return 2;\n}\n");
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# Add a README\n\n<!-- bridge:requested_work -->\nAdd a README.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n1. README.md exists.\n");
-  const started = spawnSync(process.execPath, [bridge, "start", order, "--fake-cli", "--yes", "--breakpoint", "after the review"], {
+  // A yes needs the card it answers: the first start shows it and stops, the second says yes to it.
+  const start = (...args) => spawnSync(process.execPath, [bridge, "start", order, "--fake-cli", "--breakpoint", "after the review", ...args], {
     cwd: root, encoding: "utf8", env: env(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
-  assert.equal(started.status, 0, started.stderr);
+  const card = start();
+  assert.equal(card.status, 1, card.stdout + card.stderr);
+  assert.match(card.stdout, /Needs authorization/);
+  const started = start("--yes");
+  assert.equal(started.status, 0, started.stdout + started.stderr);
   const after = await parsedAt();
   assert.equal(after["src/a.ts"], before["src/a.ts"], "a file that did not change is not read again");
   assert.equal(after["src/broken.ts"], before["src/broken.ts"]);
