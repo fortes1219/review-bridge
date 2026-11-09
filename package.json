@@ -17,6 +17,7 @@
     "!review-bridge/tests/",
     "review-bridge/tests/fixtures/fake-claude.mjs",
     "review-bridge/tests/fixtures/fake-codex.mjs",
+    "review-bridge/tests/fixtures/fakeAnswers.mjs",
     "installer/",
     "profiles/",
     "project-templates/",
