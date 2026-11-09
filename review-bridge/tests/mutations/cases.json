@@ -121,6 +121,28 @@
       "test": "review-bridge/tests/bridge-command.test.mjs",
       "case": "no shipped line tells the person to run a bare review-bridge command; --help alone names the program",
       "expect": "review-bridge/features/workOrder/commands\\.mjs:\\d+"
+    },
+    {
+      "id": "RB-M-yes-midwrite-says-changed",
+      "gate": "Authorization",
+      "target": "review-bridge/features/workOrder/commands.mjs",
+      "anchor": "return refuse(t((await cardUsed(db, card.plan_sha256)) ? \"yes.used\" : \"yes.changed\", { again }));",
+      "replacement": "return refuse(t(\"yes.changed\", { again }));",
+      "reason": "A second yes that reads the work order while the first start writes its id in place says the person changed it, when the card was used.",
+      "test": "tests/product-init.test.mjs",
+      "case": "--yes is refused when the work order changed after the card, when no card was shown, or when the card was used",
+      "expect": "The work order changed after you saw the card"
+    },
+    {
+      "id": "RB-M-line-yes-midwrite-says-changed",
+      "gate": "Authorization",
+      "target": "review-bridge/features/workOrder/line.mjs",
+      "anchor": "refuse(t((await anyCardUsed(records.db, onCard.map((card) => card.plan_sha256))) ? \"line.yes.used\" : \"line.yes.changed\", { again }))",
+      "replacement": "refuse(t(\"line.yes.changed\", { again }))",
+      "reason": "A second yes to a directory that reads one of its work orders while the first line writes its id in place says it changed, when the card was used.",
+      "test": "review-bridge/tests/work-order-line.test.mjs",
+      "case": "a card lists the directory in order, prints no work order's text, and one yes runs each as its own run",
+      "expect": "The directory changed after you saw the card"
     }
   ]
 }

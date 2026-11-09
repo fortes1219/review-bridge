@@ -183,6 +183,15 @@ test("a card lists the directory in order, prints no work order's text, and one 
   const yesAgain = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]);
   assert.equal(yesAgain.status, 1);
   assert.match(yesAgain.stdout, /already said yes to/);
+  // The line that took the card writes each work order's id into its file in place, after its claim; a
+  // second yes that reads one half written (here: emptied) is told the card was used, not that it changed.
+  const first = path.join(rt.root, rt.dirOf("demo"), "01_a.md");
+  const whole = await fsp.readFile(first, "utf8");
+  await fsp.writeFile(first, "");
+  const midWrite = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli", "--yes"]);
+  await fsp.writeFile(first, whole);
+  assert.equal(midWrite.status, 1);
+  assert.match(midWrite.stdout, /already said yes to/);
 });
 
 test("one failing does not stop the next, and the table says each", LIMIT, async (t) => {

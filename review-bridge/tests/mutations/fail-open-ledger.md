@@ -83,3 +83,30 @@ claim that nothing else is wrong.
   way to make the file differ from the plan in memory at that moment, which this release does not add. On Windows, two renames onto
   the same plan file at the same instant may fail with `EPERM`; the second start then ends with that error
   instead of the refusal, and still no second run starts.
+
+## RB-GATE-2026-004 — the second yes read the work order while the first start wrote its id
+
+- **affected_gate:** Authorization
+- **symptom:** two `start <file> --yes` at once on Windows CI: one run started (the guard held), but the other
+  said `The work order changed after you saw the card` instead of saying the card was used. Seen in the
+  Windows CI log of `521d5e9`, the only one read; Windows CI was red on every commit before it, for causes
+  not read. Green on Linux CI at `521d5e9`. Why Windows meets the window and Linux does not is not shown: the
+  write takes milliseconds. Whether Windows CI turns green with the fix is the check that this is the cause.
+- **expected_vs_actual:** expected the second yes to be told the card was used; actually told the person had
+  changed the work order, which they had not.
+- **reproduction:** GitHub Actions `windows-latest`, Node 22.23.4, `npm test` (run 42710217414): 199 of 200
+  pass, this one fails with that message.
+- **root_cause:** after its claim, the start that took the card writes the work order's id into the person's
+  file in place (`fs.writeFile`, as ESLint's `outputFixes` and Prettier's `writeFormattedFile` write a
+  person's files). The other yes compared the file with the card before asking the records whether the card
+  was used, so a file read half written looked changed. The same for a directory's card.
+- **fix:** the commit that adds this entry — a file that does not read as the card showed is first asked of
+  the records: a used card is refused as used. The write stays in place, which keeps hard-linked work
+  orders one work order.
+- **regression_test:** `tests/product-init.test.mjs` "--yes is refused when the work order changed after the
+  card, …" (the work order emptied after the yes, as if half written); `review-bridge/tests/work-order-line.test.mjs`
+  "a card lists the directory in order, …" (one of its files emptied after the line ran).
+- **mutation_case:** `RB-M-yes-midwrite-says-changed`, `RB-M-line-yes-midwrite-says-changed` (not yet run:
+  both tests start the database; they run in the container).
+- **residual_risk:** a person who really edits the work order at the same moment another yes takes the card
+  is told the card was used; that is also true.

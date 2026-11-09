@@ -238,11 +238,14 @@ async function cardForYes({ t, paths, records, directory, rows, options, again }
   if (!latest?.body.line || latest.body.line.directory !== directory.name) return refuse(t("line.yes.no_card", { again }));
   if (latest.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse(t("yes.old_card", { again }));
   const onCard = cards.filter((card) => card.body.line?.id === latest.body.line.id);
-  const changed = t("line.yes.changed", { again });
-  if (onCard.length !== latest.body.line.total) return refuse(changed);
+  // A start that took this card writes each work order's id into its file after its claim, in place (as
+  // single start does): a file read meanwhile can be half written, so the records say first whether the
+  // card was used.
+  const changed = async () => refuse(t((await anyCardUsed(records.db, onCard.map((card) => card.plan_sha256))) ? "line.yes.used" : "line.yes.changed", { again }));
+  if (onCard.length !== latest.body.line.total) return await changed();
   for (const card of onCard) {
     const row = rows.find((candidate) => candidate.taskFile === card.file);
-    if (row.text === null || digest(row.text.trim()) !== card.content_sha256) return refuse(changed);
+    if (row.text === null || digest(row.text.trim()) !== card.content_sha256) return await changed();
     const option = optionAgainstCard(card.body, options);
     if (option) return refuse(t("yes.option", { option, again }));
     if (!(card.authorization_expires_at > new Date())) return refuse(t("yes.expired", { until: card.authorization_expires_at.toISOString(), again }));

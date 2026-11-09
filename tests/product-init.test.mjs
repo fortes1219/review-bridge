@@ -770,6 +770,15 @@ test("--yes is refused when the work order changed after the card, when no card 
   const again = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(again.status, 1, again.stderr);
   assert.equal(again.stdout, "This card was already said yes to; one card starts one run. Run: npx review-bridge start " + order + " --fake-cli and show the person the new card.\n");
+  // The start that took the card writes the work order's id into the file in place, after its claim; a
+  // second yes that reads the file half written (here: emptied) is told the card was used, which is true,
+  // not that the person changed the work order, which they did not.
+  const whole = await fsp.readFile(file, "utf8");
+  await fsp.writeFile(file, "");
+  const midWrite = cli(["start", order, "--fake-cli", "--yes"]);
+  await fsp.writeFile(file, whole);
+  assert.equal(midWrite.status, 1, midWrite.stderr);
+  assert.equal(midWrite.stdout, again.stdout);
   assert.equal((await listed("runs")).length, 1, "one run from one card");
 });
 

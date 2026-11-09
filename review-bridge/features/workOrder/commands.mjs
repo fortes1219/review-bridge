@@ -374,7 +374,12 @@ async function cardForYes({ paths, planName = null, taskFile, options, again }) 
   // A directory's card printed no work order's text, so its yes is not a yes to this one alone.
   if (card.body.line) return refuse(t("yes.directory_card", { directory: card.body.line.directory, again }));
   if (card.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse(t("yes.old_card", { again }));
-  if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) return refuse(t("yes.changed", { again }));
+  // The start that took this card writes the work order's id into the file after its claim, in place, as
+  // ESLint and Prettier write a person's files: read meanwhile, the file can be half written. So a file that
+  // does not read as the card showed is first asked of the records, which say whether the card was used.
+  if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) {
+    return refuse(t((await cardUsed(db, card.plan_sha256)) ? "yes.used" : "yes.changed", { again }));
+  }
   const option = optionAgainstCard(card.body, options);
   if (option) return refuse(t("yes.option", { option, again }));
   if (await cardUsed(db, card.plan_sha256)) return refuse(t("yes.used", { again }));
