@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -34,8 +34,8 @@ async function freePort() {
   return port;
 }
 
-// A neutral install made by the real init in fake mode; every model call below is the fake CLI.
-async function install(t) {
+// A neutral install made by the real init in fake mode, once for this file: the template each test copies.
+async function initProject() {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-contract-run-"));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "contract-demo", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(0)\"" } }));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
@@ -43,14 +43,17 @@ async function install(t) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+// The test's own project: a copy of the template under a new id (isolatedDataHome.mjs copyProject).
+// Every model call below is the fake CLI.
+async function install(t) {
+  const root = await copyProject(t, await projectTemplate("contract-run", initProject), "review-bridge-contract-run-");
   const runtime = runtimeSource;
   const bootstrap = path.join(runtime, "bootstrap.mjs");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [bootstrap, ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env },
-  });
-  t.after(async () => {
-    await stopPage(root);
-    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   return { root, bootstrap, bridge, paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }) };
 }

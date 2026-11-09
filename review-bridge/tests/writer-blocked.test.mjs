@@ -1,7 +1,7 @@
 // A writer that could not run the tests where it is (Codex's sandbox on Windows: spawn EPERM) is not a
 // stopped run. Bridge runs them itself and they decide; the result says what each side knows. Canary,
 // 2026-11-05: a run ended "blocked" with a Why of one line, on a project already holding those files.
-import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -29,8 +29,9 @@ async function freePort() {
 const ORDER = "# Work order: farm\n\n<!-- bridge:requested_work -->\nBuild a small farm.\n\n<!-- bridge:acceptance -->\n- The farm is visible.\n- The tests pass.\n";
 const git = (root, ...args) => spawnSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: root, encoding: "utf8", windowsHide: true });
 
-// A Git project. With `tests`, its package.json gives Bridge a test command, so the conditions lean on it.
-async function project(t, { tests = true, testExit = 0 } = {}) {
+// A Git project set up by the real init in fake mode, once for this file and kind of project: the template
+// each test copies. With `tests`, its package.json gives Bridge a test command, so the conditions lean on it.
+async function initProject(tests, testExit) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-blocked-"));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
   if (tests) await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "blocked-demo", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(" + testExit + ")\"" } }));
@@ -41,12 +42,15 @@ async function project(t, { tests = true, testExit = 0 } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "codex", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+// The test's own project: a copy of the template under a new id (isolatedDataHome.mjs copyProject).
+async function project(t, { tests = true, testExit = 0 } = {}) {
+  const template = await projectTemplate("writer-blocked:" + (tests ? "tests-exit-" + testExit : "no-tests"), () => initProject(tests, testExit));
+  const root = await copyProject(t, template, "review-bridge-blocked-");
   const callLog = path.join(root, ".git", "calls.jsonl");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], { cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, FAKE_CALL_LOG: callLog, ...env } });
-  t.after(async () => {
-    await stopPage(root);
-    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  });
   const run = async (env) => {
     const order = ".review-bridge/work-packages/farm.md";
     await fsp.writeFile(path.join(root, order), ORDER);

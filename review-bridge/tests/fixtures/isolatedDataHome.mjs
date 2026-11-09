@@ -3,6 +3,7 @@
 // inherited by every command they spawn; the PostgreSQL server a command started there is stopped
 // when the file's tests end, and the folder is removed.
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,6 +62,40 @@ export async function stopPage(root) {
   await serviceDown({ paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }), out: { write() {} } }).catch(() => {});
 }
 
+// One real init per test file and kind of project, and a copy of it for each test, as PostgreSQL's tests
+// copy an initdb'd template instead of running initdb for each (Cluster.pm, INITDB_TEMPLATE) and as
+// Bridge's own init self-tests copy .review-bridge/ under a new id (bridge.mjs runDisposableFakeScenarios;
+// ECOSYSTEM-REFERENCES K). A test still gets a whole project of its own: the copy's new project_id makes
+// it another project in this file's database, recorded at its first use. The template's page is stopped
+// once it is made; a copy has no page, no graph and no install record, so a test of those runs init itself.
+const templates = new Map();
+const templateRoots = new Set();
+export async function projectTemplate(key, make) {
+  if (!templates.has(key)) {
+    templates.set(key, (async () => {
+      const root = await make();
+      templateRoots.add(root);
+      await stopPage(root);
+      return root;
+    })());
+  }
+  return await templates.get(key);
+}
+
+export async function copyProject(t, template, prefix) {
+  // A path that does not exist yet, so the copy is the template's folder itself, as the self-tests copy.
+  const root = path.join(os.tmpdir(), prefix + randomUUID().slice(0, 8));
+  await fs.promises.cp(template, root, { recursive: true });
+  const file = path.join(root, ".review-bridge", "bridge.json");
+  const config = JSON.parse(await fs.promises.readFile(file, "utf8"));
+  await fs.promises.writeFile(file, JSON.stringify({ ...config, project_id: randomUUID() }, null, 2) + "\n");
+  t.after(async () => {
+    await stopPage(root);
+    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  });
+  return root;
+}
+
 // The rows a query returns from the records a command wrote (the server is running by then).
 export async function queryRecords(sql, values = [], home = dataHome) {
   const client = await connect(path.join(home, "postgres"), { database: "bridge" });
@@ -82,4 +117,13 @@ export function stopServerIn(home) {
 process.on("exit", () => {
   stopServerIn(dataHome);
   try { fs.rmSync(dataHome, { recursive: true, force: true }); } catch {}
+  // The templates' folders; what each test copied went at its own end. Retried as the copies are (a file
+  // Windows still holds), and said when it cannot go, so nothing stays behind in Temp unsaid.
+  for (const root of templateRoots) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch (error) {
+      process.stderr.write("A test template folder could not be removed: " + root + " (" + (error.code || error.message) + ")\n");
+    }
+  }
 });

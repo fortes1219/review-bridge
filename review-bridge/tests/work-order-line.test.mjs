@@ -1,6 +1,6 @@
 // RC3-PIPE-01: a directory of work orders is one line. Every model call here is the fake CLI.
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -32,11 +32,15 @@ async function freePort() {
   return port;
 }
 
-async function install(t, { withGit = false } = {}) {
+const gitIn = (root) => (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true });
+
+// The real init in fake mode, once for this file and kind of project (with Git or without): the template
+// each test copies.
+async function initProject(withGit) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-line-"));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "line-demo", scripts: { test: "node -e \"process.exit(0)\"" } }));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
-  const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true });
+  const git = gitIn(root);
   if (withGit) {
     git("init", "-q");
     git("add", "-A");
@@ -46,11 +50,15 @@ async function install(t, { withGit = false } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+// The test's own project: a copy of the template under a new id (isolatedDataHome.mjs copyProject).
+async function install(t, { withGit = false } = {}) {
+  const template = await projectTemplate("work-order-line" + (withGit ? ":git" : ""), () => initProject(withGit));
+  const root = await copyProject(t, template, "review-bridge-line-");
+  const git = gitIn(root);
   const bridge = (args, env = {}) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env } });
-  t.after(async () => {
-    await stopPage(root);
-    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  });
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
   return { root, bridge, git, paths, dirOf: (name) => ".review-bridge/work-packages/" + name };
 }

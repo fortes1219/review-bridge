@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -19,7 +19,21 @@ const packageRoot = path.resolve(runtimeSource, "..");
 // init saves the default roles in the data home; keep it out of the real user profile.
 
 // A neutral install made by the real init in fake mode, so work-start --fake-cli is usable.
+// The test's own project: a copy of the template under a new id (isolatedDataHome.mjs copyProject).
 async function install(t, { withGit = false } = {}) {
+  const template = await projectTemplate("stop" + (withGit ? ":git" : ""), () => initProject(withGit));
+  const root = await copyProject(t, template, "review-bridge-stop-");
+  const runtime = runtimeSource;
+  const bootstrap = path.join(runtime, "bootstrap.mjs");
+  const bridge = (args, env = {}) => spawnSync(process.execPath, [bootstrap, ...args], {
+    cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env },
+  });
+  return { root, bootstrap, bridge, paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }) };
+}
+
+// The real init in fake mode, once for this file and kind of project (with Git or without): the template
+// each test copies.
+async function initProject(withGit) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-stop-"));
   // T0-06: a code work order needs an approved test entry point; the script exits 0 unless FAKE_GATE_EXIT says otherwise.
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "stop-demo", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(Number(process.env.FAKE_GATE_EXIT||0))\"" } }));
@@ -34,20 +48,11 @@ async function install(t, { withGit = false } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(port),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
-  const runtime = runtimeSource;
-  const bootstrap = path.join(runtime, "bootstrap.mjs");
-  const bridge = (args, env = {}) => spawnSync(process.execPath, [bootstrap, ...args], {
-    cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env },
-  });
-  t.after(async () => {
-    await stopPage(root);
-    await fsp.rm(root, { recursive: true, force: true });
-  });
-  const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
   // These checks read the Chinese pack; English, the product default, is covered by the delivery tests.
-  const config = await readJson(paths.bridgeConfigPath);
-  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ ...config, locale: "zh-TW" }, null, 2) + "\n");
-  return { root, bootstrap, bridge, paths };
+  const configPath = path.join(root, ".review-bridge", "bridge.json");
+  const config = await readJson(configPath);
+  await fsp.writeFile(configPath, JSON.stringify({ ...config, locale: "zh-TW" }, null, 2) + "\n");
+  return root;
 }
 
 async function freePort() {

@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopPage } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords, stopPage } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -42,11 +42,17 @@ async function folder(t, prefix) {
   return dir;
 }
 
-// A project set up without a terminal, with one work order in it.
-async function project(t) {
-  const root = await folder(t, "review-bridge-pty-project-");
+// A project set up without a terminal, with one work order in it: a copy of one real init made for this
+// file, under a new id (isolatedDataHome.mjs copyProject).
+async function initProject() {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-pty-template-"));
   const init = spawnSync(process.execPath, [bridge, "init", "--yes", "--fake-cli"], { cwd: root, env: env(), encoding: "utf8", windowsHide: true });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+async function project(t) {
+  const root = await copyProject(t, await projectTemplate("pty", initProject), "review-bridge-pty-project-");
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   return { root, order };

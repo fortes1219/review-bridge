@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -650,13 +650,26 @@ function yesTo(cli, order, args = [], env = {}) {
 // (the pty acceptance run), VS Code's terminal (the same CLI) and an agent with no terminal. An
 // agent's start and resume print the card and stop; the agent runs them again with --yes once the
 // person said yes. All with the fake CLI: no model is called.
-async function fourActionsProject(t, prefix) {
+// The project is a copy of one real init made for this file (isolatedDataHome.mjs copyProject), with a
+// new id, as PostgreSQL's tests copy an initdb'd template; a test that needs the page init itself started
+// asks for `ownInit`.
+async function fourActionsInit(prefix) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
-  t.after(() => removeWorkspace(root));
   const init = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--yes"), {
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+async function fourActionsProject(t, prefix, { ownInit = false } = {}) {
+  let root;
+  if (ownInit) {
+    root = await fourActionsInit(prefix);
+    t.after(() => removeWorkspace(root));
+  } else {
+    root = await copyProject(t, await projectTemplate("four-actions", () => fourActionsInit("review-bridge-four-actions-template-")), prefix);
+  }
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const cli = (args, env = {}) => spawnSync(process.execPath, [bridge, ...args], {
@@ -1319,7 +1332,7 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
 });
 
 test("without the reviewer proof a real start is refused before any model call, with --yes or without", async (t) => {
-  const { order, cli, listed } = await fourActionsProject(t, "review-bridge-no-proof-");
+  const { order, cli, listed } = await fourActionsProject(t, "review-bridge-no-proof-", { ownInit: true });
   // A card to say yes to (shown with the fake CLI, so the native --yes below has one).
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   const fakePage = /\nReviewer read-only check: not passed \(the Bridge page is running with the fake CLI\)\nRun: review-bridge down, then review-bridge start /;

@@ -1,7 +1,7 @@
 // The four pairings of writer and reviewer (RC3-BLOCKER-02), each run from a real plan through the
 // fake CLIs, which log every call. Which CLI each step reached, what it was told and what the run's
 // records say are read from there and from the database, not from what Bridge says it did.
-import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -41,20 +41,24 @@ const BODY = [
   "- The farm is visible.",
 ].join("\n") + "\n";
 
-async function install(t, writer, reviewer) {
+// The real init in fake mode, once for this file and pair of roles: the template each test copies.
+async function initProject(writer, reviewer) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-roles-"));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
   const init = spawnSync(process.execPath, [
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", writer, "--reviewer", reviewer, "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+// The test's own project, with its own call log: a copy of its roles' template under a new id
+// (isolatedDataHome.mjs copyProject).
+async function install(t, writer, reviewer) {
+  const root = await copyProject(t, await projectTemplate(writer + "+" + reviewer, () => initProject(writer, reviewer)), "review-bridge-roles-");
   const callLog = path.join(root, "calls.jsonl");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, FAKE_CALL_LOG: callLog, ...env },
-  });
-  t.after(async () => {
-    await stopPage(root);
-    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   const calls = async () => (await fsp.readFile(callLog, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   return { root, bridge, calls, paths: getBridgePaths(root, runtimeSource, { privateRootName: ".review-bridge" }) };
