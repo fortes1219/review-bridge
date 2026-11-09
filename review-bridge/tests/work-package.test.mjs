@@ -206,6 +206,18 @@ test("T12 authorized_by is the OS user and authorized_via records how work-start
   assert.equal((await readJson(path.join(r.paths.authorizationsDir, viaYes.authorization.authorization_id + ".json"))).authorized_via, "yes_flag");
 });
 
+// Two --yes to one card: the other start may be rewriting the plan file. A start that holds its plan
+// authorizes from what it holds; one given only the path reads the file and is refused by what it finds.
+test("a start that holds its plan authorizes it while its plan file is being rewritten; one given only the path does not", async (t) => {
+  const r = await runtime(t);
+  const { plan_path: planPath, ...held } = await plan(r, { task: order({ references: "src/game/farm.js" }), id: "held-plan" });
+  await fsp.writeFile(planPath, "");
+  await assert.rejects(authorizeWorkPackage({ paths: r.paths, planPath, approval: held.plan_sha256, executionMode: "fake_cli" }), /JSON/);
+  const started = await authorizeWorkPackage({ paths: r.paths, planPath, plan: held, approval: held.plan_sha256, executionMode: "fake_cli" });
+  await started.workLock();
+  assert.equal(started.run.run_id, held.proposed_run_id);
+});
+
 test("T13 the workspace delta flags a forbidden path as a scope violation even inside the allowed scope", async (t) => {
   const r = await runtime(t);
   const git = (...args) => spawnSync("git", args, { cwd: r.repoRoot, windowsHide: true });
