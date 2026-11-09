@@ -336,7 +336,8 @@ test("status says the database is stopped and does not start it", async (t) => {
   } finally {
     process.stdout.write = write;
   }
-  assert.deepEqual(lines, ["Page: not running; start it with review-bridge up", "資料庫：已停止；review-bridge up 會把它起來，下一次 start 也會。"]);
+  // Every line in the project's language, the page's as well as the database's (Fortes 2026-11-09).
+  assert.deepEqual(lines, ["網頁：沒在跑；用 review-bridge up 啟動", "資料庫：已停止；review-bridge up 會把它起來，下一次 start 也會。"]);
 });
 
 // Fortes 2026-11-09: a data directory that does not exist, cannot be read or is no cluster is said with
@@ -369,7 +370,7 @@ test("status says what is wrong with the data directory and where, and exits 4 a
   const notCluster = { state: "unusable", problem: "not_cluster", path: data };
   const zh = await show("zh-TW", notCluster);
   assert.equal(zh.code, 4);
-  assert.equal(zh.out, "Page: not running; start it with review-bridge up\n資料庫：" + data + " 不是資料庫叢集目錄。\n");
+  assert.equal(zh.out, "網頁：沒在跑；用 review-bridge up 啟動\n資料庫：" + data + " 不是資料庫叢集目錄。\n");
   const en = await show("en", { state: "unusable", problem: "unreadable", path: data, code: "EACCES" });
   assert.equal(en.code, 4);
   assert.match(en.out, new RegExp("Database: the data directory " + data.replace(/[\\.]/g, "\\$&") + " cannot be read \\(EACCES\\)\\."));

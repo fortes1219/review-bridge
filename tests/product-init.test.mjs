@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, inEnglish, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -43,6 +43,8 @@ function isolatedEnv(overrides = {}) {
     CLAUDE_REVIEW_CLI: path.join(isolatedHome, "absent", "claude"),
     CODEX_REVIEW_CLI: path.join(isolatedHome, "absent", "codex"),
     REVIEW_BRIDGE_DATA_HOME: dataHome,
+    // init speaks LANG's language, as create-vue does (i18n.mjs shellLocale): English on any machine.
+    LANG: "en_US.UTF-8",
     ...(process.env.TZ ? { TZ: process.env.TZ } : {}),
     ...overrides,
   };
@@ -507,7 +509,6 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
-  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const start = (...args) => spawnSync(process.execPath, [bridge, "start", order, ...args], {
@@ -567,7 +568,6 @@ test("init maps a Git project's code into its graph and leaves git status as it 
     cwd: packageRoot, encoding: "utf8", env: env(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
-  inEnglish(root);
   const output = JSON.parse(init.stdout);
   assert.equal(output.graph.files, 3, "three TypeScript files; notes.md is not read");
   assert.deepEqual(output.graph.incomplete, [{ path: "src/broken.ts", parse_status: "parsed", error_count: 1 }]);
@@ -657,7 +657,6 @@ async function fourActionsProject(t, prefix) {
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
-  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const cli = (args, env = {}) => spawnSync(process.execPath, [bridge, ...args], {
@@ -709,7 +708,6 @@ test("an agent's start --yes runs the project's tests when its rules give a comm
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
-  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const cli = (args) => spawnSync(process.execPath, [bridge, ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });

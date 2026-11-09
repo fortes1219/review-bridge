@@ -1,6 +1,7 @@
 // Language packs. Bridge's own human-facing text comes from
 // `locales/<lang>.json`; internal codes stay language-neutral. A missing key
 // returns the key itself so a gap in a pack never breaks a delivery.
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,11 +29,22 @@ export async function inEveryLocale(key) {
   return packs.map((pack) => pack?.[key]).filter(Boolean);
 }
 
-// The language of the person's system, the one init writes into bridge.json: what Intl reports (MDN: a
-// DateTimeFormat made with no arguments "uses the current system settings"), matched to a language pack by
-// language and script after Add Likely Subtags (Intl.Locale maximize: zh-TW and zh-Hant-HK are both
-// zh-Hant, zh-CN is zh-Hans). The default when no pack matches or Intl cannot tell.
-export async function systemLocale({ locale = new Intl.DateTimeFormat().resolvedOptions().locale } = {}) {
+// The person's language as create-vue finds it (utils/getLanguage.ts getLocale, ECOSYSTEM-REFERENCES A): the POSIX
+// variables LC_ALL, LC_MESSAGES and LANG first, then what Intl reports (MDN: a DateTimeFormat made with
+// no arguments "uses the current system settings"), then English. A POSIX value is cut at its charset
+// (zh_TW.UTF-8 is zh-TW), and the C locale, POSIX's own name for it included, is English. Node on Windows
+// reads the system and not these variables, so this is what lets a person, or a test, choose there.
+export function shellLocale(env = process.env) {
+  const raw = env.LC_ALL || env.LC_MESSAGES || env.LANG || new Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
+  const tag = String(raw).split(".")[0].replace("_", "-");
+  return tag === "C" || tag === "POSIX" ? "en-US" : tag;
+}
+
+// The language init writes into bridge.json and speaks in: the person's (shellLocale), matched to a
+// language pack by language and script after Add Likely Subtags (Intl.Locale maximize: zh-TW, zh-HK and
+// zh-MO are zh-Hant, zh-CN and zh-SG zh-Hans, as create-vue links them). The default when no pack matches
+// or the tag is not one.
+export async function systemLocale({ locale = shellLocale() } = {}) {
   let wanted;
   try {
     wanted = new Intl.Locale(locale).maximize();
@@ -54,8 +66,7 @@ export async function resolveLocale(paths) {
   return DEFAULT_LOCALE;
 }
 
-export async function createTranslator(locale = DEFAULT_LOCALE) {
-  const pack = (await loadPack(locale)) || (await loadPack(DEFAULT_LOCALE)) || {};
+function translatorOf(pack, locale) {
   const t = (key, vars = {}) => {
     const template = Object.hasOwn(pack, key) ? pack[key] : key;
     return String(template).replace(/\{([A-Za-z0-9_]+)\}/g, (match, name) => (name in vars && vars[name] !== undefined && vars[name] !== null ? String(vars[name]) : match));
@@ -63,4 +74,16 @@ export async function createTranslator(locale = DEFAULT_LOCALE) {
   t.locale = locale;
   t.has = (key) => Object.hasOwn(pack, key);
   return t;
+}
+
+export async function createTranslator(locale = DEFAULT_LOCALE) {
+  return translatorOf((await loadPack(locale)) || (await loadPack(DEFAULT_LOCALE)) || {}, locale);
+}
+
+// The default language's words, for a caller that has no language of its own to say them in (upgrade's
+// last lines, a helper called without one); read once.
+let english = null;
+export function defaultTranslator() {
+  english ??= translatorOf(JSON.parse(fs.readFileSync(path.join(localesDir, DEFAULT_LOCALE + ".json"), "utf8")), DEFAULT_LOCALE);
+  return english;
 }

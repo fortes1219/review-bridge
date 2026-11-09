@@ -265,17 +265,18 @@ async function init(options) {
     setUpProject,
     // The record rebuilt, the setup checked as init checks it, and the project read into its graph again,
     // as a first init does.
-    reinitialize: async (target) => {
+    reinitialize: async (target, t) => {
       const done = await reinitializeNeutralInstall({ target });
       if (!done) return done;
       await verifyNeutralInstall(target);
-      const graph = await mapProject(target, () => {}).then(graphOutcome, graphFailure);
+      const graph = await mapProject(target, () => {}).then(graphOutcome, graphFailure(t));
       return { ...done, graph_lines: graph.lines };
     },
   });
 }
 
-async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, step) {
+// `t` is the Guide's language, the one written into bridge.json: every step is said in it.
+async function setUpProject({ target, roles, profileId, watchPort, fakeCli, t }, step) {
   if (watchPort !== undefined && (!Number.isInteger(watchPort) || watchPort < 1 || watchPort > 65535)) {
     throw new Error("--port must be 1 through 65535.");
   }
@@ -283,7 +284,7 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
   // Live readiness is reported, never forced: the fake self-tests below are model-free
   // and need no CLI or login, and native work stays blocked either way.
   const roleReadiness = await inspectSelectedRoles(roles);
-  const plan = await step("Setting up .review-bridge/", async () => {
+  const plan = await step(t("init.step.setting_up"), async () => {
     const planned = await planNeutralInstall({ target, profileId, roles, watchPort });
     await applyNeutralInstall(planned, planned.plan_sha256);
     return planned;
@@ -291,8 +292,8 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
   let verification;
   let scenarios;
   try {
-    verification = await step("Checking the setup", () => verifyNeutralInstall(target));
-    scenarios = await step("Running the four fake self-tests", () => runDisposableFakeScenarios(target, ".review-bridge"));
+    verification = await step(t("init.step.checking"), () => verifyNeutralInstall(target));
+    scenarios = await step(t("init.step.self_tests"), () => runDisposableFakeScenarios(target, ".review-bridge"));
   } catch (error) {
     try {
       await rollbackFreshNeutralInstall(plan);
@@ -302,10 +303,10 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
     throw new Error(`Setup failed and was rolled back: ${error.message}`);
   }
   const realMode = await inspectNativeReadiness(roles);
-  const service = await step("Starting the local page", () => startService(target, fakeCli));
+  const service = await step(t("init.step.page"), () => startService(target, fakeCli));
   // The project's graph (T0-GRAPH-01). The setup stands without it, as it does without the page: a
   // graph that could not be built is said, with the command that builds it.
-  const graph = await step("Mapping the project", (update) => mapProject(target, update)).then(graphOutcome, graphFailure);
+  const graph = await step(t("init.step.mapping"), (update) => mapProject(target, update)).then(graphOutcome, graphFailure(t));
   const database = await databaseConnection();
   return {
     ok: true,
@@ -343,7 +344,7 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
 // What init says about the graph: the lines `graph` rendered in the project's language, or why it was not
 // built. The setup stands either way.
 const graphOutcome = (summary) => ({ summary, lines: summary.lines ?? [] });
-const graphFailure = (error) => ({ summary: null, lines: ["The project's graph was not built: " + error.message + " Run: review-bridge graph"] });
+const graphFailure = (t) => (error) => ({ summary: null, lines: [t("init.graph_failed", { error: error.message })] });
 
 // Reads the project into its graph through Bridge's runtime (`graph --json`): each line it prints is
 // one step, shown on the step's own line, and the last is the summary. Nothing is written in the project.

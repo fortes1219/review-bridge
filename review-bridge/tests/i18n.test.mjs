@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { serviceDown, serviceStatus } from "../features/setupCheck/pageService.mjs";
-import { createTranslator, DEFAULT_LOCALE, systemLocale } from "../features/workOrder/i18n.mjs";
+import { createTranslator, DEFAULT_LOCALE, shellLocale, systemLocale } from "../features/workOrder/i18n.mjs";
 
 const locales = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "features", "workOrder", "locales");
 
@@ -18,6 +18,20 @@ test("the system's language picks the pack with its language and script; anythin
     assert.equal(await systemLocale({ locale: system }), pack, system);
   }
   assert.equal(DEFAULT_LOCALE, "en");
+});
+
+// create-vue's getLocale order (utils/getLanguage.ts): LC_ALL, LC_MESSAGES, LANG, then the system's; a
+// POSIX value is cut at its charset and C is English. zh-HK and zh-MO are Traditional, zh-SG Simplified,
+// as create-vue links them; with no Simplified pack that is the default.
+test("the person's language is LC_ALL, then LC_MESSAGES, then LANG, then the system's, as create-vue reads it", async () => {
+  const system = new Intl.DateTimeFormat().resolvedOptions().locale;
+  assert.equal(shellLocale({ LC_ALL: "zh_TW.UTF-8", LC_MESSAGES: "fr_FR.UTF-8", LANG: "en_US.UTF-8" }), "zh-TW");
+  assert.equal(shellLocale({ LC_MESSAGES: "zh_TW.UTF-8", LANG: "en_US.UTF-8" }), "zh-TW");
+  assert.equal(shellLocale({ LANG: "zh_TW.UTF-8" }), "zh-TW");
+  assert.equal(shellLocale({}), system, "no variable: the system's");
+  for (const posix of ["C", "C.UTF-8", "POSIX"]) assert.equal(shellLocale({ LANG: posix }), "en-US", posix);
+  for (const [tag, pack] of [["zh-HK", "zh-TW"], ["zh-MO", "zh-TW"], ["zh-SG", DEFAULT_LOCALE]]) assert.equal(await systemLocale({ locale: tag }), pack, tag);
+  assert.equal(await systemLocale({ locale: shellLocale({ LANG: "zh_TW.UTF-8" }) }), "zh-TW");
 });
 
 test("every pack has the same keys, and the card and its stop line are in each person's language", async () => {

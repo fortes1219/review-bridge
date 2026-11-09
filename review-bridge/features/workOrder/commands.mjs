@@ -585,7 +585,7 @@ export async function statusOverview({ paths, options, page, databaseStatus = nu
       write(JSON.stringify({ page: { running: service.running, url: service.url, reason: service.reason }, database: { running: false, ...detail } }, null, 2));
       return exitCode;
     }
-    write("Page: " + (service.running ? service.url : "not running; start it with review-bridge up"));
+    write(service.running ? t("status.page.running", { url: service.url }) : t("status.page.not_running"));
     write(unusable ? t("status.database." + server.problem, { path: server.path, code: server.code }) : t("status.database.stopped"));
     return exitCode;
   }
@@ -601,29 +601,30 @@ export async function statusOverview({ paths, options, page, databaseStatus = nu
     }, null, 2));
     return 0;
   }
-  write("Page: " + (service.running ? service.url : "not running; start it with review-bridge up"));
+  // Every line in the project's language, as the database lines beside them are (Fortes 2026-11-09).
+  write(service.running ? t("status.page.running", { url: service.url }) : t("status.page.not_running"));
   write(t("status.database.running"));
   if (!runs.length && !options.after) {
-    write("Work: none yet. Put a work order in .review-bridge/work-packages/ and run: review-bridge start <file>");
+    write(t("status.work.none"));
   } else {
-    write("Work: " + active.length + " running");
+    write(t("status.work.running", { count: active.length }));
     for (const { line, source_file: sourceFile, run_id: runId, created_at: startedAt } of lines) {
-      write("  " + line.directory + "/ step " + line.position + " of " + line.total + ": " + path.posix.basename(sourceFile) + " running (run " + runId + "), started " + localTimestamp(startedAt));
+      write("  " + t("status.work.line", { directory: line.directory, position: line.position, total: line.total, file: path.posix.basename(sourceFile), run: runId, time: localTimestamp(startedAt) }));
     }
     for (const run of runs) {
       write("  " + [run.run_id, run.status.padEnd(11), (run.conclusion || "-").padEnd(15), (run.closed_reason || "-").padEnd(20), run.source_file, localTimestamp(run.created_at)].join("  "));
     }
-    if (more) write("  More: review-bridge status --after " + runs.at(-1).run_id);
+    if (more) write("  " + t("status.more", { run: runs.at(-1).run_id }));
   }
-  if (latestReview) write("Latest review: " + latestReview);
-  write("Roles: writer " + roles.writer + ", reviewer " + roles.reviewer);
+  if (latestReview) write(t("status.latest_review", { file: latestReview }));
+  write(t("status.roles", { writer: roles.writer, reviewer: roles.reviewer }));
   // The run's call logs live outside the project, one folder per run (review-bridge logs <run_id>).
-  write("Logs: " + logs);
+  write(t("status.logs", { folder: logs }));
   // What VS Code's PostgreSQL extension asks for; the password stays in its owner-only file.
   const { host, port, database, user, passwordFile } = db.connection;
-  write("Database in VS Code: install Microsoft's PostgreSQL extension and add a connection with");
-  write("  Server " + host + "  Port " + port + "  User " + user + "  Database " + database);
-  write("  Password: copy it from " + passwordFile);
+  write(t("status.database.vscode"));
+  write("  " + t("database.vscode.connection", { host, port, user, database }));
+  write("  " + t("database.vscode.password", { file: passwordFile }));
   return 0;
 }
 

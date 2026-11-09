@@ -1,7 +1,7 @@
 // The four pairings of writer and reviewer (RC3-BLOCKER-02), each run from a real plan through the
 // fake CLIs, which log every call. Which CLI each step reached, what it was told and what the run's
 // records say are read from there and from the database, not from what Bridge says it did.
-import { dataHome, inEnglish, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -48,7 +48,6 @@ async function install(t, writer, reviewer) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", writer, "--reviewer", reviewer, "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
-  inEnglish(root);
   const callLog = path.join(root, "calls.jsonl");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, FAKE_CALL_LOG: callLog, ...env },

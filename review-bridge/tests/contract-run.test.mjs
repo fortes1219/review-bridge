@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, inEnglish, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -43,7 +43,6 @@ async function install(t) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
-  inEnglish(root);
   const runtime = runtimeSource;
   const bootstrap = path.join(runtime, "bootstrap.mjs");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [bootstrap, ...args], {

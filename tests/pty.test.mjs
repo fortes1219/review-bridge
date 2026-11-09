@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, inEnglish, queryRecords, stopPage } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords, stopPage } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -28,6 +28,8 @@ function env() {
     CLAUDE_REVIEW_CLI: path.join(home, "absent", "claude"),
     CODEX_REVIEW_CLI: path.join(home, "absent", "codex"),
     REVIEW_BRIDGE_DATA_HOME: dataHome,
+    // init speaks LANG's language, as create-vue does (i18n.mjs shellLocale): English on any machine.
+    LANG: "en_US.UTF-8",
   };
 }
 
@@ -45,7 +47,6 @@ async function project(t) {
   const root = await folder(t, "review-bridge-pty-project-");
   const init = spawnSync(process.execPath, [bridge, "init", "--yes", "--fake-cli"], { cwd: root, env: env(), encoding: "utf8", windowsHide: true });
   assert.equal(init.status, 0, init.stderr);
-  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   return { root, order };

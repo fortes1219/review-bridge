@@ -102,6 +102,28 @@ async function guide(t, options, { answers, interactive = true, files = {}, save
   return { project, dataHome, ui, setup, run, written: () => written };
 }
 
+// Windows, 2026-11-09: on a Chinese system init printed English steps around one Chinese graph line. As
+// create-vue says its whole wizard in one language (ECOSYSTEM-REFERENCES A), every line is the person's.
+test("in the person's language the Guide asks, works and ends in that language, and hands it to the setup", async (t) => {
+  const saved = process.env.LANG;
+  process.env.LANG = "zh_TW.UTF-8";
+  t.after(() => { process.env.LANG = saved; });
+  const run = await guide(t, {}, { files: { "package.json": JSON.stringify({ name: "app" }) } });
+  await run.run;
+  const said = run.ui.calls;
+  assert.deepEqual(said.filter((call) => call.select).map((call) => call.select), ["選擇 writer：", "選擇 reviewer：", "選擇專案類型："]);
+  assert.deepEqual(said[1].options, ["claude (已登入)", "codex (需要登入)"]);
+  assert.ok(said.find((call) => call.select === "選擇專案類型：").options.includes("none (不指定專案類型)"));
+  assert.ok(said.some((call) => call.confirm === "要把 VS Code 工作加進這個專案的 .vscode/tasks.json 嗎？"));
+  const outro = said.find((call) => call.outro).outro;
+  assert.match(outro, /^完成。接下來：\n\n  把工單 \.md 放進 \.review-bridge\/work-packages\/，然後在 Claude Code 輸入：\n/);
+  assert.match(outro, /\n  網頁：http:\/\/localhost:8080\/\n\n  在 VS Code 看資料庫：/);
+  assert.match(outro, /\n    Password：從 .+secret 複製$/);
+  assert.doesNotMatch(outro, /Done\.|put a work order|at a terminal|page:|copy it from/);
+  // The steps are the setup's to say: it gets the same language.
+  assert.equal(run.setup.seen[0].t("init.step.setting_up"), "設定 .review-bridge/");
+});
+
 test("the Guide asks writer, reviewer and project type, then works one step per line and ends with Done", async (t) => {
   const run = await guide(t, {}, { files: { "package.json": JSON.stringify({ name: "app" }) } });
   const result = await run.run;

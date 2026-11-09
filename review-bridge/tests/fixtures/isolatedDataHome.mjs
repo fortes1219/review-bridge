@@ -20,6 +20,9 @@ fs.mkdirSync(process.env.HOME);
 // VS Code's user tasks: an uninstall reads them and may edit them.
 process.env.APPDATA = path.join(dataHome, "home", "AppData", "Roaming");
 process.env.XDG_CONFIG_HOME = path.join(dataHome, "home", ".config");
+// The language init speaks and writes into bridge.json is the person's, LANG before the system's, as
+// create-vue reads it (i18n.mjs shellLocale): these tests read Bridge's English words on any machine.
+process.env.LANG = "en_US.UTF-8";
 const { pg_ctl: pgCtl } = await postgresBinaries();
 
 // For a test about what belongs to the person, shared by all their projects: a machine of its own,
@@ -43,16 +46,6 @@ export function separatePerson(t) {
     env, home, claudeHome, codexHome, skillFolder, record: path.join(env.REVIEW_BRIDGE_DATA_HOME, "agent-entries.json"),
     claudeEntry: path.join(claudeHome, "commands", "review-bridge.md"), codexEntry: path.join(skillFolder, "SKILL.md"),
   };
-}
-
-// init writes the machine's language into bridge.json (systemLocale), and on Windows Node reads it from
-// the system, not from LANG or LC_ALL (checked 2026-11-09: zh-TW whatever they say). A test that reads
-// Bridge's English words sets the project's language after init, as a person edits that key.
-export function inEnglish(root) {
-  const file = path.join(root, ".review-bridge", "bridge.json");
-  const config = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (config.locale === "en") return;
-  fs.writeFileSync(file, JSON.stringify({ ...config, locale: "en" }, null, 2) + "\n");
 }
 
 // A test's clean-up stops the page service init started for it the way Playwright's webServer teardown
