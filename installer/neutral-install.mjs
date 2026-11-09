@@ -27,6 +27,9 @@ import { releaseAllVscodeTasks, vscodeTasksState } from "./vscode-tasks.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const privateName = ".review-bridge";
+// The folder keeps itself out of Git, whether Git is there at init or comes later, and touches no file of
+// the person's: pytest's .pytest_cache/.gitignore (cacheprovider.py), ruff's .ruff_cache, uv's .venv.
+const GIT_IGNORE = Object.freeze({ relative: ".gitignore", text: "# Created by Review Bridge automatically.\n*\n" });
 // The one runtime every project runs from.
 const sourceRuntime = path.join(packageRoot, "review-bridge");
 
@@ -90,37 +93,14 @@ export async function runtimeFingerprint(root = path.join(packageRoot, "review-b
   return sha256(JSON.stringify(files));
 }
 
+// Whether the folder is in a Git repository, and whether Git ignores .review-bridge/ there.
 function gitBoundary(selected) {
-  const gitRootText = git(selected, ["rev-parse", "--show-toplevel"]);
-  if (!gitRootText) return { repository: false, ignored: null, excludePath: null, pattern: null };
+  if (!git(selected, ["rev-parse", "--show-toplevel"])) return { repository: false, ignored: null };
   const target = realNative(selected);
-  const gitRoot = realNative(gitRootText);
-  const gitDirText = git(selected, ["rev-parse", "--absolute-git-dir"]);
-  const excludeText = git(selected, ["rev-parse", "--git-path", "info/exclude"]);
-  if (!gitDirText || !excludeText) throw new Error("Cannot locate local Git exclusion file.");
-  const gitDir = realNative(gitDirText);
-  const excludePath = realNative(path.resolve(selected, excludeText));
-  if (!under(excludePath, gitDir)) throw new Error("Git exclusion path is outside the selected Git directory.");
-  const relativeTarget = path.relative(gitRoot, target).replaceAll("\\", "/");
-  if (relativeTarget === ".." || relativeTarget.startsWith("../") || path.isAbsolute(relativeTarget)) {
-    throw new Error("Target is outside its Git repository.");
-  }
-  const pattern = "/" + (relativeTarget ? relativeTarget + "/" : "") + privateName + "/";
   const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", path.join(target, privateName, CONFIG_RELATIVE)], {
     cwd: target, windowsHide: true, timeout: 10_000, stdio: "ignore",
   }).status === 0;
-  return { repository: true, ignored, excludePath, pattern };
-}
-
-async function assertSafeExcludePath(excludePath) {
-  const parent = await statOptional(path.dirname(excludePath));
-  const file = await statOptional(excludePath);
-  if (parent && (!parent.isDirectory() || parent.isSymbolicLink())) {
-    throw new Error("Local Git exclusion directory is not a normal directory.");
-  }
-  if (file && (!file.isFile() || file.isSymbolicLink())) {
-    throw new Error("Local Git exclusion file is not a normal file.");
-  }
+  return { repository: true, ignored };
 }
 
 export const DEFAULT_WATCH_PORT = 8080;
@@ -158,7 +138,6 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     throw new Error("Bridge neutral state already exists; fresh install cannot overwrite it.");
   }
   const boundary = gitBoundary(root);
-  if (boundary.repository) await assertSafeExcludePath(boundary.excludePath);
   const agentEntries = await planAgentEntries();
   const plan = {
     schema_version: 1,
@@ -175,8 +154,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     git: boundary,
     agent_entries: agentEntries,
     changes: [
-      ...(boundary.repository && !boundary.ignored ? ["Keep Bridge private state out of Git using local Git exclusion"] : []),
-      "Write the settings and work order templates to .review-bridge/; Bridge keeps its run state and logs in your data and log folders",
+      "Write the settings and work order templates to .review-bridge/, with a .gitignore there that keeps the folder out of Git; Bridge keeps its run state and logs in your data and log folders",
       ...agentEntries.filter((entry) => entry.action === "add" || entry.action === "replace").map((entry) => "Add the /review-bridge entry for your agent, outside the project: " + entry.path),
       "Leave everything else in the project untouched",
       "Serve the local page at http://localhost:" + watchPort + "/ (the next free port if it is taken)",
@@ -513,32 +491,16 @@ async function applyNeutralInstallLocked(plan, claimed) {
   });
   if (fresh.plan_sha256 !== claimed) throw new Error("Neutral install plan is stale.");
   const privateRoot = path.join(plan.target, privateName);
-  const excludePath = plan.git.excludePath;
-  let previousExclude = null;
-  let wroteExclude = false;
-  let addedPrefixNewline = false;
   let createdRoot = false;
   let wroteAgentEntries = false;
   let stateRoot = null;
   let createdState = false;
   try {
-    if (plan.git.repository && !plan.git.ignored) {
-      await assertSafeExcludePath(excludePath);
-      previousExclude = await fsp.readFile(excludePath).catch((error) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      });
-      const before = previousExclude || Buffer.alloc(0);
-      const addition = (before.length && before[before.length - 1] !== 10 ? "\n" : "")
-        + "# Review Bridge local state\n" + plan.git.pattern + "\n";
-      addedPrefixNewline = addition.startsWith("\n");
-      await fsp.mkdir(path.dirname(excludePath), { recursive: true });
-      wroteExclude = true;
-      await fsp.writeFile(excludePath, Buffer.concat([before, Buffer.from(addition, "utf8")]));
-      if (!gitBoundary(plan.target).ignored) throw new Error("Local Git exclusion did not take effect.");
-    }
     await fsp.mkdir(privateRoot);
     createdRoot = true;
+    // First, so nothing written after it is ever seen by Git, then or later.
+    await fsp.writeFile(inPrivate(privateRoot, GIT_IGNORE.relative), GIT_IGNORE.text, "utf8");
+    if (plan.git.repository && !gitBoundary(plan.target).ignored) throw new Error(".review-bridge/.gitignore did not keep the folder out of Git.");
     // The project holds only its settings and work order templates; the runtime stays in the Bridge
     // folder, the run state and the install record in the service's state under the project's id.
     const profile = await resolveProfile(plan.target, plan.profile.id);
@@ -571,7 +533,9 @@ async function applyNeutralInstallLocked(plan, claimed) {
       work_template_sha256: plan.work_template_sha256,
       rules_sha256: plan.rules_sha256,
       installed_files: installedFiles,
-      git_exclusion: wroteExclude ? { path: excludePath, pattern: plan.git.pattern, added_prefix_newline: addedPrefixNewline } : null,
+      // Installs before .review-bridge/.gitignore recorded the line they added to .git/info/exclude here;
+      // upgrade, rollback and uninstall still take that line away. A new install adds none.
+      git_exclusion: null,
     });
     return { ok: true, target: plan.target, profile: plan.profile.id, roles: plan.roles, private_root: privateRoot };
   } catch (error) {
@@ -579,10 +543,6 @@ async function applyNeutralInstallLocked(plan, claimed) {
     if (createdState) await fsp.rm(stateRoot, { recursive: true, force: true });
     if (createdRoot && path.resolve(privateRoot) === path.resolve(plan.target, privateName)) {
       await fsp.rm(privateRoot, { recursive: true, force: true });
-    }
-    if (wroteExclude) {
-      if (previousExclude === null) await fsp.rm(excludePath, { force: true });
-      else await fsp.writeFile(excludePath, previousExclude);
     }
     throw new Error("Neutral install rolled back: " + error.message);
   }
@@ -620,19 +580,9 @@ export async function reinitializeNeutralInstall({ target }) {
     for (const template of TEMPLATES) await fill(template.relative, (file) => fsp.copyFile(templateSource(template), file));
     await fill("rules.md", (file) => fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), file));
     await fill("policy.override.json", async (file) => writeJson(file, projectPolicyOverride(await resolveProfile(root, config.profile_id ?? "auto"))));
-    // Kept out of Git as init does; a project already keeping it out is left as it is, and then the
-    // exclusion is not this record's to remove.
-    const boundary = gitBoundary(root);
-    let gitExclusion = null;
-    if (boundary.repository && !boundary.ignored) {
-      await assertSafeExcludePath(boundary.excludePath);
-      const before = (await fsp.readFile(boundary.excludePath).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)))) || Buffer.alloc(0);
-      const addition = (before.length && before[before.length - 1] !== 10 ? "\n" : "") + "# Review Bridge local state\n" + boundary.pattern + "\n";
-      await fsp.mkdir(path.dirname(boundary.excludePath), { recursive: true });
-      await fsp.writeFile(boundary.excludePath, Buffer.concat([before, Buffer.from(addition, "utf8")]));
-      if (!gitBoundary(root).ignored) throw new Error("Local Git exclusion did not take effect.");
-      gitExclusion = { path: boundary.excludePath, pattern: boundary.pattern, added_prefix_newline: addition.startsWith("\n") };
-    }
+    // Kept out of Git as init does; one the person already has there is theirs and left as it is.
+    await fill(GIT_IGNORE.relative, (file) => fsp.writeFile(file, GIT_IGNORE.text, "utf8"));
+    if (gitBoundary(root).repository && !gitBoundary(root).ignored) throw new Error(".review-bridge/ is not kept out of Git: its .gitignore no longer ignores it.");
     await writeAgentEntries();
     const shipped = new Map([
       ...TEMPLATES.map((template) => [template.relative, templateSource(template)]),
@@ -653,7 +603,7 @@ export async function reinitializeNeutralInstall({ target }) {
       work_template_sha256: await shippedTemplateHashes(),
       rules_sha256: shippedHash.get("rules.md"),
       installed_files: installedFiles,
-      git_exclusion: gitExclusion,
+      git_exclusion: null,
     });
     return { reinitialized: true, target: root, private_root: privateRoot, wrote };
   });
