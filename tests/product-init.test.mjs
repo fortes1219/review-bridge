@@ -126,7 +126,7 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     "    /review-bridge start .review-bridge/work-packages/<file>.md",
     "    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)",
     "  at a terminal, for advanced use and CI:",
-    "    review-bridge start .review-bridge/work-packages/<file>.md",
+    "    npx review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: http://localhost:" + port + "/",
     ...(await databaseLines()),
   ]);
@@ -208,7 +208,7 @@ test("R5 init keeps self-test artifacts disposable and installs both work-order 
     cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true,
   });
   assert.equal(removed.status, 2);
-  assert.match(removed.stderr, /Unknown command: enqueue\. Run: review-bridge --help/);
+  assert.match(removed.stderr, /Unknown command: enqueue\. Run: npx review-bridge --help/);
   assert.deepEqual(await fsp.readdir(projectPaths(root).authorizationsDir), []);
 });
 
@@ -354,7 +354,7 @@ test("init starts the resident service and ends with cd, the work folder, the st
     "    /review-bridge start .review-bridge/work-packages/<file>.md",
     "    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)",
     "  at a terminal, for advanced use and CI:",
-    "    review-bridge start .review-bridge/work-packages/<file>.md",
+    "    npx review-bridge start .review-bridge/work-packages/<file>.md",
     "  page: " + url,
     ...(await databaseLines()),
   ]);
@@ -433,7 +433,7 @@ test("work-plan <file> plans a work order with the file name, the OS user and th
   assert.equal(plain.status, 0, plain.stderr);
   const [, planFile] = /^Plan written to (.+)\n/.exec(plain.stdout) || [];
   assert.ok(planFile?.startsWith(projectPaths(root).logRoot) && planFile.endsWith("add-readme.plan.json"), plain.stdout);
-  assert.deepEqual(plain.stdout.trimEnd().split(/\r?\n/), ["Plan written to " + planFile, "Next: review-bridge work-start --plan " + planFile]);
+  assert.deepEqual(plain.stdout.trimEnd().split(/\r?\n/), ["Plan written to " + planFile, "Next: npx review-bridge work-start --plan " + planFile]);
   const planned = run(file, "--breakpoint", "after the review", "--json");
   assert.equal(planned.status, 0, planned.stderr);
   const output = JSON.parse(planned.stdout);
@@ -690,7 +690,7 @@ test("an agent's start prints the card and stops; with --yes it runs, and record
     assert.ok(lines.includes(line), line);
   }
   assert.ok(lines.some((line) => line.startsWith("Contract:     ")) && lines.some((line) => line.startsWith("Valid until:  ")));
-  assert.equal(lines.at(-1), "Needs authorization. If the person says yes, run again: review-bridge start " + order + " --fake-cli --yes");
+  assert.equal(lines.at(-1), "Needs authorization. If the person says yes, run again: npx review-bridge start " + order + " --fake-cli --yes");
   assert.deepEqual(await listed("runs"), [], "nothing started");
   assert.deepEqual(await listed("authorizations"), [], "nothing authorized");
 
@@ -741,12 +741,12 @@ test("--yes is refused when the work order changed after the card, when no card 
   const { root, order, cli, listed } = await fourActionsProject(t, "review-bridge-card-changed-");
   const noCard = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(noCard.status, 1, noCard.stderr);
-  assert.equal(noCard.stdout, "No card was shown for this work order, so there is no yes to run on. Run: review-bridge start " + order + " --fake-cli and show the person the card.\n");
+  assert.equal(noCard.stdout, "No card was shown for this work order, so there is no yes to run on. Run: npx review-bridge start " + order + " --fake-cli and show the person the card.\n");
 
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
   const file = path.join(root, order);
   await fsp.writeFile(file, (await fsp.readFile(file, "utf8")).replace("README", "READMe"));
-  const refusal = "The work order changed after you saw the card. Run: review-bridge start " + order + " --fake-cli and look again.\n";
+  const refusal = "The work order changed after you saw the card. Run: npx review-bridge start " + order + " --fake-cli and look again.\n";
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const changed = cli(["start", order, "--fake-cli", "--yes"]);
     assert.equal(changed.status, 1, changed.stderr);
@@ -760,7 +760,7 @@ test("--yes is refused when the work order changed after the card, when no card 
   assert.match(card.stdout, /\n {2}│ # 工單：新增 READMe\n/, "the new card shows the edit");
   const other = cli(["start", order, "--fake-cli", "--yes", "--rounds", "1"]);
   assert.equal(other.status, 1, other.stderr);
-  assert.equal(other.stdout, "--rounds is not what the card showed. Run: review-bridge start " + order + " --fake-cli --yes without it, or review-bridge start " + order + " --fake-cli to show the person a new card.\n");
+  assert.equal(other.stdout, "--rounds is not what the card showed. Run: npx review-bridge start " + order + " --fake-cli --yes without it, or npx review-bridge start " + order + " --fake-cli to show the person a new card.\n");
   const yes = yesTo(cli, order, ["--rounds", "2"]);
   assert.equal(yes.status, 0, yes.stdout + yes.stderr);
   assert.match(yes.stdout, /^Plan from the card: .*hello\.plan\.json\n/);
@@ -768,7 +768,7 @@ test("--yes is refused when the work order changed after the card, when no card 
   // E10: one card, one yes.
   const again = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(again.status, 1, again.stderr);
-  assert.equal(again.stdout, "This card was already said yes to; one card starts one run. Run: review-bridge start " + order + " --fake-cli and show the person the new card.\n");
+  assert.equal(again.stdout, "This card was already said yes to; one card starts one run. Run: npx review-bridge start " + order + " --fake-cli and show the person the new card.\n");
   assert.equal((await listed("runs")).length, 1, "one run from one card");
 });
 
@@ -1257,7 +1257,7 @@ test("a card past its Valid until is refused, and a card's yes is taken once", a
   await queryRecords("update plans set authorization_expires_at = now() - interval '1 second' where shown_at is not null and withdrawn_at is null");
   const old = cli(["start", order, "--fake-cli", "--yes"]);
   assert.equal(old.status, 1, old.stderr);
-  assert.match(old.stdout, /^The card was valid until .*\. Run: review-bridge start .* and show the person the new card\.\n$/);
+  assert.match(old.stdout, /^The card was valid until .*\. Run: npx review-bridge start .* and show the person the new card\.\n$/);
   assert.deepEqual(await listed("runs"), []);
   assert.deepEqual(await listed("authorizations"), []);
 
@@ -1313,7 +1313,7 @@ test("stop pauses a run and keeps its records, resume carries the work order on,
   const card = cli(["resume", runId, "--fake-cli"]);
   assert.equal(card.status, 1);
   assert.match(card.stdout, new RegExp("^Carrying on run " + runId + " \\(" + order.replaceAll(".", "\\.") + "\\) as a new run\\n"));
-  assert.match(card.stdout, new RegExp("\\nNeeds authorization\\. If the person says yes, run again: review-bridge resume " + runId + " --fake-cli --yes\\n$"));
+  assert.match(card.stdout, new RegExp("\\nNeeds authorization\\. If the person says yes, run again: npx review-bridge resume " + runId + " --fake-cli --yes\\n$"));
   const resumed = cli(["resume", runId, "--fake-cli", "--yes"]);
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.match(resumed.stdout, /\nDelivered: .*\nResult file: /);
@@ -1335,7 +1335,7 @@ test("without the reviewer proof a real start is refused before any model call, 
   const { order, cli, listed } = await fourActionsProject(t, "review-bridge-no-proof-", { ownInit: true });
   // A card to say yes to (shown with the fake CLI, so the native --yes below has one).
   assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
-  const fakePage = /\nReviewer read-only check: not passed \(the Bridge page is running with the fake CLI\)\nRun: review-bridge down, then review-bridge start /;
+  const fakePage = /\nReviewer read-only check: not passed \(the Bridge page is running with the fake CLI\)\nRun: npx review-bridge down, then npx review-bridge start /;
   // The page init started runs the fake CLI, so it can never hold a proof.
   const refused = cli(["start", order, "--yes"]);
   assert.equal(refused.status, 1, refused.stderr);
@@ -1356,7 +1356,7 @@ test("without the reviewer proof a real start is refused before any model call, 
   // A new card with no Codex here: the person hears what to install and sign in to, and nothing else.
   const noCli = cli(["start", order]);
   assert.equal(noCli.status, 1, noCli.stderr);
-  assert.match(noCli.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\n(?:Install the codex CLI and sign it in|Sign the reviewer in) \(codex login\), then run: review-bridge start /m);
+  assert.match(noCli.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\n(?:Install the codex CLI and sign it in|Sign the reviewer in) \(codex login\), then run: npx review-bridge start /m);
   assert.doesNotMatch(noCli.stdout + noCli.stderr, /MCP/);
   // And without --yes: the card, and no model call, the check's among them, before a yes.
   cli(["up", "--fake-cli"]);

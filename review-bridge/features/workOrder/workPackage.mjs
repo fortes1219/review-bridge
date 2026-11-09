@@ -40,6 +40,7 @@ import { priorityChoice } from "../../policy/policyRules.mjs";
 import { BUDGET_KEYS, budgetProblems, formProblems, MIN_CALL_TIMEOUT, parseWorkOrder, sealedText, WorkOrderFormatError, WorkOrderFormError, workOrderIdOf } from "./workOrderFormat.mjs";
 import { stopRun } from "./writerLoop.mjs";
 import { cardStillMatches } from "./workOrderRecords.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 // Who fills each role in this run: the flag given at the terminal, else bridge.json. The plan seals
 // it, so changing bridge.json later only affects the next start (Owner 2026-11-04).
@@ -148,7 +149,7 @@ export const PLAN_SCHEMA_VERSION = 10;
 
 export function assertCurrentPlan(plan) {
   if (plan?.operation !== "start_work_package") throw new Error("Unsupported work plan.");
-  if ([4, 5, 6, 7].includes(plan.schema_version)) throw new Error("This plan was made by an older Bridge and is not read again. Run: review-bridge start <file> to make a new card");
+  if ([4, 5, 6, 7].includes(plan.schema_version)) throw new Error("This plan was made by an older Bridge and is not read again. Run: " + bridgeRunner() + " start <file> to make a new card");
   if (plan.schema_version !== PLAN_SCHEMA_VERSION) throw new Error("Unsupported work plan.");
 }
 

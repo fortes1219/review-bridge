@@ -24,6 +24,7 @@ import {
   formatUpgradeRollbackPlan, formatUpgradeRollbackResult, loadInstalledServiceModules, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
   reinitializeNeutralInstall, rollbackFreshNeutralInstall, verifyNeutralInstall,
 } from "./installer/neutral-install.mjs";
+import { bridgeRunner } from "./review-bridge/utils/bridgeCommand.mjs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 // The one runtime: every project's commands, self-tests and page service run from here.
@@ -479,7 +480,7 @@ async function vscode(options) {
   }
   const target = path.resolve(options.target ?? ".");
   if (!fs.existsSync(path.join(target, ".review-bridge"))) {
-    throw new Error("This folder is not set up (" + target + "). Run review-bridge init here first, or use --user for all projects.");
+    throw new Error("This folder is not set up (" + target + "). Run " + bridgeRunner() + " init here first, or use --user for all projects.");
   }
   const file = projectTasksFile(target);
   return { ok: true, scope: "project", path: file, action: await writeVscodeTasks(file) };

@@ -20,6 +20,7 @@ import { onDatabaseBackedUp } from "./service/database/notices.mjs";
 import { failureLine, translatedFailure } from "./service/database/serverErrors.mjs";
 import { getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
 import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
+import { bridgeRunner } from "./utils/bridgeCommand.mjs";
 
 // Bridge is installed in its own folder; the project it works on is named with --project <folder>,
 // or is the folder the command runs in. Nothing is looked up from where Bridge itself sits.
@@ -65,7 +66,7 @@ async function main() {
   const manifestPath = path.join(bridgeRoot, "manifest.json");
   const manifest = await readJson(manifestPath);
   if (command !== "doctor" && !manifest.commands.includes(command)) {
-    throw new Error("Unknown command: " + command + ". Run: review-bridge --help");
+    throw new Error("Unknown command: " + command + ". Run: " + bridgeRunner() + " --help");
   }
   const fakeRequested = args.includes("--fake-cli");
   // Native model calls are allowed only for the commands that start work on a person's yes (start,

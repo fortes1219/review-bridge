@@ -7,6 +7,7 @@ import path from "node:path";
 import { projectRun, readJson, recordsDatabase, workOrderRuns } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
 import { canonicalTaskFile, workOrderOfFile, workOrdersWithSourceId } from "./workOrderRecords.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PAGE = 10;
@@ -66,7 +67,7 @@ async function runFiles(folder) {
 
 async function openProject(paths) {
   const config = await readJson(paths.bridgeConfigPath);
-  if (!config.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: review-bridge upgrade");
+  if (!config.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: " + bridgeRunner() + " upgrade");
   const database = recordsDatabase() || (async () => (await import("../../service/database/index.mjs")).openDatabase());
   return { db: await database(), projectId: config.project_id };
 }
@@ -75,7 +76,7 @@ async function showRun({ paths, db, projectId, runId, json }) {
   const run = await projectRun(db, projectId, runId);
   const folder = paths.runLogDir(runId);
   const files = await runFiles(folder);
-  if (!run && files === null) throw new Error("There is no run " + runId + " in this project. Run: review-bridge status");
+  if (!run && files === null) throw new Error("There is no run " + runId + " in this project. Run: " + bridgeRunner() + " status");
   if (json) {
     write(JSON.stringify({ run_id: runId, log_path: folder, present: files !== null, files: files || [] }, null, 2));
     return 0;
@@ -107,7 +108,7 @@ async function workOrdersNamed({ paths, db, projectId, name }) {
 
 async function showWorkOrder({ paths, db, projectId, name, after, json }) {
   const ids = await workOrdersNamed({ paths, db, projectId, name });
-  if (!ids.length) throw new Error("No work order here is named " + name + " (a file in .review-bridge/work-packages/ or a source_id). Run: review-bridge status");
+  if (!ids.length) throw new Error("No work order here is named " + name + " (a file in .review-bridge/work-packages/ or a source_id). Run: " + bridgeRunner() + " status");
   const { runs, more } = await workOrderRuns(db, ids, { limit: PAGE, after });
   const withLogs = runs.map((run) => ({ ...run, log_path: paths.runLogDir(run.run_id) }));
   if (json) {
@@ -119,13 +120,13 @@ async function showWorkOrder({ paths, db, projectId, name, after, json }) {
   for (const run of withLogs) {
     write("  " + [run.run_id, localTimestamp(run.created_at), (run.conclusion || run.status).padEnd(15), run.log_path].join("  "));
   }
-  if (more) write("  More: review-bridge logs " + name + " --after " + runs.at(-1).run_id);
+  if (more) write("  More: " + bridgeRunner() + " logs " + name + " --after " + runs.at(-1).run_id);
   return 0;
 }
 
 export async function showLogs({ paths, options }) {
   const name = options.target;
-  if (!name) throw new Error("logs needs a run id or a work order. Run: review-bridge logs <run_id>, or review-bridge logs <file or source_id>");
+  if (!name) throw new Error("logs needs a run id or a work order. Run: " + bridgeRunner() + " logs <run_id>, or " + bridgeRunner() + " logs <file or source_id>");
   const { db, projectId } = await openProject(paths);
   if (RUN_ID.test(name)) return await showRun({ paths, db, projectId, runId: name.toLowerCase(), json: Boolean(options.json) });
   return await showWorkOrder({ paths, db, projectId, name, after: options.after || null, json: Boolean(options.json) });

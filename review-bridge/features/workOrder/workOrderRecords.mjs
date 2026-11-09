@@ -11,6 +11,7 @@ import { canonical, digest } from "../../utils/digest.mjs";
 import { nfc } from "../../utils/workOrderName.mjs";
 import { workOrderChange } from "./delivery.mjs";
 import { parseWorkOrder, UNTITLED, workOrderIdOf } from "./workOrderFormat.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 const changedLines = (change) => (change ? Math.max(change.removed.length, change.added.length) : 0);
 
@@ -148,7 +149,7 @@ async function decide(db, { projectId, fileName, text, id = null, repoRoot, upda
   if (asNew) return decided("new", null, title, null, text);
   if (update) {
     const { rows } = await db.query("select work_order_id from work_orders where work_order_id = $1 and project_id = $2", [update, projectId]);
-    if (!rows.length) throw new Error("There is no work order " + update + " in this project. Run: review-bridge status");
+    if (!rows.length) throw new Error("There is no work order " + update + " in this project. Run: " + bridgeRunner() + " status");
     return decided("update", update, title, await latestVersion(db, update), text);
   }
   if (!id) return decided("new", null, title, null, text);
@@ -172,7 +173,7 @@ export async function ensureProject(db, { projectId, root }) {
     [projectId, root, path.basename(root), now],
   );
   if (rows[0].cleared_at) {
-    throw new Error("This project's records were cleared (clean --all); its id is not used again. Run: review-bridge uninstall, then review-bridge init");
+    throw new Error("This project's records were cleared (clean --all); its id is not used again. Run: " + bridgeRunner() + " uninstall, then " + bridgeRunner() + " init");
   }
 }
 
@@ -321,7 +322,7 @@ async function writeWorkOrderVersion(tx, { projectId, plan, file, now }) {
       "update work_orders set last_file_name = $3, last_activity_at = $4 where work_order_id = $1 and project_id = $2",
       [workOrderId, projectId, file, now],
     );
-    if (!updated.rowCount) throw new Error("The work order " + workOrderId + " this card updates is no longer in Bridge's records. Run: review-bridge start <file> again");
+    if (!updated.rowCount) throw new Error("The work order " + workOrderId + " this card updates is no longer in Bridge's records. Run: " + bridgeRunner() + " start <file> again");
   }
   const version = await tx.query(
     "insert into work_order_versions (work_order_id, content_sha256, version_no, title, source_text, source_file, sealed_at, source_id)"
@@ -338,10 +339,10 @@ export async function recordStart(db, { planSha256, authorize }) {
   if (!recorder) throw new Error("This process keeps no run records; a start is refused.");
   return await db.transaction(async (tx) => {
     const { rows } = await tx.query("select project_id, body, withdrawn_at from plans where plan_sha256 = $1 for update", [planSha256]);
-    if (!rows.length) throw new Error("This plan is not in Bridge's records. Run: review-bridge start <file> again");
-    if (rows[0].withdrawn_at) throw new Error("This card was answered no or never shown. Run: review-bridge start <file> again");
+    if (!rows.length) throw new Error("This plan is not in Bridge's records. Run: " + bridgeRunner() + " start <file> again");
+    if (rows[0].withdrawn_at) throw new Error("This card was answered no or never shown. Run: " + bridgeRunner() + " start <file> again");
     const used = await tx.query("select 1 from authorization_claims where claim_key = $1", ["plan-" + planSha256]);
-    if (used.rows.length) throw new Error("This card was already said yes to; one card starts one run. Run: review-bridge start <file> again");
+    if (used.rows.length) throw new Error("This card was already said yes to; one card starts one run. Run: " + bridgeRunner() + " start <file> again");
     const { project_id: projectId, body: plan } = rows[0];
     const file = plan.work_order?.file ?? plan.task_file;
     await lockWorkOrder(tx, { projectId, plan, file });

@@ -28,6 +28,7 @@ import { formProblems, parseWorkOrder, sealedText, WorkOrderFormError, workOrder
 import { authorizeCard, optionAgainstCard, planFilePath, PLAN_SCHEMA_VERSION, workLockReleased, workOrderChecker } from "./workPackage.mjs";
 import { uncommittedNow } from "./workspaceEvidence.mjs";
 import { stopRun } from "./writerLoop.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 const write = (line) => process.stdout.write(line + "\n");
 
@@ -107,10 +108,10 @@ export async function directoryOfTarget(paths, target) {
   if (!stat?.isDirectory()) return null;
   const root = path.join(paths.privateRoot, "work-packages");
   const parts = path.relative(real(root), real(absolute)).split(path.sep);
-  const example = "review-bridge start .review-bridge/work-packages/<directory>/";
+  const example = bridgeRunner() + " start .review-bridge/work-packages/<directory>/";
   if (parts.length === 1 && parts[0] === "") throw new Error("work-packages/ itself is not a line: give a subdirectory or a file. Run: " + example);
   if (parts[0] === ".." || path.isAbsolute(parts.join(path.sep))) throw new Error(target + " is not under .review-bridge/work-packages/: give a subdirectory of it or a file. Run: " + example);
-  if (parts.length > 1) throw new Error(target + " is more than one level under work-packages/; a line is one directory directly under it, and its work orders are directly in that. Run: review-bridge start .review-bridge/work-packages/" + parts[0] + "/");
+  if (parts.length > 1) throw new Error(target + " is more than one level under work-packages/; a line is one directory directly under it, and its work orders are directly in that. Run: " + bridgeRunner() + " start .review-bridge/work-packages/" + parts[0] + "/");
   return { name: nfc(parts[0]), absolute, shown: canonicalTaskFile(paths.repoRoot, absolute) + "/" };
 }
 
@@ -133,7 +134,7 @@ export async function lineRunningLine(paths, { db, projectId }, name) {
   if (!(await lineHeld(paths, name))) return null;
   const step = (await activeLineSteps(db, projectId)).find((row) => row.line.directory === name);
   const where = step ? " (run " + step.run_id + ", step " + step.line.position + " of " + step.line.total + ")" : "";
-  return name + "/ is running" + where + ". Run: review-bridge status to see its progress";
+  return name + "/ is running" + where + ". Run: " + bridgeRunner() + " status to see its progress";
 }
 
 // A start of one file of a directory whose line is running would stop that line's step or race it.
@@ -174,7 +175,7 @@ async function surveyDirectory({ paths, records, directory, check }) {
         continue;
       }
       const stopped = await stopRun(paths, found.run_id);
-      if (stopped.exitCode === 2) throw new Error("Run " + found.run_id + " of " + row.name + " outlived the process that ran it and could not be stopped: " + stopped.line + ". Run: review-bridge stop " + found.run_id);
+      if (stopped.exitCode === 2) throw new Error("Run " + found.run_id + " of " + row.name + " outlived the process that ran it and could not be stopped: " + stopped.line + ". Run: " + bridgeRunner() + " stop " + found.run_id);
       await deliverOutcome({ paths, runId: found.run_id, notify: false }).catch(() => {});
       row.interrupted = true;
       continue;
@@ -337,7 +338,7 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
   }
   // As the disk spells it and pasted into any shell, as a single start's: a name may hold a space.
   const fake = options.fakeCli ? " --fake-cli" : "";
-  const again = "review-bridge start " + tools.shownPath(directory.absolute).replaceAll("\\", "/") + fake;
+  const again = bridgeRunner() + " start " + tools.shownPath(directory.absolute).replaceAll("\\", "/") + fake;
   const records = await tools.openRecords(paths);
   const refused = await lineRunningLine(paths, records, directory.name);
   if (refused) { write(refused); return 1; }
@@ -393,7 +394,7 @@ export async function startDirectory({ paths, options, adapter, loadAdapter, gua
   try {
     release = await acquireLock(lineLockFile(paths, directory.name));
   } catch {
-    write((await lineRunningLine(paths, records, directory.name)) || directory.name + "/ is being started by another process. Run: review-bridge status to see its progress");
+    write((await lineRunningLine(paths, records, directory.name)) || directory.name + "/ is being started by another process. Run: " + bridgeRunner() + " status to see its progress");
     return 1;
   }
   try {

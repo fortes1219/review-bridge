@@ -154,7 +154,7 @@ test("a card lists the directory in order, prints no work order's text, and one 
   assert.match(rows[2], /\(same number as 02-b\.md; runs after it, by name\)/);
   assert.match(rows[4], /not a work order \(.+\) {3}\(skip\)$/);
   assert.match(card.stdout, /Runs in place, one after another\. A failed step does not stop the next\./);
-  assert.match(card.stdout, /Needs authorization\. If the person says yes, run again: review-bridge start \.review-bridge\/work-packages\/demo --fake-cli --yes/);
+  assert.match(card.stdout, /Needs authorization\. If the person says yes, run again: npx review-bridge start \.review-bridge\/work-packages\/demo --fake-cli --yes/);
   assert.equal(card.stdout.includes(secret), false, "the card holds no work order's text");
   assert.deepEqual(await queryRecords("select 1 from runs where project_id = $1", [rt.paths.projectId]), [], "nothing started without a yes");
 
@@ -300,7 +300,7 @@ test("stop on the running step stops the whole line, and same-directory starts a
 
   const refused = rt.bridge(["start", rt.dirOf("demo"), "--fake-cli"]);
   assert.equal(refused.status, 1);
-  assert.match(refused.stdout, new RegExp("demo/ is running \\(run " + secondRun + ", step 2 of 3\\)\\. Run: review-bridge status to see its progress"));
+  assert.match(refused.stdout, new RegExp("demo/ is running \\(run " + secondRun + ", step 2 of 3\\)\\. Run: npx review-bridge status to see its progress"));
   const file = rt.bridge(["start", rt.dirOf("demo") + "/03-c.md", "--fake-cli"]);
   assert.equal(file.status, 1);
   assert.match(file.stdout, /demo\/ is running/);
@@ -482,7 +482,7 @@ test("a directory whose name holds a space prints a command that can be pasted b
   const rt = await install(t);
   await directory(rt, "исправить вход", { "01-a.md": null });
   const card = rt.bridge(["start", rt.dirOf("исправить вход"), "--fake-cli"]);
-  assert.match(card.stdout, /run again: review-bridge start "\.review-bridge\/work-packages\/исправить вход" --fake-cli --yes/);
+  assert.match(card.stdout, /run again: npx review-bridge start "\.review-bridge\/work-packages\/исправить вход" --fake-cli --yes/);
 });
 
 test("a card made before a file changed is not taken by --yes, and in a Git project the card counts what is uncommitted", LIMIT, async (t) => {

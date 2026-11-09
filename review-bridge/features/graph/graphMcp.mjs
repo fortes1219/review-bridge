@@ -13,6 +13,7 @@
 import path from "node:path";
 
 import { GRAPH_MCP_NAME, graphQueries } from "../../service/index.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 // Claude Code loads a tool marked this way up front instead of behind ToolSearch.
@@ -61,7 +62,7 @@ export function graphTools({ projectId, db }) {
   const guarded = (work) => async (input) => {
     try {
       const database = await db();
-      if (!(await graphQueries.graphState(database, { projectId }))) return refusal("This project has no graph yet. Run: review-bridge graph");
+      if (!(await graphQueries.graphState(database, { projectId }))) return refusal("This project has no graph yet. Run: " + bridgeRunner() + " graph");
       return answer(await work(database, input ?? {}));
     } catch (error) {
       if (error instanceof CursorError) return refusal(error.message);

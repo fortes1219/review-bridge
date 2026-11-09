@@ -4,6 +4,7 @@ import { activeRuns, fileExists, listJson, listRuns, loadOrCreatePolicySnapshot,
 import { priorityChoice } from "../../policy/policyRules.mjs";
 import { inspectStateFilesystem } from "../../utils/filesystem.mjs";
 import { consoleEncodingHint, powershellCodePage } from "./consoleEncoding.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 // `codePage` is the one PowerShell writes in (asked only on Windows); tests pass it in.
 export async function inspectDoctor({
@@ -11,7 +12,7 @@ export async function inspectDoctor({
   codePage = platform === "win32" ? powershellCodePage() : null,
 }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
-    throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
+    throw new Error("This folder is not set up for Review Bridge. Run: " + bridgeRunner() + " init");
   }
   const bridgeConfig = await readJson(paths.bridgeConfigPath);
   const neutralLayout = path.basename(paths.privateRoot) === ".review-bridge";

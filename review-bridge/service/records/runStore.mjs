@@ -22,6 +22,7 @@ import {
   activeRuns, DatabaseUnavailableError, eventLine, eventRecordsAfter, lastEventSequence, numberedLine, projectRuns, recordsDatabase,
   replayUnrecorded, runRecorder,
 } from "./runRecords.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 // A run's status and conclusion, as GitHub Actions has them for a workflow run; why it closed is
 // its closed_reason. The one list of closed reasons; retention and the CLI read it from here so a
@@ -73,7 +74,7 @@ function conclusionOf(run, reason, gate) {
 // A run recorded under an older policy shape is neither resumed nor delivered.
 export function assertCurrentPolicy(policySchemaVersion, runId) {
   if (policySchemaVersion !== 5) {
-    throw new Error("This run's policy is from an older Bridge; run: review-bridge clean " + runId);
+    throw new Error("This run's policy is from an older Bridge; run: " + bridgeRunner() + " clean " + runId);
   }
 }
 

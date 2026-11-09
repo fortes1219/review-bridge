@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import jsonc from "jsonc-parser";
 
+import { bridgeRunner } from "../review-bridge/utils/bridgeCommand.mjs";
 import { writeWhole } from "./agent-files.mjs";
 
 const TASK_PREFIX = "review-bridge:";
@@ -28,12 +29,14 @@ const input = (value) => "${input:" + value.id + "}";
 
 // command and args apart, so that VS Code quotes a path with spaces for the shell in use. focus puts
 // the person's y in the terminal rather than the editor; an empty problemMatcher keeps VS Code from
-// asking whether to scan the output.
+// asking whether to scan the output. The command is how the person runs Bridge (bridgeRunner): npx
+// review-bridge for one who never installed it globally.
+const [RUNNER, ...RUNNER_ARGS] = bridgeRunner().split(" ");
 const task = (action, ...args) => ({
   label: TASK_PREFIX + " " + action,
   type: "shell",
-  command: "review-bridge",
-  args: [action, ...args],
+  command: RUNNER,
+  args: [...RUNNER_ARGS, action, ...args],
   problemMatcher: [],
   presentation: { focus: true },
 });

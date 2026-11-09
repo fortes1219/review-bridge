@@ -361,7 +361,7 @@ test("the MCP tools answer one page at a time from the graph, say when there is 
   const tools = graphTools({ projectId: "p", db: async () => db });
   const none = await tools.find_definitions({ symbol: "a" });
   assert.equal(none.isError, true);
-  assert.match(none.content[0].text, /no graph yet\. Run: review-bridge graph/);
+  assert.match(none.content[0].text, /no graph yet\. Run: npx review-bridge graph/);
   graph = { scope: [""], git_commit: "abc" };
   const page = JSON.parse((await tools.find_definitions({ symbol: "a", limit: 2 })).content[0].text);
   assert.equal(page.next_cursor, "9.5", "a full page says where the next starts");
@@ -389,7 +389,7 @@ test("a graph that cannot be brought up to date at a start goes into the run's r
   });
   assert.equal(reason, "Git could not answer `git diff`");
   assert.deepEqual(recorded, [["run-0001", { event: "graph_update", updated: false, reason }]]);
-  assert.equal(written, "專案的 graph 沒有更新（Git could not answer `git diff`）；writer 與 reviewer 會查更新前的 graph，結果檔會寫明。要重讀整個專案：review-bridge graph\n");
+  assert.equal(written, "專案的 graph 沒有更新（Git could not answer `git diff`）；writer 與 reviewer 會查更新前的 graph，結果檔會寫明。要重讀整個專案：npx review-bridge graph\n");
   assert.equal(await updateRunGraph(paths, { db: {}, projectId: "p" }, "run-0001", { update: async () => ({ updated: true }), record: async () => assert.fail("nothing to record") }), null);
 
   const tr = await createTranslator("zh-TW");

@@ -1,12 +1,11 @@
 # Review Bridge
 
 ```sh
-npm i -g review-bridge
 cd your-project
-review-bridge init
+npx review-bridge init
 ```
 
-Release candidates are on the next tag: `npm i -g review-bridge@next`.
+Every command Bridge prints is in the same one-off form (`npx review-bridge start …`), so nothing has to be installed globally. If you prefer a global install, `npm i -g review-bridge` works too and `npx` then runs that copy.
 
 Review Bridge runs your work orders with two separate agents: a writer that does the work and an independent, read-only reviewer that checks it. Bridge itself decides the scope, the budget, the verification command and when to stop and hand back to you; the agents cannot change those.
 

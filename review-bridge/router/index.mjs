@@ -14,6 +14,7 @@ import {
   bridgeDataHome, createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, rebuildRunFiles, recordsDatabase, replayUnrecorded,
 } from "../service/index.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
+import { bridgeRunner } from "../utils/bridgeCommand.mjs";
 
 // clean <run_id> also removes the run from the person's database: one delete, and every row it owns
 // goes with it; its authorization and claim stay, so its card never takes another yes.
@@ -345,7 +346,7 @@ export const PROJECT_OPTION = Object.freeze({
 
 // The help line printed after a refusal of the command line itself.
 export function helpHint(command) {
-  return COMMANDS[command] ? " Run: review-bridge " + command + " --help" : " Run: review-bridge --help";
+  return COMMANDS[command] ? " Run: review-bridge " + command + " --help" : " Run: " + bridgeRunner() + " --help";
 }
 
 // Splits a command line into the run id, the positional work order and the options of the table.
@@ -394,7 +395,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   if (!entry?.run) throw new Error("Unknown command: " + command + "." + helpHint(null));
   const { runId, options } = parseCommandLine(command, args);
   if (!entry.configFree && !(await fileExists(paths.bridgeConfigPath))) {
-    throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
+    throw new Error("This folder is not set up for Review Bridge. Run: " + bridgeRunner() + " init");
   }
   await recordRunsOf(paths);
   return await entry.run({ command, args, paths, options, runId, adapter, loadAdapter, inspectionAdapter, adapterId, adapterDefinition, adapterSource });

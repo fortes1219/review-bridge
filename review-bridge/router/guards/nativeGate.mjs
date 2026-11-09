@@ -8,6 +8,7 @@
 // stay closed in native mode.
 
 import { checkService } from "../../features/setupCheck/index.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 export const NATIVE_MODEL_COMMANDS = Object.freeze(["start", "resume", "work-start", "review", "bounded-resume"]);
 // The commands that start work on a person's yes.
@@ -19,7 +20,7 @@ export function nativeGateDecision({ command, args = [] }) {
   if (args.includes("--fake-cli")) return { allowed: true, mode: "fake_cli" };
   if (!NATIVE_MODEL_COMMANDS.includes(command)) return { allowed: true, mode: "model_free" };
   if (!CONFIRMED_COMMANDS.includes(command)) {
-    return { allowed: false, reason: "entry_point", message: PREFIX + " for " + command + ": only start and resume may call a model. Run: review-bridge start <file>" };
+    return { allowed: false, reason: "entry_point", message: PREFIX + " for " + command + ": only start and resume may call a model. Run: " + bridgeRunner() + " start <file>" };
   }
   return { allowed: true, mode: "native" };
 }
@@ -44,11 +45,11 @@ export function assertNativeAllowed(input) {
 export async function checkReviewerProof(paths, { check = checkService, reviewer = null, mcp = null } = {}) {
   const service = await check(paths, { reviewer, mcp });
   if (!service.running) {
-    return { ok: false, reason: "watch_not_running", detail: service.reason, message: PREFIX + ": the Bridge page service is not running (" + service.reason + "). Run: review-bridge start <file> (it starts the page and runs the check first)" };
+    return { ok: false, reason: "watch_not_running", detail: service.reason, message: PREFIX + ": the Bridge page service is not running (" + service.reason + "). Run: " + bridgeRunner() + " start <file> (it starts the page and runs the check first)" };
   }
   const state = service.status?.reviewer_readonly?.state || "unknown";
   if (service.status?.reviewer_readonly_proven !== true || state !== "proven") {
-    return { ok: false, reason: "reviewer_not_proven", detail: state, message: PREFIX + ": the reviewer read-only check has not passed (state: " + state + "). Run: review-bridge start <file> (it runs the check first) or open " + service.url + " and press Check." };
+    return { ok: false, reason: "reviewer_not_proven", detail: state, message: PREFIX + ": the reviewer read-only check has not passed (state: " + state + "). Run: " + bridgeRunner() + " start <file> (it runs the check first) or open " + service.url + " and press Check." };
   }
   return { ok: true, reason: "proven", detail: state };
 }

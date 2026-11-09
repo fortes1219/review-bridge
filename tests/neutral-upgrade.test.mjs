@@ -352,7 +352,7 @@ test("W2b an automatic rollback that cannot finish keeps the marker and names up
   await assert.rejects(upgrade(root, {
     afterLegacyRemoved: async () => { throw new Error("injected"); },
     afterFilesRestored: async () => { throw new Error("restore blocked"); },
-  }), /automatic rollback did not finish \(restore blocked\)\. Bridge stays blocked for new work\. Run: review-bridge upgrade --rollback --target .+\. The backup is in /);
+  }), /automatic rollback did not finish \(restore blocked\)\. Bridge stays blocked for new work\. Run: npx review-bridge upgrade --rollback --target .+\. The backup is in /);
   assert.equal(await exists(markerOf(root)), true, "new work stays blocked");
   await rollback(root);
   sameTree(await persistent(root), before, "after upgrade --rollback");

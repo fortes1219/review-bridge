@@ -290,12 +290,16 @@ test("init puts each agent's /review-bridge entry where its CLI looks; the perso
   assert.match(command, /^---\ndescription: .+\nargument-hint: .+\n---\n/);
   assert.match(command, /^argument-hint: start <file> \| stop <run_id> \| resume <run_id> \| clean \[<run_id>\]$/m);
   assert.match(command, /four actions \(\$ARGUMENTS\)/);
+  // The agent runs Bridge as the person can: npx review-bridge, which a global install answers too.
+  assert.match(command, /Run the matching command in this project folder: `npx review-bridge <action> <file\|run_id>`/);
   assert.match(command, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with .--yes./);
   // Codex takes a skill: it requires the description, and it expands no arguments, so none is promised.
   const skill = await fsp.readFile(me.codexEntry, "utf8");
   assert.match(skill, /^---\nname: review-bridge\ndescription: .+\n---\n/);
   assert.doesNotMatch(skill, /\$ARGUMENTS|\{\{args\}\}|argument-hint/);
   assert.match(skill, /one of\nfour actions:/);
+  assert.match(skill, /`npx review-bridge <action> <file\|run_id>`/);
+  assert.doesNotMatch(skill + command, /\{\{bridge\}\}/);
   assert.match(skill, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with .--yes./);
   assert.deepEqual(await fsp.readFile(path.join(me.codexHome, "AGENTS.md")), theirs);
   assert.equal((await verifyNeutralInstall(root)).valid, true);

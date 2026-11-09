@@ -142,7 +142,7 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
     { start: "Checking the setup" }, { done: "Checking the setup" },
     { start: "Running the four fake self-tests" }, { done: "Running the four fake self-tests" },
     { start: "Starting the local page" }, { done: "Starting the local page" },
-    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" + DATABASE_LINES },
+    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    npx review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" + DATABASE_LINES },
   ]);
   assert.deepEqual(run.setup.seen.map(({ target, roles, profileId }) => ({ target, roles, profileId })),
     [{ target: run.project, roles: { writer: "claude", reviewer: "codex" }, profileId: "node-backend" }]);
@@ -223,7 +223,7 @@ test("a tasks file Bridge cannot read does not undo the setup: the file stays an
   assert.equal(result.ok, true);
   assert.equal(await fsp.readFile(file, "utf8"), "{ broken");
   assert.deepEqual(broken.ui.calls.find((call) => call.failed), { failed: "Adding VS Code tasks" });
-  assert.match(broken.ui.calls.at(-1).outro, /VS Code tasks were not added: .*cannot be read as a tasks file.* Fix it, then run: review-bridge vscode/);
+  assert.match(broken.ui.calls.at(-1).outro, /VS Code tasks were not added: .*cannot be read as a tasks file.* Fix it, then run: npx review-bridge vscode/);
 });
 
 test("an empty folder preselects none, and none is set up as a project without a type", async (t) => {
@@ -303,7 +303,7 @@ test("a folder already set up, or root on macOS and Linux, is refused before any
     inspectProvider: async () => signedIn, setUpProject: async () => { throw new Error("setup must not run"); },
   });
   const before = done.ui.calls.length;
-  await assert.rejects(again, /This folder is already set up .* review-bridge upgrade/);
+  await assert.rejects(again, /This folder is already set up .* npx review-bridge upgrade/);
   assert.equal(done.ui.calls.length, before);
 
   const root = await guide(t, {}, { asRoot: true, setUp: false });
@@ -327,8 +327,8 @@ test("an option the Guide does not know is refused", async (t) => {
 test("Done names cd when the project is not the current folder, then the agent's start, the terminal's start, the page and the database for VS Code", () => {
   const cwd = path.join(os.tmpdir(), "work");
   assert.equal(doneMessage(path.join(cwd, "my app"), cwd, "http://localhost:8081/", DATABASE),
-    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/" + DATABASE_LINES);
-  assert.match(doneMessage(cwd, cwd, null, DATABASE), /\n  page: not running; start it with review-bridge up\n/);
+    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    npx review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/" + DATABASE_LINES);
+  assert.match(doneMessage(cwd, cwd, null, DATABASE), /\n  page: not running; start it with npx review-bridge up\n/);
 });
 
 test("--version prints the package version and --help describes the npm command", () => {

@@ -33,6 +33,7 @@ import {
 import { refuseForm, writeWorkOrderIds } from "./workOrderForm.mjs";
 import { formProblems, parseWorkOrder, sealedText, WorkOrderFormError, workOrderIdOf } from "./workOrderFormat.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 export const DEFAULT_BREAKPOINT = "after the review";
 
@@ -62,7 +63,7 @@ const workPackageName = (options) => options.workPackage || (options.taskFile ? 
 // recorded.
 async function openRecords(paths) {
   const config = await readJson(paths.bridgeConfigPath);
-  if (!config.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: review-bridge upgrade");
+  if (!config.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: " + bridgeRunner() + " upgrade");
   // The router's opener writes a run's kept events first; a direct call opens it plainly.
   const database = recordsDatabase() || (async () => (await import("../../service/database/index.mjs")).openDatabase());
   const db = await database();
@@ -177,7 +178,7 @@ export async function planWork({ paths, options, adapter, inspectionAdapter }) {
     return 0;
   }
   const shown = shownPath(plan.plan_path);
-  process.stdout.write("Plan written to " + shown + "\nNext: review-bridge work-start --plan " + shown + "\n");
+  process.stdout.write("Plan written to " + shown + "\nNext: " + bridgeRunner() + " work-start --plan " + shown + "\n");
   return 0;
 }
 
@@ -289,7 +290,7 @@ async function runAuthorized({ paths, options, plan: held = null, adapter, appro
 // checked and before the person is asked. --approve and --yes carry the person's yes through an
 // agent; without them and without a terminal the card is printed and nothing starts.
 export async function startWork({ paths, options, adapter, guard }) {
-  if (!options.planPath) throw new Error("work-start needs a plan. Run: review-bridge work-plan <file> first, or review-bridge start <file> to do both.");
+  if (!options.planPath) throw new Error("work-start needs a plan. Run: " + bridgeRunner() + " work-plan <file> first, or " + bridgeRunner() + " start <file> to do both.");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
@@ -301,7 +302,7 @@ export async function startWork({ paths, options, adapter, guard }) {
   const approval = options.approval || await confirmWorkStart(paths, options.planPath, {
     assumeYes: Boolean(options.yes),
     ask: interactive(),
-    again: "review-bridge work-start --plan " + shownPath(path.resolve(options.planPath)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : ""),
+    again: bridgeRunner() + " work-start --plan " + shownPath(path.resolve(options.planPath)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : ""),
   });
   if (approval === null) return 1;
   return await runAuthorized({ paths, options, adapter, approval, authorizedVia: relayed ? "agent" : "terminal" });
@@ -320,7 +321,7 @@ const CHECK_REFUSALS = Object.freeze({
 function checkFailureLines(check, again) {
   const why = CHECK_REFUSALS[check.reason] || check.reason;
   const next = check.reason === "page_runs_fake_cli"
-    ? "Run: review-bridge down, then " + again
+    ? "Run: " + bridgeRunner() + " down, then " + again
     : check.reason === "reviewer_not_ready"
       ? "Sign the reviewer in (" + (SIGN_IN_COMMANDS[check.provider] || "see its CLI's help") + "), then run: " + again
       : "Run: " + again + " again" + (check.url ? ", or open " + check.url + " and press Check" : "");
@@ -457,13 +458,13 @@ async function startFile({ paths, options, adapter, loadAdapter, inspectionAdapt
 // `start <file>`: the person's one command from a work order to its result. `start <directory>`: the
 // same for every work order in a directory of work-packages/, one after another, on one yes.
 export async function startWorkOrder({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck }) {
-  if (!options.taskFile) throw new Error("start needs a work order. Run: review-bridge start .review-bridge/work-packages/<file>.md");
+  if (!options.taskFile) throw new Error("start needs a work order. Run: " + bridgeRunner() + " start .review-bridge/work-packages/<file>.md");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
   const directory = await directoryOfTarget(paths, options.taskFile);
   if (directory) {
-    const again = "review-bridge start " + shownPath(directory.absolute).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
+    const again = bridgeRunner() + " start " + shownPath(directory.absolute).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
     return await startDirectory({
       paths, options, adapter, loadAdapter, guard, reviewerCheck, directory,
       tools: {
@@ -482,7 +483,7 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, ins
   const running = await fileLineRunning(paths, openRecords, path.resolve(options.taskFile));
   if (running) { write(running); return 1; }
   // Forward slashes: the command is pasted into any shell, bash included, and Windows takes them.
-  const again = "review-bridge start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
+  const again = bridgeRunner() + " start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
   return await startFile({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again });
 }
 
@@ -492,15 +493,15 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, ins
 // roles come from bridge.json or the flags as they are now, and its priority, model, effort and
 // budget from the work order again; the card shows them all.
 export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck }) {
-  if (!runId) throw new Error("resume needs a run id. Run: review-bridge status to see the runs, then review-bridge resume <run_id>");
+  if (!runId) throw new Error("resume needs a run id. Run: " + bridgeRunner() + " status to see the runs, then " + bridgeRunner() + " resume <run_id>");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
   const control = await loadControlView(paths, runId).catch(() => null);
-  if (!control) throw new Error("There is no run " + runId + " here. Run: review-bridge status");
-  if (control.authorization_status === "active") throw new Error("Run " + runId + " is still running. Pause it first: review-bridge stop " + runId);
+  if (!control) throw new Error("There is no run " + runId + " here. Run: " + bridgeRunner() + " status");
+  if (control.authorization_status === "active") throw new Error("Run " + runId + " is still running. Pause it first: " + bridgeRunner() + " stop " + runId);
   const workPackage = control.run.work_package;
-  if (!workPackage.task_file) throw new Error("Run " + runId + " was not started from a work order file. Run: review-bridge start <file>");
+  if (!workPackage.task_file) throw new Error("Run " + runId + " was not started from a work order file. Run: " + bridgeRunner() + " start <file>");
   const taskFile = path.join(paths.repoRoot, ...workPackage.task_file.split("/"));
   // resume saves one work order and has nothing to do with its directory's line; it waits for that line.
   const running = await fileLineRunning(paths, openRecords, taskFile);
@@ -508,7 +509,7 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
   write("Carrying on run " + runId + " (" + workPackage.task_file + ") as a new run");
   // One plan per stopped run, so the card and its --yes name the same one.
   const planName = workPackage.work_package_id + ".resume-" + runId;
-  const again = "review-bridge resume " + runId + (options.fakeCli ? " --fake-cli" : "");
+  const again = bridgeRunner() + " resume " + runId + (options.fakeCli ? " --fake-cli" : "");
   return await startFile({
     paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again, planName, command: "resume",
     planOptions: {
@@ -525,10 +526,10 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
 // and contracts leave the person's database in one transaction; the project id is kept as cleared
 // and never used again. Refused while one of its runs is running, and with a run id.
 export async function clearProjectRecords({ paths, runId, options }) {
-  if (runId) throw new Error("clean --all clears the whole project; give no run id. Run: review-bridge clean --all");
+  if (runId) throw new Error("clean --all clears the whole project; give no run id. Run: " + bridgeRunner() + " clean --all");
   const { db, projectId } = await openRecords(paths);
   const active = await activeRuns(db, projectId);
-  if (active.length) throw new Error(active.length + " run(s) of this project are running. Stop them first: review-bridge stop " + active[0].run_id);
+  if (active.length) throw new Error(active.length + " run(s) of this project are running. Stop them first: " + bridgeRunner() + " stop " + active[0].run_id);
   const counts = await clearProject(db, projectId);
   if (options.json) {
     write(JSON.stringify({ project_id: projectId, cleared: counts }, null, 2));
@@ -537,7 +538,7 @@ export async function clearProjectRecords({ paths, runId, options }) {
   write("Cleared this project's records: " + counts.work_orders + " work order(s), " + counts.work_order_versions + " version(s), "
     + counts.plans + " plan(s), " + counts.authorizations + " authorization(s), " + counts.contracts + " contract(s), " + counts.runs + " run(s), "
     + counts.graph_files + " graph file(s).");
-  write("This project's id is not used again. To use Bridge here again: review-bridge uninstall --target ., then review-bridge init");
+  write("This project's id is not used again. To use Bridge here again: " + bridgeRunner() + " uninstall --target ., then " + bridgeRunner() + " init");
   return 0;
 }
 
@@ -578,7 +579,7 @@ const DATA_DIRECTORY_UNUSABLE = 4;
 
 export async function statusOverview({ paths, options, page, databaseStatus = null, records = statusRecords }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
-    write("This folder is not set up for Review Bridge. Run: review-bridge init");
+    write("This folder is not set up for Review Bridge. Run: " + bridgeRunner() + " init");
     return 0;
   }
   const service = await page();

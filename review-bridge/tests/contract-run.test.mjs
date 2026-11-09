@@ -250,7 +250,7 @@ test("start refuses a work order whose required block was deleted, writes its ma
     assert.equal(refused.status, 1, name + ": " + refused.stderr);
     assert.match(refused.stdout, new RegExp(name + "\\.md cannot start yet:"), name);
     assert.match(refused.stdout, missing, name);
-    assert.match(refused.stdout, /Fill it in, then run: review-bridge start /, name);
+    assert.match(refused.stdout, /Fill it in, then run: npx review-bridge start /, name);
     assert.equal(await fsp.readFile(path.join(rt.root, order), "utf8"), text + writtenBack, name + ": only the block is added");
     assert.equal(await runs(), before, name + ": nothing started");
     await fsp.appendFile(path.join(rt.root, order), filled);

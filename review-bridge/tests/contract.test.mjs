@@ -179,7 +179,7 @@ test("a contract an older Bridge sealed is refused by name, and the person is to
   const old = { ...build(), schema_version: 3 };
   await fsp.mkdir(paths.contractsDir, { recursive: true });
   await fsp.writeFile(contractPath(paths, digest(old)), JSON.stringify(old));
-  await assert.rejects(loadContract(paths, digest(old)), (error) => error instanceof ContractChangedError && /made by an older Bridge and is not read again; run: review-bridge clean/.test(error.message));
+  await assert.rejects(loadContract(paths, digest(old)), (error) => error instanceof ContractChangedError && /made by an older Bridge and is not read again; run: npx review-bridge clean/.test(error.message));
 });
 
 // The canonical walk used to call itself; the expected values were recorded from that version, so

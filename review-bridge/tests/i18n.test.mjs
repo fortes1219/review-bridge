@@ -66,8 +66,8 @@ test("ps and down say the page's state in the project's language", async (t) => 
     return lines.join("");
   };
   for (const [locale, notRunning, wasNot] of [
-    ["zh-TW", "Bridge 沒在跑，執行 review-bridge up\n", "Bridge 沒在跑\n"],
-    ["en", "Bridge is not running. Run: review-bridge up\n", "Bridge was not running.\n"],
+    ["zh-TW", "Bridge 沒在跑，執行 npx review-bridge up\n", "Bridge 沒在跑\n"],
+    ["en", "Bridge is not running. Run: npx review-bridge up\n", "Bridge was not running.\n"],
   ]) {
     await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ locale }));
     assert.equal(await said(serviceStatus), notRunning, locale);
@@ -75,5 +75,5 @@ test("ps and down say the page's state in the project's language", async (t) => 
   }
   // A project with no locale is English, the default.
   await fsp.writeFile(paths.bridgeConfigPath, "{}");
-  assert.equal(await said(serviceStatus), "Bridge is not running. Run: review-bridge up\n");
+  assert.equal(await said(serviceStatus), "Bridge is not running. Run: npx review-bridge up\n");
 });

@@ -6,6 +6,8 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
+
 export const DEFAULT_LOCALE = "en";
 const localesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "locales");
 const cache = new Map();
@@ -66,8 +68,11 @@ export async function resolveLocale(paths) {
   return DEFAULT_LOCALE;
 }
 
+// {bridge} in any line is how the person runs Bridge again (bridgeRunner), so no line names a command
+// they may not have.
 function translatorOf(pack, locale) {
-  const t = (key, vars = {}) => {
+  const t = (key, given = {}) => {
+    const vars = { bridge: bridgeRunner(), ...given };
     const template = Object.hasOwn(pack, key) ? pack[key] : key;
     return String(template).replace(/\{([A-Za-z0-9_]+)\}/g, (match, name) => (name in vars && vars[name] !== undefined && vars[name] !== null ? String(vars[name]) : match));
   };

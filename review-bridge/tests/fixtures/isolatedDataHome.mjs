@@ -24,6 +24,9 @@ process.env.XDG_CONFIG_HOME = path.join(dataHome, "home", ".config");
 // The language init speaks and writes into bridge.json is the person's, LANG before the system's, as
 // create-vue reads it (i18n.mjs shellLocale): these tests read Bridge's English words on any machine.
 process.env.LANG = "en_US.UTF-8";
+// The commands Bridge prints name the package manager that ran it (bridgeCommand.mjs); npm test sets
+// one and node --test does not. Without one the lines read `npx review-bridge …`, however the tests run.
+delete process.env.npm_config_user_agent;
 const { pg_ctl: pgCtl } = await postgresBinaries();
 
 // For a test about what belongs to the person, shared by all their projects: a machine of its own,

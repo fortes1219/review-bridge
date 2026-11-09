@@ -13,6 +13,7 @@ import { digest } from "../../utils/digest.mjs";
 import { ensureDir } from "../../service/index.mjs";
 import { loadSchema, validateAgainstSchema } from "./typedResults.mjs";
 import { conditionsOf, rangesOf } from "./workOrderFormat.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "schemas");
 
@@ -144,7 +145,7 @@ export async function loadContract(paths, sha256) {
   let contract;
   try { contract = JSON.parse(text); } catch { throw new ContractChangedError(sha256, "is not valid JSON"); }
   if (digest(contract) !== sha256) throw new ContractChangedError(sha256, "was changed after it was sealed");
-  if (contract?.schema_version < CONTRACT_SCHEMA_VERSION) throw new ContractChangedError(sha256, "was made by an older Bridge and is not read again; run: review-bridge clean");
+  if (contract?.schema_version < CONTRACT_SCHEMA_VERSION) throw new ContractChangedError(sha256, "was made by an older Bridge and is not read again; run: " + bridgeRunner() + " clean");
   if ((await schemaProblems(contract)).length) throw new ContractChangedError(sha256, "does not match the contract schema");
   return contract;
 }

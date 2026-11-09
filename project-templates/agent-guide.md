@@ -10,7 +10,7 @@ four actions ({{args}}):
 
 What to do:
 
-1. Run the matching command in this project folder: `review-bridge <action> <file|run_id>`.
+1. Run the matching command in this project folder: `{{bridge}} <action> <file|run_id>`.
 2. When it prints a card and stops with "Needs authorization" (start and resume do), show the
    person the card exactly as printed, word for word, and ask whether to go on. There is one card: it
    names the contract Bridge cut from the work order, and its yes starts the work.

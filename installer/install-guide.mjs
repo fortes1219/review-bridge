@@ -15,6 +15,7 @@ import { readDefaultRoles, saveDefaultRoles } from "./personal-settings.mjs";
 import { listProfiles, matchingProfiles } from "./project-profile.mjs";
 import { PROVIDERS, validateRoles } from "./role-readiness.mjs";
 import { PROJECT_TASKS_RELATIVE, projectTasksFile, writeVscodeTasks } from "./vscode-tasks.mjs";
+import { bridgeRunner } from "../review-bridge/utils/bridgeCommand.mjs";
 
 const GUIDE_OPTIONS = new Set(["target", "writer", "reviewer", "profile", "port", "yes", "json", "fake-cli"]);
 const BUILT_IN_ROLES = Object.freeze({ writer: "claude", reviewer: "codex" });
@@ -56,7 +57,7 @@ export function doneMessage(target, cwd, url, database, vscodeTasks = null, grap
   lines.push("    /review-bridge start .review-bridge/work-packages/<file>.md");
   lines.push("    " + t("init.done.codex"));
   lines.push("  " + t("init.done.terminal"));
-  lines.push("    review-bridge start .review-bridge/work-packages/<file>.md");
+  lines.push("    " + bridgeRunner() + " start .review-bridge/work-packages/<file>.md");
   if (vscodeTasks === true) lines.push("  " + t("init.done.vscode_added", { file: PROJECT_TASKS_RELATIVE }));
   else if (vscodeTasks) lines.push("  " + t("init.done.vscode_failed", { reason: vscodeTasks }));
   lines.push("  " + (url ? t("init.done.page", { url }) : t("init.done.page_not_running")));

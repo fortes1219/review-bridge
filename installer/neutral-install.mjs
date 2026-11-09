@@ -24,6 +24,7 @@ import {
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
 import { releaseAllVscodeTasks, vscodeTasksState } from "./vscode-tasks.mjs";
+import { bridgeRunner } from "../review-bridge/utils/bridgeCommand.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const privateName = ".review-bridge";
@@ -549,7 +550,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
 }
 
 // What upgrade and uninstall say when .review-bridge/ is here but its record is not: init rebuilds it.
-const NO_RECORD = ".review-bridge/ is here, but its install record is not in Bridge's data folder (the folder was deleted, or this is another machine). Run: review-bridge init — it rebuilds the record and keeps your settings, work orders and results.";
+const NO_RECORD = ".review-bridge/ is here, but its install record is not in Bridge's data folder (the folder was deleted, or this is another machine). Run: " + bridgeRunner() + " init — it rebuilds the record and keeps your settings, work orders and results.";
 
 // init where .review-bridge/ is and its install record in the data folder is not (the data folder deleted,
 // another machine, a reinstalled system), the way `git init` reinitializes an existing repository (git
@@ -565,7 +566,7 @@ export async function reinitializeNeutralInstall({ target }) {
     const configPath = inPrivate(privateRoot, CONFIG_RELATIVE);
     const config = await readJsonOptional(configPath).catch(() => null);
     if (!config?.project_id) {
-      throw new Error(".review-bridge/ is here but its bridge.json has no project id, so Bridge cannot tell which project it was. Move .review-bridge/ aside and run: review-bridge init");
+      throw new Error(".review-bridge/ is here but its bridge.json has no project id, so Bridge cannot tell which project it was. Move .review-bridge/ aside and run: " + bridgeRunner() + " init");
     }
     const layout = await installLayout(root);
     if (await statOptional(installPath(layout, layout.manifest))) return null;
@@ -1972,7 +1973,7 @@ async function restartStoppedService(context) {
   if (!context.serviceStopAttempted || !context.marker.service_was_running || await pageServiceRunning(context.root)) return false;
   const outcome = await restartOutcome(context.hooks.restartService, context.root);
   if (!outcome.running) {
-    throw new Error("The Bridge page service that was running " + didNotRestart(outcome) + ", so Bridge stays blocked for new work. Run: review-bridge upgrade --rollback --target " + context.root);
+    throw new Error("The Bridge page service that was running " + didNotRestart(outcome) + ", so Bridge stays blocked for new work. Run: " + bridgeRunner() + " upgrade --rollback --target " + context.root);
   }
   return true;
 }
@@ -2227,7 +2228,7 @@ async function rollbackAfterFailure(context, error) {
     await restartStoppedService(context);
   } catch (rollbackError) {
     throw new Error("The upgrade failed (" + error.message + ") and the automatic rollback did not finish (" + rollbackError.message
-      + "). Bridge stays blocked for new work. Run: review-bridge upgrade --rollback --target " + context.root + ". The backup is in " + context.marker.backup_dir);
+      + "). Bridge stays blocked for new work. Run: " + bridgeRunner() + " upgrade --rollback --target " + context.root + ". The backup is in " + context.marker.backup_dir);
   }
   await fsp.rm(context.markerPath, { force: true });
   const failed = new Error("The upgrade failed and was rolled back; the project's settings are as before: " + error.message

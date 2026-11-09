@@ -13,6 +13,7 @@ import { UnknownMigrationsError } from "./serverErrors.mjs";
 import {
   clearOldServer, clusterPaths, connect, connectionSettings, dataDirectoryProblem, ensureCluster, postgresBinaries, serverState, startServer, stopServer,
 } from "./postgresServer.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 export const DATABASE_NAME = "bridge";
 const opened = new Map();
@@ -47,7 +48,7 @@ export async function backUpBeforeMigrating(root, { dataHome, dir = MIGRATIONS_D
   } catch (error) {
     if (!(error instanceof BackupRefusedError) || !error.runs.length) throw error;
     throw new BackupRefusedError("Bridge backs up the database before it applies " + state.pending.length + " new migration(s), and a run is running."
-      + " Let it end, or stop it with review-bridge stop <run_id> in its project, then run the command again.\n" + runLines(error.runs), error.runs);
+      + " Let it end, or stop it with " + bridgeRunner() + " stop <run_id> in its project, then run the command again.\n" + runLines(error.runs), error.runs);
   }
 }
 

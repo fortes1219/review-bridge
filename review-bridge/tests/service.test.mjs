@@ -73,7 +73,7 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
 
   const notRunning = bridge("ps");
   assert.equal(notRunning.status, 1);
-  assert.equal(notRunning.stdout.trim(), "Bridge is not running. Run: review-bridge up");
+  assert.equal(notRunning.stdout.trim(), "Bridge is not running. Run: npx review-bridge up");
 
   const up = bridge("up", "--fake-cli");
   assert.equal(up.status, 0, up.stderr);
@@ -113,7 +113,7 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
   assert.deepEqual(statusLines.slice(0, 3), [
     "Page: " + url,
     "Database: running",
-    "Work: none yet. Put a work order in .review-bridge/work-packages/ and run: review-bridge start <file>",
+    "Work: none yet. Put a work order in .review-bridge/work-packages/ and run: npx review-bridge start <file>",
   ]);
   assert.equal(statusLines.some((line) => /^Review queue:/.test(line)), false, running.stdout);
 
@@ -124,14 +124,14 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
   assert.equal(await fsp.stat(path.join(privateRoot, "watch-session.json")).catch(() => null), null);
   const after = bridge("ps");
   assert.equal(after.status, 1);
-  assert.equal(after.stdout.trim(), "Bridge is not running. Run: review-bridge up");
+  assert.equal(after.stdout.trim(), "Bridge is not running. Run: npx review-bridge up");
   // status only looks: a stopped database is said to be stopped and is not started to answer
   // (the down below finds it still not running).
   const stopped = bridge("status");
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.deepEqual(stopped.stdout.trim().split(/\r?\n/), [
-    "Page: not running; start it with review-bridge up",
-    "Database: stopped; review-bridge up starts it, and so does the next start.",
+    "Page: not running; start it with npx review-bridge up",
+    "Database: stopped; npx review-bridge up starts it, and so does the next start.",
   ]);
   // B7: nothing is left to stop, which is not a failure.
   const downAgain = bridge("down");
@@ -196,7 +196,7 @@ test("T3 a foreign server answering 200 on the recorded port is wrong_service, n
   assert.equal((await checkService(paths)).reason, "wrong_service");
   const ps = bridge("ps");
   assert.equal(ps.status, 1);
-  assert.equal(ps.stdout.trim(), "Bridge is not running. Run: review-bridge up");
+  assert.equal(ps.stdout.trim(), "Bridge is not running. Run: npx review-bridge up");
 });
 
 test("T4 a session pointing at a port nobody listens on is unreachable; a malformed record is no_session", async (t) => {

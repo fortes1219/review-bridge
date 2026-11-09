@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { bridgeDataHome, bridgeLogHome } from "../service/database/dataHome.mjs";
 import { assertUnder } from "./pathGuard.mjs";
+import { bridgeRunner } from "./bridgeCommand.mjs";
 
 // Bridge's place in a project is only this provider-neutral folder. There is no default: a caller
 // that does not name it is refused, never sent into a provider's own folder.
@@ -51,10 +52,10 @@ export function readProjectId(bridgeConfigPath) {
   try {
     config = JSON.parse(fs.readFileSync(bridgeConfigPath, "utf8"));
   } catch (error) {
-    if (error.code === "ENOENT") throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
+    if (error.code === "ENOENT") throw new Error("This folder is not set up for Review Bridge. Run: " + bridgeRunner() + " init");
     throw new Error("bridge.json cannot be read (" + error.message + ").");
   }
-  if (!config?.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: review-bridge upgrade");
+  if (!config?.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: " + bridgeRunner() + " upgrade");
   if (!PROJECT_ID.test(String(config.project_id))) throw new Error("bridge.json has a project_id that is not an id: " + config.project_id);
   return String(config.project_id).toLowerCase();
 }

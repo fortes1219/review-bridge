@@ -30,10 +30,10 @@ test("the project keeps settings, work orders and results; state and logs are ou
   for (const [key, file] of [["bridgeConfigPath", "bridge.json"], ["policyOverridePath", "policy.override.json"], ["rulesPath", "rules.md"], ["resultsDir", "results"]]) {
     assert.equal(paths[key], path.join(target, ".review-bridge", file), key);
   }
-  assert.throws(() => paths.stateRoot, /This folder is not set up for Review Bridge\. Run: review-bridge init/);
+  assert.throws(() => paths.stateRoot, /This folder is not set up for Review Bridge\. Run: npx review-bridge init/);
   await fsp.mkdir(paths.privateRoot);
   await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4 }));
-  assert.throws(() => getBridgePaths(target, path.resolve("review-bridge"), { privateRootName: ".review-bridge", env }).runsDir, /Run: review-bridge upgrade/);
+  assert.throws(() => getBridgePaths(target, path.resolve("review-bridge"), { privateRootName: ".review-bridge", env }).runsDir, /Run: npx review-bridge upgrade/);
   const id = "0a1b2c3d-0000-4000-8000-000000000001";
   await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ schema_version: 4, project_id: id }));
   const named = getBridgePaths(target, path.resolve("review-bridge"), { privateRootName: ".review-bridge", env });

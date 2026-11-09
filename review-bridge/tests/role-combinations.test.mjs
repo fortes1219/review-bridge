@@ -353,11 +353,11 @@ test("at the command line: a missing Codex is said as such in the role it fills;
   assert.doesNotMatch(planOnly.stderr, /MCP/);
   const reviewer = rt.bridge(["start", order], absent);
   assert.equal(reviewer.status, 1, reviewer.stderr);
-  assert.match(reviewer.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: review-bridge start /m);
+  assert.match(reviewer.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: npx review-bridge start /m);
   assert.doesNotMatch(reviewer.stdout + reviewer.stderr, /MCP/);
   const writer = rt.bridge(["start", order, "--writer", "codex", "--reviewer", "claude"], absent);
   assert.equal(writer.status, 1, writer.stderr);
-  assert.match(writer.stdout, /^Writer: not ready \(the writer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: review-bridge start /m);
+  assert.match(writer.stdout, /^Writer: not ready \(the writer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: npx review-bridge start /m);
   assert.doesNotMatch(writer.stdout + writer.stderr, /MCP/);
   // No Codex role: nothing about Codex or its list, even with Codex absent. Its check stops at Claude's own CLI.
   const noCodex = rt.bridge(["start", order, "--writer", "claude", "--reviewer", "claude"], absent);
