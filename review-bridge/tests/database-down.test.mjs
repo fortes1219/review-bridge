@@ -157,6 +157,25 @@ test("the pid file's number alive but its program unreadable: nothing is touched
   assert.deepEqual([fake.calls.tool, fake.calls.listed, fake.calls.signals], [["status"], 0, []]);
 });
 
+// Linux container, 2026-11-09: the server and its children were killed before down ran, and down said
+// "what it left behind was cleared" with nothing stopped. Nothing left is nothing cleared.
+test("the pid file's number gone and none of its children left: nothing is cleared and down does not say it was", async (t) => {
+  const { home, root, paths } = await cluster(t, { pid: DEAD_POSTMASTER });
+  // The machine's list holds other folders' and running servers' processes, none whose parent is that number.
+  const listing = [
+    { pid: OTHER_FOLDER_ORPHAN, ppid: OTHER_DEAD_POSTMASTER, postmaster: false },
+    { pid: LIVE_POSTMASTER, ppid: 1, postmaster: true },
+    { pid: LIVE_CHILD, ppid: LIVE_POSTMASTER, postmaster: false },
+  ];
+  const fake = seams({ root, live: [OTHER_FOLDER_ORPHAN, LIVE_POSTMASTER, LIVE_CHILD], listing });
+  assert.deepEqual(await clearOldServer(root, fake), { cleared: "nothing", stopped: [] });
+  assert.deepEqual(fake.calls.parents, [DEAD_POSTMASTER], "the list is asked for that number's children");
+  assert.deepEqual(fake.calls.signals, [], "no signal is sent");
+  assert.ok(await fsp.stat(path.join(paths.data, "postmaster.pid")), "the pid file stays for the next start");
+  const server = { binaries: fake.binaries, state: async () => ({ running: false, cluster: true }), clear: (at, options) => clearOldServer(at, { ...options, ...fake }) };
+  assert.deepEqual(await stopDatabase({ dataHome: home, server }), { database: "not_running" });
+});
+
 test("a program is a postgres when its name ends in postgres or postmaster, as Postgres.app tests it", () => {
   for (const yes of ["C:\\Bridge\\bin\\postgres.exe", "C:\\BRIDGE\\BIN\\POSTGRES.EXE", "/opt/bridge/bin/postgres", "/usr/lib/postgresql/18/bin/postmaster"]) assert.equal(isPostgresProgram(yes), true, yes);
   for (const no of ["C:\\Windows\\System32\\notepad.exe", "/usr/bin/node", "/opt/postgres-helper"]) assert.equal(isPostgresProgram(no), false, no);

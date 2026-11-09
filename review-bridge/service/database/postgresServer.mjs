@@ -440,6 +440,9 @@ export async function clearOldServer(root, {
     return { cleared: "pg_ctl", stopped: [] };
   }
   const old = leftoverProcesses(await processes(binaries, pid), pid);
+  // No child of that number is left: nothing was cleared, and `down` must not say it was. The pid file
+  // stays for the next start, which removes a dead server's itself.
+  if (!old.length) return { cleared: "nothing", stopped: [] };
   for (const { pid: child } of old) { try { signal(child); } catch {} }
   const deadline = Date.now() + STOP_WAIT_MS;
   while (old.some((entry) => alive(entry.pid)) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
