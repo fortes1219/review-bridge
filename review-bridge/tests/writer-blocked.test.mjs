@@ -136,7 +136,9 @@ test("the prompt says who runs the tests only when Bridge will, whichever provid
   });
   const withTests = compose({ kind: "command", command: "npm test" });
   assert.match(withTests, /Bridge itself runs the project's tests \(npm test\) outside your sandbox/);
-  assert.match(withTests, /If they cannot run where you are, write that in unverified and keep status done: it is not a reason to be blocked\./);
+  assert.match(withTests, /That they cannot run where you are is not a reason to be blocked: write that in unverified and keep status done\./);
+  // The writer is not asked to run the tests: Bridge runs them, and the writer's run would be no evidence (Fortes 2026-11-09).
+  assert.doesNotMatch(withTests, /Run them if you can/);
   // Every condition, with tests or without: none is set apart as the tests'.
   for (const prompt of [withTests, compose({ kind: "not_configured" })]) {
     assert.match(prompt, /status is done only if every condition is done\./);

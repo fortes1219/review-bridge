@@ -172,7 +172,7 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     ] : ["There is no contract for this task; leave criteria empty."]),
     ...(workPackage.test?.kind === "command" ? [
       "Bridge itself runs the project's tests (" + workPackage.test.command + ") outside your sandbox after this call; work they fail comes back to you before any review.",
-      "Run them if you can. If they cannot run where you are, write that in unverified and keep status done: it is not a reason to be blocked.",
+      "That they cannot run where you are is not a reason to be blocked: write that in unverified and keep status done.",
     ] : []),
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",
     "Your final answer must be one writer.result object that matches the JSON schema given to the CLI; no prose outside it.",
