@@ -812,7 +812,7 @@ async function assertMoved(roots, expected) {
   }
 }
 
-const PROJECT_ONLY = ["bridge.json", "policy.override.json", "results", "rules.md", "work-packages"];
+const PROJECT_ONLY = [".gitignore", "bridge.json", "policy.override.json", "results", "rules.md", "work-packages"];
 
 test("W13 an upgrade from the older layout moves every old file out of the project, checked by SHA-256, and status still answers", async (t) => {
   const root = await workspace(t);

@@ -173,8 +173,9 @@ test("R5 init keeps self-test artifacts disposable and installs both work-order 
   ]);
   await fsp.access(path.join(projectPaths(root).stateRoot, "review-bridge-install.json"));
   assert.deepEqual(await fsp.readdir(path.join(root, ".review-bridge", "work-packages")), ["TEMPLATE.md", "TEMPLATE.zh-TW.md"]);
-  // The project keeps only its settings and work orders; the run state lives outside it.
-  assert.deepEqual((await fsp.readdir(path.join(root, ".review-bridge"))).sort(), ["bridge.json", "policy.override.json", "rules.md", "work-packages"]);
+  // The project keeps only its settings and work orders, and the .gitignore that keeps them out of Git; the
+  // run state lives outside it.
+  assert.deepEqual((await fsp.readdir(path.join(root, ".review-bridge"))).sort(), [".gitignore", "bridge.json", "policy.override.json", "rules.md", "work-packages"]);
 
   const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const doctor = spawnSync(process.execPath, [bootstrap, "doctor", "--fake-cli"], {
@@ -1630,7 +1631,7 @@ test("after a run the project holds only its settings, work orders and results/<
   // The project: three settings, the work orders, and one folder of results with the contract and the result.
   const project = await filesUnder(path.join(root, ".review-bridge"));
   const results = project.filter((name) => name.startsWith("results/"));
-  assert.deepEqual(project.filter((name) => !name.startsWith("results/")), ["bridge.json", "policy.override.json", "rules.md", "work-packages/TEMPLATE.md", "work-packages/TEMPLATE.zh-TW.md", "work-packages/hello.md"]);
+  assert.deepEqual(project.filter((name) => !name.startsWith("results/")), [".gitignore", "bridge.json", "policy.override.json", "rules.md", "work-packages/TEMPLATE.md", "work-packages/TEMPLATE.zh-TW.md", "work-packages/hello.md"]);
   assert.equal(results.length, 2, results.join(", "));
   assert.ok(results.includes("results/hello/contract.v1." + run.contract_sha256.slice(0, 7) + ".json"), results.join(", "));
   assert.equal(await fsp.readFile(path.join(root, ".review-bridge", "results", "hello", "contract.v1." + run.contract_sha256.slice(0, 7) + ".json"), "utf8"),
