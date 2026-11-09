@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome, inEnglish, queryRecords, stopPage } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -34,7 +34,7 @@ function env() {
 async function folder(t, prefix) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(async () => {
-    spawnSync(process.execPath, [bridge, "down"], { cwd: dir, env: env(), windowsHide: true });
+    await stopPage(dir);
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
   });
   return dir;
@@ -45,6 +45,7 @@ async function project(t) {
   const root = await folder(t, "review-bridge-pty-project-");
   const init = spawnSync(process.execPath, [bridge, "init", "--yes", "--fake-cli"], { cwd: root, env: env(), encoding: "utf8", windowsHide: true });
   assert.equal(init.status, 0, init.stderr);
+  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   return { root, order };

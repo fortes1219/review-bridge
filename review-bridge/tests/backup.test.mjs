@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopServerIn } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords, stopServerIn, stopPage } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -62,7 +62,7 @@ async function projectWithRun() {
 
 test.after(async () => {
   if (!project) return;
-  project.bridge(["down"]);
+  await stopPage(project.root);
   await fsp.rm(project.root, { recursive: true, force: true });
 });
 

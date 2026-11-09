@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome, inEnglish, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -107,6 +107,8 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
   });
 
   assert.equal(result.status, 0, result.stderr);
+  // The graph's line is in the project's language, the machine's that init wrote into bridge.json.
+  const words = await createTranslator(await resolveLocale(projectPaths(root)));
   assert.deepEqual(result.stdout.trimEnd().split(/\r?\n/), [
     "Setting up .review-bridge/...",
     "Checking the setup...",
@@ -114,7 +116,7 @@ test("init without a terminal asks nothing, prints no plan, and ends with the ne
     "Starting the local page...",
     // T0-GRAPH-01: init reads the project into its graph and says how much it read; this one holds no code.
     "Mapping the project...",
-    "Mapped 0 file(s): 0 definition(s), 0 reference(s), 0 import(s).",
+    words("graph.mapped", { files: 0, definitions: 0, references: 0, imports: 0 }),
     "",
     "Done. Now:",
     "",
@@ -505,6 +507,7 @@ test("start plans a Chinese work order, shows the card, runs one line per step a
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
+  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const start = (...args) => spawnSync(process.execPath, [bridge, "start", order, ...args], {
@@ -564,6 +567,7 @@ test("init maps a Git project's code into its graph and leaves git status as it 
     cwd: packageRoot, encoding: "utf8", env: env(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
+  inEnglish(root);
   const output = JSON.parse(init.stdout);
   assert.equal(output.graph.files, 3, "three TypeScript files; notes.md is not read");
   assert.deepEqual(output.graph.incomplete, [{ path: "src/broken.ts", parse_status: "parsed", error_count: 1 }]);
@@ -629,7 +633,9 @@ test("init that reinitializes a set-up folder reads the project into its graph a
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(again.status, 0, again.stderr);
-  assert.deepEqual(again.stdout.trimEnd().split(/\r?\n/).slice(1), ["Mapped 2 file(s): 2 definition(s), 0 reference(s), 0 import(s)."]);
+  // The graph line is in the project's language, the machine's that init wrote into bridge.json.
+  const words = await createTranslator(await resolveLocale(projectPaths(root)));
+  assert.deepEqual(again.stdout.trimEnd().split(/\r?\n/).slice(1), [words("graph.mapped", { files: 2, definitions: 2, references: 0, imports: 0 })]);
   assert.match(again.stdout, /^Reinitialized existing Review Bridge setup in /);
   const projectId = projectPaths(root).projectId;
   assert.deepEqual((await queryRecords("select path from graph_files where project_id = $1 order by path", [projectId])).map((row) => row.path), ["src/a.ts", "src/b.ts"]);
@@ -651,6 +657,7 @@ async function fourActionsProject(t, prefix) {
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
+  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const cli = (args, env = {}) => spawnSync(process.execPath, [bridge, ...args], {
@@ -702,6 +709,7 @@ test("an agent's start --yes runs the project's tests when its rules give a comm
     cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(init.status, 0, init.stderr);
+  inEnglish(root);
   const order = ".review-bridge/work-packages/hello.md";
   await fsp.writeFile(path.join(root, order), "# 工單：新增 README\n\n<!-- bridge:requested_work -->\n在專案根目錄加一個 README。\n\n<!-- bridge:acceptance -->\n## 驗收\n\n1. 專案根目錄存在 `README.md`。\n");
   const cli = (args) => spawnSync(process.execPath, [bridge, ...args], { cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024 });

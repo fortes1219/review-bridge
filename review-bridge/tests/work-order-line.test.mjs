@@ -1,6 +1,6 @@
 // RC3-PIPE-01: a directory of work orders is one line. Every model call here is the fake CLI.
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, inEnglish, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -46,9 +46,10 @@ async function install(t, { withGit = false } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  inEnglish(root);
   const bridge = (args, env = {}) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env } });
   t.after(async () => {
-    bridge(["down"]);
+    await stopPage(root);
     await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });

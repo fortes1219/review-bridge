@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import "./fixtures/isolatedDataHome.mjs";
+import { stopPage } from "./fixtures/isolatedDataHome.mjs";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -39,7 +39,7 @@ async function workspace(t, watch) {
     cwd: root, encoding: "utf8", windowsHide: true,
   });
   t.after(async () => {
-    bridge("down");
+    await stopPage(root);
     await fsp.rm(root, { recursive: true, force: true });
   });
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });

@@ -1,7 +1,7 @@
 // A writer that could not run the tests where it is (Codex's sandbox on Windows: spawn EPERM) is not a
 // stopped run. Bridge runs them itself and they decide; the result says what each side knows. Canary,
 // 2026-11-05: a run ended "blocked" with a Why of one line, on a project already holding those files.
-import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, inEnglish, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -41,10 +41,11 @@ async function project(t, { tests = true, testExit = 0 } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "codex", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  inEnglish(root);
   const callLog = path.join(root, ".git", "calls.jsonl");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], { cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, FAKE_CALL_LOG: callLog, ...env } });
   t.after(async () => {
-    bridge(["down"]);
+    await stopPage(root);
     await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   const run = async (env) => {

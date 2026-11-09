@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { connect, postgresBinaries } from "../../service/database/postgresServer.mjs";
 
@@ -42,6 +43,29 @@ export function separatePerson(t) {
     env, home, claudeHome, codexHome, skillFolder, record: path.join(env.REVIEW_BRIDGE_DATA_HOME, "agent-entries.json"),
     claudeEntry: path.join(claudeHome, "commands", "review-bridge.md"), codexEntry: path.join(skillFolder, "SKILL.md"),
   };
+}
+
+// init writes the machine's language into bridge.json (systemLocale), and on Windows Node reads it from
+// the system, not from LANG or LC_ALL (checked 2026-11-09: zh-TW whatever they say). A test that reads
+// Bridge's English words sets the project's language after init, as a person edits that key.
+export function inEnglish(root) {
+  const file = path.join(root, ".review-bridge", "bridge.json");
+  const config = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (config.locale === "en") return;
+  fs.writeFileSync(file, JSON.stringify({ ...config, locale: "en" }, null, 2) + "\n");
+}
+
+// A test's clean-up stops the page service init started for it the way Playwright's webServer teardown
+// stops what it started: by the service's own record, never by asking Bridge to stop itself
+// (ECOSYSTEM-REFERENCES K). `down` refuses while a run of the test is still open, and that left page
+// services running with the test's folder as their working directory (2026-11-09). serviceDown kills
+// only the pid the session names and that answers on its port as that service. The database is the
+// file's: stopped by pg_ctl on this file's own data directory when the file's tests end (below).
+export async function stopPage(root) {
+  const runtime = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const { serviceDown } = await import("../../features/setupCheck/pageService.mjs");
+  const { getBridgePaths } = await import("../../utils/paths.mjs");
+  await serviceDown({ paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }), out: { write() {} } }).catch(() => {});
 }
 
 // The rows a query returns from the records a command wrote (the server is running by then).

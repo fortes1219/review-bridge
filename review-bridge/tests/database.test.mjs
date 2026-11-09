@@ -22,7 +22,9 @@ async function database(t) {
   t.after(async () => {
     await client?.end().catch(() => {});
     await stopServer(root, { binaries }).catch(() => {});
-    await fsp.rm(root, { recursive: true, force: true });
+    // On Windows a stopped server's files stay locked for a moment (EBUSY, 2026-11-09); Node's rm retries
+    // EBUSY and EPERM with maxRetries, as the other tests' clean-ups do.
+    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   await ensureCluster(root, { binaries });
   await startServer(root, { binaries });

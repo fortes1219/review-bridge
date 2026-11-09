@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords, stopPage } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -40,7 +40,7 @@ async function install(t, { withGit = false } = {}) {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env },
   });
   t.after(async () => {
-    bridge(["down"]);
+    await stopPage(root);
     await fsp.rm(root, { recursive: true, force: true });
   });
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
