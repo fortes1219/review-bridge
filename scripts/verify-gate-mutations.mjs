@@ -35,13 +35,18 @@ const git = (gitArgs) => {
   return result.stdout.trim();
 };
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const runCase = (dir, item) => spawnSync(process.execPath, ["--test", "--test-name-pattern=^" + escape(item.case) + "$", item.test], {
+// The TAP reporter, named: node:test's default depends on the Node and the stdout (Node 22 doc/api/test.md:
+// "When stdout is a TTY, the spec reporter is used by default. Otherwise, the tap reporter is used";
+// Node 23.0.0, nodejs/node#54548, made spec the default on non-TTY stdout too), so the counts are read
+// from the one format every supported Node writes when asked.
+const runCase = (dir, item) => spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--test-name-pattern=^" + escape(item.case) + "$", item.test], {
   cwd: dir, encoding: "utf8", windowsHide: true, timeout: 300_000, env: { ...process.env, NODE_OPTIONS: "" },
 });
 const counts = (result) => ({
-  pass: Number(/ℹ pass (\d+)/.exec(result.stdout)?.[1] ?? NaN),
-  fail: Number(/ℹ fail (\d+)/.exec(result.stdout)?.[1] ?? NaN),
+  pass: Number(/^# pass (\d+)$/m.exec(result.stdout)?.[1] ?? NaN),
+  fail: Number(/^# fail (\d+)$/m.exec(result.stdout)?.[1] ?? NaN),
 });
+const readable = (count) => Number.isInteger(count.pass) && Number.isInteger(count.fail);
 
 const report = { started_at: new Date().toISOString(), node: process.version, platform: process.platform + " " + os.release(), results: [] };
 const links = [];
@@ -66,7 +71,9 @@ try {
     result.baseline = baseline;
     const file = path.join(dir, item.target);
     const text = fs.readFileSync(file, "utf8").replaceAll("\r\n", "\n");
-    if (!(baseline.fail === 0 && baseline.pass > 0)) {
+    if (!readable(baseline)) {
+      Object.assign(result, { result: "invalid", detail: "the baseline run's counts could not be read (no TAP # pass / # fail lines)" });
+    } else if (!(baseline.fail === 0 && baseline.pass > 0)) {
       Object.assign(result, { result: "invalid", detail: "baseline is not green" });
     } else if (!text.includes(item.anchor)) {
       Object.assign(result, { result: "invalid", detail: "anchor not found: the code under test changed shape" });
@@ -76,7 +83,8 @@ try {
       const mutant = counts(ran);
       result.mutant = mutant;
       const output = ran.stdout + ran.stderr;
-      if (!(mutant.pass + mutant.fail > 0)) Object.assign(result, { result: "invalid", detail: "no test ran: " + output.split("\n").find((line) => /Error/.test(line))?.trim() });
+      if (!readable(mutant)) Object.assign(result, { result: "invalid", detail: "the mutant run's counts could not be read (no TAP # pass / # fail lines)" });
+      else if (!(mutant.pass + mutant.fail > 0)) Object.assign(result, { result: "invalid", detail: "no test ran: " + output.split("\n").find((line) => /Error/.test(line))?.trim() });
       else if (mutant.fail === 0) Object.assign(result, { result: "survived", detail: "the case still passes against the mutant" });
       else if (new RegExp(item.expect).test(output)) Object.assign(result, { result: "killed", detail: "failed with: " + item.expect });
       else Object.assign(result, { result: "invalid", detail: "failed, but not with the expected message (" + item.expect + "): " + output.split("\n").find((line) => /Error|actual|expected/.test(line))?.trim() });
