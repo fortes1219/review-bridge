@@ -512,6 +512,9 @@ export async function claimStartAuthorization(paths, authorizationId, {
       };
     }
   }
+  // One reading of the clock for the run's start: its deadlines are counted from the moment it records as
+  // its creation (three readings left timeout_at a millisecond short of run_timeout, Windows 2026-11-09).
+  const startedAt = nowIso(clock);
   const run = {
     schema_version: 4,
     run_id: claim.run_id,
@@ -529,12 +532,12 @@ export async function claimStartAuthorization(paths, authorizationId, {
     execution_mode: executionMode,
     budget: { ...structuredClone(workPackage.budget), consumed_rounds: 0 },
     recovery_window: snapshot.effective_policy.limits.recovery_window,
-    run_deadline_at: plusMs(nowIso(clock), snapshot.effective_policy.limits.recovery_window),
+    run_deadline_at: plusMs(startedAt, snapshot.effective_policy.limits.recovery_window),
     // The run's own time limit, counted from its start; checked where the run already checks for a stop.
-    timeout_at: workPackage.budget.run_timeout ? plusMs(nowIso(clock), workPackage.budget.run_timeout) : null,
+    timeout_at: workPackage.budget.run_timeout ? plusMs(startedAt, workPackage.budget.run_timeout) : null,
     workspace_evidence: workspaceEvidence,
     last_state: null,
-    created_at: nowIso(clock),
+    created_at: startedAt,
     work_package_id: workPackage.work_package_id,
     last_event_sequence: 0,
     updated_at: nowIso(clock),
