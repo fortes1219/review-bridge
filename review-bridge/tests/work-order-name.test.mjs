@@ -78,6 +78,21 @@ test("the records name a file in NFC, whichever form the path came in", async (t
   assert.equal(canonicalTaskFile(root, WORK_ORDERS + JAPANESE + ".md"), WORK_ORDERS + JAPANESE + ".md");
 });
 
+// A CI runner's TEMP is an 8.3 name (C:\Users\RUNNER~1\…) whose long name is what the file system gives
+// back. Every caller hands an absolute path; a work order not on disk yet is still named by its path in
+// the project, whichever spelling each side came in.
+test("a project named by its Windows short path names a work order not yet on disk by its path in the project", { skip: process.platform !== "win32" && "8.3 short names are Windows only" }, async (t) => {
+  const parent = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-long-folder-name-"));
+  t.after(() => fsp.rm(parent, { recursive: true, force: true }));
+  const result = spawnSync("cmd.exe", ["/d", "/s", "/c", "\"for %I in (\"" + parent + "\") do @echo %~sI\""], { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true });
+  const short = result.status === 0 ? result.stdout.trim() : "";
+  if (!short.includes("~")) return t.skip("this volume makes no 8.3 short names");
+  const named = WORK_ORDERS + JAPANESE + ".md";
+  assert.equal(canonicalTaskFile(short, path.join(short, named)), named);
+  assert.equal(canonicalTaskFile(parent, path.join(short, named)), named);
+  assert.equal(canonicalTaskFile(short, path.join(parent, named)), named);
+});
+
 test("a work order named in any language goes from its card through its yes to a result under its own name", LIMIT, async (t) => {
   const rt = await install(t);
   for (const name of NAMES) {

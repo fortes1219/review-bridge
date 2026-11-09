@@ -480,6 +480,7 @@ export async function startServer(root, {
   while (!(await serverRunning(root, { binaries, tool }))) {
     const port = await firstFreePort(from);
     if (port === null) throw new Error("PostgreSQL's ports from " + start + " up to 65535 are all taken.");
+    const began = Date.now();
     const result = await detached(binaries.pg_ctl, [
       "start", "-D", paths.data, "-l", paths.control, "-w", "-t", String(timeoutSeconds),
       "-o", "-h " + LISTEN_HOST + " -p " + port,
@@ -493,7 +494,13 @@ export async function startServer(root, {
       continue;
     }
     if (result.held || OLD_SERVER_HINT.test(said)) throw new OldServerError(paths.control, serverWords(said));
-    throw new Error("PostgreSQL did not start within " + timeoutSeconds + "s: " + (serverWords(said) || "pg_ctl exited " + result.code + "."));
+    // Said as it was: how long pg_ctl waited (a server that dies at once is not a timeout) and the server's
+    // last lines as written. The log collector writes a dying server's last words after it is gone and
+    // exits last (syslogger.c, "we'll ignore postmaster death"), so they may not be in the file yet; the
+    // folder is named for them.
+    const waited = Math.round((Date.now() - began) / 1000);
+    throw new Error("PostgreSQL did not start: pg_ctl gave up after " + waited + "s (it waits up to " + timeoutSeconds + "s). It said: "
+      + (lastLines(said, 8) || "nothing; pg_ctl exited " + result.code + "."));
   }
   await ready(root, deadline);
   return { port: await runningPort(paths) };

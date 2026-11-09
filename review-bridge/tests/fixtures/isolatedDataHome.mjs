@@ -5,6 +5,7 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,26 @@ process.env.LANG = "en_US.UTF-8";
 // one and node --test does not. Without one the lines read `npx review-bridge …`, however the tests run.
 delete process.env.npm_config_user_agent;
 const { pg_ctl: pgCtl } = await postgresBinaries();
+
+// The port this file's database starts from: one the system hands out, as the embedded-PostgreSQL libraries'
+// test helpers take theirs (fergusstrange/embedded-postgres: "Test helpers and the CLI choose Port(0) by
+// default", freePort listens on 127.0.0.1:0; zonky's detectPort opens a ServerSocket(0); ECOSYSTEM-REFERENCES
+// K). Test files run at once and each starts a server; from one start port they found the same port free
+// and the second died binding it (Windows CI, 2026-11-10). Written as the data home's database.port, which
+// every command reads; nothing of the product changes, and nothing is left behind.
+const systemPort = () => new Promise((resolve, reject) => {
+  const probe = net.createServer();
+  probe.once("error", reject);
+  probe.listen(0, "127.0.0.1", () => {
+    const { port } = probe.address();
+    probe.close(() => resolve(port));
+  });
+});
+// In the shape saveDefaultRoles writes (installer/personal-settings.mjs): a settings file is read for its
+// roles whenever it is there, so it carries the built-in ones (claude writes, codex reviews) beside the port.
+fs.writeFileSync(path.join(dataHome, "settings.json"), JSON.stringify({
+  schema_version: 1, default_roles: { writer: "claude", reviewer: "codex" }, database: { port: await systemPort() },
+}, null, 2) + "\n");
 
 // For a test about what belongs to the person, shared by all their projects: a machine of its own,
 // whose data home holds no other test's projects, for this test only.

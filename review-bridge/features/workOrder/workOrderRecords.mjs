@@ -19,8 +19,28 @@ const changedLines = (change) => (change ? Math.max(change.removed.length, chang
 // system spells it (where names ignore case, farm.md and FARM.md are one file, so one name), in NFC (a
 // macOS disk hands the same name back decomposed). Never used to open the file: plan.task_file does that.
 export function canonicalTaskFile(repoRoot, file) {
-  const real = (target) => { try { return realpathSync.native(target); } catch { return path.resolve(target); } };
-  return nfc(path.relative(real(repoRoot), real(path.resolve(repoRoot, file))).split(path.sep).join("/"));
+  return nfc(path.relative(realAsFarAsItGoes(repoRoot), realAsFarAsItGoes(path.resolve(repoRoot, file))).split(path.sep).join("/"));
+}
+
+// A path spelled as the file system spells it, also when its last parts are not there yet: the nearest part
+// that exists is made real and the rest joined back, as CPython's non-strict realpath does on Windows
+// (Lib/ntpath.py _getfinalpathname_nonstrict: "find as much of the target directory as we can and join the
+// rest"). Both sides of path.relative then have one spelling, so a short name (C:\Users\RUNNER~1, a CI
+// runner's TEMP) on one side and the long name on the other no longer part them. Like CPython it walks up
+// only past a part that is not there; any other error leaves the path as it was given.
+function realAsFarAsItGoes(target) {
+  const rest = [];
+  let at = path.resolve(target);
+  for (;;) {
+    try {
+      return path.join(realpathSync.native(at), ...rest);
+    } catch (error) {
+      const up = path.dirname(at);
+      if (!["ENOENT", "ENOTDIR"].includes(error.code) || up === at) return path.resolve(target);
+      rest.unshift(path.basename(at));
+      at = up;
+    }
+  }
 }
 
 // Whether a file the records name is there, however the disk spells that name: a disk that keeps names

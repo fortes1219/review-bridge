@@ -110,3 +110,46 @@ claim that nothing else is wrong.
   both tests start the database; they run in the container).
 - **residual_risk:** a person who really edits the work order at the same moment another yes takes the card
   is told the card was used; that is also true.
+
+## RB-GATE-2026-005 — a work order not yet on disk, under a Windows short path, was named outside the project
+
+- **affected_gate:** Records
+- **symptom:** on Windows CI `canonicalTaskFile` named `.review-bridge/work-packages/ログイン修正.md` as
+  `../../../../../RUNNER~1/AppData/Local/Temp/…/ログイン修正.md`.
+- **expected_vs_actual:** expected the path in the project; actually a path climbing out of it.
+- **reproduction:** `review-bridge/tests/work-order-name.test.mjs` "the records name a file in NFC, …" on
+  GitHub Actions `windows-latest` at `837f067`, whose TEMP is `C:\Users\RUNNER~1\…` (an 8.3 name for
+  `runneradmin`).
+- **root_cause:** the root was made real (long name) and so was the file, but a file not yet on disk cannot
+  be made real, so it kept the short name; one long and one short path were compared.
+- **fix:** the commit that adds this entry — both sides are made real as far as they exist and the rest is
+  joined back, as CPython's non-strict `realpath` does on Windows (`Lib/ntpath.py`).
+- **regression_test:** `review-bridge/tests/work-order-name.test.mjs` "a project named by its Windows short
+  path names a work order not yet on disk by its path in the project" (skipped where there are no 8.3 names).
+- **mutation_case:** `RB-M-task-file-short-path` (killed on a Windows volume with 8.3 names; invalid where
+  the test is skipped).
+- **residual_risk:** none known.
+
+## RB-GATE-2026-006 — test files starting their databases at once took the same port
+
+- **affected_gate:** Records (test setup)
+- **symptom:** Windows CI `review-bridge/tests/acceptance-run.test.mjs`: the template's init failed with
+  "PostgreSQL did not start within 60s" about 1.4 s after the server started; seven tests failed with it.
+- **expected_vs_actual:** expected each test file's server to start; actually one died binding a port another
+  file's server had just taken, and Bridge's message called it a 60 s timeout.
+- **reproduction:** GitHub Actions `windows-latest` at `837f067`, `node --test "review-bridge/tests/*.test.mjs"`,
+  which runs `os.availableParallelism() - 1` files at once; every file's server looked for a free port from
+  the same start port.
+- **root_cause:** a port is probed free and then bound by the server; between them another file's server
+  took it. PostgreSQL starts its log collector before binding (`postmaster.c`), so the bind FATAL went to the
+  collector's file, which writes a dying server's last words after it is gone (`syslogger.c`); Bridge read
+  the file at once, saw only the collector's HINT, did not retry on the next port, and said "within 60s"
+  whatever the wait.
+- **fix:** the commit that adds this entry — each test file takes a port the system hands out, as the
+  embedded-PostgreSQL libraries' test helpers do (fergusstrange/embedded-postgres `freePort`, zonky
+  `detectPort`: bind port 0, read the number, close), and writes it as its data home's `database.port`; the start failure now says how long pg_ctl waited and the server's last lines as written.
+- **regression_test:** none that can fail on demand; the check is both CI platforms green.
+- **mutation_case:** none: the race is not reproducible on demand.
+- **residual_risk:** reading the collector's file too early is unchanged, so a port taken between the probe
+  and the bind outside the tests (another program) still fails instead of moving to the next port. The
+  message says where the server's log is.
