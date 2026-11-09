@@ -214,6 +214,25 @@ test("Git lists what it does not ignore, what changed since a commit (staged or 
   assert.equal(git(root, "count-objects", "-v"), objects, "hash-object without -w stores nothing in the project's Git");
 });
 
+// CI's Windows runner has an 8.3 TEMP (C:\Users\RUNNER~1\...), while Git names the work tree in full:
+// a project reached by its short name still sees its changed files (Windows CI, 2026-11-09).
+test("a project reached by its Windows short name still sees what changed since a commit", { skip: process.platform !== "win32" && "8.3 short names are Windows only" }, async (t) => {
+  const parent = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-long-folder-name-"));
+  t.after(() => fsp.rm(parent, { recursive: true, force: true }));
+  const named = spawnSync("cmd.exe", ["/d", "/s", "/c", "\"for %I in (\"" + parent + "\") do @echo %~sI\""], { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true });
+  const short = named.status === 0 ? named.stdout.trim() : "";
+  if (!short.includes("~")) return t.skip("this volume makes no 8.3 short names");
+  const root = path.join(short, "app");
+  await fsp.mkdir(root);
+  await files(root, { "a.ts": "a\n", "b.ts": "b\n" });
+  git(root, "init", "-q");
+  git(root, "add", ".");
+  git(root, "commit", "-q", "-m", "one");
+  const commit = git(root, "rev-parse", "HEAD").trim();
+  await files(root, { "b.ts": "changed\n" });
+  assert.deepEqual(changedSince(root, commit, ["."]), ["b.ts"]);
+});
+
 // An in-memory stand-in for the graph's tables, answering the statements graphRecords.mjs sends.
 function memoryDb() {
   const state = { graph: null, files: new Map(), writes: [], removed: [], cleared: 0, project: false };

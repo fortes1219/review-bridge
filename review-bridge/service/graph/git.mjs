@@ -3,7 +3,7 @@
 // A project counts as without Git only when there is no .git in it or above it and no GIT_DIR; after
 // that, a call Git cannot answer is an error, never "nothing changed".
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 function git(cwd, args, input = undefined) {
@@ -47,10 +47,14 @@ export function listFiles(root, pathspecs) {
 // Vitest's --changed asks Git the same two things (vcs/git.ts); Bridge diffs the working tree because
 // its graph covers what is not committed yet.
 // `git diff` names paths from the top of the work tree (its --relative would drop a sibling package's
-// changes), `ls-files` from `root`; both come back relative to `root`.
+// changes), `ls-files` from `root`; both come back relative to `root`. Git names the top in full, so
+// `root` is named the same way first: on Windows a folder reached by its 8.3 short name (CI's TEMP is
+// C:\Users\RUNNER~1\...) would otherwise lie outside it and no change would be seen, as the installer
+// found (installer/neutral-install.mjs realNative).
 export function changedSince(root, commit, pathspecs) {
   const top = topLevel(root);
-  const fromTop = (file) => path.relative(root, path.join(top, file)).split(path.sep).join("/");
+  const base = realpathSync.native(path.resolve(root));
+  const fromTop = (file) => path.relative(base, path.join(top, file)).split(path.sep).join("/");
   const changed = nul(git(root, ["diff", "--name-only", "-z", "--no-renames", commit, "--", ...pathspecs])).map(fromTop);
   const untracked = nul(git(root, ["ls-files", "-z", "--others", "--exclude-standard", "--", ...pathspecs]));
   return [...new Set([...changed, ...untracked])];
