@@ -2,10 +2,18 @@
 
 ## Upgrade
 
+How you update Bridge depends on how you run it:
+
+- **With `npx review-bridge` and no global installation:** no separate update step is needed. `npx` retrieves the latest release from npm.
+- **With a global installation:** run `npm i -g review-bridge@latest`. `npx review-bridge` uses that installed copy, so you need to update it yourself.
+
+If a new version needs database migrations, its first command backs up the database and prints the backup location before applying them. Active runs prevent the backup. If the database contains migrations unknown to this version, such as after using a newer release, Bridge lists them, refuses to open it, and changes nothing.
+
+Update each project's `.review-bridge/` setup with `upgrade`:
+
 ```sh
-npm i -g review-bridge@next        # Upgrade the package
 cd your-project
-review-bridge upgrade              # Back up and upgrade this project's setup
+npx review-bridge upgrade          # Back up and update this project's setup
 ```
 
 `upgrade` stops the old service, backs up data, migrates it, checks integrity, removes old files, restarts the service, and checks its health. Bridge handles the sequence; you can rerun it after an interruption.
@@ -19,13 +27,13 @@ review-bridge upgrade              # Back up and upgrade this project's setup
 
 ## Backup
 
-See [Results, logs, and the database → Backup](./results#backup). `review-bridge backup` copies the database for all projects and is refused while work is running.
+See [Backup](./results#backup). `npx review-bridge backup` copies the database for all projects and refuses while a run is active.
 
 ## Uninstall
 
 ```sh
-review-bridge uninstall --target .   # Back up and remove the project's setup
-npm uninstall -g review-bridge       # Remove the package
+npx review-bridge uninstall --target .   # Remove the project's setup, with a backup
+npm uninstall -g review-bridge           # Remove Bridge itself if installed globally
 ```
 
 - `uninstall` removes only content created by Bridge: `.review-bridge/` (including result copies, which are backed up), and tasks starting with `review-bridge:` and inputs starting with `review-bridge-` in `.vscode/tasks.json`. That file is deleted only if nothing else remains.
@@ -34,7 +42,9 @@ npm uninstall -g review-bridge       # Remove the package
 
 ## Platforms
 
-Windows x64 has been verified natively. Apple Silicon macOS can be selected but has not been verified natively. Linux remains experimental; native model work fails closed by default.
+Native execution is verified on Windows x64. Apple Silicon macOS is selectable but unverified. Linux blocks native model execution.
+
+The database uses PostgreSQL 18. Moving to a different PostgreSQL major version requires a dump and restore, which this release doesn't handle.
 
 ### Windows
 
@@ -46,4 +56,4 @@ Run `notepad $PROFILE` in PowerShell and add the following setting. Create the f
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 ```
 
-You can also use PowerShell 7 (`pwsh`), which outputs UTF-8 by default. `review-bridge doctor` reports whether PowerShell is using UTF-8; it does not modify your profile.
+You can also use PowerShell 7 (`pwsh`), which outputs UTF-8 by default. `npx review-bridge doctor` reports whether PowerShell is using UTF-8 without changing your profile.

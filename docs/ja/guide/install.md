@@ -1,71 +1,81 @@
 # インストールと初期設定
 
-Review Bridge はグローバルにインストールする CLI です。一度インストールしたら、利用する各プロジェクトで `init` を実行します。
+Review Bridge は npm で公開している CLI ツールです。プロジェクトのフォルダーで `npx review-bridge init` を実行すると、最新版の取得と初期設定を行います。`npm create vite` と同じように、事前のインストールは不要です。
 
 ## 必要な環境
 
-- npm を含む Node.js 22 以降。
-- Git。Git を使わないプロジェクトでも作業は実行できますが、**変更の証跡**には Git が必要です。Git がある場合、Bridge は開始時のコミットと実際のファイル変更を記録します。ない場合は、証跡を取得できないことを結果に明記します。
-- writer と reviewer に割り当てる CLI。`claude`（Claude Code）、`codex`、または両方をインストールし、ログインしておきます。
-- Bridge の状態を保存するローカルディスク。OneDrive、Dropbox、iCloud Drive、UNC、NFS、SMB などの同期フォルダーやネットワークドライブは利用できません。
-
-## インストール
-
-```sh
-npm i -g review-bridge@next
-```
-
-リリース候補版（rc）は `next` タグで配布します。安定版の公開後は `npm i -g review-bridge` を利用できます。
+- Node.js 22.8 以降と npm。
+- **変更の証跡**を取得するための Git。Git なしでも実行できますが、結果には証跡を提供できないと明記します。Git がある場合は開始時のコミットと実際のファイル変更を記録します。
+- 各役割に必要な CLI のインストールとログイン。`claude`（Claude Code）、`codex`、または両方です。
+- Bridge の状態を保存するローカルディスク。OneDrive、Dropbox、iCloud Drive、UNC、NFS、SMB などの同期・ネットワーク保存先は使えません。
 
 ## プロジェクトの初期設定
 
 ```sh
 cd your-project
-review-bridge init
+npx review-bridge init
 ```
 
-`init` は最初に次の 3 項目を確認します。それぞれ既定値があり、Enter でそのまま選択できます。
+`npx` は npm の最新版を確認するため、ネットワーク接続が必要です。確認を省くには `npm i -g review-bridge` でグローバルインストールします。その後の `npx review-bridge` はそのコピーを使います。pnpm、Yarn、Bun なら、それぞれ `pnpm dlx review-bridge init`、`yarn dlx review-bridge init`、`bun x review-bridge init` を使えます。以後の案内も同じ形式になります。[パッケージマネージャー](../reference/cli#package-managers)を参照してください。
 
-1. **writer**：`claude` または `codex`。保存済みの既定値を使い、未設定なら `claude` を使います。
-2. **reviewer**：保存済みの既定値を使い、未設定なら `codex` を使います。
-3. **プロジェクト種別**：検出された種別を使い、検出できなければ `none` を使います。この設定で、writer の各ラウンド後に Bridge が実行する検証コマンド（`npm test` など）が決まります。`none` を選ぶか、対応するコマンドがない場合も作業は実行できます。カード、記録、結果には `tests: not configured` と表示されます。
+`init` は create-vite と同じく、質問を終えてから設定を始めます。各質問には既定値があり、Enter で選べます。
 
-続いて、プロジェクトの `.vscode/tasks.json` に VS Code タスクを追加するか確認します。既定値は **N** です。[作業の実行](./start#vs-code)も参照してください。
+1. **writer**：`claude` または `codex`。保存済みの既定値がなければ `claude` です。
+2. **reviewer**：保存済みの既定値がなければ `codex` です。
+3. **プロジェクトの種類**：検出した種類を使い、検出できなければ `none` です。writer の各ラウンド後に Bridge が実行する `npm test` などのコマンドを決めます。`none` や該当コマンドのない場合も実行でき、カード、記録、結果にテスト未設定と表示します。
+4. **VS Code タスク**：プロジェクトの `.vscode/tasks.json` に書き込むかを選びます。既定は **N** です。[VS Code から実行](./start#in-vs-code)を参照してください。
+
+回答後は設定を始め、各ステップを 1 行ずつ表示します。計画のプレビューや追加の確認はありません。
 
 `--writer`、`--reviewer`、`--profile <type|none>`、`--target <folder>` で直接指定することもできます。対話型ターミナルがない場合や `--yes` を付けた場合は、未指定の項目に既定値を使い、質問しません。
 
 ### init が行うこと
 
-- `.review-bridge/` に `bridge.json`、`policy.override.json`、`rules.md` と、作業指示のテンプレート `work-packages/TEMPLATE.md`（英語）、`TEMPLATE.zh-TW.md`（繁体字中国語）を作成します。
-- Git プロジェクトでは、結果ファイルを含む `.review-bridge/` 全体を `.git/info/exclude` で追跡対象から除外します。**`.gitignore` は変更しません。**
-- モック CLI を使って `PASS`、`FAIL_THEN_PASS`、`HARD_STOP`、`RATE_LIMIT` の 4 つの自己テストを実行します。モデルは呼び出しません。
-- `127.0.0.1` でローカルページのサービスを起動します。
-- 全プロジェクトで共用するエージェント用の入口を、**プロジェクトの外**に配置します。Claude Code は `~/.claude/commands/review-bridge.md` を `/review-bridge` で呼び出します。`CLAUDE_CONFIG_DIR` が設定されていれば、その場所を使います。Codex は `~/.agents/skills/review-bridge/SKILL.md` を `$review-bridge` で呼び出します。同じ場所に自分で作成したファイルがある場合、Bridge は上書きしません。
+- `.review-bridge/` に `bridge.json`、`policy.override.json`、`rules.md` と、作業指示テンプレート `work-packages/TEMPLATE.md`（英語）、`TEMPLATE.zh-TW.md`（繁体字中国語）を作成します。
+- 同フォルダー内に `*` だけの `.gitignore` を置き、結果を含む全体を Git の対象外にします。後から Git を初期化しても同様です。**プロジェクト自身の `.gitignore` は変更しません。**
+- モデルを呼び出さず、模擬 CLI で `PASS`、`FAIL_THEN_PASS`、`HARD_STOP`、`RATE_LIMIT` の 4 件を自己テストします。
+- `127.0.0.1` でローカルページを起動します。初回利用時にデータベースも作成・起動します。
+- コードの graph をデータベースに作成し、プロジェクトには graph ファイルを残しません。[プロジェクトのコード索引](./start#project-graph)を参照してください。
+- **プロジェクト外**にエージェント用の入口を配置して共用します。Claude Code は `~/.claude/commands/review-bridge.md`（`CLAUDE_CONFIG_DIR` に対応）から `/review-bridge`、Codex は `~/.agents/skills/review-bridge/SKILL.md` から `$review-bridge` を呼び出します。既存のユーザーファイルは維持します。
 
 アプリケーションのファイル、`.gitignore`、`AGENTS.md`、`CLAUDE.md`、`.claude/` は変更しません。初期設定前に変更がなく、`.vscode/tasks.json` の追加を選ばなければ、設定後も `git status` に変更は表示されません。
 
 ### 出力例
+
+`package.json` と `index.js` がある小さな Git プロジェクトでの表示例です。この手順ではモデルを呼び出さない rc3 の模擬 CLI を使います。ポートやパスワードファイルの場所は環境ごとに変わります。`<data home>` はユーザーのデータディレクトリを表します。
 
 ```text
 Setting up .review-bridge/...
 Checking the setup...
 Running the four fake self-tests...
 Starting the local page...
+Mapping the project...
+Mapped 1 file(s): 0 definition(s), 1 reference(s), 0 import(s).
+
 Done. Now:
 
   put a work order .md in .review-bridge/work-packages/, then in Claude Code type:
     /review-bridge start .review-bridge/work-packages/<file>.md
     (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)
   at a terminal, for advanced use and CI:
-    review-bridge start .review-bridge/work-packages/<file>.md
-  page: http://localhost:8080/
+    npx review-bridge start .review-bridge/work-packages/<file>.md
+  page: http://localhost:53559/
 
   database in VS Code: install Microsoft's PostgreSQL extension and add a connection with
-    Server 127.0.0.1  Port 5432  User bridge  Database bridge
-    Password: copy it from <data home>/postgres/secret
+    Server 127.0.0.1  Port 53558  User bridge  Database bridge
+    Password: copy it from <data home>\postgres\secret
 ```
 
-末尾にデータベースの接続情報が表示されます。`review-bridge status` でいつでも再確認できます。[結果・ログ・データベース](./results#vs-code-database)を参照してください。
+`init` はシステム言語を検出し、`bridge.json` の `locale` に保存します。カード、`status`、`up`、`down`、`ps`、結果ファイルはその設定を使います。CLI の固定メッセージは現在、英語と繁体字中国語に対応しており、日本語環境では英語になります。解析後の行は graph の集計で、解析できなかったファイルは個別に列挙します。
+
+初期化後の `git status --short` に出力はなく、`.review-bridge/.gitignore` は次の内容になります。
+
+```text
+# Created by Review Bridge automatically.
+*
+```
+
+接続情報は設定完了時に表示され、`npx review-bridge status` でも確認できます。[VS Code でデータベースを見る](./results#vs-code-database)を参照してください。
 
 ## 次のステップ
 

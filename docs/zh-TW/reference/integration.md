@@ -31,19 +31,19 @@ rc3 目前提供三種串接方式：
 
 ## 啟動工作前，先取得人工授權
 
-在互動式終端機執行 `start` 時，Bridge 會詢問工作停點、顯示計畫卡片，並要求你確認。透過 agent 或腳本呼叫、沒有互動式終端機時，則先顯示卡片並停在 `Needs authorization`，不會直接開始工作。
+在互動式終端機執行 `start` 時，Bridge 會詢問工作停點、顯示計畫卡片，並要求你確認。透過 agent 或腳本呼叫、沒有互動式終端機時，則先顯示卡片並停在「需要授權」（英文介面是 `Needs authorization`），以 exit code `1` 結束，不會開始工作。
 
 以下示範沒有互動式終端機時的兩次呼叫：
 
 ```sh
 # 先產生並顯示計畫卡片
-review-bridge start .review-bridge/work-packages/add-readme.md
+npx review-bridge start .review-bridge/work-packages/add-readme.md
 
 # 將卡片交給人確認；取得同意後，才執行這一步
-review-bridge start .review-bridge/work-packages/add-readme.md --yes
+npx review-bridge start .review-bridge/work-packages/add-readme.md --yes
 ```
 
-`--yes` 表示「人已看過這份計畫並同意執行」，由程式或 agent 轉達這個確認。授權紀錄會標示 `authorized_via: agent`。
+`--yes` 表示「人已看過這份計畫並同意執行」，由程式或 agent 轉達這個確認。授權紀錄會標示 `authorized_via: agent`。`--yes` 只照最近一張顯示過的卡片開工；沒有顯示過卡片、工單或選項在卡片之後改過、卡片過期或已開過工，一律拒絕。
 
 **這個欄位記錄的是授權如何轉達，不會替你驗證是否真的有人核准。** 串接 CI 或排程時，仍須安排人工核准步驟，不能把 `--yes` 當成可直接跳過確認的選項。限制 agent 擅自代答，則由 agent 工具本身的權限提示機制負責。
 
@@ -58,7 +58,7 @@ review-bridge start .review-bridge/work-packages/add-readme.md --yes
 | `work-cancel --reason <text> [--run <run_id>]` | 取消指定執行的有效授權，使工作無法繼續 |
 | `roles-check` | 檢查 writer、reviewer 使用的 CLI 是否已安裝並登入，不呼叫模型 |
 
-以上指令皆以 `review-bridge` 開頭；完整選項可用 `<指令> --help` 查看。
+以上指令皆以 `npx review-bridge`（或你的套件管理器對應的寫法）開頭；完整選項可用 `<指令> --help` 查看。
 
 ## 讓程式讀取狀態與結果
 
@@ -66,7 +66,7 @@ CLI 的 JSON 輸出適合用來更新工單狀態或顯示執行進度。依照�
 
 | 指令 | 可取得的內容 |
 |---|---|
-| `status --json` | 本機頁面資訊、執行中的工作數、專案最新十筆執行、審查佇列、角色設定、日誌目錄與資料庫連線資訊 |
+| `status --json` | 本機頁面資訊、執行中的工作數、專案最新十筆執行、最新的審查檔、角色設定、日誌目錄、資料庫是否在跑與連線資訊 |
 | `logs <run_id> --json` | 指定執行的日誌目錄，以及各檔案的用途 |
 | `logs <file \| source_id> --json` | 指定工單的歷次執行，最新一筆在前，每頁十筆；用 `--after <run_id>` 取得下一頁 |
 | `work-status` | 直接輸出 JSON，包含專案的執行清單與最新一筆執行的詳細資料 |
@@ -87,12 +87,13 @@ CLI 的 JSON 輸出適合用來更新工單狀態或顯示執行進度。依照�
 
 | 類別 | 欄位 |
 |---|---|
-| 工單與合約 | `version_no`、`title`、`contract_sha256` |
+| 工單與合約 | `work_order_id`、`version_no`、`title`、`contract_sha256` |
 | 執行模式 | `execution_mode` |
 | 實作角色 | `writer_provider`、`writer_model`、`writer_effort` |
 | 審查角色 | `reviewer_provider`、`reviewer_model`、`reviewer_effort`、`reviewer_mcp` |
 | 執行限制 | `breakpoint`、`scope`、`budget`；預算各值另附設定來源 |
 | 測試與停止資訊 | `test`、`timeout_at`、`last_stop` |
+| 授權 | `authorized_by`、`authorized_via` |
 
 `status` 表示工作仍在執行（`in_progress`）或已結束（`completed`）。**工作結束不代表交付成功**，還須讀取 `conclusion`：`success`、`failure`、`cancelled`、`timed_out` 或 `action_required`。`closed_reason` 則提供更具體的結束原因。
 
@@ -106,29 +107,31 @@ CLI 的 JSON 輸出適合用來更新工單狀態或顯示執行進度。依照�
 
 **不要只用 exit code 判斷是否完成交付。** Bridge 可能正常結束指令，卻仍在等待授權或人工決定。
 
-例如，顯示 `Needs authorization` 後會以 exit code `0` 結束，但工作尚未開始。有執行紀錄後，應再檢查 `status` 與 `conclusion`；`action_required` 代表需要人工處理，不能當成成功。
+例如，工作停在「要你決定」時，指令會以 exit code `0` 結束，但結論是 `action_required`，需要人工處理，不能當成成功。有執行紀錄後，請一律再檢查 `status` 與 `conclusion`。
 
 | Exit code | 意義 |
 |---|---|
-| `0` | 指令正常結束。可能已交付，也可能仍待授權、工單釐清或合約確認 |
-| `1` | writer、reviewer 或 policy 檢查失敗 |
-| `2` | 指令參數有誤 |
-| `69` | 執行所需資源不可用，例如資料庫或工作證明資料；對應 sysexits 的 `EX_UNAVAILABLE` |
-| `75` | provider 額度耗盡（`rate_limited`） |
-| `76` | 超過 token 上限，或無法讀取用量 |
-| `77` | writer 執行逾時 |
-| `79` | 模型輸出不符合要求的格式，例如 `contract_rejected` |
+| `0` | 指令正常結束。工作已結束時，可能已交付，也可能停在需要人處理的結論（例如「要你決定」） |
+| `1` | 沒有開工：停在「需要授權」、在終端機答 n、工單沒過表單檢查、`--yes` 被拒；或 writer、reviewer、policy 檢查失敗。資料夾有任何一張沒交付時也是 `1` |
+| `2` | 指令出錯，例如參數有誤；訊息印在 stderr |
+| `4` | `status` 找不到、讀不到資料庫的資料夾或內容不對（和 `pg_ctl status` 相同） |
+| `69` | 執行所需資源不可用，例如工作途中資料庫沒有回應（`database_unavailable`）或讀不到工作證明；對應 sysexits 的 `EX_UNAVAILABLE` |
+| `75` | provider 額度耗盡（`rate_limited`）；資料夾整條因登出或額度用完而停下 |
+| `76` | 超過 token 上限、讀不到 writer 的用量，或輪數用完仍未通過 |
+| `77` | writer 單次呼叫逾時 |
+| `78` | 開工後，writer 讀的參考檔被改過（`reference_changed`） |
+| `79` | 模型輸出不符合要求的格式，或合約缺了必填欄位（`contract_rejected`） |
 | `130` | 因 `stop` 或 Ctrl+C 停止 |
 
 ## 查詢資料庫，製作報表與看板
 
 Bridge 的 PostgreSQL 是執行紀錄的權威來源，僅監聽本機的 `127.0.0.1`。報表、看板或稽核匯出可以直接用 SQL 讀取資料。
 
-執行 `review-bridge status`，即可取得主機、連接埠、使用者、資料庫名稱，以及密碼檔位置。連線方式見[在 VS Code 看資料庫](../guide/results#在-vs-code-看資料庫)。結果檔是供閱讀的副本；詳細日誌另有保留期限，見[結果、紀錄與資料庫](../guide/results)。
+執行 `npx review-bridge status`，即可取得主機、連接埠、使用者、資料庫名稱，以及密碼檔位置。連線方式見[在 VS Code 看資料庫](../guide/results#在-vs-code-看資料庫)。結果檔是供閱讀的副本；詳細日誌另有保留期限，見[結果、紀錄與資料庫](../guide/results)。
 
 ### 資料表與用途
 
-目前共有 16 張業務資料表，另有一張 `schema_migrations` 記錄資料庫遷移版本。
+目前共有 16 張業務資料表與 5 張專案 graph 的資料表，另有一張 `schema_migrations` 記錄資料庫遷移版本。
 
 | 資料表 | 內容 |
 |---|---|
@@ -142,6 +145,7 @@ Bridge 的 PostgreSQL 是執行紀錄的權威來源，僅監聽本機的 `127.0
 | `test_results` | Bridge 執行測試的結果 |
 | `review_results`、`review_findings`、`review_verdicts` | 審查結果、發現的問題與各項驗收條件的判定 |
 | `acceptance_rows`、`acceptance_decisions` | 驗收條件的逐項結果，以及 Bridge 的整體判定 |
+| `graph_states`、`graph_files`、`graph_definitions`、`graph_references`、`graph_imports` | 專案的 graph：讀到的檔、定義、引用與 import，以及最後更新到哪個 commit |
 
 ### 常用查詢範例
 
@@ -165,7 +169,7 @@ limit 10;
 ```sql
 select sequence, ac_id, result, verdict, test, evidence
 from acceptance_rows
-where run_id = '2eb9dc50-f49d-4eae-95ed-e503a2fa5531'
+where run_id = '0be8174d-7b4e-4063-908f-199292f759c2'
 order by sequence, ac_id;
 ```
 
@@ -179,7 +183,7 @@ group by project_id
 order by project_id;
 ```
 
-最後一例按**執行開始時間**歸月，統計目前已記錄的用量，並非 provider 帳單。若執行中斷、用量紀錄不完整，仍須查看結果檔中的 `partial` 標示。
+最後一例按**執行開始時間**歸月，統計目前已記錄的用量，並非 provider 帳單。若有呼叫讀不到用量，結果檔的 token 表會在該角色寫「N（M 次讀不到）」與「未知」，不拿部分加總充當全部。
 
 ### 讀取資料，請不要直接改寫紀錄
 

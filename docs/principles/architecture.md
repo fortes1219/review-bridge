@@ -1,8 +1,8 @@
 # Architecture and roadmap
 
-Review Bridge is the command bridge for AI work: people set the direction, and Bridge manages authorization, execution, and acceptance. Its long-term goal is an **AI work audit system suitable for enterprise use**, where teams can trace who authorized work, which contract it followed, what changed, and who reviewed it.
+Review Bridge is a command center for AI work. You set the direction; Bridge manages approval, execution, and acceptance. Its long-term goal is an **AI work audit system for teams and enterprises**, where you can trace who approved each job, which contract it followed, what actually changed, and who reviewed it.
 
-This page describes the target architecture and development stages. rc3 focuses on the foundations of execution and auditing. Future components shown in the diagram are still planned.
+This page describes the target architecture and development stages. Version 0.3.0-rc.3 provides the execution and audit foundations; later features shown in the diagram are still planned.
 
 ## Target architecture
 
@@ -30,7 +30,7 @@ flowchart TB
     RUST["Rust（napi-rs）<br/>Large-context diffs, work-proof fingerprints"]
   end
   Owner["You / your team"] --> CLI & AGENT & WEB
-  CLI & AGENT & WEB --> CARD --> CONTRACT --> GATE --> PROOF
+  CLI & AGENT & WEB --> CONTRACT --> CARD --> GATE --> PROOF
   PROBE -.guards.-> GATE
   CARD & CONTRACT & GATE & PROOF --> DB
   DB --> RAG -.review context.-> GATE
@@ -43,22 +43,22 @@ flowchart TB
 
 Bridge enforces these in code; skills, prompts, or model reports alone cannot provide them:
 
-1. **Sealed contracts**: Bridge fills fields from marked work-order blocks, the writer extracts acceptance criteria, and the reviewer checks them. Bridge seals the contract with SHA-256. Implementation and review use the same contract; a change to its contents stops execution.
-2. **Read-only reviewer checks**: CLI restrictions are checked and evidence kept. Codex tests whether its sandbox blocks a write; Claude Code checks the session mode and tool list. These provide different levels of evidence.
-3. **Immutable authorization records**: work requires human approval, either directly at a terminal or relayed by an agent. Each card can authorize work once. Without valid authorization, work is refused.
-4. **Work proof from Git**: evidence comes from Git state and version samples. The model's own claims are listed separately.
+1. **Sealed contracts:** code copies marked work-order blocks into the contract and splits the acceptance list into conditions without calling a model. Bridge seals it with SHA-256 and identifies it on the card. Implementation and review use the same contract; tampering stops execution.
+2. **Verified reviewer restrictions:** CLI read-only settings are checked and the evidence is retained. Codex tests sandbox denial of a write; Claude Code checks the session mode and tool list. The evidence differs by provider.
+3. **Immutable authorization records:** each run requires a person's approval, given directly in the terminal or relayed by an agent. Each card can authorize work only once. No valid authorization means no execution.
+4. **Work proof from Git:** Git state and version samples provide evidence, with model claims listed separately.
 
 Other designs must have a precedent in the open-source ecosystem. Designs without one are not adopted. See [Design references](./references).
 
 ## Roadmap
 
-| Stage | Scope | Status |
+| Version | Scope | Status |
 |---|---|---|
-| **rc3** | The basic chain: install → `init` → work order → `start` → human approval → run → result file → **query records with SQL**, including a connection from VS Code. Agent, VS Code, and terminal entry points; four role pairings; read-only checks for both providers; personal connector isolation; OS-standard record locations. | In development; this documentation covers this version. |
-| **Remaining rc3 work** | Run work orders in directory order, isolate parallel work with git worktrees, and verify the MCP servers available to reviewers individually. | Planned or in development; not yet available features. |
-| **rc4** | Vue 3.5 interface to inspect contracts, runs, and per-criterion decisions; control work and set budgets; integrate storage and the interface. | Planned. |
-| Future direction | pgvector knowledge base containing past verdicts, contracts, and team documentation for the reviewer. | No version assigned. |
-| Later | A Vue CMS; Rust napi-rs modules for large-context diffs and work-proof fingerprints, retaining the JavaScript entry point on npm; oxlint in verification. | Initial direction. |
+| **0.3.0-rc.3** | `npx review-bridge init` → work order → `start` → human approval → execution → result file → **SQL queries**, including VS Code database access. Agent, VS Code, and terminal entry points; four role pairings; both providers' read-only checks; personal connector isolation; contracts without model calls; directory pipelines; a project graph; and records in OS data directories | Released on npm November 10, 2026; this documentation covers that version |
+| **Upcoming work** | Isolate concurrent work with git worktrees and verify each additional reviewer MCP server | Planned; not available yet |
+| **rc4** | A Vue 3.5 interface for contracts, run status, acceptance decisions, work controls, and budgets, integrated with data storage | Planned |
+| Future direction | Use pgvector to retrieve past decisions, contracts, and team documents for the reviewer | No version assigned |
+| Later | Vue CMS; Rust modules through napi-rs for large-context diffs and work-proof fingerprints, retaining the npm JavaScript entry point; oxlint in verification | Direction only |
 
 rc3 acceptance includes database access: a user must be able to connect from VS Code using the details printed by `init` and query work-order versions, contract hashes, verdicts, and the authorization source (`authorized_via`).
 

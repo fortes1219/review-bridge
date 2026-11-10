@@ -4,23 +4,23 @@
 
 ## `.review-bridge/bridge.json`
 
-`init` 產生的設定如下：
+`init` 產生的設定如下。這是 0.3.0-rc.3 在一個有 `package.json`（沒有 `test` script）的專案、系統語言為繁體中文時寫出的檔案，照原樣：
 
 ```json
 {
   "schema_version": 4,
-  "project_id": "64c4a2f2-7c52-4f70-859f-a94c24008089",
-  "profile_id": null,
+  "project_id": "bdbe7d5a-c1de-4d00-ad6e-59ed13cf8d0f",
+  "profile_id": "node-backend",
   "roles": {
     "writer": { "provider_id": "claude" },
     "reviewer": { "provider_id": "codex" },
     "reviewer_readonly_required": true
   },
   "requires_human_authorization": true,
-  "watch": { "port": 8080, "strict_port": false },
+  "watch": { "port": 53559, "strict_port": false },
   "retention": { "days": 15 },
-  "locale": "en",
-  "test": { "profile_id": null, "rules": [] },
+  "locale": "zh-TW",
+  "test": { "profile_id": "node-backend", "rules": [{ "command": "npm test", "package_script": "test" }] },
   "readiness": { "reviewer_readonly_proven": "not_run" },
   "default_policy_ref": "review-bridge/config/default-policy.json",
   "project_override_ref": ".review-bridge/policy.override.json",
@@ -35,6 +35,7 @@
 | `roles.reviewer_readonly_required`、`requires_human_authorization`、`readiness` | 受保護欄位。`init` 分別寫入 `true`、`true`、`"not_run"`；`init` 與 `upgrade` 會檢查這些值，若遭修改便停止，不能用來關閉安全限制 |
 | `watch.port` | 本機頁面的連接埠。`strict_port` 為 `false` 時，若埠被占用，會依序尋找下一個可用埠 |
 | `retention.days` | 執行日誌與已結束紀錄的保留天數，供 `clean` 清理時使用 |
+| `locale` | 卡片、`status`、`up`、`down`、`ps`、`init` 與結果檔使用的語言：`en` 或 `zh-TW`。`init` 依系統語言寫入 |
 | `test.profile_id` / `test.rules` | 專案類型與對應的驗證指令，見下方 profiles 表格 |
 
 ## `.review-bridge/policy.override.json`
@@ -107,7 +108,7 @@ Bridge 每次開始工作前提供給 writer 的規則摘要，說明可做事�
 | `java-backend` | Java | `mvnw`／`mvn test`、`gradlew`／`gradle test` |
 | `dotnet-backend` | .NET 與 C# | `dotnet test` |
 | `php-laravel` | PHP Laravel | `php artisan test` |
-| `none` | — | 不執行測試；卡片與結果會標示「tests: not configured」 |
+| `none` | — | 不執行測試；卡片與結果會標示測試「沒有設定」 |
 
 ## 環境變數
 

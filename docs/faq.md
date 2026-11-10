@@ -6,37 +6,41 @@ Common problems encountered in actual use, and how to resolve them.
 
 ### Claude Code does not recognize `/review-bridge`
 
-`init` installs the shared entry point at `~/.claude/commands/review-bridge.md`. If `CLAUDE_CONFIG_DIR` is set, it goes in that directory's `commands/` folder. Check whether the file exists. If missing, run `review-bridge init` in a project that has not been initialized. The Codex entry point is `~/.agents/skills/review-bridge/SKILL.md`, called with `$review-bridge`.
+`init` installs the command at `~/.claude/commands/review-bridge.md` for all your projects. If you set `CLAUDE_CONFIG_DIR`, look in its `commands/` directory instead. Check that the file exists. If it's missing, run `npx review-bridge init` in a project that hasn't been initialized. Codex uses the skill at `~/.agents/skills/review-bridge/SKILL.md`, invoked with `$review-bridge`.
 
 ### start says Codex or Claude is not signed in
 
-The error shows the appropriate login command, such as `codex login`. Sign in, then rerun the same `start`. `review-bridge roles-check` checks CLI installation and sign-in status for both roles without calling a model.
+The error includes the relevant CLI's login command, such as `codex login`. Sign in, then run the same `start` command again. Use `npx review-bridge roles-check` to check both roles' CLI installation and login status without calling a model.
 
 ### My work order was rejected for an unknown key
 
-Frontmatter accepts only `priority`, `writer`, `reviewer`, `budget`, `source_id`, and the legacy top-level `effort`. Block markers accept only the contract's 17 fields. Errors include a line number. See [Your first work order](./guide/work-order).
+Frontmatter accepts only `priority`, `writer`, `reviewer`, `budget`, `source_id`, top-level `effort`, and the `id` managed by Bridge. Block markers must use one of the 17 contract field names. Errors include line numbers. See [Your first work order](./guide/work-order).
 
-### Work stopped before any model call because of open questions
+### The card never appears, and Bridge says the work order isn't ready
 
-Every nonempty line in `open_questions`, other than `無` or `none`, is treated as an unresolved question. Bridge stops until you answer it in the work order. It also stops if no acceptance criteria are provided.
+`start` checks the work order as a form: it needs work instructions and an acceptance list with valid Markdown items. `open_questions` must be empty or contain only `none` or `無`. If a check fails, Bridge stops before the card, lists the affected lines, and prints the command to run after you've fixed them. No model is called. See [Work-order validation](./guide/work-order#work-order-validation).
 
 ### The card expired
 
-Cards are valid for 24 hours. `Valid until` shows the deadline. Run `start` again to generate a new card.
+Authorization cards expire after 24 hours. The deadline appears under `Valid until`, currently in UTC. Run `start` again to generate a new card after it expires.
+
+### The card calls my file a copy, but I only renamed it
+
+Bridge identifies a work order by its frontmatter `id`. Renaming or moving the original file produces an update card that notes the previous location. A file is treated as a copy only when the original still exists and both contain the same `id`. Use `--update <work_order_id>` or `--as-new` to correct the choice. See [Which work order are you approving?](./guide/start#work-order-identity).
 
 ### I edited the work order. Will Bridge use the new version?
 
-Run `start` again. Authorization applies only to the text you confirmed. Edits made after a run begins appear under “Work order changed after the start” in the result, with a note that they were not used.
+Run `start` again to use your edits. Authorization covers only the work-order text you approved. If you edit the file after a run starts, the result includes a “Work order changed after the start” section explaining that those edits weren't part of the run.
 
 ## Reviewers and connectors
 
 ### The read-only check fails with Claude as reviewer
 
-The reviewer session may expose only `Read`, `Grep`, and `Glob`. If its `init` event lists any additional tool, including an MCP tool, the check fails and work does not start. Every call uses `--strict-mcp-config`; if tools remain, use the diagnostic message to check what that session actually loaded.
+A Claude Code reviewer session may use only `Read`, `Grep`, and `Glob`, plus Bridge's read-only graph server and servers allowed by policy. If its `init` event lists other tools, including tools from other MCP connectors, the check fails and work doesn't start. Every call uses `--strict-mcp-config`. If extra tools remain, use the diagnostic output to check what the session actually loaded.
 
-### What does Reviewer MCP: none mean?
+### What does `Reviewer MCP: none` mean?
 
-Bridge isolates personal MCP connectors, including Claude connectors and servers listed by `codex mcp list` (including `node_repl`). `none` means no MCP server was made available to the reviewer.
+Bridge isolates personal MCP connectors, including Claude connectors and servers listed by `codex mcp list`, such as `node_repl`. `none` means the policy hasn't allowed any additional servers for the reviewer. Both roles receive Bridge's read-only `review-bridge-graph` server; it isn't listed on this line.
 
 To allow a server, add it to the project's `reviewer.mcp_allow` policy. Allowed servers currently have no read-only verification, and the card states this limitation. See [Concepts](./concepts/).
 
@@ -46,13 +50,17 @@ On Windows, running `npm test` (Vitest) inside the Codex 0.166 sandbox can fail 
 
 ## Results
 
-### The result says No files were changed, but the writer claims otherwise
+### The result says no files changed, but the writer says it made changes
 
-The first “Files changed” list comes from Git. Writer claims appear separately under “What the writer says it changed (not checked against Git)”. If they differ, compare the Git list with “Already uncommitted when the run started”. The writer's report alone is not evidence of a change.
+The first list under “Files changed” comes from Git. The writer's claims appear separately under “What the writer says it changed (not checked against Git).” If they disagree, compare the Git list with “Files already uncommitted at the start.” A writer's claim alone isn't evidence of a change.
 
 ### Where are the result file and logs?
 
-The project keeps result copies in `.review-bridge/results/<work-order>/`. Full logs, including prompts, streams, stderr, test output, plans, and cards, live in the operating system's log directory. `review-bridge status` shows the location under `Logs:`, and `review-bridge logs <run_id>` explains each file. See [Results, logs, and the database](./guide/results).
+Readable results live in the project's `.review-bridge/results/<work-order>/` directory. Full logs—including prompts, streams, stderr, test output, plans, and authorization cards—live in the operating system's log directory. `npx review-bridge status` shows its location under `Logs`; `npx review-bridge logs <run_id>` explains each file.
+
+### The reviewer passed the work, but its extra findings aren't in the result
+
+Successful result files currently list what the reviewer verified and didn't run, but omit its additional findings. Those remain in the database and the review file named by `Latest review` in `status`. See [Result files](./guide/results#result-files).
 
 ### .vscode/tasks.json causes the result to mention uncommitted changes
 
@@ -62,7 +70,7 @@ You decide whether Git should track `.vscode/tasks.json`. Bridge does not automa
 
 ### The database is not on port 5432
 
-If 5432 is occupied, Bridge searches upward for the next free port at each database start. `init` and `review-bridge status` show the current port. To start from another port, add `"database": { "port": 5440 }` to data home's `settings.json`.
+If port 5432 is taken, Bridge searches upward for an available port at each startup. `init` and `npx review-bridge status` show the port in use. To start searching elsewhere, add `"database": { "port": 5440 }` to `settings.json` in your data home.
 
 ### init rejects a project on OneDrive or a network drive
 
@@ -70,7 +78,15 @@ Bridge state requires a local filesystem. Synced folders and network drives are 
 
 ### Codex output is garbled on Chinese Windows
 
-PowerShell may output the system code page while Codex reads UTF-8. Add `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` to `$PROFILE`, or use PowerShell 7. `review-bridge doctor` reports whether UTF-8 is in use. See [Upgrade, back up, and uninstall → Windows](./guide/maintenance#windows).
+PowerShell writes in the system code page, while Codex reads UTF-8. A mismatch can garble text. Add `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` to `$PROFILE`, or use PowerShell 7. `npx review-bridge doctor` reports whether UTF-8 is in use. See [Windows](./guide/maintenance#windows).
+
+### A run stopped with `database_unavailable`
+
+The database stopped responding during execution. Bridge stops the run and makes no further model calls. The terminal reports that the database is unavailable. Records saved to files during the interruption are written back by the next command that opens the database. Check `npx review-bridge status`, start it with `npx review-bridge up`, then run `start` again.
+
+### The database is still running after I close the terminal
+
+That's expected. The database and local page keep running after the terminal or VS Code closes. Stop them with `npx review-bridge down`. If any project has an active run, `down` lists the runs and refuses to stop.
 
 ### When do role changes in bridge.json take effect?
 
@@ -78,4 +94,4 @@ On the next `start`. Active runs keep their roles. The card shows the pairing us
 
 ### Can I use Linux?
 
-Linux is experimental; native model work fails closed by default. Windows x64 has been verified natively. Apple Silicon macOS can be selected but has not been verified natively.
+Linux blocks native model execution. Windows x64 has been verified natively. Apple Silicon macOS is selectable but hasn't been verified in a native environment.

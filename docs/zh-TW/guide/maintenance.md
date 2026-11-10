@@ -2,10 +2,18 @@
 
 ## 升級
 
+Bridge 本體怎麼升級，看你怎麼執行它：
+
+- **用 `npx review-bridge`（沒有全域安裝）**：不必做任何事，`npx` 每次都取 npm 上的最新版。
+- **全域安裝過**：`npm i -g review-bridge@latest`。全域裝了之後，`npx review-bridge` 會用全域那一份，所以要自己升級。
+
+新版第一次執行、需要遷移資料庫時，會先備份資料庫並印出備份位置，再套用遷移；有工作在跑時拒絕。資料庫裡有這一版不認得的遷移（例如之前用過更新的版本）時，Bridge 會列出它們、拒絕開啟，不做任何改動。
+
+專案裡 `.review-bridge/` 的設定，用 `upgrade` 搬到新版：
+
 ```sh
-npm i -g review-bridge@next        # 升級 Bridge 本體
 cd your-project
-review-bridge upgrade              # 把這個專案的設定搬到新版，先備份
+npx review-bridge upgrade          # 把這個專案的設定搬到新版，先備份
 ```
 
 `upgrade` 會依序停止舊服務、備份、遷移、檢查完整性、清理舊檔、重新啟動並執行健康檢查。流程由 Bridge 處理，中斷後可再次執行。
@@ -19,13 +27,13 @@ review-bridge upgrade              # 把這個專案的設定搬到新版，先�
 
 ## 備份
 
-見 [結果、紀錄與資料庫 → 備份](./results#備份)：`review-bridge backup` 複製整個資料庫（所有專案），若有工作仍在執行，會拒絕備份。
+見[結果、紀錄與資料庫 → 備份](./results#備份)：`npx review-bridge backup` 複製整個資料庫（所有專案），若有工作仍在執行，會拒絕備份。
 
 ## 移除
 
 ```sh
-review-bridge uninstall --target .   # 先把專案的設定移掉，有備份
-npm uninstall -g review-bridge       # 再移掉 Bridge 本體
+npx review-bridge uninstall --target .   # 先把專案的設定移掉，有備份
+npm uninstall -g review-bridge           # 有全域安裝過，再移掉 Bridge 本體
 ```
 
 - `uninstall` 僅移除 Bridge 建立的內容：`.review-bridge/`（結果副本也會納入備份）、`.vscode/tasks.json` 裡 `review-bridge:` 的 task 與 `review-bridge-` 的 input（僅在檔案不含其他內容時刪除檔案）。
@@ -34,7 +42,9 @@ npm uninstall -g review-bridge       # 再移掉 Bridge 本體
 
 ## 平台
 
-Windows x64 已通過原生環境驗證。Apple Silicon macOS 可選用，但尚未完成原生驗證。Linux 仍屬實驗階段，原生模型工作預設拒絕執行（fail closed）。
+Windows x64 已通過原生環境驗證。Apple Silicon macOS 可選用，但尚未完成原生驗證。Linux 上原生模型工作一律拒絕執行（fail closed）。
+
+資料庫是 PostgreSQL 18。升級到不同主版本的 PostgreSQL 需要 dump 與 restore，這一版還不處理。
 
 ### Windows
 
@@ -46,4 +56,4 @@ Codex 使用 Windows PowerShell 執行指令時，會載入你的 `$PROFILE`。�
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 ```
 
-也可以改用預設輸出 UTF-8 的 PowerShell 7（`pwsh`）。`review-bridge doctor` 會顯示目前 PowerShell 是否使用 UTF-8，不會修改你的 profile。
+也可以改用預設輸出 UTF-8 的 PowerShell 7（`pwsh`）。`npx review-bridge doctor` 會顯示目前 PowerShell 是否使用 UTF-8，不會修改你的 profile。

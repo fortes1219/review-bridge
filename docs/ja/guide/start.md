@@ -12,13 +12,15 @@
 
 Codex では `$review-bridge start .review-bridge/work-packages/add-readme.md` と入力します。
 
-エージェントが最初に `start` を実行します。Bridge は作業指示、変更範囲、予算、検証コマンドを実行計画として固定し、ローカルページサービスのセッションごとに reviewer の読み取り専用制限を確認します。その後、承認カードを表示し、`Needs authorization` で停止します。
+エージェントが最初に `start` を実行します。Bridge は作業指示の形式を検証し、各ブロックをコントラクトへ転記して、範囲、予算、テストコマンドとともに計画を固定します。承認カードを表示し、`Needs authorization` で止まります。この時点ではモデルを呼び出していません。
 
-エージェントはカードを**原文のまま省略せずに提示**し、「Start this work?」と確認する必要があります。あなたが同意した場合に限り、同じコマンドに `--yes` を付けて再実行できます。この確認が実行の承認となり、記録にはエージェントが承認を伝えたことが残ります（`authorized_via: agent`）。
+エージェントは**カード全文をそのまま**提示し、実行してよいか確認する必要があります。ユーザーの承認後にだけ、同じコマンドへ `--yes` を付けて再実行できます。これが実行の承認となり、エージェント経由で伝えたことを `authorized_via: agent` と記録します。
+
+`--yes` が使うのは**直近に表示したカード**だけです。未表示、表示後の作業指示・オプション変更、期限切れ（24 時間）、使用済みの場合は、承認も実行もしません。拒否のメッセージには次に実行するコマンドを表示します。
 
 `/review-bridge` の操作はターミナルと同じ 4 つです。`start <file>`、`stop <run_id>`、`resume <run_id>`、`clean [<run_id>]` を使えます。
 
-## VS Code から {#vs-code}
+## VS Code から {#in-vs-code}
 
 Bridge は `review-bridge: start`、`stop`、`resume`、`clean`、`status`、`logs` の 6 つのタスクを用意しています。Quick Open に `task review-bridge` と入力するか、`Terminal → Run Task` を選択します。
 
@@ -26,41 +28,41 @@ Bridge は `review-bridge: start`、`stop`、`resume`、`clean`、`status`、`lo
 
 | 配置先 | 追加方法 | 利用範囲 |
 |---|---|---|
-| プロジェクトの `.vscode/tasks.json` | `init` の最後の質問で y を選ぶか、`review-bridge vscode` を実行 | このプロジェクト |
-| ユーザータスク（`Tasks: Open User Tasks`） | `review-bridge vscode --user` | すべてのプロジェクト |
+| プロジェクトの `.vscode/tasks.json` | `init` の最後で y を選ぶか、`npx review-bridge vscode` | このプロジェクト |
+| ユーザータスク（`Tasks: Open User Tasks`） | `npx review-bridge vscode --user` | 全プロジェクト |
 
 `.vscode/tasks.json` を Git で管理するかは自分で決められます。Bridge は自動で追加も除外もしません。コミットするか追跡対象から除外するまでは、Git の変更として扱われ、結果にも未コミットの変更があると表示されます。
 
 Bridge が管理するのは、label が `review-bridge:` で始まる task と、id が `review-bridge-` で始まる input だけです。それ以外の内容、コメント、書式は保持します。`uninstall` はこれらの項目を取り除き、他に何も残っていない場合に限りファイルを削除します。
 
-ユーザータスクは VS Code の既定プロファイルに書き込みます。独自の tasks を持つ他のプロファイル、VS Code Insiders、VSCodium、ポータブル版では場所が異なるため、プロジェクト内で `review-bridge vscode` を使ってください。マルチルートワークスペースのユーザータスクは最初のフォルダーで実行されるため、作業指示のあるプロジェクトとは限りません。
+ユーザータスクは VS Code の既定プロファイルに書き込みます。独自のタスクを持つ別プロファイル、VS Code Insiders、VSCodium、ポータブル版は保存先が異なるため、プロジェクトで `npx review-bridge vscode` を使ってください。マルチルートワークスペースでは最初のフォルダーから実行するため、作業指示のあるプロジェクトとは限りません。
 
 ## ターミナルから
 
-高度な使い方や CI では、直接コマンドを実行できます。
-
 ```sh
-review-bridge start .review-bridge/work-packages/add-readme.md
+npx review-bridge start .review-bridge/work-packages/add-readme.md
 ```
 
-`start` は、人に判断を戻す停止位置（既定はレビュー後）を確認し、カードを表示してから `Start this work? [y/N]` と尋ねます。
+対話型ターミナルでは、`start` が停止位置（既定はレビュー後）を尋ね、カードを表示して `Start this work? [y/N]` と確認します。n を選ぶと承認も実行もしません。
 
 | 操作 | コマンド |
 |---|---|
-| 作業指示を実行 | `review-bridge start <file>` |
-| 記録を残して停止 | `review-bridge stop <run_id>` |
-| 停止した作業指示を再実行 | `review-bridge resume <run_id>` |
-| 終了した実行記録を整理 | `review-bridge clean [<run_id>]` |
+| 作業指示を実行 | `npx review-bridge start <file>` |
+| 記録を残して停止 | `npx review-bridge stop <run_id>` |
+| 停止した作業指示を再実行 | `npx review-bridge resume <run_id>` |
+| 終了済み記録を削除 | `npx review-bridge clean [<run_id>]` |
 
-実行中の作業と run ID は `review-bridge status` で確認できます。
+実行中の作業と ID は `npx review-bridge status` で確認できます。表は npm の `npx` ですが、pnpm、Yarn、Bun では案内も `pnpm dlx`、`yarn dlx`、`bun x` になります。[パッケージマネージャー](../reference/cli#package-managers)を参照してください。
 
-## 承認カード
+## 承認カード {#the-card}
 
-どの入口でも同じ形式のカードが表示されます。以下は、中国語の作業指示をモック CLI で実行した際の Linux 上の出力です。
+どの入口でもカードの形式は同じです。以下は README を追加する英語の作業指示を、`locale: en` と `--fake-cli` で実行した記録です。日本語の CLI メッセージには未対応のため、出力は英語のまま掲載しています。モデルは呼び出していません。対話型ターミナルがなければ、カードを表示して承認を待ちます。ローカルパスの先頭だけを `<log directory>`、`<data home>`、`<project>` に置き換え、ID、ハッシュ、日時は実行時の値を残しています。
 
 ```text
+Plan written to <log directory>\1c3df8e9-f699-4351-9b16-a9368eae3436\b8f6c4b8-44a9-4f23-8a08-12bae14a6110\add-readme.plan.json
+
 Work order:   .review-bridge/work-packages/add-readme.md
-              New work order "幫專案補一份 README"
+              New work order "Add a README to the project"
 Stops:        after the review
 Scope:        the whole project except protected files (23 patterns)
 Tests:        not configured (no test rule matched; the work starts without tests)
@@ -69,45 +71,155 @@ Writer:       claude (config), model the CLI's default (priority table), effort 
 Reviewer:     codex (config), model the CLI's default (priority table), effort medium (priority table)
 Reviewer MCP: none
 Budget:       tokens 4000000 (config), tokens_per_call 1500000 (config), call_timeout 900000 (config), test_timeout 600000 (config), run_timeout 21600000 (config), rounds 2 (config)
-Contract:     up to 2 work-order translation(s) by the writer (claude) and 2 check(s) by the reviewer (codex), 15 minute(s) per call
-Valid until:  2026-11-06T23:31:11.999Z
+Contract:     sha256 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3, 2 condition(s) cut from the acceptance list
+Valid until:  2026-11-11T04:44:59.223Z
 
-The work order, as it will be sealed:
+The work order, as sealed:
   │ ---
   │ source_id: DOC-1
   │ ---
-  │ # 幫專案補一份 README
-  │ …
+  │ # Add a README to the project
+  │
+  │ <!-- bridge:context -->
+  │ ## Background
+  │ The project has no README, so new teammates do not know how to start it.
+  │
+  │ <!-- bridge:requested_work -->
+  │ ## Requested work
+  │ Add README.md at the project root, explaining the project and how to start it.
+  │
+  │ <!-- bridge:acceptance -->
+  │ ## Acceptance
+  │ 1. README.md exists at the project root, with the project name on its first line.
+  │ 2. The README has a "Getting started" section.
+  │
+  │ <!-- bridge:open_questions -->
+  │ ## Open questions
+  │ none
 
-Needs authorization. If the person says yes, run again: review-bridge start .review-bridge/work-packages/add-readme.md --yes
+Needs authorization. If the person says yes, run again: npx review-bridge start .review-bridge/work-packages/add-readme.md --fake-cli --yes
 ```
 
-- 値の後ろの括弧は設定元を示します。`cli`、`work_order`、`priority`、`config` のいずれかです。
-- 下半分には、**固定して保存される作業指示の原文**が表示されます。承認はこの内容にだけ適用されます。後から編集した内容を使うには、`start` を再実行してください。
-- `Valid until` はカードの有効期限（24 時間）です。期限が切れたら新しいカードを作成します。
-- `Reviewer MCP` は reviewer が使える MCP サーバーを示します。既定値は `none` です。
+- 値の後の括弧は、フラグ、作業指示、priority 表、設定ファイルのどこから来たかを示します。
+- `Contract` は固定したコントラクトの SHA-256 と、コードで分割した完了条件の数です。作成にモデルは使わず、結果のトークン数は 0 です。
+- 下半分は承認対象の**固定した作業指示の原文**です。後の編集を使うには、再び `start` が必要です。
+- `Valid until` は有効期限（24 時間）で、現在は UTC 表示です。期限切れ後は新しいカードを作ります。
+- `Reviewer MCP` は追加で許可したサーバーの一覧で、既定は `none` です。
+- `Work order` の次の行は、今回どの作業指示を承認するかを示します。次の節で説明します。
+- `Plan written to`、`Reviewer read-only check` などの前置きと、各ステップのメッセージは現在英語のみです。
+
+## カードと作業指示の識別 {#work-order-identity}
+
+最初の承認時に Bridge が frontmatter へ `id` を追加し、その版をデータベースに記録します。この行は削除しないでください。コントラクトの SHA-256 には含めません。上の英語の作業指示には、次のように追記されました。
+
+```markdown
+---
+id: d1626c15-7f6a-4cb1-8899-64807c20a50a
+source_id: DOC-1
+---
+# Add a README to the project
+```
+
+次回以降はこの `id` で識別し、カードの `Work order` の下に判定を表示します。
+
+| カードの表示 | 表示される場合 |
+|---|---|
+| New work order “…” | `id` がない、または DB に登録がない |
+| Updates “…”, still version N, with new run settings | 原文は同じで、役割や予算などの設定が変わった |
+| Updates “…”, version N → N+1, X lines changed | 作業指示の内容が変わった |
+| Updates “…” (was at …) | 改名・移動した元のファイル。同じ作業指示 |
+| A copy of …, recorded as a new work order “…” | 同じ `id` の元ファイルが残るコピー。承認時に別の ID を付与 |
+
+同じファイルへのハードリンクはコピーではなく、同じ作業指示として扱います。ファイルシステムのファイル ID で判別し、ID を取得できない場合は推測せず拒否します。
+
+判定が違う場合は、次の指定で新しいカードを表示できます。
+
+- `--update <work_order_id>`：指定した作業指示の新しい版として扱います。別ファイルに内容を貼り付けても履歴を引き継ぎたい場合などに使います。`work_order_id` は元のファイルの frontmatter の `id` です。
+- `--as-new`：別の作業指示の `id` が入っていても、新しい作業指示として扱います。
+
+2 つは同時に指定できず、単一ファイルだけに使えます。フォルダーには使えません。旧版の実行中に編集後の作業指示を開始すると、まずカードで通知し、新版の開始時に旧 run を `cancelled`、理由 `superseded` で停止します。
+
+## フォルダー内の作業指示をまとめて実行する
+
+`.review-bridge/work-packages/` のサブフォルダーに作業指示をまとめ、そのフォルダーを `start` に渡します。
+
+```sh
+npx review-bridge start .review-bridge/work-packages/demo/
+```
+
+- ファイル名順に処理します。`01-`、`02_` などの番号を使え、番号なしは最後です。
+- 全件を検証してから、ファイル名と各コントラクトの SHA-256 を 1 枚のカードに表示します。本文は載せません。承認は一度で、各作業指示に別の run、承認記録、コントラクトを作ります。
+- 1 件失敗しても次へ進みます。provider のログアウト、利用枠の消費、`stop`、Ctrl+C は全体を停止します。
+- 再び同じフォルダーを開始すると、完了済みと記録された作業指示をスキップします。
+- 進捗は `status`、終了時は一覧表で確認できます。結果は `results/<フォルダー>/<作業指示>/` です。
+- 実行場所はプロジェクトの作業フォルダーです。2 つ同時に始めると共有するため、先の処理が終わってから次を開始してください。
 
 ## 実行中の表示
 
-承認後は各ステップの進捗が表示されます。対話型ターミナルでは、待機中に進行表示が出ます。
+承認後はステップごとに進捗を表示します。同じ模擬実行で、カードの再表示に続いて出力された部分です。プロジェクトのローカルパスは `<project>` に短縮しています。
 
 ```text
-  Writer (claude) turns the work order into a contract; reviewer (codex) checks it
-  Contract sealed
+Reviewer read-only check: not needed with the fake CLI (no model is called)
+
   Writer working (call 1 of 2)
   Tests: not configured for this project
   Reviewer checking the work
 Delivered: no tests configured, reviewer passed
-Result file: /…/.review-bridge/results/add-readme/DOC-1 add-readme 2026-11-06 07-31-29 success.md
+Result file: <project>\.review-bridge\results\add-readme\DOC-1 add-readme 2026-11-10 12-45-02 success.md
 Tokens: writer 153246, reviewer 60400
 ```
 
-実行順序は決まっています。まず writer が作業指示をコントラクトに変換し、reviewer が確認してから Bridge が内容を固定します。続いて writer が最大 `rounds` ラウンドの実装を行います。各ラウンド後に **Bridge がプロジェクトのテストコマンドを実行**し、reviewer が結果を審査します。最後に結果ファイルを出力します。
+処理の順序は次のとおりです。
+
+1. **reviewer の読み取り専用制限を確認。** 実際の CLI ではモデルを一度呼び出して検証し、`Reviewer read-only check: passed` と表示します。同じローカルページのセッションでは結果を再利用します。失敗したら実行しません。模擬 CLI はモデルを使わず、`not needed with the fake CLI` と表示します。
+2. **プロジェクトの graph を更新。** Git が報告する変更ファイルだけを再読込します。次の節で説明します。
+3. **writer が実装。** 最大 `rounds` 回まで実装・修正します。
+4. **Bridge がテスト。** 未設定ならそのまま進め、カード、記録、結果に未設定と明記します。
+5. **完了条件を個別に審査。** reviewer が確認し、Bridge が成立するかを判定します。未完了で回数が残っていれば 3 に戻ります。
+6. 結果ファイルを作成。末尾の 3 行は結論、結果パス、トークン数です。run ID は `status` で確認してください。
+
+データベースが応答しなくなると、理由 `database_unavailable` で停止し、以後モデルを呼び出しません。ターミナルにも利用できないと表示します。その間にファイルへ保存した記録は、次にデータベースを開くコマンドが書き戻します。復旧後に `start` を実行し直してください。
+
+## プロジェクトのコード索引（graph） {#project-graph}
+
+`init` は関数、クラス、型の定義、参照、ファイル間の import を索引にします。JavaScript、TypeScript、`.vue` の script、Python、Go、Rust、Java、Kotlin、C++、C# に対応します。JavaScript・TypeScript 以外の parser は初回利用時に npm で Bridge のデータディレクトリへ追加します。npm・pnpm workspace では、そのパッケージと依存する workspace パッケージを対象にします。
+
+- graph はデータベースに保存し、プロジェクトにファイルは作りません。
+- `init` の最後にファイル、定義、参照、import の数を表示します。解析できない箇所や parser のないファイルは不完全として列挙し、黙って集計から落としません。
+- `start` は Git が報告する変更分だけを更新します。失敗時は更新できなかったことを通知し、両方の役割が旧 graph を使うことを結果にも明記します。全体の再構築は `npx review-bridge graph` です。
+- writer の呼び出し前に Bridge が作業指示の文章から graph を検索し、結果を prompt に含めます。レビューでも同様です。トークン表の `graph lookups` は SQL 回数と prompt の推定トークン数で、両役割の input に計上済みです。
+- 両方の役割は読み取り専用 MCP サーバー `review-bridge-graph` に直接問い合わせることもできます。ただし、この版で計測した run では、自らのツール呼び出しはありませんでした。
 
 ## 停止・再実行・整理
 
-- `stop <run_id>`：モデルのプロセスを停止し、記録を残します。
-- `resume <run_id>`：同じ作業指示を**新しい run** として実行します。停止位置と変更範囲は引き継ぎます。役割、モデル、effort、予算は再決定し、新しいカードで再び承認を求めます。
-- run ID を付けない `clean`：終了した実行記録を日別ファイルにまとめ、保存期限を過ぎた記録を削除します。`clean <run_id>` は指定した終了済み run を削除します。実行中の作業は削除できません。
+- `stop <run_id>`：モデルのプロセスを停止し、記録は残します。
+- `resume <run_id>`：同じ作業指示に**新しい run** を作り、停止位置と範囲を引き継ぎます。役割、モデル、effort、予算を決め直し、カードで再承認を求めます。
+- ID なしの `clean`：終了済み記録を日別にまとめ、保持期限を過ぎたものを削除します。`clean <run_id>` は指定した終了済み run だけを削除し、実行中は拒否します。`clean --all` はプロジェクトの全 DB 記録を消し、ID を廃止します。再利用には `uninstall`、`init` の順で実行してください。
+
+単一ファイルの `start` 中に Ctrl+C を押すと、コマンドは終了しても run が続く場合があります。`npx review-bridge status` で探し、`npx review-bridge stop <run_id>` で止めてください。
+
+## データベースとローカルページの操作 {#database-and-page}
+
+データベースは初回利用時に作成・起動し、ターミナルや VS Code を閉じても動き続けます。手動操作には次を使います。
+
+| コマンド | 動作 |
+|---|---|
+| `npx review-bridge up` | データベース、ページの順にバックグラウンド起動 |
+| `npx review-bridge down` | ページ、データベースの順に停止。実行中の run があれば一覧を表示して拒否 |
+| `npx review-bridge ps` | ページの動作状態と URL を表示 |
+| `npx review-bridge watch` | このターミナルでページを実行。Ctrl+C で終了 |
+
+`down` の実行後は次のようになります。
+
+```text
+$ npx review-bridge down
+Page stopped.
+Database stopped.
+$ npx review-bridge status
+Page: not running; start it with npx review-bridge up
+Database: stopped; npx review-bridge up starts it, and so does the next start.
+```
+
+`status` は状態を表示するだけで、データベースを起動しません。
 
 Bridge は**自動でコミット、push、デプロイを行いません**。結果ファイルに変更ファイルが並ぶので、内容を確認してコミットするか判断してください。続いて[結果・ログ・データベース](./results)を参照してください。

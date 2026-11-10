@@ -4,17 +4,20 @@ Review Bridge は、独立した 2 つの AI エージェントで作業指示�
 
 このドキュメントでは、1 回の実行を **run**、エージェントの作業セッションを **session**、役割に割り当てる CLI（`claude` または `codex`）を **provider** と呼びます。**policy** は Bridge がコードで適用する実行ルールです。
 
+> 設計の背景は [AI 導入後の開発プロセスと検証責任について](https://hackmd.io/@FortesHuang/HJnWgQGJMx)（HackMD、中国語）で説明しています。
+
 ## 1 回の実行の流れ
 
 ```text
 作業指示 .md
-  → 実行計画を固定（範囲・予算・検証コマンド・停止位置）
-  → カードを表示し、あなたが承認
-  → writer が条件を整理、reviewer が確認、Bridge がコントラクトを固定
-  → writer が実装（最大 rounds 回）、各回の後に Bridge がテストを実行
-  → reviewer が審査、Bridge が条件ごとの受け入れを判定
-  → 結果ファイルを出力
-  → あなたが成果を確認し、コミットするか判断
+  → 形式を検証し、各ブロックをコントラクトへ転記（モデル呼び出しなし）
+  → 範囲・予算・テストコマンド・停止位置を計画として固定
+  → カードを表示し、ユーザーが承認
+  → reviewer の読み取り専用制限を確認し、プロジェクトの graph を更新
+  → writer が最大 rounds 回の実装・修正を行い、各回の後に Bridge がテスト
+  → reviewer が審査し、Bridge が完了条件ごとに判定
+  → 結果ファイルを作成
+  → ユーザーが成果を確認し、コミットするか決める
 ```
 
 作業指示のバージョン、計画、承認、コントラクト、run、イベント、判定、納品はデータベースに記録します。結果ファイルは、内容を読むためのコピーです。
@@ -27,34 +30,35 @@ Review Bridge は、独立した 2 つの AI エージェントで作業指示�
 
 同じ provider を使う場合も、各役割は別の CLI プロセスとセッションで動作します。reviewer は Bridge が別途起動します。writer のサブエージェントによる確認は、独立レビューとして扱いません。
 
-| アクセス | 用途 | Claude Code | Codex |
+| アクセス | 役割 | Claude Code | Codex |
 |---|---|---|---|
-| `none` | コントラクトへの変換 | `--tools "" --strict-mcp-config` | `exec --sandbox read-only` |
-| `read` | コントラクト確認・レビュー | `--permission-mode plan --tools Read,Grep,Glob --disallowedTools Write,Edit,NotebookEdit,Bash,PowerShell --strict-mcp-config --no-session-persistence` | `exec --ephemeral --sandbox read-only` |
-| `write` | writer | `--permission-mode auto --strict-mcp-config`。プロジェクトに `.mcp.json` があれば `--mcp-config .mcp.json` を追加 | `app-server`。スレッドに `sandbox: workspace-write` と `approvalPolicy: never` を設定 |
+| `read` | reviewer | `--permission-mode plan --tools Read,Grep,Glob --disallowedTools Write,Edit,NotebookEdit,Bash,PowerShell --strict-mcp-config --no-session-persistence`。`--mcp-config` で Bridge の graph サーバーと `reviewer.mcp_allow` のサーバーを追加 | `exec --ephemeral --sandbox read-only`。`-c mcp_servers.…` で Bridge の graph サーバーを追加 |
+| `write` | writer | `--permission-mode auto --strict-mcp-config`。`--mcp-config` で Bridge の graph サーバーと、存在する場合はプロジェクトの `.mcp.json` を追加 | `app-server`。thread の `sandbox: workspace-write`、`approvalPolicy: never` と Bridge の graph サーバーを設定 |
+
+Bridge の読み取り専用サーバー `review-bridge-graph` は、定義の場所、参照元、変更の影響先を調べるためのものです。[プロジェクトのコード索引](../guide/start#project-graph)を参照してください。
 
 ## reviewer の読み取り専用制限を確認する
 
-`start` と `resume` は、作業指示を実行するモデル呼び出しの前に reviewer の読み取り専用制限を確認します。結果は provider ごとに、ローカルページサービスのメモリに保持します。確認で得られる証拠の強さは異なります。
+`start` と `resume` は承認後、実装を始める前に reviewer の読み取り専用制限を確認します。この確認自体がモデル呼び出しです。結果はローカルページサービスのメモリに provider ごとに保存し、同じページのセッションでは一度だけ確認します。provider によって得られる証拠は異なります。
 
-- **Codex**：権限確認用のファイル（センチネルファイル）への書き込みを試み、OS のサンドボックスによって拒否されることを確認します。
-- **Claude Code**：CLI の `init` イベントで plan mode と、利用可能なツールが `Read`、`Grep`、`Glob` のみであることを確認します。センチネルファイルが作成されず、CLI が正常終了することも必要です。MCP を含め、追加ツールが 1 つでもあれば確認は失敗し、作業は始まりません。
+- **Codex**：権限確認用ファイルへの書き込みを試し、OS のサンドボックスが拒否することを確認します。
+- **Claude Code**：CLI の `init` イベントで plan mode と `Read`、`Grep`、`Glob` だけが使われていること、確認用ファイルが作成されていないこと、CLI が正常終了したことを確認します。Bridge の graph サーバーと policy で許可したもの以外のツールがあれば、MCP ツールも含めてチェックは失敗し、実行しません。
 
 ## 個人用コネクターの分離
 
-Bridge が起動するセッションには、個人用 MCP コネクターを引き継ぎません。Claude Code の呼び出しはすべて `--strict-mcp-config` を使い、プロジェクトの `.mcp.json` は writer だけに渡します。コントラクト変換用セッションの `init` イベントに MCP ツールが残っていれば、実行を停止し、そのツール名を表示します。
+Bridge が起動するセッションは個人用 MCP コネクターを引き継ぎません。Claude Code の全呼び出しに `--strict-mcp-config` を指定し、Bridge が指定したサーバーだけを読み込みます。プロジェクトの `.mcp.json` は writer のみ、Bridge の graph サーバーは両方の役割に渡します。reviewer の権限確認と各レビューは同じサーバー設定を使い、確認時の `init` イベントに想定外のツールがあれば実行しません。
 
 Codex の呼び出しはすべて `--disable apps --disable plugins` を使い、`codex mcp list` が返すサーバーを個別に無効化します。リストを読み取れなければ作業を開始しません。
 
-特定の MCP サーバーを reviewer に許可するには、プロジェクトの policy の `reviewer.mcp_allow` に名前を追加します。これらのサーバーは**読み取り専用か検証せずに許可**され、その制限がカードに表示されます。許可は reviewer の呼び出しだけに適用され、writer やコントラクト変換には渡しません。
+reviewer に追加の MCP サーバーを許可するには、プロジェクトの policy の `reviewer.mcp_allow` に名前を指定します。これらのサーバーは**読み取り専用かどうかを検証せず**に渡し、カードにもその制限を表示します。この許可は reviewer だけに適用し、writer には渡しません。
 
 ## コントラクトと承認
 
-- `start` は作業指示の原文、変更範囲、予算、検証コマンドを実行計画として固定します。カードの確認で承認するのは、この計画とその作業指示です。
-- 承認後、Bridge が作業指示のブロックからコントラクトの各項目を埋めます。writer が受け入れ条件に番号を付け、reviewer が確認してから、コントラクトを固定して保存します。2 回目の承認は求めません。
-- 承認記録は作成後に変更できません。欠落、不正、期限切れ（24 時間）、使用済みの承認は拒否します。
-- 実行開始後に作業指示を編集しても、承認済みの内容は変わりません。新しい内容を使うには `start` を再実行し、新バージョンと新しいカードを作成します。
-- `source_id` は、自分のシステムで使っているチケット番号です。Bridge は作業指示の識別や実行ルールの決定には使いません。結果ファイルや `logs` で検索するために利用できます。
+- `start` は作業指示の原文、範囲、予算、テストコマンドを計画として固定します。承認の対象は、その計画と作業指示です。
+- コントラクトはカードの表示前にコードで作成します。各ブロックをそのまま転記し、完了条件のリストを番号付きの条件に分割します。モデルは呼び出しません。カードの `Contract` 行に SHA-256 を示し、1 枚のカードに 1 回の承認で実行します。
+- 承認記録は作成後に変更できません。欠落、不正、期限切れ（24 時間）、使用済みの承認では実行しません。
+- 実行開始後に作業指示を編集しても、承認済みの内容は変わりません。`start` を実行し直すと、新しい版と承認カードを作成します。
+- `source_id` は既存の課題管理ツールとの対応づけに使います。Bridge 内の識別や実行ルールを決めるものではありません。結果ファイルや `logs` から検索できます。
 
 ## テストは Bridge が実行する
 
@@ -62,11 +66,11 @@ writer の各ラウンド後に、Bridge がエージェントのサンドボッ
 
 ## 変更の証跡
 
-Git プロジェクトでは、Bridge は開始時のコミットを記録し、終了時に Git からファイルの変更を取得して、自身の記録と照合します。「Files changed」では、Git で確認した変更、Git と未照合の writer の報告、開始前からあった未コミットの変更を分けて表示します。Git がなければ、証跡を取得できないことを明記します。
+Git を使うプロジェクトでは、開始時のコミットを記録し、終了時に Git から変更を取得して Bridge の記録と照合します。結果では、Git の変更、Git と照合していない writer の申告、開始前からあった未コミットの変更を分けて表示します。Git がなければ、変更の証跡を提供できないと明記します。
 
 ## プロジェクトのファイルと実行データ
 
-Bridge はグローバルツールです。プロジェクトの設定、作業指示、結果のコピーは `.review-bridge/` に置き、`.git/info/exclude` で追跡対象から除外します。`.gitignore`、`AGENTS.md`、`CLAUDE.md`、`.claude/`、既存の skills は変更しません。エージェント用の入口はユーザーレベルに配置し、プロジェクト間で共用します。実行記録は OS のデータ・ログディレクトリに保存します。
+プロジェクトのファイルと実行記録は分けて保存します。設定、作業指示、結果のコピーは `.review-bridge/` に置き、そこに `*` だけの `.gitignore` を用意して Git の対象外にします。プロジェクトの `.gitignore`、`AGENTS.md`、`CLAUDE.md`、`.claude/`、既存の skills は変更しません。エージェント用の入口はユーザー単位で共用し、実行記録は OS のデータ・ログディレクトリに保存します。
 
 ## セキュリティモデル
 

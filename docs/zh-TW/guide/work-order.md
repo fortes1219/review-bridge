@@ -1,6 +1,6 @@
 # 第一張工單
 
-工單是放在 `.review-bridge/work-packages/` 的 Markdown 檔案。Bridge 依區塊標記解析內容，將原文填入合約的對應欄位；模型只負責把驗收區塊整理成編號條件。
+工單是放在 `.review-bridge/work-packages/` 的 Markdown 檔案。Bridge 用程式依區塊標記解析內容，將原文抄進合約的對應欄位，並把驗收清單的每一項切成一條編號條件（AC1、AC2…）。這一步不呼叫模型，結果檔的 token 表記為 0。
 
 如果你用其他工具產生工單，請讓輸出符合本頁的固定格式。
 
@@ -12,9 +12,9 @@ cp .review-bridge/work-packages/TEMPLATE.zh-TW.md .review-bridge/work-packages/a
 
 填寫需要的區塊，用不到的可以整段刪除。`##` 小標題供人閱讀，可以使用任何語言；Bridge 依 `<!-- bridge:… -->` 標記辨識區塊。
 
-## 最小範例
+## 先寫一張簡單工單
 
-一個標題、一個 `requested_work` 區塊、一個 `acceptance` 區塊：
+必填的是 `requested_work` 與 `acceptance`；以下範例另外加上標題、背景與待決問題，方便整理需求：
 
 ```markdown
 ---
@@ -40,7 +40,17 @@ source_id: DOC-1
 無
 ```
 
-工單至少要有一項可驗證的條件。若未提供，Bridge 會在呼叫模型前停止，提示你補上。
+## 開工前的表單檢查
+
+`start` 把工單當成一張表單來檢查，下列任何一項不符合，就在顯示卡片之前停下，逐項列出問題（行號、哪個區塊），並印出補好之後再執行的指令：
+
+- **要做的事**：`requested_work`（或 `run_plan`）底下要有內容。
+- **驗收清單**：`acceptance` 底下要有清單，每一行都是清單項目，用 `- `、`* `、`+ ` 或 `1. ` 開頭。「一、」「（1）」在 Markdown 裡不算清單，寫成這樣的行會被指出來。清單照 Markdown 的規則切（markdown-it，和 VitePress 相同），一個項目就是一條條件。
+- **待決問題**：`open_questions` 底下只能是 `無`、`none` 或空白；其他每一行都是還沒回答的問題。把答案寫進工單，再刪掉那一行或改成 `無`。
+
+如果你刪掉了「要做的事」或「驗收」的區塊標記，Bridge 會把標記和小標題補回檔案最後面，讓你知道要寫在哪裡；你寫過的每一行都不會被改。標題（`# `）可以不寫，沒有標題時記為 `untitled`。
+
+Bridge 檢查格式與必填內容，不會判斷需求是否足夠清楚。如何寫出可驗證的要求，見[把需求講清楚](../principles/asking)。
 
 ## 完整的工單
 
@@ -161,18 +171,18 @@ API 回 200，總價仍顯示 1000。
 | `run_plan` | Bridge | 描述兩個以上的計畫步驟；會記入合約，目前仍以一次 run 執行整張工單 |
 | `scope_notes.include` / `exclude` / `must_keep` | writer、reviewer | 供 reviewer 核對修改是否超出範圍，以及必須保留的行為是否受損 |
 | `scope_notes.expected_locations` | writer | 提示可能修改的位置；**不代表修改授權**，實際範圍以卡片的 `Scope` 為準 |
-| `acceptance` | reviewer、Bridge | 必填；模型整理成 AC1、AC2…，結果檔逐條列出驗收判定 |
+| `acceptance` | reviewer、Bridge | 必填；Bridge 把清單的每一項切成 AC1、AC2…，結果檔逐條列出驗收判定 |
 | `verification_hints` | writer、reviewer | 提供測試資料與既有測試名稱；實際測試指令由專案類型決定 |
 | `reproduction.*` | writer、reviewer | 描述缺陷的環境、重現步驟、實際結果、預期結果與頻率；功能工單可省略 |
 | `references` | writer | 連結、檔案路徑與相關工單 |
-| `open_questions` | Bridge | 列出尚待回答的問題；除 `無`、`none` 或空白外，其他內容都會使工作停下，等待你回答 |
+| `open_questions` | Bridge | 列出尚待回答的問題；除 `無`、`none` 或空白外，其他內容都會讓 `start` 在卡片前停下，等你在工單裡回答 |
 
 ## 區塊格式
 
 - 第一個以 `# ` 開頭的行是工單標題。
 - 每個區塊從 `<!-- bridge:<key> -->` 標記開始，到下一個標記或檔案結尾為止。
 - 區塊 key 對應合約的 17 個欄位：`context`、`outcome`、`requested_work`、`run_plan`、`scope_notes.include`、`scope_notes.exclude`、`scope_notes.must_keep`、`scope_notes.expected_locations`、`acceptance`、`verification_hints`、`reproduction.environment`、`reproduction.steps`、`reproduction.actual`、`reproduction.expected`、`reproduction.frequency`、`references`、`open_questions`。未知 key 或重複 key 都會被拒絕，錯誤訊息會列出行號。
-- `open_questions`：填入 `無`、`none` 或留空，表示沒有待決問題。其他每一行都視為問題；Bridge 會在呼叫模型前停止，等待你在工單中回答。
+- `open_questions`：填入 `無`、`none` 或留空，表示沒有待決問題。其他每一行都視為問題；`start` 會在顯示卡片前停下，等你在工單中回答。
 - frontmatter、標題、區塊標記、`##`／`###` 小標題與空行屬於文件結構。區塊外的其他內容會以「未使用的行」保留在合約中。
 
 ## frontmatter
@@ -197,9 +207,12 @@ source_id: SHOP-412         # 你自己系統的單號；Bridge 只存不讀
 ---
 ```
 
+第一次按「好」之後，Bridge 會在 frontmatter 加上一行 `id: <工單 ID>`（沒有 frontmatter 的檔會多出一段只有這行的 frontmatter）。這行由 Bridge 管理，不要自己填、改或刪；它不算進合約的 SHA-256。見下方[檔名與工單身分](#檔名與工單身分)。
+
+
 - 未知 key 與不合法的值都會被拒絕，並列出行號。例如 priority 或 effort 不在允許清單中、budget 不是正整數，或設定超過 policy 上限。超出上限時，訊息也會顯示允許的上限。
-- `writer` 套用於實作、修正與合約翻譯的每次呼叫；`reviewer` 套用於合約檢查與每次審查。省略的欄位採用 policy 中 priority 表的設定。角色使用的 provider 由 `bridge.json` 或單次執行的 `--writer`／`--reviewer` 決定，並顯示在卡片上。
-- `model` 必須符合該角色 CLI 接受的命名格式，否則會在顯示卡片前被拒絕。Bridge 只檢查名稱格式（`claude`：別名 `fable`、`opus`、`sonnet`、`haiku`，可加 `[1m]`，或含 `claude-` 的名字；`codex`：`gpt-`、`codex-` 開頭，或 `o` 加數字開頭），**模型名稱是否存在，仍由該 CLI 確認**；名稱有誤時，CLI 會在第一次呼叫回報錯誤。以下保留文件在 2026-11-06 整理的名稱，使用時請以連結中的最新說明為準：
+- `writer` 套用於 writer 的每次呼叫（做工與每次修正）；`reviewer` 套用於每次審查。省略的欄位採用 policy 中 priority 表的設定。角色使用的 provider 由 `bridge.json` 或單次執行的 `--writer`／`--reviewer` 決定，並顯示在卡片上。
+- `model` 必須符合該角色 CLI 接受的命名格式，否則會在顯示卡片前被拒絕。Bridge 只檢查名稱格式（`claude`：別名 `fable`、`opus`、`sonnet`、`haiku`，可加 `[1m]`，或含 `claude-` 的名字；`codex`：`gpt-`、`codex-` 開頭，或 `o` 加數字開頭），**模型名稱是否存在，仍由該 CLI 確認**；名稱有誤時，CLI 會在第一次呼叫回報錯誤。以下是撰寫本頁時兩個 CLI 文件列出的名稱，使用時請以連結中的最新說明為準：
 
   | 角色的 CLI | 可以寫的值 | 來源 |
   |---|---|---|
@@ -210,7 +223,21 @@ source_id: SHOP-412         # 你自己系統的單號；Bridge 只存不讀
 - `effort` 僅接受 `low`、`medium`、`high` 三個值，兩個角色都一樣。Claude Code 自己的 `--effort` 還有 `xhigh`、`max`，Codex 的介面還有 Extra High、Max、Ultra，本版 Bridge 尚未支援這些值。
 - 仍支援頂層 `effort`，其意義等同 `writer.effort`；同時填寫兩者會被拒絕。
 - 設定值依以下優先順序決定：終端機旗標（`--rounds`、`--call-timeout`）→ 工單 → policy 的 priority 表（effort 與 model）→ policy 的 limits。計畫會記錄各值及其來源（`cli`、`work_order`、`priority`、`config`），卡片也會一併顯示。
+- `tokens` 與 `tokens_per_call` 只算 writer，而且不含 cache read（cache read 在結果檔另外列）。reviewer 的用量會記錄，但不計入 token 預算。
 - `run_timeout` 是整次執行的時間上限，預設 6 小時，概念與 GitHub Actions job 的 `timeout-minutes` 相同。逾時後以 `timed_out` 結束，原因記為 `run_timeout`；每次呼叫的可用時間也受剩餘總時間限制。
+
+## 檔名與工單身分
+
+工單檔名可以用任何語言：各種文字的字母、數字與組合記號，加上 `.`、`_`、`-` 與單一空白。開頭和結尾不能是點或空白，不能有路徑分隔字元，長度上限 80 個字元、同時不超過 180 位元組（中文一個字 3 位元組，所以中文檔名最多約 60 個字）。比對與存檔前會正規化成 NFC，同一個中文檔名在 macOS 和 Windows 上算同一張。
+
+Bridge 認工單靠 frontmatter 的 `id`，不靠檔名或位置：
+
+- 改檔名、搬到別的資料夾、調整序號：仍是同一張工單。
+- 改內容後重新開工：同一張工單的新版本。
+- 複製檔案（原檔還在、兩個檔有同一個 `id`）：複製的那份是新工單，按「好」時拿到新的 `id`。
+- 同一個檔案的兩個硬連結：同一張工單。檔案系統不提供檔案編號、分不出硬連結和複製時，Bridge 拒絕，不猜。
+
+卡片會寫出這次認的是哪一張；認錯時用 `--update <work_order_id>` 或 `--as-new` 指定，見[開始執行 → 卡片認的是哪一張工單](./start#卡片認的是哪一張工單)。
 
 ## 執行計畫（run plan）
 

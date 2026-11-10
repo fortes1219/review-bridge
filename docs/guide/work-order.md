@@ -1,6 +1,6 @@
 # Your first work order
 
-A work order is a Markdown file in `.review-bridge/work-packages/`. Bridge parses its block markers and copies the original text into the matching contract fields. The model only turns acceptance blocks into numbered criteria.
+A work order is a Markdown file in `.review-bridge/work-packages/`. Bridge parses the block markers, copies each block into the matching contract field, and splits the acceptance list into numbered conditions (AC1, AC2, and so on). This is done in code without a model call and records 0 tokens in the result.
 
 If another tool generates your work orders, have it output the fixed format on this page.
 
@@ -12,9 +12,9 @@ cp .review-bridge/work-packages/TEMPLATE.md .review-bridge/work-packages/add-rea
 
 Fill in the blocks you need and delete unused blocks entirely. `##` headings are for people and can use any language. Bridge identifies blocks by `<!-- bridge:… -->` markers.
 
-## Minimal example
+## A simple work order
 
-The minimum is a title, a `requested_work` block, and an `acceptance` block:
+Only `requested_work` and `acceptance` are required. This example also includes a title, background, and an open-questions block to keep the request organized:
 
 ```markdown
 ---
@@ -40,7 +40,17 @@ Add README.md at the project root, explaining the project and how to start it.
 none
 ```
 
-A work order needs at least one verifiable criterion. Without one, Bridge stops before calling a model and asks you to add it.
+## Work-order validation {#work-order-validation}
+
+`start` validates the work order as a form. If any of the following checks fails, it stops before showing the card, lists each problem with its block and line number, and prints the command to run after you fix it:
+
+- **Work instructions:** `requested_work` or `run_plan` must contain work to do.
+- **Acceptance list:** `acceptance` must contain valid Markdown list items, starting with `- `, `* `, `+ `, or `1. `. Formats such as `一、` and `（1）` aren't list markers. Bridge uses markdown-it, the parser used by VitePress, and makes each list item one condition.
+- **Open questions:** `open_questions` must be empty or contain only `none` or `無`. Any other line is an unanswered question. Write the answer into the work order, then remove the question or replace it with `none`.
+
+If you remove a required work or acceptance marker, Bridge appends the marker and heading so you know where to fill it in. It doesn't change your existing lines. A `# ` title is optional; without one, the title is `untitled`.
+
+Bridge checks structure and required content, not whether your requirements are clear enough. For practical ways to make them verifiable, see [When Bridge needs your input](../principles/asking).
 
 ## Complete example
 
@@ -152,26 +162,28 @@ Every time; all checkouts using discount codes.
 none
 ```
 
+Here's what each block is used for:
+
 | Block | Used by | Purpose |
 |---|---|---|
-| `context`, `outcome` | writer, reviewer | Original text enters the contract, explaining the background and expected outcome. |
-| `requested_work` | writer | The specific work to do; required. |
-| `run_plan` | Bridge | Describes two or more planned steps. Recorded in the contract; currently the whole work order still executes as one run. |
-| `scope_notes.include` / `exclude` / `must_keep` | writer, reviewer | Lets the reviewer check for scope expansion and damage to behavior that must be preserved. |
-| `scope_notes.expected_locations` | writer | Hints about likely files, **not permission to edit them**. The authorized scope is the card's `Scope`. |
-| `acceptance` | reviewer, Bridge | Required. The model extracts AC1, AC2, …; the result reports each criterion's decision. |
-| `verification_hints` | writer, reviewer | Test data and existing test names. The project type determines the actual test command. |
-| `reproduction.*` | writer, reviewer | Bug environment, steps, actual and expected results, and frequency. Optional for feature work. |
-| `references` | writer | Links, paths, and related tickets. |
-| `open_questions` | Bridge | Unanswered questions. Any content other than `無`, `none`, or blank lines stops work for your answer. |
+| `context`, `outcome` | writer, reviewer | Copied into the contract to explain the background and expected result |
+| `requested_work` | writer | Required work instructions |
+| `run_plan` | Bridge | Two or more planned steps; stored in the contract, with one execution run for the entire work order |
+| `scope_notes.include` / `exclude` / `must_keep` | writer, reviewer | Help check scope and preserve required behavior |
+| `scope_notes.expected_locations` | writer | Suggest likely files; **doesn't authorize edits**. The card's `Scope` sets the actual boundary |
+| `acceptance` | reviewer, Bridge | Required list, split into AC1, AC2, and so on, with a decision for each in the result |
+| `verification_hints` | writer, reviewer | Test data and existing test names; the project type selects the actual test command |
+| `reproduction.*` | writer, reviewer | Bug environment, steps, actual and expected results, and frequency; omit for feature work |
+| `references` | writer | Links, paths, and related work orders |
+| `open_questions` | Bridge | Unanswered questions. Anything other than `none`, `無`, or blank stops `start` before the card until you answer in the work order |
 
 ## Block format
 
-- The first line beginning with `# ` is the title.
-- Each block starts at `<!-- bridge:<key> -->` and ends at the next marker or end of file.
-- The keys correspond to the contract's 17 fields: `context`, `outcome`, `requested_work`, `run_plan`, `scope_notes.include`, `scope_notes.exclude`, `scope_notes.must_keep`, `scope_notes.expected_locations`, `acceptance`, `verification_hints`, `reproduction.environment`, `reproduction.steps`, `reproduction.actual`, `reproduction.expected`, `reproduction.frequency`, `references`, `open_questions`. Unknown or duplicate keys are rejected with a line number.
-- `open_questions`: use `無`, `none`, or leave it empty when there are no questions. Every other line is treated as a question; Bridge stops before calling a model until you answer it in the work order.
-- Frontmatter, titles, block markers, `##` / `###` headings, and blank lines form the structure. Other text outside blocks is kept as “unused lines” in the contract.
+- The first line starting with `# ` is the title.
+- Each block starts at `<!-- bridge:<key> -->` and ends at the next marker or the end of the file.
+- The 17 keys are `context`, `outcome`, `requested_work`, `run_plan`, `scope_notes.include`, `scope_notes.exclude`, `scope_notes.must_keep`, `scope_notes.expected_locations`, `acceptance`, `verification_hints`, `reproduction.environment`, `reproduction.steps`, `reproduction.actual`, `reproduction.expected`, `reproduction.frequency`, `references`, and `open_questions`. Unknown or duplicate keys are rejected with line numbers.
+- Leave `open_questions` blank or use `none` or `無` when no questions remain. Any other line is treated as a question and prevents `start` from showing the card until you answer it in the file.
+- Frontmatter, the title, markers, `##`/`###` headings, and blank lines are structure. Other lines outside marked blocks remain in the contract as unused lines.
 
 ## Frontmatter
 
@@ -195,20 +207,36 @@ source_id: SHOP-412         # Your external ticket ID; not an execution rule
 ---
 ```
 
-- Unknown keys and invalid values are rejected with line numbers. Examples include unsupported priority or effort values, a budget that is not a positive integer, or a value exceeding policy limits. Limit errors show the allowed ceiling.
-- `writer` applies to implementation, corrections, and contract translation. `reviewer` applies to contract checks and reviews. Omitted fields use the policy's priority table. The provider for each role comes from `bridge.json` or `--writer` / `--reviewer` for that run, and appears on the card.
-- `model` must match the role CLI's naming format or it is rejected before the card. Bridge checks only the format: Claude aliases `fable`, `opus`, `sonnet`, `haiku`, optionally with `[1m]`, or a name containing `claude-`; Codex names beginning with `gpt-`, `codex-`, or `o` followed by a digit. **The CLI still decides whether the model exists.** An invalid name fails on its first call. The following names are the documentation snapshot dated 2026-11-06; consult the linked current documentation when choosing a model.
+After your first approval, Bridge adds `id: <work-order-ID>` to frontmatter. If there was no frontmatter, it creates a block containing that line. Bridge manages the ID: don't supply, edit, or delete it yourself. It isn't part of the contract's SHA-256. See [File names and identity](#file-names-and-identity).
+
+- Unknown keys and invalid values are rejected with line numbers. Examples include unsupported priority or effort, non-integer or nonpositive budgets, and values above the policy ceiling. Errors identify the allowed limit.
+- `writer` settings apply to implementation and corrections; `reviewer` settings apply to each review. Omitted values use the policy's priority table. Providers come from `bridge.json` or per-run `--writer`/`--reviewer` options and appear on the card.
+- `model` must match the role CLI's naming rules, or it's rejected before the card. Bridge checks the name's format only: for `claude`, the aliases `fable`, `opus`, `sonnet`, `haiku`, optionally with `[1m]`, or a name containing `claude-`; for `codex`, names beginning with `gpt-`, `codex-`, or `o` followed by a digit. **The CLI determines whether the model actually exists.** An unavailable name fails on the first call. The following names reflect the CLI documentation when this page was written; check the linked docs for current availability:
 
   | Role CLI | Values in the snapshot | Source |
   |---|---|---|
   | `claude` | Aliases: `fable`, `opus`, `sonnet`, `haiku`, `sonnet[1m]`, `opus[1m]`, `fable[1m]`. Full names: `claude-fable-5-1`, `claude-fable-5`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-5-5`; older 4.x names are also listed upstream. Claude Code's `best`, `opusplan`, and `default` are **not accepted** by Bridge's naming check. | [Claude Code model configuration](https://code.claude.com/docs/en/model-config) |
   | `codex` | `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, `gpt-6-luna`. The snapshot records `gpt-5.5` as API-key-only, and `gpt-5.4`, `gpt-5.3-codex`, and others as retired. | [Codex models](https://learn.chatgpt.com/docs/models) |
 
-  Omitting `model` or setting it to `null` uses the CLI's current default; the result records `model: null`. Names can change between releases, so check the links and CLI help. For a custom Codex provider, configure the model in Codex and omit `model` here.
-- Both roles accept only `low`, `medium`, and `high` for `effort`. Claude Code also has `xhigh` and `max`, and the Codex interface has Extra High, Max, and Ultra; this Bridge version does not support those values.
-- The legacy top-level `effort` is still accepted as `writer.effort`. Specifying both is rejected.
-- Precedence is CLI flags (`--rounds`, `--call-timeout`) → work order → policy priority table (effort and model) → policy limits. The plan records values and sources (`cli`, `work_order`, `priority`, `config`); the card displays both.
-- `run_timeout` caps the whole run at six hours by default, like GitHub Actions job `timeout-minutes`. At the deadline, the run ends as `timed_out` with reason `run_timeout`. Each call is also limited to the remaining run time.
+  Omit `model` or set it to `null` to use the CLI's current default; results record `model: null`. Names may change with CLI releases. Check the linked documentation and CLI help. For a custom Codex provider, set the model in Codex and omit `model` here.
+- Both roles accept only `low`, `medium`, and `high` for `effort`. Claude Code also offers `xhigh` and `max`, and the Codex interface offers Extra High, Max, and Ultra; this Bridge release doesn't support those values.
+- Top-level `effort` is still accepted as `writer.effort`. Specifying both is rejected.
+- Precedence is CLI flags (`--rounds`, `--call-timeout`) → work order → policy priority table for model and effort → policy limits. Plans and cards show each value's source: `cli`, `work_order`, `priority`, or `config`.
+- `tokens` and `tokens_per_call` apply only to the writer and exclude cache reads, which results list separately. Reviewer usage is recorded without a token budget.
+- `run_timeout` limits the whole run, defaulting to 6 hours, like a GitHub Actions job's `timeout-minutes`. At the limit, the run ends as `timed_out` with reason `run_timeout`; each call is capped by the remaining time.
+
+## File names and identity {#file-names-and-identity}
+
+File names can use letters, digits, and combining marks from any script, plus `.`, `_`, `-`, and single spaces. Leading or trailing dots and spaces, and path separators, aren't allowed. The limits are 80 characters and 180 UTF-8 bytes; multibyte characters may reach the byte limit first. Names are normalized to NFC before comparison and storage, so equivalent Unicode names match on macOS and Windows.
+
+Bridge identifies a work order by its frontmatter `id`, not its name or location:
+
+- Rename, move, or renumber a file: the same work order.
+- Edit its content and start again: a new version of the same work order.
+- Copy it while the original still exists with the same `id`: a new work order, assigned its own ID on approval.
+- Two hard links to one file: the same work order. If the filesystem doesn't provide file IDs, Bridge can't distinguish a hard link from a copy and rejects the request rather than guessing.
+
+The card shows which work order it identified. Use `--update <work_order_id>` or `--as-new` if you need to correct it. See [Which work order are you approving?](./start#work-order-identity).
 
 ## Run plans
 

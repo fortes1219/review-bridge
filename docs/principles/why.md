@@ -2,11 +2,13 @@
 
 Each section explains a problem, the approach, its precedent, and the design boundary. Every approach must have a reference in the existing ecosystem; mechanisms without one are not adopted.
 
-## Approve the plan before creating the contract
+> The premise is explained in [Managing delivery and verification responsibilities after adopting AI](https://hackmd.io/@FortesHuang/HJnWgQGJMx) (HackMD, in Chinese): AI speeds up production without taking over responsibility for verification. Teams need to manage their capacity to verify work as well as the speed of producing it.
+
+## Create contracts in code, then approve once
 
 **Problem:** An ambiguous work order can lead a model to assume requirements, with misunderstandings discovered only after implementation. Without a record, it is also hard to establish who approved what.
 
-**Approach:** `start` seals the work order, scope, budget, and verification command into a plan, then shows the card. Approval applies to that text and SHA-256; later file edits do not change the authorized work. Authorization is recorded in the database and cannot be changed. Missing, malformed, expired (24 hours), or used authorization is rejected. After authorization, the writer translates the work order into a contract and the reviewer checks it. Ambiguity stops work for a human decision.
+**Approach:** `start` seals the work order, scope, budget, and test command into a plan, then shows the card. Approval covers that text and SHA-256; later file edits don't change it. Authorization records are immutable. Missing, malformed, expired (24 hours), or consumed authorization blocks execution. The contract is created before the card by copying blocks and splitting the acceptance list, without a model call. Its SHA-256 identifies what you're approving. Missing required content, invalid list items, or open questions stop `start` before the card with an itemized explanation. If the writer later needs a human decision, work stops and the result file records its question.
 
 **Precedent:** Terraform's `plan -out` → `apply <plan>` applies a saved plan, excluding configuration edits made afterward. Bridge's `upgrade --plan-out` → `--plan --approve <sha>` follows that pattern. Binding content to a hash also draws on Git commits and tags.
 
@@ -18,7 +20,7 @@ Each section explains a problem, the approach, its precedent, and the design bou
 
 **Approach:** Bridge starts the reviewer in a separate session using the CLI's restrictions: Codex `exec --sandbox read-only`; Claude Code `--permission-mode plan --tools Read,Grep,Glob` with `--disallowedTools`.
 
-Before work starts, Codex attempts a sentinel-file write that its OS sandbox must deny. Claude Code's `init` event must list only the three read tools, and the sentinel file must not exist. Work is refused if the check fails. The checks provide different levels of evidence, documented separately.
+Before implementation, Codex attempts a sentinel-file write that its OS sandbox must deny. Claude Code's `init` event must list only the three read tools, Bridge's graph server, and policy-approved servers, and the sentinel file must not exist. A failed check prevents execution. These checks offer different levels of evidence, which are documented separately.
 
 **Precedent:** CI checks that use read-only tokens. CLI output and the operating-system sandbox provide the evidence for the restriction.
 
@@ -60,25 +62,25 @@ Event files in the runtime state directory are caches. Reads check database sequ
 
 **Problem:** As a global tool, Bridge should avoid unrequested edits to a project's `.gitignore`, `AGENTS.md`, `CLAUDE.md`, or `.claude/`, and keep runtime records out of project content.
 
-**Approach:** Project settings, work orders, and result copies go in `.review-bridge/`, excluded through `.git/info/exclude`. Agent entry points use Bridge-owned files at the user level (`~/.claude/commands/review-bridge.md`, `~/.agents/skills/review-bridge/SKILL.md`), shared across projects and managed by `uninstall`. State and logs use OS data and log directories.
+**Approach:** project settings, work orders, and result copies live in `.review-bridge/`. Its own `.gitignore` contains `*`, keeping the directory out of Git even if Git is initialized later. Bridge-owned user-level entries (`~/.claude/commands/review-bridge.md` and `~/.agents/skills/review-bridge/SKILL.md`) are shared across projects and managed by `uninstall`. Runtime state and logs use OS data and log directories.
 
 Writing `.vscode/tasks.json` is an optional integration. It is off by default and requires asking the user first.
 
-**Precedent:** `env-paths` data/log conventions; create-vue's question before writing `.vscode/`; VS Code's `jsonc-parser` for preserving comments in `tasks.json`.
+**Precedent:** `env-paths` data/log conventions; a directory-local `.gitignore` containing `*`, as used by pytest's `.pytest_cache`, ruff's `.ruff_cache`, and uv's `.venv`; create-vue's opt-in for `.vscode/`; and VS Code's `jsonc-parser` to preserve comments in `tasks.json`.
 
 **Boundary:** Apart from that optional VS Code integration, existing user files are unchanged. Bridge does not append marked sections to `AGENTS.md`. The conda/pnpm/nvm approach was evaluated but not adopted. User-created skills are left alone.
 
 ## Isolate personal connectors
 
-**Problem:** Sessions may inherit MCP connectors configured in Claude or Codex, such as Drive, a database, or `node_repl`. A contract-translation session receiving a delete-file tool would exceed its required permissions.
+**Problem:** sessions may inherit personal MCP connectors configured in Claude or Codex, such as Drive, a database, or `node_repl`. A reviewer receiving a delete-file tool would have more access than its role requires.
 
-**Approach:** Every Claude Code call uses `--strict-mcp-config`; the project's `.mcp.json` reaches only the writer. If translation still exposes MCP tools in its `init` event, Bridge stops the run.
+**Approach:** every Claude Code call uses `--strict-mcp-config` and loads only Bridge-specified servers. The project's `.mcp.json` goes only to the writer; Bridge's read-only graph server goes to both roles. Unexpected tools in the reviewer's probe `init` event fail the check and prevent execution.
 
 Every Codex call uses `--disable apps --disable plugins` and disables servers listed by `codex mcp list` individually. If that list cannot be read, work is refused. Servers explicitly allowed through `reviewer.mcp_allow` are not verified as read-only, and the card states this.
 
 **Precedent:** Both CLIs' existing isolation options, applied explicitly on every call.
 
-**Boundary:** No custom MCP proxy. No server is allowed by default.
+**Boundary:** no custom MCP proxy. Apart from Bridge's own graph server, no servers are allowed by default.
 
 ## Enforce limits in code
 
@@ -100,4 +102,4 @@ Settings have a fixed precedence: CLI flags → work order → priority table �
 
 **Precedent:** Migration tools that record completed steps and apply only pending migrations; service stop/start flows such as `docker compose down` / `up` and `brew services`.
 
-**Boundary:** The old rc2 layout is not retained. There is no idle auto-shutdown mechanism requiring another resident process.
+**Boundary:** the old directory layout isn't retained. There's no idle auto-shutdown mechanism requiring another resident process.

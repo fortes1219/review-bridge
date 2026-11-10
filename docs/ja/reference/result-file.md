@@ -1,18 +1,20 @@
 # 結果ファイル
 
-run ごとに `.review-bridge/results/<作業指示名>/` に結果ファイルを作成します。名前は `<source_id> <作業指示名> <現地日付> <hh-mm-ss> <結論>.md` で、既存の結果は上書きしません。現在、結果ファイルの見出しなどは英語で出力されます。このページでは各セクションの読み方を説明します。ヘッダーの例には中国語の作業指示を使っています。
+各 run は `.review-bridge/results/<作業指示名>/` に `<source_id> <作業指示名> <現地日付> <hh-mm-ss> <結論>.md` を新規作成し、上書きしません。フォルダー単位なら `results/<フォルダー>/<作業指示>/` です。固定ラベルは `bridge.json` の `locale` に従い、現在は英語と繁体字中国語に対応します。ここでは英語の表示名に沿って各節を説明します。[全体の例](../guide/results#result-files)も参照してください。
 
 ## 先頭：作業指示と実行情報
+
+[作業を実行する](../guide/start#the-card)で紹介した、英語の作業指示による模擬実行のヘッダーです。`locale: en` の出力をそのまま掲載しています。サンプルのリポジトリにはまだコミットがないため、`commit` は `null` です。
 
 ```yaml
 ---
 source_id: DOC-1
-title: 幫專案補一份 README
+title: Add a README to the project
 source_file: .review-bridge/work-packages/add-readme.md
 version_no: 1  # the sealed version this result is about, not the .md on disk now
-contract_sha256: 7189c52c…
-run_id: 2eb9dc50-f49d-4eae-95ed-e503a2fa5531
-commit: 8c96ab0e…
+contract_sha256: 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3
+run_id: b8f6c4b8-44a9-4f23-8a08-12bae14a6110
+commit: null  # plus uncommitted changes
 writer:
   provider: claude
   model: null  # the CLI's own default
@@ -27,93 +29,100 @@ reviewer:
 
 | フィールド | 説明 |
 |---|---|
-| `source_id` | 作業指示の frontmatter にあるチケット番号。未設定なら省略。 |
-| `title` | 作業指示のタイトル。 |
-| `source_file` | プロジェクト内の作業指示のパス。 |
-| `version_no` | **その実行で固定した作業指示のバージョン**。後から編集しても、この結果が参照するバージョンは変わりません。 |
-| `contract_sha256` | コントラクトの SHA-256。同じディレクトリの `contract.v<バージョン>.<先頭 7 文字>.json` に対応します。 |
-| `run_id` | `logs <run_id>`、`clean <run_id>` で使う実行 ID。 |
-| `commit` | 開始時のコミット。未コミットの変更があれば `plus uncommitted changes`、Git がなければ `unknown (no Git)` を表示します。 |
-| `writer` / `reviewer` | 今回使った provider、モデル、effort。`null` は CLI の既定モデルです。reviewer の `mcp` は利用を許可された MCP サーバーです。 |
+| `source_id` | frontmatter の課題番号。未設定なら省略 |
+| `title` | 作業指示のタイトル。`# ` 見出しがなければ `untitled` |
+| `source_file` | プロジェクト内の作業指示パス |
+| `version_no` | **今回の run で固定した版**。後の編集では変わらない |
+| `contract_sha256` | 隣の `contract.v<版>.<先頭7文字>.json` に対応する SHA-256 |
+| `run_id` | `logs <run_id>`、`clean <run_id>` で使う実行 ID |
+| `commit` | 開始時のコミット。まだコミットがなければ `null`。必要に応じ `plus uncommitted changes`、Git がなければ `unknown (no Git)` と表示 |
+| `writer` / `reviewer` | 今回の provider、model、effort。`null` は CLI 既定値。reviewer の `mcp` は許可したサーバー |
 
-値は Bridge のデータベースから取得します。読み取れない場合は先頭で理由を説明し、値を unknown と表示します。
+値は Bridge のデータベースから取得します。読み取れなければ、理由とともに以後の値が不明であることをヘッダーに表示します。
 
 ## タイトル：結論
 
-| タイトル | `conclusion` | 意味 |
+| 表示タイトル | `conclusion` | 意味 |
 |---|---|---|
-| `Delivered` | `success` | レビューが成功し、すべての受け入れ条件に根拠があります。 |
-| `Needs fixing` | `action_required` | 自動修正の上限（`rounds`）に達しても未解決の項目があります。 |
-| `Your decision needed` | `action_required` | 作業指示の曖昧さ、範囲外の変更、データ削除、パッケージ変更、リリース操作などについて人の判断が必要です。 |
-| `Stopped` | `cancelled` | `stop` の実行、新バージョンによる置き換え、またはデータベースの切断で停止しました。 |
-| `Cancelled` | `cancelled` | 承認が取り消されました。 |
-| `Token ceiling exceeded` | `failure` | 呼び出し単位または run 全体のトークン上限を超えたか、使用量を取得できません。 |
-| `Provider quota exhausted` | `failure` | provider の利用枠を使い切りました。 |
-| `Timed out` | `timed_out` | `run_timeout` に達しました。 |
-| `Error` | `failure` / `timed_out` | その他のエラー。Why に理由コードとログのパスがあります。 |
+| `Delivered` | `success` | レビューに合格し、すべての完了条件が成立 |
+| `Needs fixing` | `action_required` | 修正回数 `rounds` を使い切り、未解決の項目がある |
+| `Your decision needed` | `action_required` | writer の質問、範囲拡大、公開操作など、ユーザーの判断が必要 |
+| `Stopped` | `cancelled` | `stop`、新版による置き換え（`superseded`）、DB 切断（`database_unavailable`） |
+| `Cancelled` | `cancelled` | `work-cancel` による承認の取り消し |
+| `Token ceiling exceeded` | `failure` | writer の単一呼び出し・run 全体のトークン超過、または使用量不明 |
+| `Provider quota exhausted` | `failure` | provider の利用枠を使い切った |
+| `Timed out` | `timed_out` | `run_timeout` に到達 |
+| `Error` | `failure` / `timed_out` | その他のエラー。`Why` に理由コードとログのパス |
+
+`database_unavailable` の `Why` には、実行中に DB が応答しなくなり、その後モデルを呼び出していないことと、復旧後に再実行する案内を記載します。
 
 ## 概要とテスト
 
 ```text
-Work order: <パス>   run: <run_id>   ended: <UTC 時刻>   calls: <モデル呼び出し回数>
+Work order: <path>   run: <run_id>   ended: <UTC time>   calls: <writer calls>
 Tests: not configured for this project; no test rule matched, so none ran
 ```
 
-テスト行は `Existing tests passed: <コマンド>`、`Existing tests failed: <コマンド> (exit <code>)`、`Existing tests timed out: <コマンド>`、`Tests: not configured…` のいずれかです。
+テスト行は、上記の未設定のほか、`Existing tests passed: <command>`、`Existing tests failed: <command> (exit <code>)`、`Existing tests timed out: <command>` になります。
 
-## Acceptance
+## 完了条件の判定
 
-受け入れ条件ごとに 1 行表示します。
+完了条件ごとに 1 行表示します。同じ模擬実行では、次のように記録されました。
 
 ```text
-- AC1 proven: <条件の原文> (reviewer: pass; tests: not used; evidence: <reviewer の根拠>)
-Checked on commit 8c96ab0e483f.
+- AC1 proven: README.md exists at the project root, with the project name on its first line. (reviewer: pass; evidence: fake: read the delta and the test output for AC1)
+- AC2 proven: The README has a "Getting started" section. (reviewer: pass; evidence: fake: read the delta and the test output for AC2)
+Checked on commit none plus uncommitted changes.
 ```
 
-- 結果：`proven`、`failed`、`unknown`。
-- `reviewer`：その条件に対する reviewer の判定。
-- `tests`：`passed`、`failed`、`not run`、`not used`（テストに依存しない条件）。
-- 最後の行は確認時のバージョンです。`Checked on commit …`、`… plus uncommitted changes`、Git がなければ `Version checked: unknown (no Git)` と表示します。
+- 結果は `proven`、`failed`、`unknown` です。reviewer の判定をそのまま写すのではなく、Bridge が条件ごとに決定します。
+- `reviewer` は、その条件に対する reviewer の判定です。
+- 最後に確認対象の版を示します。コミットのみ、未コミットの変更を含むコミット、または `unknown (no Git)` です。
+- 開始時に graph を更新できなければ、両方の役割が以前の graph を使った旨を追記します。
+- 審査前に停止した run では条件を表示しません。
 
-reviewer が合格としても、根拠がない条件が残っていれば Bridge は納品成功と判定しません。理由は Why に記載します。
+reviewer が合格としても、すべての条件が `proven` でなければ完了にはしません。理由は `Why` に記載します。
 
-## Why
+## 判定の理由
 
-結論の根拠を説明します。成功時は、reviewer が検証した項目（`Verified by the reviewer:`）と、実行しなかった項目（`Not run by the reviewer:`）を表示します。
+結論の根拠を説明する節です。
 
-成功しなかった場合は、最後のレビューの指摘（`<id> (<severity>) <path>:<line>: <claim> -> <fix>`）、失敗したテストコマンドと stderr の末尾、writer の質問（`The writer asks you:`）、writer が確認できなかった事項（`What the writer says it could not check:`）、停止理由を表示します。
+- **完了時**：`Verified by the reviewer:` と `Not run by the reviewer:` を表示します。**合格に添えた追加 findings はここには表示しません。** DB と `status` の `Latest review` が示すファイルに残ります。
+- **未完了時**：最後の findings（`<id> (<severity>) <path>:<line>: <claim> -> <fix>`）、失敗したテストと stderr 末尾、`The writer asks you:`、`What the writer says it could not check:`、停止理由を表示します。
 
-## Work order changed after the start
+## 実行開始後に作業指示が変わった場合
 
 実行開始後に作業指示を変更した場合に表示されます。Bridge は開始時に固定したバージョンで判定しているため、一覧の変更は**今回の実行には使われていません**。新しい内容を使うには `start` を再実行してください。ファイルが削除された場合や読み取れない場合も、ここに表示します。
 
-## Next step
+## 次の操作
 
-次の操作を案内します。成功時は変更を確認してコミットするか判断します。利用枠を使い切った場合はリセット後に再試行し、指摘があれば Why に従って作業指示やコードを修正します。タイムアウト時は作業を小さくするか、許容範囲内で `budget.run_timeout` を増やします。
+成功時は変更を確認してコミットするか決めます。利用枠切れなら回復後に `start`、指摘があれば作業指示かコードを修正します。writer の質問には作業指示へ回答を書いて再実行します。タイムアウトなら依頼を分割するか、許容範囲で `budget.run_timeout` を増やします。
 
-## Files changed
+## 変更されたファイル
 
 変更の証跡は 3 つの一覧に分かれます。該当項目がなければ省略します。
 
-1. **Files changed**：Git から取得した変更（`added`／`modified`／`deleted`）を Bridge の記録と照合したものです。冒頭には、同じユーザーで動くプロセスはこれらの記録を変更できる、という証拠の制限を示します。変更がなければ `No files were changed.` と表示します。
-2. **What the writer says it changed (not checked against Git)**：writer が報告した変更です。Git との照合はしていません。
-3. **Already uncommitted when the run started**：開始前からあった未コミットの変更です。今回の成果とはみなしません。
+1. **Files changed**：Git の変更（`added`、`modified`、`deleted`）を Bridge の記録と照合した一覧。同じユーザー権限のプロセスなら記録を書き換えられるという証拠の制限を冒頭に記載します。変更なしは `No files were changed.` です。
+2. **What the writer says it changed (not checked against Git)**：Git と照合していない writer の申告です。
+3. **Already uncommitted when the run started**：開始前の未コミット変更で、今回の成果とは扱いません。
 
-範囲の問題がある場合は、`Changes outside the allowed scope`（許可範囲外の変更）や `Changes outside the scope that could not be attributed to this run`（今回の実行によるものと確認できない範囲外の変更）も表示します。Git がなければ `No work proof: …` のみです。実行中に Git 履歴が書き換えられたりブランチが切り替わったりすると、Bridge は比較を続けず停止します。
+範囲に問題があれば、`Changes outside the allowed scope` または `Changes outside the scope that could not be attributed to this run` を追加します。Git がなければ証跡がないと表示します。実行中の履歴書き換えやブランチ変更では、比較を続けず停止します。
 
-## Tokens
+## トークン使用量
 
 | 列 | 説明 |
 |---|---|
-| role | `writer`、`reviewer`、`contract translation`（writer による条件の整理）、`contract check`（reviewer によるコントラクト確認）。 |
-| calls | 呼び出し回数。 |
-| input / cache read / cache write / output / total | CLI が報告した使用量の合計。writer のサブエージェントも含みます。 |
-| cost | CLI が費用を報告した場合のみ表示します。 |
+| role | `contract`、`writer`、`reviewer`。検索時は `graph lookups` も追加 |
+| calls | 呼び出し回数 |
+| input / cache read / cache write / output / total | CLI の使用量。writer の子エージェント分も含む |
+| cost | CLI が報告した場合のみ表示 |
 
-停止、タイムアウト、中断などで呼び出しが正常終了しなかった場合、使用量は `partial` になります。使用量が不完全な場合、Bridge はトークン上限が守られたと確認できません。
+- `contract` は常に 0 です。コントラクトはコードで転記し、モデルを使いません。
+- `graph lookups` は SQL 回数と prompt に追加した推定トークン数です。両役割の input に含まれ、別料金ではありません。
+- 使用量を取得できない呼び出しがあれば、calls は `N (M unreadable)`、ほかは `unknown` です。一部の合計を全体として扱いません。writer の使用量不明では予算内と確認できないため、次の呼び出し前に停止します。
 
 ## JSON 出力
 
-`review-bridge status --json`、`review-bridge logs <run_id|file> --json`、`review-bridge work-status` は共通の JSON フィールドを返します。各 run の `run_id`、`status`、`conclusion`、`closed_reason`、`created_at`、`closed_at`、`source_file`、`work_package_id`、`authorized_via` が含まれます。
-
-最新の記録には、`version_no`、`title`、`contract_sha256`、`execution_mode`、`writer_provider`／`writer_model`／`writer_effort`、`reviewer_provider`／`reviewer_model`／`reviewer_effort`／`reviewer_mcp`、`breakpoint`、`scope`、`budget`（各値の設定元を含む）、`test`、`timeout_at`、`last_stop` も含まれます。
+- `npx review-bridge status --json`：ページ、役割、DB 接続情報、直近 10 件の run。各行に `run_id`、`status`、`conclusion`、`closed_reason`、`created_at`、`closed_at`、`updated_at`、`source_file`、`work_package_id`、`authorized_via`。次ページは `--after <run_id>` です。
+- `npx review-bridge work-status`：同じ一覧と `latest_run` の詳細。`work_order_id`、`version_no`、`title`、`contract_sha256`、`execution_mode`、`writer_provider`／`writer_model`／`writer_effort`、`reviewer_provider`／`reviewer_model`／`reviewer_effort`／`reviewer_mcp`、`breakpoint`、`scope`、設定元付きの `budget`、`test`、`timeout_at`、`authorized_by`、`authorized_via`、`last_stop` を含みます。
+- `npx review-bridge logs <run_id|file> --json`：run のフィールドは `work-status` と同じです。

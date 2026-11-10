@@ -22,7 +22,7 @@ Bridge は Vue エコシステムを技術の方向性とし、VoidZero の Vite
 | 設計項目 | 参考元 | Bridge での採用方法 |
 |---|---|---|
 | Markdown 作業指示と YAML frontmatter | Astro content collections | 先頭の `---` から次の `---` まで。全フィールドは任意、未知の項目は拒否。 |
-| 作業指示の必須項目 | Jira issue の必須項目 | タイトル、作業内容、受け入れ条件。バグには環境、手順、実際・期待する結果、頻度も記載。 |
+| 作業指示の必須内容 | Jira の issue 必須項目 | 作業内容と完了条件は必須、タイトルは任意。不具合では環境、手順、実際・期待する結果、頻度も記載 |
 | 保存済み計画を適用し、後の設定変更を含めない | Terraform `plan -out` → `apply` | start のカードと人の承認。`upgrade --plan-out` → `--plan --approve <sha>`。 |
 | 編集した作業指示を再実行し、旧 run を停止 | GitHub Actions `concurrency` + `cancel-in-progress` | 置き換えられる版は stop と同じ停止処理。新 run の作成時に `superseded_by` を設定。 |
 | run ごとの時間制限 | GitHub Actions job の `timeout-minutes` | `budget.run_timeout`。期限到達時に `timed_out` で終了。 |
@@ -30,15 +30,21 @@ Bridge は Vue エコシステムを技術の方向性とし、VoidZero の Vite
 | 切断後の追記と不一致の拒否 | Kafka idempotent producer | 最後の既知番号＋1 からローカルで仮採番し、追記時にデータベースが照合。 |
 | 実行側に別の正本を持たせない | GitHub Actions・Prefect・Inngest | データベースを唯一の正本にする。 |
 | 作業指示ごとの結果フォルダー | Playwright `test-results/<test>/` | `.review-bridge/results/<作業指示>/`。run ごとに 1 ファイル、上書きしない。 |
-| サービスの起動・停止をまとめて管理 | `docker compose down`／`up`、`brew services` | `review-bridge down`／`up`。 |
+| サービスの起動・停止 | `docker compose down`／`up`、`brew services` | `npx review-bridge up` は DB、ページの順に起動。`down` は逆順で、作業中は拒否 |
 | 孤立したデータベースプロセスの処理 | zonky embedded-postgres の `cleanOldDataDirectories` | `pg_ctl stop -m fast` 後に再試行。そのデータディレクトリに属するプロセスだけを扱う。 |
 | 認識できないファイルを変更しない | Git checkout の未追跡ファイルの扱い | 移行先に同名で内容の異なるファイルがあるときだけ `upgrade` が拒否し、名前を表示。 |
 | `.vscode/` への書き込み前に確認 | `npm create vue@latest` | init の最後の確認。 |
-| tasks.json の他の内容とコメントを保持 | VS Code の `jsonc-parser` | `review-bridge vscode`、`uninstall`。 |
+| `tasks.json` の既存内容とコメントを維持 | VS Code の `jsonc-parser` | `npx review-bridge vscode`、`uninstall` |
 | ユーザーレベルのエージェント入口 | Claude Code `~/.claude/commands/`、Codex `~/.agents/skills/`（`ext/skills/src/host_roots.rs`） | `/review-bridge`、`$review-bridge`。 |
 | セッションの読み取り専用・分離オプション | Claude Code `--permission-mode plan`／`--tools`／`--strict-mcp-config`、Codex `exec --sandbox read-only`、`--disable apps --disable plugins`、`mcp_servers.<name>.enabled` | reviewer の制限確認とコネクターの分離。 |
 | OS 標準ディレクトリへの記録とローテーション | `env-paths` の data／log 規約 | `%LOCALAPPDATA%\ReviewBridge`、`~/Library/Logs/ReviewBridge`、`$XDG_STATE_HOME/review-bridge`。 |
-| データベースのバックアップ | PostgreSQL のファイルレベルバックアップ | `review-bridge backup` で停止、全体をコピー、再起動。 |
+| DB のバックアップ | PostgreSQL のファイル単位方式 | `npx review-bridge backup`：停止、全フォルダーのコピー、再起動 |
+| ツール用フォルダー内に `*` だけの `.gitignore` | pytest `.pytest_cache`、ruff `.ruff_cache`、uv `.venv` | `.review-bridge/.gitignore`。プロジェクトの除外設定は変更しない |
+| 起動元に合わせた次のコマンド | create-vite の `npm_config_user_agent`（`pkgFromUserAgent`） | `npx`、`pnpm dlx`、`yarn dlx`、`bun x`、`deno run -A npm:` |
+| frontmatter の `id` で識別 | Docusaurus・Astro の文書 ID、Jira の課題番号 | 初回承認で書き込み、改名・移動でも同じ作業指示 |
+| 2 つのパスが同じファイルか判定 | `find -samefile`、coreutils `test -ef`（device と inode） | ハードリンクは同一。ファイル ID のない環境は拒否 |
+| リスト項目の分割 | VitePress でも使う markdown-it の規則 | 1 項目が 1 条件。`一、`・`（1）` はリスト記号ではない |
+| DB 状態の終了コード | `pg_ctl status` の 4 | DB ディレクトリを読めなければ `status` は 4 |
 
 検討したものの**採用しなかった**方式は、conda／pnpm／nvm のようなユーザー rc ファイルへのマーカーブロック追加と、Node 組み込み SQLite です。Bridge は専用の独立ファイルと PostgreSQL を使います。
 

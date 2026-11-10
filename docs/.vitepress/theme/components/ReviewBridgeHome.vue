@@ -7,7 +7,7 @@ import bridgeImage from '../assets/bridge-command-deck.webp'
 import pkg from '../../../../package.json'
 
 const version = (pkg as { version: string }).version
-const installTag = version.includes('-') ? 'next' : 'latest'
+const installTag = 'latest'
 
 interface Props {
   locale?: HomeLocale

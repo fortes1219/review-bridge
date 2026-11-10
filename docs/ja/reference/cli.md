@@ -1,27 +1,42 @@
 # コマンド
 
-各コマンドの `review-bridge <command> --help` の出力を、オプションを含めてそのまま掲載しています。エージェントやスクリプト向けの下位コマンドは `review-bridge --help --all` で確認できます。`work-plan`、`work-start`、`work-status`、`work-cancel`、`wait`、`prune`、`rm`、`roles-check` が含まれます。通常は `start` だけで `work-plan` と `work-start` の両方を実行できます。
+0.3.0-rc.3 の `npx review-bridge <コマンド> --help` の出力を、原文のまま掲載します。`Usage: review-bridge …` は実行ファイル名です。実行時は[パッケージマネージャー](#package-managers)に応じた接頭辞を付けてください。`npx review-bridge --help --all` には、エージェント・スクリプト用の `work-plan`、`work-start`、`work-status`、`work-cancel`、`wait`、`prune`、`rm`、`graph`、`graph-mcp`、`roles-check` も表示されます。通常は `start` で計画から実行まで行えます。
 
 | コマンド | 用途 |
 |---|---|
-| `init` | 現在のフォルダーを初期設定し、writer、reviewer、プロジェクト種別を選択します。 |
-| `start` | 実行計画を固定し、reviewer の読み取り専用制限を確認してカードを表示します。人の承認後に作業を開始します。 |
-| `stop` | 指定した run のモデルプロセスを停止し、記録を残します。`resume <run_id>` で作業指示を再実行できます。 |
-| `resume` | 停止した作業指示を、同じ停止位置と変更範囲で新しい run として実行します。役割、モデル、effort、予算を再決定し、新しいカードで承認を求めます。 |
-| `clean` | run ID がなければ終了済み記録を日別ファイルにまとめ、期限切れの内容を削除します。ID があればその終了済み run を削除します。実行中の作業は削除できません。 |
-| `status` | ローカルページ、プロジェクトの実行状態、レビューキュー、データベース接続情報を表示します。 |
-| `logs` | run のログフォルダーと各ファイルの用途を表示します。作業指示ファイルまたは `source_id` を渡すと、過去の run を新しい順に表示します。 |
-| `vscode` | プロジェクトの `.vscode/tasks.json` に Bridge のタスクを追加します。`--user` なら全プロジェクト共用のユーザータスクに書き込みます。 |
-| `up` | ローカルページサービスをバックグラウンドで起動します。 |
-| `down` | ローカルページサービスを停止します。 |
-| `ps` | ローカルページサービスの状態と URL を表示します。 |
-| `watch` | 現在のターミナルでローカルページサービスを実行します。Ctrl+C で終了します。 |
-| `upgrade` | プロジェクト設定をバックアップし、インストール済みの Review Bridge のバージョンに更新します。 |
-| `uninstall` | バックアップ後、指定フォルダーから Review Bridge の設定を削除します。パッケージ自体の削除は `npm uninstall -g review-bridge` を使います。 |
-| `doctor` | 作業指示を実行せず、本機のプラットフォーム adapter を確認します。 |
-| `backup` | データベースを停止し、全プロジェクトのデータをコピーしてから再起動します。実行中の作業があれば拒否します。 |
+| `init` | 現在のフォルダーに writer、reviewer、プロジェクトの種類を設定 |
+| `start` | 計画を固定してカードを表示。承認後に reviewer の権限を確認し、実行。`.review-bridge/work-packages/` 配下のフォルダーならファイル名順に処理 |
+| `stop` | モデルのプロセスを停止して記録を維持。`resume <run_id>` で再実行 |
+| `resume` | 同じ停止位置と範囲で新しい run を作成。役割、モデル、effort、予算を決め直して再承認 |
+| `clean` | ID なしなら終了済み記録を日別にまとめ、期限切れを削除。ID ありなら指定した終了済み run を削除。実行中は不可 |
+| `status` | データベースを起動せず、ページ、DB 状態、run、接続情報を表示 |
+| `logs` | run のログ一覧、またはファイル・`source_id` ごとの実行履歴を新しい順に表示 |
+| `vscode` | `.vscode/tasks.json` に追加。`--user` はプロジェクト共通のユーザータスク |
+| `up` | バックグラウンドでデータベース、ローカルページの順に起動 |
+| `down` | ページ、データベースの順に停止。実行中の run があれば拒否 |
+| `ps` | ローカルページの動作状態と URL を表示 |
+| `watch` | 現在のターミナルでページを実行。Ctrl+C で終了 |
+| `upgrade` | バックアップ後、設定をインストール済み Bridge の版へ更新 |
+| `uninstall` | バックアップ後、プロジェクトの設定を削除。本体の削除は `npm uninstall -g review-bridge` |
+| `doctor` | 作業を実行せず、プラットフォームの adapter を確認 |
+| `backup` | データベースを停止して全プロジェクトをコピーし、再起動。作業中は拒否 |
+| `graph` | コード全体の graph を再構築。初回は `init`、変更分は `start` が処理。`--help --all` に掲載 |
 
 プロジェクトは `--project <folder>` または `--target <folder>` で指定し、既定は現在のフォルダーです。対応するオプションは各コマンドを参照してください。
+
+## パッケージマネージャー {#package-managers}
+
+グローバルインストールは不要です。`npx review-bridge <コマンド>` は npm の `latest` を取得し、`npm i -g review-bridge` でインストール済みならそのコピーを使います。設定後の手順、カード、`status`、エラー後の案内、エージェントの入口、VS Code タスクは、起動に使ったパッケージマネージャーに合わせて表示します。
+
+| 起動元 | Bridge が表示するコマンド |
+|---|---|
+| npm、または判別できない場合 | `npx review-bridge …` |
+| pnpm | `pnpm dlx review-bridge …` |
+| Yarn 2 以降 | `yarn dlx review-bridge …`（`dlx` のない Yarn 1 は `npx`） |
+| Bun | `bun x review-bridge …` |
+| Deno | `deno run -A npm:review-bridge …` |
+
+create-vite と同じく `npm_config_user_agent` で判別します。案内するコマンドにバージョンは指定しません。実行ファイル名だけを使うのは `--help` の原文です。
 
 ## init
 
@@ -55,12 +70,12 @@ Options:
 
 ## start
 
-実行計画を固定し、reviewer の読み取り専用制限を確認してカードを表示します。人の承認後に作業を開始します。
+計画を固定してカードを表示し、承認後に reviewer の権限を確認して実行します。フォルダーなら各作業指示をファイル名順に処理します。`--update` と `--as-new` は[カードと作業指示の識別](../guide/start#work-order-identity)を参照してください。
 
 ```text
-Usage: review-bridge start <file> [options]
+Usage: review-bridge start <file|directory> [options]
 
-Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
 
 Options:
   --writer <claude|codex>
@@ -147,12 +162,12 @@ Options:
 
 ## status
 
-ローカルページ、プロジェクトの実行状態、レビューキュー、データベース接続情報を表示します。
+ローカルページ、データベースの状態、run、接続情報を表示します。DB が停止中なら起動方法を案内するだけで、自動では起動しません。
 
 ```text
 Usage: review-bridge status [options]
 
-Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
+Show what Bridge is doing now: the page, this project's runs, and how to look at the database
 
 Options:
   --after <run_id>
@@ -201,12 +216,12 @@ Options:
 
 ## up
 
-ローカルページサービスをバックグラウンドで起動します。
+バックグラウンドでデータベース、ローカルページの順に起動します。
 
 ```text
 Usage: review-bridge up [options]
 
-Start the local page service in the background
+Start the database and the local page service in the background
 
 Options:
   --project <folder>
@@ -217,12 +232,12 @@ Options:
 
 ## down
 
-ローカルページサービスを停止します。
+`up` と逆に、ページ、データベースの順で停止します。実行中の run があれば一覧を表示して拒否します。
 
 ```text
 Usage: review-bridge down [options]
 
-Stop the local page service
+Stop the local page service and the database; refused while a run is running
 
 Options:
   --project <folder>
@@ -341,6 +356,22 @@ Usage: review-bridge backup [options]
 Copy your database, for all your projects, with the database stopped (refused while a run is running)
 
 Options:
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
+## graph
+
+プロジェクト全体のコードを読み直し、graph を再構築します。初回は `init`、Git が報告する変更分は `start` が更新します。`start` で graph を更新できなかったと表示された場合に使ってください。[プロジェクトのコード索引](../guide/start#project-graph)を参照してください。`--help --all` に掲載しています。
+
+```text
+Usage: review-bridge graph [options]
+
+Read this project's code into its graph again, whole (init does this; start brings it up to date)
+
+Options:
+  --json
+      Print each step as one JSON line, the last one the summary (boolean)
   --project <folder>
       The project folder (string; default: the current folder)
 ```

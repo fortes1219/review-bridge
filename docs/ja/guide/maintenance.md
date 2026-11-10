@@ -2,10 +2,18 @@
 
 ## アップグレード
 
+Bridge 本体の更新方法は、実行方法によって異なります。
+
+- **グローバルインストールせず `npx review-bridge` を使う場合**：個別の更新操作は不要です。npm の最新版を取得します。
+- **グローバルインストールした場合**：`npm i -g review-bridge@latest` で更新します。`npx review-bridge` もそのインストール済みの版を使うため、更新が必要です。
+
+新版でデータベースのマイグレーションが必要な場合は、最初のコマンドが先にバックアップを作り、保存先を表示してから適用します。実行中の run がある場合は拒否します。新しい版を使った後など、現在の版が知らないマイグレーションがあれば、その一覧を表示してデータベースを開かず、変更もしません。
+
+各プロジェクトの `.review-bridge/` の設定は `upgrade` で更新します。
+
 ```sh
-npm i -g review-bridge@next        # パッケージを更新
 cd your-project
-review-bridge upgrade              # バックアップ後、プロジェクト設定を更新
+npx review-bridge upgrade          # バックアップ後、このプロジェクトの設定を更新
 ```
 
 `upgrade` は、旧サービスの停止、バックアップ、移行、整合性確認、旧ファイルの整理、再起動、ヘルスチェックを順に行います。Bridge が処理するため、中断しても再実行できます。
@@ -19,13 +27,13 @@ review-bridge upgrade              # バックアップ後、プロジェクト�
 
 ## バックアップ
 
-[結果・ログ・データベース → バックアップ](./results#backup)を参照してください。`review-bridge backup` は全プロジェクトのデータベースをコピーします。実行中の作業があれば拒否します。
+[バックアップ](./results#backup)を参照してください。`npx review-bridge backup` は全プロジェクトのデータベースをコピーします。実行中の run がある場合は拒否します。
 
 ## 削除
 
 ```sh
-review-bridge uninstall --target .   # バックアップ後、プロジェクト設定を削除
-npm uninstall -g review-bridge       # パッケージを削除
+npx review-bridge uninstall --target .   # バックアップを作り、プロジェクトの設定を削除
+npm uninstall -g review-bridge           # グローバルインストールしていれば本体も削除
 ```
 
 - `uninstall` が削除するのは Bridge が作成した内容だけです。`.review-bridge/`（結果のコピーもバックアップ対象）、`.vscode/tasks.json` の `review-bridge:` で始まる task と `review-bridge-` で始まる input を取り除きます。他に内容がなければファイルも削除します。
@@ -34,7 +42,9 @@ npm uninstall -g review-bridge       # パッケージを削除
 
 ## 対応プラットフォーム
 
-Windows x64 はネイティブ環境で検証済みです。Apple Silicon macOS は選択できますが、ネイティブ検証は未実施です。Linux は実験段階で、ネイティブ環境でのモデル実行は既定で拒否します（fail closed）。
+Windows x64 はネイティブ環境で検証済みです。Apple Silicon macOS は選択できますが未検証です。Linux ではネイティブ環境でのモデル実行を拒否します。
+
+データベースは PostgreSQL 18 です。別のメジャーバージョンへの移行には dump と restore が必要で、この版では対応していません。
 
 ### Windows
 
@@ -46,4 +56,4 @@ PowerShell で `notepad $PROFILE` を実行し、次の設定を追加します�
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 ```
 
-既定で UTF-8 を出力する PowerShell 7（`pwsh`）に切り替える方法もあります。`review-bridge doctor` は現在の PowerShell が UTF-8 を使っているか表示し、profile 自体は変更しません。
+既定で UTF-8 を出力する PowerShell 7（`pwsh`）も使えます。`npx review-bridge doctor` は UTF-8 の使用状況を表示し、プロファイル自体は変更しません。
