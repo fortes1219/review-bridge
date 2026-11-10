@@ -1,7 +1,10 @@
 name: CI
 
+# Pushes to master and pull requests, as Vite's CI lists its branches under on.push.branches; a pushed
+# tag runs only publish.yml.
 on:
   push:
+    branches: [master]
   pull_request:
 
 permissions:
