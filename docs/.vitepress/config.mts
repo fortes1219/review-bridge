@@ -102,6 +102,10 @@ export default withMermaid(defineConfig({
             "link": "/faq"
           },
           {
+            "text": "Known issues",
+            "link": "/known-issues"
+          },
+          {
             "text": "Release notes",
             "link": "/release-notes"
           },
@@ -222,6 +226,10 @@ export default withMermaid(defineConfig({
           {
             "text": "よくある質問",
             "link": "/ja/faq"
+          },
+          {
+            "text": "既知の問題",
+            "link": "/ja/known-issues"
           },
           {
             "text": "リリースノート",
@@ -345,6 +353,10 @@ export default withMermaid(defineConfig({
           {
             "text": "常見問題",
             "link": "/zh-TW/faq"
+          },
+          {
+            "text": "已知問題",
+            "link": "/zh-TW/known-issues"
           },
           {
             "text": "發行紀錄",

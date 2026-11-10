@@ -15,6 +15,17 @@ There's no need to install Bridge globally. Commands printed by Bridge use the s
 
 Read the [documentation](https://review-bridge.akasa-lab.dev/) in English, Japanese, or Traditional Chinese.
 
+## Known issues in 0.3.0-rc.3 (read before your first run)
+
+`start` runs in the foreground of whatever started it. If that process is killed mid-run, the run is left in the records as still running: the writer's edits stay on disk, nothing is replayed, and `down` refuses until you close the run yourself with `npx review-bridge stop <run_id>` (find the id with `npx review-bridge status`), then `resume <run_id>`. What kills it in practice:
+
+- **An agent's shell-tool timeout.** Claude Code's Bash tool stops a command after 2 minutes by default (10 minutes at most) and kills it. A run with two writer rounds and a test step is often longer. Give the command a long timeout or run it in the background, and wait for the result file. Codex's exec tool has its own limit.
+- **Closing the terminal or VS Code window** that is running `start`, and **Ctrl+C** on a single-file `start` (the command exits, the run may keep going).
+- **Sleep, shutdown, or a crash of the machine.**
+- **Installing a new version while a run is active.** `npx` replaces the cached program in place; run `npx review-bridge down` before updating.
+
+Automatic detection of a dead run is planned for the next patch release. The full list is under [Known limitations](CHANGELOG.md).
+
 ## What `init` does
 
 `init` asks four questions. Press Enter to accept each default:

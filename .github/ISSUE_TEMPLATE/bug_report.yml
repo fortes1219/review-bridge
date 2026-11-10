@@ -1,0 +1,103 @@
+name: "Bug report"
+description: Something Bridge did, or did not do, that the documentation says otherwise
+labels: [pending triage]
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please read [Known issues](https://github.com/fortes1219/review-bridge#known-issues-in-030-rc3-read-before-your-first-run) first: a run left "running" after its terminal or agent died is a known one.
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what Bridge did instead. Quote Bridge's own words rather than describing them.
+      placeholder: I ran `npx review-bridge start …`. I expected … Bridge printed …
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Steps to reproduce
+      description: From a fresh folder if you can. Say which entry point you used (Claude Code, Codex, VS Code task, terminal) and whether the writer and reviewer were real CLIs or `--fake-cli`.
+      placeholder: |
+        1. `npm create vite@latest demo -- --template vue-ts && cd demo && npm install`
+        2. `npx review-bridge init`
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: work-order
+    attributes:
+      label: Work order
+      description: The work-order file as it was when you ran `start`, with anything private removed. The frontmatter `id` line is fine to keep.
+      render: markdown
+  - type: textarea
+    id: result-file
+    attributes:
+      label: Result file
+      description: The whole result file from `.review-bridge/results/<work order>/…md`, if the run produced one. Its header carries the run id, contract SHA-256 and roles we need.
+      render: markdown
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `npx review-bridge status --json`
+      description: Run it in the project folder after the problem. It shows the page, database, this project's latest runs and the log directory. Remove the password-file path if you prefer.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `npx review-bridge logs <run_id>` prints the run's log folder. Attach the files from it that matter (the writer's `*.stderr.log`, the reviewer's `*.stdout.log`, `*.result.md`). They contain the full prompts and the model's output, so read them before pasting and remove anything private.
+      placeholder: |
+        <details>
+        <summary>writer.stderr.log</summary>
+
+        ```text
+        …
+        ```
+        </details>
+  - type: textarea
+    id: system-info
+    attributes:
+      label: Versions
+      description: Output of `npx review-bridge --version`, `node --version`, `npm --version`, `claude --version` and/or `codex --version`, plus the OS and whether the run was started by an agent, VS Code or a terminal.
+      render: shell
+      placeholder: |
+        review-bridge 0.3.0-rc.3
+        node v22.x
+        npm 10.x
+        claude 2.1.x / codex 0.x
+        Windows 11 / macOS 15 / Ubuntu 24.04
+        started from: Claude Code
+    validations:
+      required: true
+  - type: dropdown
+    id: package-manager
+    attributes:
+      label: How Bridge was run
+      options:
+        - npx (no global install)
+        - npm i -g review-bridge
+        - pnpm dlx
+        - yarn dlx
+        - bun x
+        - other (say which in the description)
+    validations:
+      required: true
+  - type: checkboxes
+    id: checkboxes
+    attributes:
+      label: Validations
+      options:
+        - label: I read the [Known issues](https://github.com/fortes1219/review-bridge#known-issues-in-030-rc3-read-before-your-first-run) and this is not one of them, or it is one and this report adds something.
+          required: true
+        - label: I checked the [Known limitations](https://github.com/fortes1219/review-bridge/blob/master/CHANGELOG.md) for this version.
+          required: true
+        - label: I searched the [existing issues](https://github.com/fortes1219/review-bridge/issues).
+          required: true
+        - label: I removed private content (code, prompts, paths, tokens) from everything I pasted.
+          required: true

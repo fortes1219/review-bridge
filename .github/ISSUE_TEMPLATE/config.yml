@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://review-bridge.akasa-lab.dev/
+    about: How Bridge works, in English, Japanese and Traditional Chinese.
+  - name: Questions and discussion
+    url: https://github.com/fortes1219/review-bridge/discussions
+    about: Questions, ideas and "is this expected?" go here, not in issues.
