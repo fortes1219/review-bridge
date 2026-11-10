@@ -1,0 +1,109 @@
+{
+  "schema": "review-bridge.contract",
+  "schema_version": 4,
+  "work_package_id": "add-readme",
+  "source": {
+    "path": ".review-bridge/work-packages/add-readme.md",
+    "sha256": "80aaa8be9c693119613d5f99a9a344b0c78af78dc939fd6dcbf63dfbc573ad83",
+    "lines": [
+      "---",
+      "source_id: DOC-1",
+      "---",
+      "# 幫專案補一份 README",
+      "",
+      "<!-- bridge:context -->",
+      "## 背景與現況",
+      "專案根目錄沒有 README，新同事不知道怎麼啟動。",
+      "",
+      "<!-- bridge:requested_work -->",
+      "## 要做的事",
+      "在專案根目錄新增 README.md，說明專案用途與啟動方式。",
+      "",
+      "<!-- bridge:acceptance -->",
+      "## 驗收",
+      "1. 根目錄有 README.md，第一行是專案名稱。",
+      "2. README 裡有一段「如何啟動」。",
+      "",
+      "<!-- bridge:open_questions -->",
+      "## 待決問題",
+      "無"
+    ]
+  },
+  "ticket": {
+    "title": {
+      "text": "幫專案補一份 README",
+      "source_refs": [
+        {
+          "start": 4,
+          "end": 4
+        }
+      ]
+    },
+    "source_id": {
+      "text": "DOC-1",
+      "source_refs": [
+        {
+          "start": 2,
+          "end": 2
+        }
+      ]
+    },
+    "priority": null,
+    "effort": null,
+    "budget": null
+  },
+  "context": {
+    "text": "專案根目錄沒有 README，新同事不知道怎麼啟動。",
+    "source_refs": [
+      {
+        "start": 8,
+        "end": 8
+      }
+    ]
+  },
+  "outcome": null,
+  "requested_work": {
+    "text": "在專案根目錄新增 README.md，說明專案用途與啟動方式。",
+    "source_refs": [
+      {
+        "start": 12,
+        "end": 12
+      }
+    ]
+  },
+  "scope_notes": {
+    "include": null,
+    "exclude": null,
+    "must_keep": null,
+    "expected_locations": null
+  },
+  "run_plan": null,
+  "acceptance": [
+    {
+      "id": "AC1",
+      "statement": "根目錄有 README.md，第一行是專案名稱。",
+      "source_refs": [
+        {
+          "start": 16,
+          "end": 16
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC2",
+      "statement": "README 裡有一段「如何啟動」。",
+      "source_refs": [
+        {
+          "start": 17,
+          "end": 17
+        }
+      ],
+      "run_refs": []
+    }
+  ],
+  "verification_hints": [],
+  "reproduction": null,
+  "references": [],
+  "unused_lines": []
+}

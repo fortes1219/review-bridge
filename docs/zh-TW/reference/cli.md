@@ -1,27 +1,42 @@
 # 指令
 
-本頁整理 `review-bridge <指令> --help` 的實際輸出，各段保留原文與選項。供 agent 與腳本使用的底層指令，可透過 `review-bridge --help --all` 查看，包括 `work-plan`、`work-start`、`work-status`、`work-cancel`、`wait`、`prune`、`rm`、`roles-check`。一般使用 `start` 即可完成 `work-plan` 與 `work-start` 兩個步驟。
+本頁整理 `npx review-bridge <指令> --help` 的實際輸出（0.3.0-rc.3），各段保留原文與選項。說明原文裡的 `Usage: review-bridge …` 是程式名稱；實際執行時，請照你用的套件管理器加上前綴，見下方[用哪個套件管理器執行](#用哪個套件管理器執行)。供 agent 與腳本使用的底層指令，可透過 `npx review-bridge --help --all` 查看，包括 `work-plan`、`work-start`、`work-status`、`work-cancel`、`wait`、`prune`、`rm`、`graph`、`graph-mcp`、`roles-check`。一般使用 `start` 即可完成 `work-plan` 與 `work-start` 兩個步驟。
 
 | 指令 | 用途 |
 |---|---|
 | `init` | 初始化目前資料夾，設定 writer、reviewer 與專案類型。 |
-| `start` | 執行工單：封存計畫、檢查 reviewer 的唯讀限制、顯示卡片，取得人工授權後開始執行。 |
+| `start` | 執行工單：封存計畫、顯示卡片，你說好之後檢查 reviewer 只能讀，再開始執行。傳入 `.review-bridge/work-packages/` 底下的資料夾時，依檔名順序執行裡面的每一張。 |
 | `stop` | 停止指定執行的模型程序並保留紀錄，可透過 `resume <run_id>` 重新執行該工單。 |
 | `resume` | 為已停止的工單建立新的 run，保留停點與範圍；重新決定角色、模型、effort 與預算，並再次顯示卡片、要求人工授權。 |
 | `clean` | 清理紀錄：不帶 run ID 時，將已結束紀錄彙整成每日檔案，並刪除超過保留期限的內容；帶 run ID 時，移除指定的已結束紀錄。執行中的工作不能清除。 |
-| `status` | 顯示本機頁面、專案的執行狀態、審查佇列與資料庫連線資訊。 |
+| `status` | 顯示本機頁面、資料庫是否在跑、這個專案的執行狀態，以及資料庫連線資訊；不會因此啟動資料庫。 |
 | `logs` | 查看指定 run 的日誌目錄與各檔案用途；傳入工單檔案或 `source_id` 時，按時間由新到舊列出歷次執行。 |
 | `vscode` | 將 Bridge 工作加入專案的 `.vscode/tasks.json`；使用 `--user` 則寫入所有專案共用的使用者 tasks。 |
-| `up` | 在背景啟動本機頁面服務。 |
-| `down` | 停止本機頁面服務。 |
+| `up` | 在背景啟動資料庫，再啟動本機頁面服務。 |
+| `down` | 停止本機頁面服務，再停止資料庫；任何專案有工作在跑時拒絕。 |
 | `ps` | 顯示本機頁面服務的運作狀態與網址。 |
 | `watch` | 在目前終端機執行本機頁面服務，按 Ctrl+C 結束。 |
 | `upgrade` | 先備份，再將專案設定升級至目前安裝的 Review Bridge 版本。 |
 | `uninstall` | 先備份，再從指定資料夾移除 Review Bridge 設定。移除 Bridge 本體請使用 `npm uninstall -g review-bridge`。 |
 | `doctor` | 檢查本機使用的平台 adapter，不執行工單。 |
 | `backup` | 停止資料庫後備份所有專案的資料，再重新啟動。若有工作仍在執行，會拒絕備份。 |
+| `graph` | 重新把整個專案的程式碼讀進 graph（`init` 已做過一次，`start` 只更新改過的檔）。列在 `--help --all`。 |
 
 各指令使用 `--project <folder>` 或 `--target <folder>` 指定專案，預設為目前資料夾。支援的選項見各段說明。
+
+## 用哪個套件管理器執行
+
+不必全域安裝：`npx review-bridge <指令>` 每次會取 npm 上的最新版（`latest`）；已經用 `npm i -g review-bridge` 全域安裝時，`npx` 會直接用那一份。Bridge 印出的指令（`init` 結尾的「接下來」、卡片最後一行、`status`、錯誤訊息裡的下一步、代理入口與 VS Code 工作）會照啟動它的套件管理器寫：
+
+| 你用什麼啟動 | Bridge 印出的指令 |
+|---|---|
+| npm，或看不出是哪一個 | `npx review-bridge …` |
+| pnpm | `pnpm dlx review-bridge …` |
+| Yarn 2 以上 | `yarn dlx review-bridge …`（Yarn 1 沒有 `dlx`，印 `npx`） |
+| Bun | `bun x review-bridge …` |
+| Deno | `deno run -A npm:review-bridge …` |
+
+判斷依據是套件管理器設定的環境變數 `npm_config_user_agent`，作法與 `create-vite` 相同。印出的指令不帶版本號；只有 `--help` 的說明原文用裸的程式名稱。
 
 ## init
 
@@ -55,12 +70,12 @@ Options:
 
 ## start
 
-執行工單：封存計畫、檢查 reviewer 的唯讀限制、顯示卡片，取得人工授權後開始執行。
+執行工單：封存計畫、顯示卡片，你說好之後檢查 reviewer 只能讀，再開始執行。傳入資料夾時依檔名順序執行裡面的每一張。`--update`／`--as-new` 的用法見[開始執行 → 卡片認的是哪一張工單](../guide/start#卡片認的是哪一張工單)。
 
 ```text
-Usage: review-bridge start <file> [options]
+Usage: review-bridge start <file|directory> [options]
 
-Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
 
 Options:
   --writer <claude|codex>
@@ -147,12 +162,12 @@ Options:
 
 ## status
 
-顯示本機頁面、專案的執行狀態、審查佇列與資料庫連線資訊。
+顯示本機頁面、資料庫是否在跑、這個專案的執行狀態，以及資料庫連線資訊；資料庫沒在跑時只說明怎麼起來，不會自己起。
 
 ```text
 Usage: review-bridge status [options]
 
-Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
+Show what Bridge is doing now: the page, this project's runs, and how to look at the database
 
 Options:
   --after <run_id>
@@ -201,12 +216,12 @@ Options:
 
 ## up
 
-在背景啟動本機頁面服務。
+在背景啟動資料庫，再啟動本機頁面服務。
 
 ```text
 Usage: review-bridge up [options]
 
-Start the local page service in the background
+Start the database and the local page service in the background
 
 Options:
   --project <folder>
@@ -217,12 +232,12 @@ Options:
 
 ## down
 
-停止本機頁面服務。
+依 `up` 相反的順序停止：先停本機頁面服務，再停資料庫。任何專案有工作在跑時會列出那些 run 並拒絕。
 
 ```text
 Usage: review-bridge down [options]
 
-Stop the local page service
+Stop the local page service and the database; refused while a run is running
 
 Options:
   --project <folder>
@@ -341,6 +356,22 @@ Usage: review-bridge backup [options]
 Copy your database, for all your projects, with the database stopped (refused while a run is running)
 
 Options:
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
+## graph
+
+重新把整個專案的程式碼讀進 graph。`init` 已經讀過一次，`start` 每次只更新 Git 回報有改動的檔；`start` 說「專案的 graph 沒有更新」時，照它印出的指令跑這一個。graph 是什麼，見[開始執行 → 專案的 graph](../guide/start#專案的-graph)。這個指令列在 `--help --all`。
+
+```text
+Usage: review-bridge graph [options]
+
+Read this project's code into its graph again, whole (init does this; start brings it up to date)
+
+Options:
+  --json
+      Print each step as one JSON line, the last one the summary (boolean)
   --project <folder>
       The project folder (string; default: the current folder)
 ```

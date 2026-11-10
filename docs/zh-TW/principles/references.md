@@ -22,7 +22,7 @@ Bridge 以 Vue 生態為技術方向，並以 VoidZero 旗下的 Vite、Vitest�
 | 設計項目 | 參考來源 | Bridge 的採用方式 |
 |---|---|---|
 | 以 Markdown 撰寫工單，將 frontmatter 解析為 YAML | Astro content collections | frontmatter 由第一行 `---` 延伸至下一個 `---`；欄位皆可省略，未知欄位會被拒絕 |
-| 工單必填項 | Jira 的 issue 必填欄位 | 必填標題、工作內容與驗收條件；缺陷工單另提供環境、重現步驟、實際結果、預期結果與發生頻率 |
+| 工單必填項 | Jira 的 issue 必填欄位 | 工作內容與驗收清單必填，標題選填；缺陷工單另提供環境、重現步驟、實際結果、預期結果與發生頻率 |
 | 儲存計畫後依該版本套用，不採用後續設定修改 | Terraform `plan -out` → `apply` | `start` 的授權卡片與人工確認；`upgrade --plan-out` → `--plan --approve <sha>` |
 | 修改工單後重新執行，停止被取代的舊執行 | GitHub Actions `concurrency` + `cancel-in-progress` | 被取代的版本採用與 `stop` 相同的停止流程；新執行建立時補上 `superseded_by` |
 | 各次執行具有獨立的時間上限 | GitHub Actions job `timeout-minutes` | `budget.run_timeout`，逾時後以 `timed_out` 結束 |
@@ -30,15 +30,21 @@ Bridge 以 Vue 生態為技術方向，並以 VoidZero 旗下的 Vite、Vitest�
 | 斷線後補寫資料，核對不符便拒絕 | Kafka idempotent producer | 本機暫編「最後已知序號＋1」，補寫時資料庫核對 |
 | 執行端不另存權威狀態 | GitHub Actions、Prefect、Inngest | 以資料庫為唯一權威來源 |
 | 每張工單使用獨立的結果資料夾 | Playwright `test-results/<test>/` | `.review-bridge/results/<工單>/`，每次執行一個檔案，永不覆寫 |
-| 統一管理服務的停止與啟動 | `docker compose down`／`up`、`brew services` | `review-bridge down`／`up` |
+| 統一管理服務的停止與啟動 | `docker compose down`／`up`、`brew services` | `npx review-bridge down`／`up`：`up` 先起資料庫再起頁面，`down` 反過來；有工作在跑時 `down` 拒絕 |
 | 孤兒資料庫程序的處理 | zonky embedded-postgres 的 `cleanOldDataDirectories` | 先 `pg_ctl stop -m fast` 再重試；僅處理屬於該資料目錄的程序 |
 | 保留無法辨識的檔案 | `git checkout` 對未追蹤檔的規則 | `upgrade` 僅在目的地存在同名但內容不同的檔案時拒絕遷移，並列出檔名 |
 | 寫入 `.vscode/` 前詢問使用者 | `npm create vue@latest` | `init` 的最後一項確認 |
-| 修改 `tasks.json` 時保留其他內容與註解 | VS Code 自己的 `jsonc-parser` | `review-bridge vscode`、`uninstall` |
+| 修改 `tasks.json` 時保留其他內容與註解 | VS Code 自己的 `jsonc-parser` | `npx review-bridge vscode`、`uninstall` |
 | 使用者層級的 agent 入口 | Claude Code `~/.claude/commands/`、Codex `~/.agents/skills/`（`ext/skills/src/host_roots.rs`） | `/review-bridge`、`$review-bridge` |
 | 工作階段的唯讀與隔離選項 | Claude Code `--permission-mode plan`／`--tools`／`--strict-mcp-config`；Codex `exec --sandbox read-only`、`--disable apps --disable plugins`、`mcp_servers.<name>.enabled` | reviewer 唯讀檢查與連接器隔離 |
 | 執行紀錄存放於作業系統標準目錄，並定期輪替 | `env-paths` 的 data／log 慣例 | `%LOCALAPPDATA%\ReviewBridge`、`~/Library/Logs/ReviewBridge`、`$XDG_STATE_HOME/review-bridge` |
-| 資料庫備份 | PostgreSQL 檔案層級備份 | `review-bridge backup`：停止資料庫，複製完整資料夾，再重新啟動 |
+| 資料庫備份 | PostgreSQL 檔案層級備份 | `npx review-bridge backup`：停止資料庫，複製完整資料夾，再重新啟動 |
+| 工具在使用者專案裡的資料夾自帶只有 `*` 的 `.gitignore` | pytest 的 `.pytest_cache`、ruff 的 `.ruff_cache`、uv 的 `.venv` | `.review-bridge/.gitignore`；不碰專案自己的 `.gitignore` |
+| 依啟動它的套件管理器印出下一步指令 | create-vite 讀 `npm_config_user_agent`（`pkgFromUserAgent`） | `npx`、`pnpm dlx`、`yarn dlx`、`bun x`、`deno run -A npm:` |
+| 文件的身分寫在 frontmatter 的 `id` | Docusaurus、Astro 的 frontmatter `id`；Jira 把單號印在單上 | 第一次按「好」時把工單 `id` 寫進 frontmatter；改名、搬移仍是同一張 |
+| 判斷兩個路徑是不是同一個檔 | `find -samefile`、coreutils `test -ef`（同一個裝置與 inode） | 硬連結算同一張工單；檔案系統不給檔案編號時拒絕 |
+| 把清單切成項目 | markdown-it 的清單規則（VitePress 使用） | 驗收清單的每一項是一條條件；「一、」「（1）」不算清單 |
+| 資料庫狀態的結束碼 | `pg_ctl status` 的 exit code 4 | `status` 讀不到資料庫資料夾時以 4 結束 |
 
 曾評估但**未採用**的做法包括：在使用者 rc 檔追加標記區塊（如 conda／pnpm／nvm），以及使用 Node 內建的 SQLite。Bridge 改採獨立檔案與 PostgreSQL。
 

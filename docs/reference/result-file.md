@@ -1,18 +1,20 @@
 # Result files
 
-Each run creates a result in `.review-bridge/results/<work-order-name>/`, named `<source_id> <work-order-name> <local-date> <hh-mm-ss> <conclusion>.md`. Existing results are not overwritten. Bridge currently outputs result files in English. This page explains each section; the header example uses a Chinese work order.
+Each run writes a new result to `.review-bridge/results/<work-order-name>/`, named `<source_id> <work-order-name> <local-date> <hh-mm-ss> <conclusion>.md`. Existing files aren't overwritten. Directory pipelines use `results/<directory>/<work-order>/`. Fixed labels follow `bridge.json`'s `locale`, currently English or Traditional Chinese. See the [full example](../guide/results#result-files).
 
 ## Header: the work order and run
+
+This header comes from the [captured English fake-CLI run](../guide/start#the-card), with `locale: en`. The sample repository has no commits yet, so `commit` is `null`:
 
 ```yaml
 ---
 source_id: DOC-1
-title: 幫專案補一份 README
+title: Add a README to the project
 source_file: .review-bridge/work-packages/add-readme.md
 version_no: 1  # the sealed version this result is about, not the .md on disk now
-contract_sha256: 7189c52c…
-run_id: 2eb9dc50-f49d-4eae-95ed-e503a2fa5531
-commit: 8c96ab0e…
+contract_sha256: 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3
+run_id: b8f6c4b8-44a9-4f23-8a08-12bae14a6110
+commit: null  # plus uncommitted changes
 writer:
   provider: claude
   model: null  # the CLI's own default
@@ -25,63 +27,68 @@ reviewer:
 ---
 ```
 
-| Field | Description |
+| Field | Meaning |
 |---|---|
-| `source_id` | The ID in the work order's frontmatter; omitted if unset. |
-| `title` | Work-order title. |
-| `source_file` | Work-order path within the project. |
-| `version_no` | **The work-order version sealed for this run.** Later edits do not change the version this result refers to. |
-| `contract_sha256` | The contract's SHA-256, matching the adjacent `contract.v<version>.<first-seven-characters>.json`. |
-| `run_id` | The execution ID used by `logs <run_id>` and `clean <run_id>`. |
-| `commit` | Starting commit. Adds `plus uncommitted changes` if needed; without Git, shows `unknown (no Git)`. |
-| `writer` / `reviewer` | The provider, model, and effort used for the run. `null` means the CLI's default model. The reviewer's `mcp` lists its allowed MCP servers. |
+| `source_id` | Issue ID from frontmatter; omitted if not set |
+| `title` | Work-order title, or `untitled` without a `# ` heading |
+| `source_file` | Work-order path within the project |
+| `version_no` | **The version sealed for this run**, unaffected by later file edits |
+| `contract_sha256` | Contract SHA-256, matching the adjacent `contract.v<version>.<first-seven-characters>.json` |
+| `run_id` | Execution ID for `logs <run_id>` and `clean <run_id>` |
+| `commit` | Starting commit (`null` if there are no commits yet), annotated `plus uncommitted changes` when needed, or `unknown (no Git)` |
+| `writer` / `reviewer` | Provider, model, and effort for this run; `null` uses the CLI default. Reviewer `mcp` lists allowed MCP servers |
 
-These values come from Bridge's database. If it cannot be read, the header explains why and values are marked unknown.
+These values come from Bridge's database. If it can't be read, the header explains why and marks values unknown, for example: “Bridge's database could not be read (…); every value below is unknown.”
 
 ## Title: the conclusion
 
 | Title | `conclusion` | Meaning |
 |---|---|---|
-| `Delivered` | `success` | Review passed and evidence supports every acceptance criterion. |
-| `Needs fixing` | `action_required` | The correction-round limit (`rounds`) was reached with unresolved issues. |
-| `Your decision needed` | `action_required` | A human decision is needed, for example an ambiguous work order, out-of-scope changes, data deletion, a package change, or a release action. |
-| `Stopped` | `cancelled` | You ran `stop`, a new work-order version superseded this run, or the database disconnected. |
-| `Cancelled` | `cancelled` | Authorization was canceled. |
-| `Token ceiling exceeded` | `failure` | A per-call or per-run token ceiling was exceeded, or usage could not be read. |
-| `Provider quota exhausted` | `failure` | The provider's available quota was exhausted. |
-| `Timed out` | `timed_out` | The run reached `run_timeout`. |
-| `Error` | `failure` / `timed_out` | Another error; see Why for its reason code and log path. |
+| `Delivered` | `success` | Reviewer passed the work and every acceptance condition is proven |
+| `Needs fixing` | `action_required` | Correction rounds (`rounds`) are exhausted with unresolved issues |
+| `Your decision needed` | `action_required` | A human choice is needed, such as a writer question, scope expansion, or a release action |
+| `Stopped` | `cancelled` | `stop`, a newer work-order version (`superseded`), or loss of the database (`database_unavailable`) |
+| `Cancelled` | `cancelled` | Authorization revoked with `work-cancel` |
+| `Token ceiling exceeded` | `failure` | Writer per-call or per-run token limit, or unreadable writer usage |
+| `Provider quota exhausted` | `failure` | The provider's available quota is used up |
+| `Timed out` | `timed_out` | `run_timeout` reached |
+| `Error` | `failure` / `timed_out` | Other errors; “Why” gives a reason code and log path |
+
+For `database_unavailable`, “Why” explains that the database stopped responding during work, no model was called afterward, and you should start again once the database is back.
 
 ## Summary and tests
 
 ```text
-Work order: <path>   run: <run_id>   ended: <UTC time>   calls: <model call count>
+Work order: <path>   run: <run_id>   ended: <UTC time>   calls: <writer calls>
 Tests: not configured for this project; no test rule matched, so none ran
 ```
 
-The test line can show `Existing tests passed: <command>`, `Existing tests failed: <command> (exit <code>)`, `Existing tests timed out: <command>`, or `Tests: not configured…`.
+The test line can also be `Existing tests passed: <command>`, `Existing tests failed: <command> (exit <code>)`, or `Existing tests timed out: <command>`.
 
 ## Acceptance
 
-Each acceptance criterion has its own row:
+Each acceptance criterion has its own row. The same captured run produced:
 
 ```text
-- AC1 proven: <criterion text> (reviewer: pass; tests: not used; evidence: <reviewer evidence>)
-Checked on commit 8c96ab0e483f.
+- AC1 proven: README.md exists at the project root, with the project name on its first line. (reviewer: pass; evidence: fake: read the delta and the test output for AC1)
+- AC2 proven: The README has a "Getting started" section. (reviewer: pass; evidence: fake: read the delta and the test output for AC2)
+Checked on commit none plus uncommitted changes.
 ```
 
-- Result: `proven`, `failed`, or `unknown`.
-- `reviewer`: the reviewer's verdict on this criterion.
-- `tests`: `passed`, `failed`, `not run`, or `not used` (the criterion does not depend on tests).
-- The final line identifies the checked version: `Checked on commit …`, `… plus uncommitted changes`, or `Version checked: unknown (no Git)`.
+- Results are `proven`, `failed`, or `unknown`. Bridge decides each condition rather than simply copying the reviewer's verdict.
+- `reviewer` is the reviewer's verdict for that condition.
+- The last line identifies the checked version: the commit alone, the commit plus uncommitted changes, or `unknown (no Git)`.
+- If the project graph couldn't be refreshed at the start, an extra line notes that both roles used the earlier graph.
+- Runs stopped before review don't list acceptance decisions here.
 
-Even with a reviewer pass, Bridge does not mark the work as successfully delivered if any criterion lacks evidence. Why explains the decision.
+Even with a reviewer pass, Bridge won't mark the work delivered unless every acceptance condition is `proven`. “Why” explains the reason.
 
 ## Why
 
-This section explains the conclusion. For a successful delivery, it lists `Verified by the reviewer:` and `Not run by the reviewer:`.
+This section explains the conclusion.
 
-Otherwise, it includes the last review's findings (`<id> (<severity>) <path>:<line>: <claim> -> <fix>`), failed test commands and the end of stderr, questions under `The writer asks you:`, limitations under `What the writer says it could not check:`, and the reason work stopped.
+- **Delivered:** lists `Verified by the reviewer:` and `Not run by the reviewer:`. **Extra findings accompanying a pass aren't included here yet.** They remain in the database and the review file identified by `Latest review` in `status`.
+- **Not delivered:** lists the last review's findings (`<id> (<severity>) <path>:<line>: <claim> -> <fix>`), failed test commands and stderr tail, `The writer asks you:`, `What the writer says it could not check:`, and the stop reason.
 
 ## Work order changed after the start
 
@@ -89,31 +96,33 @@ Appears when the work-order file changed after the run began. Bridge judges the 
 
 ## Next step
 
-Suggests what to do next: inspect changes and decide whether to commit after success; wait for a quota reset if exhausted; address findings using Why; or reduce the work order's size or raise `budget.run_timeout` within the allowed limits after a timeout.
+Next steps depend on the result: inspect changes and decide whether to commit after success; wait for provider quota before another `start`; fix the work order or code based on findings; write answers to writer questions into the work order before restarting; or split timed-out work into smaller orders, or raise `budget.run_timeout` within policy limits.
 
 ## Files changed
 
 Work proof is split into three lists, omitted when there is nothing to show:
 
-1. **Files changed**: changes read from Git (`added`, `modified`, `deleted`) and checked against Bridge's records. The opening note states a limitation: processes running as the same user can still modify those records. With no changes, it prints `No files were changed.`.
-2. **What the writer says it changed (not checked against Git)**: the writer's claims, not checked against Git.
-3. **Already uncommitted when the run started**: changes that existed before this run, not attributed to its work.
+1. **Files changed:** actual Git changes (`added`, `modified`, `deleted`), checked against Bridge's records. The opening note states that any process running as the same user could rewrite those records. No changes produces `No files were changed.`
+2. **What the writer says it changed (not checked against Git):** the writer's own report.
+3. **Already uncommitted when the run started:** pre-existing edits, not attributed to this run.
 
-Scope issues also produce `Changes outside the allowed scope` or `Changes outside the scope that could not be attributed to this run`. Without Git, the section only says `No work proof: …`. If Git history is rewritten or the branch changes during the run, Bridge stops rather than continuing the comparison.
+Scope issues add “Changes outside the allowed scope” or “Changes outside the scope that could not be attributed to this run.” Without Git, this section says no work proof is available. If history is rewritten or the branch changes during execution, Bridge stops rather than continuing the comparison.
 
 ## Tokens
 
-| Column | Description |
+| Column | Meaning |
 |---|---|
-| role | `writer`, `reviewer`, `contract translation` (writer extracts criteria), or `contract check` (reviewer checks the contract). |
-| calls | Number of calls. |
-| input / cache read / cache write / output / total | Usage totals reported by the CLI, including the writer's sub-agents. |
-| cost | Present only if the CLI reports a cost. |
+| role | `contract`, `writer`, `reviewer`, plus `graph lookups` when used |
+| calls | Number of calls |
+| input / cache read / cache write / output / total | Usage reported by the CLI, including writer subagents |
+| cost | Shown only when the CLI reports it |
 
-A call that did not finish normally because it was stopped, timed out, or interrupted has usage marked `partial`. With incomplete usage, Bridge cannot confirm that token ceilings held.
+- `contract` is always 0: code copies the work order into a contract without calling a model.
+- `graph lookups` records Bridge's SQL queries and estimated tokens added to prompts. Those tokens are already included in writer and reviewer input, not an extra charge.
+- If usage can't be read for some calls, the role's calls column shows `N (M unreadable)` and the other columns show `unknown`. Partial totals aren't presented as complete. Unreadable writer usage prevents another call because Bridge can't verify the budget still holds.
 
 ## JSON output
 
-`review-bridge status --json`, `review-bridge logs <run_id|file> --json`, and `review-bridge work-status` expose the same JSON fields: `run_id`, `status`, `conclusion`, `closed_reason`, `created_at`, `closed_at`, `source_file`, `work_package_id`, and `authorized_via` for each run.
-
-The latest record also includes `version_no`, `title`, `contract_sha256`, `execution_mode`, `writer_provider` / `writer_model` / `writer_effort`, `reviewer_provider` / `reviewer_model` / `reviewer_effort` / `reviewer_mcp`, `breakpoint`, `scope`, `budget` (including each value's source), `test`, `timeout_at`, and `last_stop`.
+- `npx review-bridge status --json`: local page, roles, database connection, and the project's latest ten runs. Each has `run_id`, `status`, `conclusion`, `closed_reason`, `created_at`, `closed_at`, `updated_at`, `source_file`, `work_package_id`, and `authorized_via`. Use `--after <run_id>` for the next page.
+- `npx review-bridge work-status`: the same run list plus `latest_run` details: `work_order_id`, `version_no`, `title`, `contract_sha256`, `execution_mode`, `writer_provider`/`writer_model`/`writer_effort`, `reviewer_provider`/`reviewer_model`/`reviewer_effort`/`reviewer_mcp`, `breakpoint`, `scope`, `budget` with sources, `test`, `timeout_at`, `authorized_by`, `authorized_via`, and `last_stop`.
+- `npx review-bridge logs <run_id|file> --json`: run fields match `work-status`.

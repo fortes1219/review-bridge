@@ -4,23 +4,23 @@ Configuration is split between project and personal settings: three files in the
 
 ## `.review-bridge/bridge.json`
 
-`init` generates this configuration:
+Example configuration created by `init` in rc3 for a project with `package.json` but no `test` script:
 
 ```json
 {
   "schema_version": 4,
-  "project_id": "64c4a2f2-7c52-4f70-859f-a94c24008089",
-  "profile_id": null,
+  "project_id": "bdbe7d5a-c1de-4d00-ad6e-59ed13cf8d0f",
+  "profile_id": "node-backend",
   "roles": {
     "writer": { "provider_id": "claude" },
     "reviewer": { "provider_id": "codex" },
     "reviewer_readonly_required": true
   },
   "requires_human_authorization": true,
-  "watch": { "port": 8080, "strict_port": false },
+  "watch": { "port": 53559, "strict_port": false },
   "retention": { "days": 15 },
   "locale": "en",
-  "test": { "profile_id": null, "rules": [] },
+  "test": { "profile_id": "node-backend", "rules": [{ "command": "npm test", "package_script": "test" }] },
   "readiness": { "reviewer_readonly_proven": "not_run" },
   "default_policy_ref": "review-bridge/config/default-policy.json",
   "project_override_ref": ".review-bridge/policy.override.json",
@@ -28,14 +28,15 @@ Configuration is split between project and personal settings: three files in the
 }
 ```
 
-| Field | Description |
+| Field | Meaning |
 |---|---|
-| `project_id` | Identifies the project in data home and the log directory. Do not change it. |
-| `roles.writer` / `roles.reviewer` | Assigns `claude` or `codex` to each role. Changes take effect on the next `start`, and the card shows the pairing. |
-| `roles.reviewer_readonly_required`, `requires_human_authorization`, `readiness` | Protected fields. `init` writes `true`, `true`, and `"not_run"`, respectively. `init` and `upgrade` stop if these values have changed; they are not switches for disabling safety restrictions. |
-| `watch.port` | Port for the local page. If `strict_port` is `false` and the port is occupied, Bridge searches upward for a free one. |
-| `retention.days` | Days to keep execution logs and finished records, used by `clean`. |
-| `test.profile_id` / `test.rules` | Project type and its verification command; see the profiles below. |
+| `project_id` | Project identity in the data and log directories; don't edit it |
+| `roles.writer` / `roles.reviewer` | `claude` or `codex` for each role. Changes apply on the next `start` and appear on the card |
+| `roles.reviewer_readonly_required`, `requires_human_authorization`, `readiness` | Protected. `init` writes `true`, `true`, and `"not_run"`, respectively. Setup and upgrade check these values and stop if changed; they can't disable safety restrictions |
+| `watch.port` | Local page port. With `strict_port: false`, search upward for an available port if occupied |
+| `retention.days` | Retention period for logs and finished records, applied by `clean` |
+| `locale` | Language for cards, `status`, `up`, `down`, `ps`, `init`, and results: `en` or `zh-TW`. Set from the system language during `init` |
+| `test.profile_id` / `test.rules` | Project type and test commands; see the profiles below |
 
 ## `.review-bridge/policy.override.json`
 
@@ -97,17 +98,17 @@ Personal settings shared by all projects:
 
 Choose a type in init's third setting. It selects the verification command Bridge runs after each writer round:
 
-| `profile_id` | Detection | Verification command |
+| `profile_id` | Detection | Test command |
 |---|---|---|
 | `vue-frontend` | Vue and TypeScript frontend | `npm test` |
 | `node-backend` | Node.js backend | `npm test` |
 | `rust-backend` | Rust | `cargo test --workspace` |
 | `go-backend` | Go | `go test ./...` |
 | `python-backend` | Python | `python -m pytest` |
-| `java-backend` | Java | `mvnw` / `mvn test`, `gradlew` / `gradle test` |
+| `java-backend` | Java | `mvnw`/`mvn test`, `gradlew`/`gradle test` |
 | `dotnet-backend` | .NET and C# | `dotnet test` |
 | `php-laravel` | PHP Laravel | `php artisan test` |
-| `none` | — | No tests run; the card and result say `tests: not configured`. |
+| `none` | — | No tests; the card and result explicitly say they're not configured |
 
 ## Environment variables
 

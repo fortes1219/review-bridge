@@ -31,19 +31,19 @@ rc3 では次の 3 つの方法を使えます。
 
 ## 実行する前に、ユーザーの承認を得る
 
-対話型ターミナルで `start` を実行すると、Bridge はどこまで作業するかを尋ね、計画カードを表示して承認を求めます。エージェントやスクリプトから呼び出し、対話型ターミナルがない場合は、カードを表示した後、`Needs authorization` の状態で止まります。
+対話型ターミナルでは、`start` が停止位置を尋ね、計画カードを表示して承認を求めます。対話型ターミナルのないエージェントやスクリプトでは、カードと `Needs authorization` を表示し、終了コード `1` で終わります。作業はまだ始まりません。
 
 対話型ターミナルがない場合は、次のように 2 回に分けて呼び出します。
 
 ```sh
-# まず計画カードを生成して表示する
-review-bridge start .review-bridge/work-packages/add-readme.md
+# 計画カードを作成して表示
+npx review-bridge start .review-bridge/work-packages/add-readme.md
 
-# ユーザーにカードを見せ、承認を得てから実行する
-review-bridge start .review-bridge/work-packages/add-readme.md --yes
+# ユーザーにカードを提示し、承認後に実行
+npx review-bridge start .review-bridge/work-packages/add-readme.md --yes
 ```
 
-`--yes` は「ユーザーがこの計画を確認し、実行に同意した」ことを、プログラムやエージェントが伝える指定です。承認記録には `authorized_via: agent` と記録されます。
+`--yes` は、表示済み計画に対するユーザーの承認を伝え、`authorized_via: agent` と記録します。直近に表示したカードだけを使い、未表示、内容・オプション変更、期限切れ、使用済みの場合は拒否します。
 
 **このフィールドが記録するのは承認の伝達経路であり、本当にユーザーが承認したかを検証するものではありません。** CI や定期実行でも、ユーザーによる承認ステップを設けてください。`--yes` を確認省略のために使うことはできません。エージェントによる無断の代答は、エージェント側ツールの権限確認で制限します。
 
@@ -58,18 +58,18 @@ review-bridge start .review-bridge/work-packages/add-readme.md --yes
 | `work-cancel --reason <text> [--run <run_id>]` | 指定した run の有効な承認を取り消し、作業を続行できないようにします |
 | `roles-check` | writer と reviewer の CLI がインストールされ、ログイン済みかを確認します。モデルは呼び出しません |
 
-各コマンドの前には `review-bridge` を付けます。すべてのオプションは `<コマンド> --help` で確認できます。
+各コマンドの前に `npx review-bridge` または使用するパッケージマネージャーの形式を付けます。全オプションは `<コマンド> --help` で確認できます。
 
 ## プログラムから状態と結果を取得する
 
 CLI の JSON 出力は、課題のステータス更新や進捗表示に使えます。必要な情報に応じてコマンドを選びます。
 
-| コマンド | 取得できる内容 |
+| コマンド | 取得内容 |
 |---|---|
-| `status --json` | ローカルページの情報、実行中の作業数、プロジェクトの直近 10 件の run、レビューキュー、役割設定、ログディレクトリ、データベースの接続情報 |
-| `logs <run_id> --json` | 指定した run のログディレクトリと、各ファイルの用途 |
-| `logs <file \| source_id> --json` | 指定した作業指示の実行履歴。新しい順に 1 ページ 10 件を返し、`--after <run_id>` で次のページを取得します |
-| `work-status` | プロジェクトの run 一覧と、最新の run の詳細を JSON で出力します |
+| `status --json` | ページ、実行中の件数、直近 10 件の run、最新審査ファイル、役割、ログ、DB 状態、接続情報 |
+| `logs <run_id> --json` | run のログディレクトリと各ファイルの用途 |
+| `logs <file \| source_id> --json` | 作業指示の履歴を新しい順に 10 件。次ページは `--after <run_id>` |
+| `work-status` | run 一覧と最新 run の詳細を JSON 出力 |
 | `clean --json`、`upgrade --json`、`uninstall --json`、`init --json`、`vscode --json` | 各操作の結果 |
 
 ### 実行記録のフィールド
@@ -87,12 +87,13 @@ CLI の JSON 出力は、課題のステータス更新や進捗表示に使え�
 
 | 分類 | フィールド |
 |---|---|
-| 作業指示とコントラクト | `version_no`、`title`、`contract_sha256` |
+| 作業指示とコントラクト | `work_order_id`、`version_no`、`title`、`contract_sha256` |
 | 実行モード | `execution_mode` |
-| 実装担当 | `writer_provider`、`writer_model`、`writer_effort` |
-| レビュー担当 | `reviewer_provider`、`reviewer_model`、`reviewer_effort`、`reviewer_mcp` |
-| 実行上限 | `breakpoint`、`scope`、`budget`。予算の各値には設定元も含まれます |
-| テストと停止に関する情報 | `test`、`timeout_at`、`last_stop` |
+| writer | `writer_provider`、`writer_model`、`writer_effort` |
+| reviewer | `reviewer_provider`、`reviewer_model`、`reviewer_effort`、`reviewer_mcp` |
+| 上限 | `breakpoint`、`scope`、`budget`。予算の各値に設定元を付記 |
+| テストと停止 | `test`、`timeout_at`、`last_stop` |
+| 承認 | `authorized_by`、`authorized_via` |
 
 `status` は、実行中（`in_progress`）か、終了したか（`completed`）を示します。**終了したことと、正常に成果を得られたことは別です。** `conclusion` も確認してください。値は `success`、`failure`、`cancelled`、`timed_out`、`action_required` です。`closed_reason` には、さらに具体的な終了理由が入ります。
 
@@ -106,42 +107,45 @@ CLI の JSON 出力は、課題のステータス更新や進捗表示に使え�
 
 **終了コードだけでは、成果を得られたかどうかを判断できません。** コマンドが正常終了しても、承認やユーザーの判断を待っていることがあります。
 
-たとえば `Needs authorization` を表示した場合の終了コードは `0` ですが、作業はまだ始まっていません。run の記録がある場合は、`status` と `conclusion` も確認してください。`action_required` はユーザーの対応が必要な状態であり、成功として扱えません。
+たとえば `Your decision needed` で終わる run は終了コード `0` ですが、結論は `action_required` です。ユーザーの対応が必要で、成功にはできません。run の記録がある場合は、必ず `status` と `conclusion` を確認してください。
 
 | 終了コード | 意味 |
 |---|---|
-| `0` | コマンドが正常終了した。成果を得られた場合のほか、承認、要件の確認、コントラクトの確認を待っている場合もある |
-| `1` | writer、reviewer、または policy のチェックに失敗した |
-| `2` | コマンドの引数が不正 |
-| `69` | データベースや変更の証跡など、必要なリソースを利用できない。sysexits の `EX_UNAVAILABLE` に相当する |
-| `75` | provider の利用枠を使い切った（`rate_limited`） |
-| `76` | トークン上限を超えた、または使用量を読み取れない |
-| `77` | writer がタイムアウトした |
-| `79` | `contract_rejected` など、モデルの出力が必要な形式を満たしていない |
-| `130` | `stop` または Ctrl+C で停止した |
+| `0` | コマンドが正常終了。run は成功のほか、`action_required` などの対応待ちの場合もある |
+| `1` | 未開始：承認待ち、n で辞退、形式不備、`--yes` 拒否。または writer・reviewer・policy の確認失敗。フォルダー内に未完了がある場合も `1` |
+| `2` | 引数などのコマンドエラー。stderr に説明 |
+| `4` | `status` が DB ディレクトリの欠落・読み取り不可・不正な内容を検出。`pg_ctl status` と同じ |
+| `69` | `database_unavailable` や変更の証跡が読めないなど、必要なリソースを利用できない。sysexits の `EX_UNAVAILABLE` |
+| `75` | provider の利用枠消費（`rate_limited`）、またはログアウト・利用枠で全体停止 |
+| `76` | トークン超過、writer 使用量の取得失敗、修正回数の上限 |
+| `77` | writer の呼び出しがタイムアウト |
+| `78` | 開始後に writer の参照ファイルが変更された（`reference_changed`） |
+| `79` | モデル出力の形式不正、または必須項目のないコントラクト（`contract_rejected`） |
+| `130` | `stop` または Ctrl+C で停止 |
 
 ## データベースからレポートやダッシュボードを作る
 
 実行記録の正本は Bridge の PostgreSQL です。待ち受けるのはローカルの `127.0.0.1` だけで、レポート、ダッシュボード、監査用のデータ出力には SQL で直接読み取れます。
 
-`review-bridge status` を実行すると、ホスト、ポート、ユーザー、データベース名、パスワードファイルの場所を確認できます。接続手順は [VS Code でデータベースを見る](../guide/results#vs-code-database)を参照してください。結果ファイルは閲覧用のコピーです。詳細ログには別途保持期限があります。[結果・ログ・データベース](../guide/results)で説明しています。
+`npx review-bridge status` でホスト、ポート、ユーザー、DB 名、パスワードファイルの場所を確認できます。接続方法は [VS Code でデータベースを見る](../guide/results#vs-code-database)を参照してください。結果は閲覧用コピーで、詳細ログには別途保持期限があります。[結果・ログ・データベース](../guide/results)で説明しています。
 
 ### テーブルと保存内容
 
-現在は 16 個の業務テーブルに加え、マイグレーションの適用履歴を管理する `schema_migrations` があります。
+業務テーブル 16 個、プロジェクトの graph 用テーブル 5 個に加え、適用履歴を管理する `schema_migrations` があります。
 
 | テーブル | 内容 |
 |---|---|
-| `projects` | プロジェクト情報。`project_id` は `bridge.json` 内のプロジェクト ID に対応します |
-| `work_orders`、`work_order_versions` | 作業指示の識別と版の履歴。各版に原文、`content_sha256`、`source_id` を保存します |
-| `plans` | 計画カードの全文（`body`）と `plan_sha256` |
-| `authorizations`、`authorization_claims` | 承認者、時刻、伝達経路、対象の計画と、承認を一度だけ使用するための記録 |
-| `contracts` | 固定したコントラクトの内容と `sha256` |
-| `policy_snapshots` | 実行時に適用した policy とそのハッシュ |
-| `runs`、`run_events` | 各 run とイベント。イベントの連番はデータベースが割り当てます |
-| `test_results` | Bridge が実行したテストの結果 |
-| `review_results`、`review_findings`、`review_verdicts` | レビュー結果、指摘事項、各完了条件の判定 |
-| `acceptance_rows`、`acceptance_decisions` | 完了条件ごとの結果と、Bridge による全体の判定 |
+| `projects` | プロジェクト。`project_id` は `bridge.json` と対応 |
+| `work_orders`、`work_order_versions` | 識別と版。原文、`content_sha256`、`source_id` を含む |
+| `plans` | 計画カード全文（`body`）と `plan_sha256` |
+| `authorizations`、`authorization_claims` | 承認者、時刻、伝達方法、計画、一度だけ使うための記録 |
+| `contracts` | 固定したコントラクトと `sha256` |
+| `policy_snapshots` | 適用した policy とハッシュ |
+| `runs`、`run_events` | 実行とイベント。連番は DB が採番 |
+| `test_results` | Bridge が実行したテスト |
+| `review_results`、`review_findings`、`review_verdicts` | レビュー、指摘、条件別の判定 |
+| `acceptance_rows`、`acceptance_decisions` | 条件別の結果と Bridge 全体の判定 |
+| `graph_states`、`graph_files`、`graph_definitions`、`graph_references`、`graph_imports` | 解析したファイル、定義、参照、import、最終更新時のコミット |
 
 ### よく使うクエリの例
 
@@ -165,7 +169,7 @@ limit 10;
 ```sql
 select sequence, ac_id, result, verdict, test, evidence
 from acceptance_rows
-where run_id = '2eb9dc50-f49d-4eae-95ed-e503a2fa5531'
+where run_id = '0be8174d-7b4e-4063-908f-199292f759c2'
 order by sequence, ac_id;
 ```
 
@@ -179,7 +183,7 @@ group by project_id
 order by project_id;
 ```
 
-最後の例は、**run の開始時刻**を基準に月を区切り、現時点で記録されている使用量を集計します。provider の請求額を示すものではありません。実行の中断などで使用量の記録が不完全な場合は、結果ファイルの `partial` 表示も確認してください。
+最後の例は**run の開始時刻**で月を分け、記録済みの使用量を集計します。provider の請求とは異なります。使用量を取得できなかった呼び出しがあれば、その役割の表に `N (M unreadable)` と `unknown` を表示し、一部の合計を全体として扱いません。
 
 ### 参照は SQL、変更は Bridge のコマンドで行う
 

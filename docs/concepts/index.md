@@ -4,14 +4,17 @@ Review Bridge runs work orders with two independent AI agents: a **writer** that
 
 This documentation uses a few common terms: a **run** is one execution, a **session** is an agent's working context, a **provider** is the CLI assigned to a role (`claude` or `codex`), and **policy** means the rules Bridge enforces in code.
 
+> For the background, see [Managing delivery and verification responsibilities after adopting AI](https://hackmd.io/@FortesHuang/HJnWgQGJMx) (HackMD, in Chinese).
+
 ## The lifecycle of a run
 
 ```text
 Work order .md
-  → Seal the plan: scope, budget, verification command, breakpoint
+  → Validate the form and copy its blocks into a contract (no model call)
+  → Seal the plan: scope, budget, test command, and stopping point
   → Show the card for your approval
-  → Writer extracts criteria; reviewer checks; Bridge seals the contract
-  → Writer implements (up to rounds); Bridge runs tests after each round
+  → Check the reviewer's read-only restrictions; refresh the project graph
+  → Writer implements, up to rounds iterations; Bridge runs tests after each one
   → Reviewer checks; Bridge decides each acceptance criterion
   → Write the result file
   → You inspect the work and decide whether to commit
@@ -27,34 +30,35 @@ Both `claude` and `codex` can be the writer or reviewer, in all four pairings. S
 
 Each role has its own CLI process and session, even when both use the same provider. Bridge starts the reviewer separately. A check performed by a writer's sub-agent does not count as independent review.
 
-| Access | Used for | Claude Code | Codex |
+| Access | Role | Claude Code | Codex |
 |---|---|---|---|
-| `none` | Contract translation | `--tools "" --strict-mcp-config` | `exec --sandbox read-only` |
-| `read` | Contract check and review | `--permission-mode plan --tools Read,Grep,Glob --disallowedTools Write,Edit,NotebookEdit,Bash,PowerShell --strict-mcp-config --no-session-persistence` | `exec --ephemeral --sandbox read-only` |
-| `write` | Writer | `--permission-mode auto --strict-mcp-config`; adds `--mcp-config .mcp.json` if the project has that file | `app-server`, with thread settings `sandbox: workspace-write` and `approvalPolicy: never` |
+| `read` | reviewer | `--permission-mode plan --tools Read,Grep,Glob --disallowedTools Write,Edit,NotebookEdit,Bash,PowerShell --strict-mcp-config --no-session-persistence`, with `--mcp-config` for Bridge's graph server and servers in `reviewer.mcp_allow` | `exec --ephemeral --sandbox read-only`, with `-c mcp_servers.…` for Bridge's graph server |
+| `write` | writer | `--permission-mode auto --strict-mcp-config`, with `--mcp-config` for Bridge's graph server and the project's `.mcp.json` if present | `app-server`, with thread `sandbox: workspace-write`, `approvalPolicy: never`, and Bridge's graph server |
+
+Bridge's read-only graph server, `review-bridge-graph`, helps locate definitions, references, and code affected by a change. See [The project graph](../guide/start#project-graph).
 
 ## Evidence of read-only access
 
-`start` and `resume` check the reviewer's read-only restrictions before calling models to carry out the work order. The local page service keeps a separate result for each provider in memory. The two checks provide different levels of evidence:
+After you approve `start` or `resume`, Bridge checks the reviewer's read-only restrictions before implementation begins. The check itself calls a model. Its result is cached separately for each provider in the local page service's memory, once per page session. The two providers offer different kinds of evidence:
 
-- **Codex** attempts to write a sentinel file used to test permissions. The operating-system sandbox must deny the write.
-- **Claude Code** must report plan mode in its `init` event, with only `Read`, `Grep`, and `Glob` available. The sentinel file must not exist, and the CLI must finish normally. Any additional tool, including an MCP tool, fails the check and prevents work from starting.
+- **Codex:** attempts to write a sentinel file and verifies that the operating-system sandbox denies it.
+- **Claude Code:** checks that the CLI's `init` event reports plan mode with only `Read`, `Grep`, and `Glob`, that the sentinel file wasn't created, and that the CLI finished normally. Bridge's graph server and policy-approved servers are allowed; any additional tools, including other MCP tools, fail the check and prevent work from starting.
 
 ## Isolating personal connectors
 
-Sessions started by Bridge do not inherit your personal MCP connectors. Every Claude Code call uses `--strict-mcp-config`; only the writer receives the project's `.mcp.json`. If a contract-translation session still lists MCP tools in its `init` event, Bridge stops the run and names the tools that were not isolated.
+Sessions started by Bridge don't inherit your personal MCP connectors. Every Claude Code call uses `--strict-mcp-config` and loads only the servers Bridge specifies. The project's `.mcp.json` goes only to the writer; Bridge's graph server goes to both roles. The reviewer's probe and each review use the same server configuration. Unexpected tools in the probe's `init` event fail the check and prevent work from starting.
 
 Every Codex call uses `--disable apps --disable plugins` and disables each server returned by `codex mcp list`. If the list cannot be read, work does not start.
 
-To allow an MCP server for the reviewer, add its name to the project's `reviewer.mcp_allow` policy. These servers are passed through **without read-only verification**, and the card states that limitation. This permission applies only to reviewer calls, not the writer or contract translation.
+To allow an additional MCP server for the reviewer, add its name to the project policy's `reviewer.mcp_allow`. These servers are passed through **without read-only verification**, and the card states that limitation. This permission applies only to the reviewer, not the writer.
 
 ## Contracts and authorization
 
-- `start` seals the work-order text, scope, budget, and verification command into a plan. When you confirm the card, you authorize that plan and its work-order content.
-- After authorization, Bridge fills contract fields from the work order's marked blocks. The writer turns acceptance blocks into numbered criteria, and the reviewer checks them before Bridge seals the contract. There is no second human approval.
-- Authorization records cannot be changed after creation. Missing, malformed, expired (24 hours), or already-used authorization is rejected.
-- Editing a work order after a run starts does not change what was authorized. Run `start` again to create a new version and a new card.
-- `source_id` is an ID from your own system. Bridge does not use it to decide work-order identity or execution rules. You can use it to find a work order in result files and `logs`.
+- `start` seals the work-order text, scope, budget, and test command into a plan. Your approval covers that plan and its work-order content.
+- The contract is created in code before the card appears. Bridge copies marked blocks unchanged and splits the acceptance list into numbered conditions without a model call. The card's `Contract` line shows its SHA-256: one card, one approval.
+- Authorization records can't be changed after creation. Missing, malformed, expired (24 hours), or consumed authorization blocks execution.
+- Editing a work order after a run starts doesn't change the approved content. Run `start` again to create a new version and authorization card.
+- `source_id` links to your existing issue tracker. It doesn't determine Bridge's work-order identity or execution rules. Use it in result files and `logs` to find the work order.
 
 ## Bridge runs the tests
 
@@ -62,11 +66,11 @@ After each writer round, Bridge runs the project type's test command **outside**
 
 ## Work proof
 
-In a Git project, Bridge records the starting commit, reads file changes from Git at the end, and checks them against its own records. “Files changed” separates changes observed through Git, writer claims that have not been checked against Git, and changes that were already uncommitted at the start. Without Git, the result states that work proof is unavailable.
+For Git projects, Bridge records the starting commit, reads the actual file changes from Git when work ends, and checks them against its records. “Files changed” separates Git changes, the writer's claims that haven't been checked against Git, and uncommitted changes that predate the run. Projects without Git explicitly have no work proof.
 
 ## Project files and runtime data
 
-Bridge is a global tool. Project settings, work orders, and result copies live in `.review-bridge/`, excluded through `.git/info/exclude`. Bridge does not edit `.gitignore`, `AGENTS.md`, `CLAUDE.md`, `.claude/`, or your existing skills. Agent entry points are installed at the user level and shared across projects. Runtime records live in the operating system's data and log directories.
+Bridge keeps project files separate from runtime records. Settings, work orders, and result copies live in `.review-bridge/`, whose own `.gitignore` contains `*`. Its contents stay out of Git. Bridge doesn't edit the project's `.gitignore`, `AGENTS.md`, `CLAUDE.md`, `.claude/`, or existing skills. Agent entry points are installed at the user level for all projects; runtime records live in OS data and log directories.
 
 ## Security model
 

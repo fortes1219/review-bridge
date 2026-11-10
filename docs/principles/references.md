@@ -22,7 +22,7 @@ The following table collects the precedents for individual design decisions.
 | Design | Reference | How Bridge uses it |
 |---|---|---|
 | Markdown work orders with YAML frontmatter | Astro content collections | From the first `---` line to the next; all fields optional, unknown fields rejected. |
-| Required work-order fields | Jira required issue fields | Title, requested work, and acceptance criteria; bug reports also include environment, steps, actual and expected results, and frequency. |
+| Required work-order content | Jira required issue fields | Work instructions and acceptance criteria are required; the title is optional. Bugs also describe environment, steps, actual and expected results, and frequency |
 | Apply a saved plan, excluding later configuration edits | Terraform `plan -out` → `apply` | The start card and human approval; `upgrade --plan-out` → `--plan --approve <sha>`. |
 | Restart an edited work order and stop the superseded run | GitHub Actions `concurrency` + `cancel-in-progress` | Superseded versions follow the stop path. The new run sets `superseded_by`. |
 | A time limit per run | GitHub Actions job `timeout-minutes` | `budget.run_timeout`; closes as `timed_out` on expiration. |
@@ -30,15 +30,21 @@ The following table collects the precedents for individual design decisions.
 | Replay after disconnection, rejecting mismatches | Kafka idempotent producer | Temporarily number local events from the last known sequence plus one; the database checks them on replay. |
 | No second authoritative state in the worker | GitHub Actions, Prefect, Inngest | The database is the source of truth. |
 | A result folder per work order | Playwright `test-results/<test>/` | `.review-bridge/results/<work-order>/`; one file per run, never overwritten. |
-| A single place to start and stop services | `docker compose down` / `up`, `brew services` | `review-bridge down` / `up`. |
+| Service lifecycle | `docker compose down`/`up`, `brew services` | `npx review-bridge up` starts the database, then the page; `down` reverses it and refuses while work is active |
 | Handling orphaned database processes | zonky embedded-postgres `cleanOldDataDirectories` | Try `pg_ctl stop -m fast`, then retry; handle only processes belonging to this data directory. |
 | Leave unrecognized files untouched | Git checkout’s treatment of untracked files | `upgrade` refuses a migration only when a destination file has the same name and different content, and lists it. |
 | Ask before writing `.vscode/` | `npm create vue@latest` | The final init question. |
-| Preserve other tasks.json content and comments | VS Code’s `jsonc-parser` | `review-bridge vscode` and `uninstall`. |
+| Preserve unrelated `tasks.json` content and comments | VS Code's `jsonc-parser` | `npx review-bridge vscode` and `uninstall` |
 | User-level agent entry points | Claude Code `~/.claude/commands/`, Codex `~/.agents/skills/` (`ext/skills/src/host_roots.rs`) | `/review-bridge` and `$review-bridge`. |
 | Session read-only and isolation options | Claude Code `--permission-mode plan`, `--tools`, `--strict-mcp-config`; Codex `exec --sandbox read-only`, `--disable apps --disable plugins`, `mcp_servers.<name>.enabled` | Reviewer read-only checks and connector isolation. |
 | Logs in OS-standard directories with rotation | `env-paths` data/log conventions | `%LOCALAPPDATA%\ReviewBridge`, `~/Library/Logs/ReviewBridge`, `$XDG_STATE_HOME/review-bridge`. |
-| Database backups | PostgreSQL file-level backup | `review-bridge backup`: stop, copy the whole directory, restart. |
+| Database backups | PostgreSQL file-level backup | `npx review-bridge backup`: stop, copy the full directory, restart |
+| A tool's own directory-local `.gitignore` containing `*` | pytest `.pytest_cache`, ruff `.ruff_cache`, uv `.venv` | `.review-bridge/.gitignore`, without editing the project's ignore rules |
+| Match next-step commands to the launching package manager | create-vite's `npm_config_user_agent` (`pkgFromUserAgent`) | `npx`, `pnpm dlx`, `yarn dlx`, `bun x`, `deno run -A npm:` |
+| Identity in frontmatter `id` | Docusaurus and Astro document IDs; Jira issue IDs shown on issues | Write the ID on first approval; preserve identity through renames and moves |
+| Determine whether two paths are the same file | `find -samefile`, coreutils `test -ef` (device and inode) | Hard links are one work order; reject filesystems without file IDs |
+| Split lists into items | markdown-it list rules, also used by VitePress | Each acceptance-list item is one condition; `一、` and `（1）` aren't list markers |
+| Database status exit code | `pg_ctl status` exit code 4 | `status` returns 4 if it can't read the database directory |
 
 Considered but **not adopted**: adding marked blocks to user rc files, as conda, pnpm, and nvm do; and Node's built-in SQLite. Bridge uses its own separate files and PostgreSQL instead.
 

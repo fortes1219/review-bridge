@@ -1,0 +1,372 @@
+{
+  "schema": "review-bridge.contract",
+  "schema_version": 4,
+  "work_package_id": "checkout-discount",
+  "source": {
+    "path": ".review-bridge/work-packages/checkout-discount.md",
+    "sha256": "88f51ab868576bd8c586e727aff00299ad928593687d57fdbb2a9c5ceb95a6b9",
+    "lines": [
+      "---",
+      "priority: high",
+      "writer: { effort: high }",
+      "reviewer: { effort: medium }",
+      "budget:",
+      "  rounds: 2",
+      "  run_timeout: 7200000",
+      "source_id: SHOP-412",
+      "---",
+      "# クーポン適用後にチェックアウトの合計が更新されない",
+      "",
+      "<!-- bridge:context -->",
+      "## 背景と現状",
+      "CheckoutSummary でクーポンを入力し、API が 200 を返しても合計が元の価格のまま。サポートには今週 14 件の報告があった。クーポン API は 2026-10 にレスポンスを変更し、以前の `total` から `subtotal`、`discount`、`total` の 3 フィールドになった。",
+      "",
+      "<!-- bridge:outcome -->",
+      "## 期待する成果",
+      "有効なクーポンの入力後 1 秒以内に割引後の合計を表示する。無効なら合計を変更せず、エラーメッセージを表示する。",
+      "",
+      "<!-- bridge:requested_work -->",
+      "## 作業内容",
+      "1. CheckoutSummary のクーポン適用後の計算を修正し、API の新しい `total` を使う。",
+      "2. 無効なクーポンでは API のエラーメッセージを表示し、合計は元のままにする。",
+      "3. 両方のケースにユニットテストを追加する。",
+      "",
+      "<!-- bridge:run_plan -->",
+      "## 実行計画",
+      "### RUN A",
+      "合計計算と有効なクーポンの表示を修正する。",
+      "- effort: high",
+      "- acceptance:",
+      "  - 有効なクーポン適用後の合計が API の total と一致する。",
+      "",
+      "### RUN B",
+      "無効なクーポンのエラーを表示する。",
+      "- depends_on: RUN A",
+      "- budget: { rounds: 1 }",
+      "- acceptance:",
+      "  - 無効なクーポンではエラーを表示し、合計は変わらない。",
+      "",
+      "<!-- bridge:scope_notes.include -->",
+      "## 対象に含める",
+      "- チェックアウトのクーポン入力と合計の部分",
+      "- この 2 ケースのユニットテスト",
+      "",
+      "<!-- bridge:scope_notes.exclude -->",
+      "## 対象外",
+      "- クーポン API 本体（バックエンドの別チケット）",
+      "- カートページの小計",
+      "",
+      "<!-- bridge:scope_notes.must_keep -->",
+      "## 維持するもの",
+      "- クーポンがない場合の計算は変えない",
+      "- 既存のチェックアウトのテストはすべて成功する",
+      "- API のパスやパラメーターを変更しない",
+      "",
+      "<!-- bridge:scope_notes.expected_locations -->",
+      "## 変更が予想される場所（参考であり、編集の許可ではない）",
+      "- src/components/checkout/CheckoutSummary.vue",
+      "- src/composables/useDiscount.ts",
+      "- tests/unit/checkout/",
+      "",
+      "<!-- bridge:acceptance -->",
+      "## 完了条件",
+      "1. 有効なクーポン入力後 1 秒以内に割引後の合計を表示し、API の `total` と一致する。",
+      "2. 無効なクーポンでは合計を変えず、API のエラーメッセージを表示する。",
+      "3. `npm test` がすべて成功する。追加した 2 テストは修正前に失敗し、修正後に成功する。",
+      "",
+      "<!-- bridge:verification_hints -->",
+      "## 検証のヒント",
+      "- テストデータ：`WELCOME10`（有効、10% 引き）、`EXPIRED`（無効、API は 422 と「クーポンの有効期限が切れています」を返す）。",
+      "- 既存テスト：`tests/unit/checkout/CheckoutSummary.spec.ts`。",
+      "",
+      "<!-- bridge:reproduction.environment -->",
+      "## バグ：環境",
+      "Chrome 130、Windows 11、フロントエンド v2.14.0、テスト環境。",
+      "",
+      "<!-- bridge:reproduction.steps -->",
+      "## バグ：再現手順",
+      "1. 価格 1000 の商品を 1 つカートに入れ、チェックアウトに進む。",
+      "2. `WELCOME10` を入力して適用する。",
+      "3. 合計を確認する。",
+      "",
+      "<!-- bridge:reproduction.actual -->",
+      "## バグ：実際の結果",
+      "API は 200 を返すが、合計は 1000 のまま。",
+      "",
+      "<!-- bridge:reproduction.expected -->",
+      "## バグ：期待する結果",
+      "合計が 900 と表示される。",
+      "",
+      "<!-- bridge:reproduction.frequency -->",
+      "## バグ：頻度と影響",
+      "毎回発生。クーポンを使うすべてのチェックアウトが対象。",
+      "",
+      "<!-- bridge:references -->",
+      "## 参考資料・添付・依存関係",
+      "- クーポン API の文書：docs/api/discount.md",
+      "- 関連チケット：SHOP-398（API の形式変更）",
+      "",
+      "<!-- bridge:open_questions -->",
+      "## 未決の質問",
+      "none"
+    ]
+  },
+  "ticket": {
+    "title": {
+      "text": "クーポン適用後にチェックアウトの合計が更新されない",
+      "source_refs": [
+        {
+          "start": 10,
+          "end": 10
+        }
+      ]
+    },
+    "source_id": {
+      "text": "SHOP-412",
+      "source_refs": [
+        {
+          "start": 8,
+          "end": 8
+        }
+      ]
+    },
+    "priority": "high",
+    "effort": "high",
+    "budget": {
+      "rounds": 2,
+      "run_timeout": 7200000
+    }
+  },
+  "context": {
+    "text": "CheckoutSummary でクーポンを入力し、API が 200 を返しても合計が元の価格のまま。サポートには今週 14 件の報告があった。クーポン API は 2026-10 にレスポンスを変更し、以前の `total` から `subtotal`、`discount`、`total` の 3 フィールドになった。",
+    "source_refs": [
+      {
+        "start": 14,
+        "end": 14
+      }
+    ]
+  },
+  "outcome": {
+    "text": "有効なクーポンの入力後 1 秒以内に割引後の合計を表示する。無効なら合計を変更せず、エラーメッセージを表示する。",
+    "source_refs": [
+      {
+        "start": 18,
+        "end": 18
+      }
+    ]
+  },
+  "requested_work": {
+    "text": "1. CheckoutSummary のクーポン適用後の計算を修正し、API の新しい `total` を使う。\n2. 無効なクーポンでは API のエラーメッセージを表示し、合計は元のままにする。\n3. 両方のケースにユニットテストを追加する。",
+    "source_refs": [
+      {
+        "start": 22,
+        "end": 24
+      }
+    ]
+  },
+  "scope_notes": {
+    "include": {
+      "text": "- チェックアウトのクーポン入力と合計の部分\n- この 2 ケースのユニットテスト",
+      "source_refs": [
+        {
+          "start": 43,
+          "end": 44
+        }
+      ]
+    },
+    "exclude": {
+      "text": "- クーポン API 本体（バックエンドの別チケット）\n- カートページの小計",
+      "source_refs": [
+        {
+          "start": 48,
+          "end": 49
+        }
+      ]
+    },
+    "must_keep": {
+      "text": "- クーポンがない場合の計算は変えない\n- 既存のチェックアウトのテストはすべて成功する\n- API のパスやパラメーターを変更しない",
+      "source_refs": [
+        {
+          "start": 53,
+          "end": 55
+        }
+      ]
+    },
+    "expected_locations": {
+      "text": "- src/components/checkout/CheckoutSummary.vue\n- src/composables/useDiscount.ts\n- tests/unit/checkout/",
+      "source_refs": [
+        {
+          "start": 59,
+          "end": 61
+        }
+      ]
+    }
+  },
+  "run_plan": {
+    "runs": [
+      {
+        "name": "RUN A",
+        "text": "合計計算と有効なクーポンの表示を修正する。",
+        "depends_on": [],
+        "depends_on_quote": null,
+        "source_refs": [
+          {
+            "start": 29,
+            "end": 29
+          }
+        ],
+        "effort": "high",
+        "budget": null
+      },
+      {
+        "name": "RUN B",
+        "text": "無効なクーポンのエラーを表示する。",
+        "depends_on": [
+          "RUN A"
+        ],
+        "depends_on_quote": "- depends_on: RUN A",
+        "source_refs": [
+          {
+            "start": 35,
+            "end": 35
+          }
+        ],
+        "effort": null,
+        "budget": {
+          "rounds": 1
+        }
+      }
+    ]
+  },
+  "acceptance": [
+    {
+      "id": "AC1",
+      "statement": "有効なクーポン入力後 1 秒以内に割引後の合計を表示し、API の `total` と一致する。",
+      "source_refs": [
+        {
+          "start": 65,
+          "end": 65
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC2",
+      "statement": "無効なクーポンでは合計を変えず、API のエラーメッセージを表示する。",
+      "source_refs": [
+        {
+          "start": 66,
+          "end": 66
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC3",
+      "statement": "`npm test` がすべて成功する。追加した 2 テストは修正前に失敗し、修正後に成功する。",
+      "source_refs": [
+        {
+          "start": 67,
+          "end": 67
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC4",
+      "statement": "有効なクーポン適用後の合計が API の total と一致する。",
+      "source_refs": [
+        {
+          "start": 32,
+          "end": 32
+        }
+      ],
+      "run_refs": [
+        "RUN A"
+      ]
+    },
+    {
+      "id": "AC5",
+      "statement": "無効なクーポンではエラーを表示し、合計は変わらない。",
+      "source_refs": [
+        {
+          "start": 39,
+          "end": 39
+        }
+      ],
+      "run_refs": [
+        "RUN B"
+      ]
+    }
+  ],
+  "verification_hints": [
+    {
+      "text": "- テストデータ：`WELCOME10`（有効、10% 引き）、`EXPIRED`（無効、API は 422 と「クーポンの有効期限が切れています」を返す）。\n- 既存テスト：`tests/unit/checkout/CheckoutSummary.spec.ts`。",
+      "source_refs": [
+        {
+          "start": 71,
+          "end": 72
+        }
+      ]
+    }
+  ],
+  "reproduction": {
+    "environment": {
+      "text": "Chrome 130、Windows 11、フロントエンド v2.14.0、テスト環境。",
+      "source_refs": [
+        {
+          "start": 76,
+          "end": 76
+        }
+      ]
+    },
+    "steps": {
+      "text": "1. 価格 1000 の商品を 1 つカートに入れ、チェックアウトに進む。\n2. `WELCOME10` を入力して適用する。\n3. 合計を確認する。",
+      "source_refs": [
+        {
+          "start": 80,
+          "end": 82
+        }
+      ]
+    },
+    "actual": {
+      "text": "API は 200 を返すが、合計は 1000 のまま。",
+      "source_refs": [
+        {
+          "start": 86,
+          "end": 86
+        }
+      ]
+    },
+    "expected": {
+      "text": "合計が 900 と表示される。",
+      "source_refs": [
+        {
+          "start": 90,
+          "end": 90
+        }
+      ]
+    },
+    "frequency": {
+      "text": "毎回発生。クーポンを使うすべてのチェックアウトが対象。",
+      "source_refs": [
+        {
+          "start": 94,
+          "end": 94
+        }
+      ]
+    }
+  },
+  "references": [
+    {
+      "text": "- クーポン API の文書：docs/api/discount.md\n- 関連チケット：SHOP-398（API の形式変更）",
+      "source_refs": [
+        {
+          "start": 98,
+          "end": 99
+        }
+      ]
+    }
+  ],
+  "unused_lines": []
+}

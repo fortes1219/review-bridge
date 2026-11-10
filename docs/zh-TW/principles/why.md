@@ -4,11 +4,11 @@
 
 > 這一頁的前提寫在這篇：[AI 導入後，工程團隊真正要管理的是交付鏈路與驗證責任](https://hackmd.io/@FortesHuang/HJnWgQGJMx)（HackMD）——AI 加快的是產出，沒有拿走驗證的責任；團隊要管的是驗證的量能，不只是產出的速度。
 
-## 先確認計畫，再產生合約
+## 合約由程式抄出，確認一次就開工
 
 **問題**：工單若有歧義，模型可能自行推定需求，直到完成後才發現理解有誤。若未保留授權依據，事後也難以查明由誰核准、核准了哪些內容。
 
-**做法**：`start` 先將工單、範圍、預算與驗證指令封存成計畫，再顯示授權卡片。確認僅適用於卡片上的原文與 SHA-256，之後修改檔案不會變更已授權內容。授權記錄在資料庫中，建立後不可變更；若授權缺失、損壞、過期（24 小時）或已使用，一律拒絕執行。授權後，writer 先將工單轉成合約，再由 reviewer 核對；若有歧義，便停止並交回人工決定。
+**做法**：`start` 先將工單、範圍、預算與驗證指令封存成計畫，再顯示授權卡片。確認僅適用於卡片上的原文與 SHA-256，之後修改檔案不會變更已授權內容。授權記錄在資料庫中，建立後不可變更；若授權缺失、損壞、過期（24 小時）或已使用，一律拒絕執行。合約在卡片之前由程式產生：照工單區塊原文抄錄，驗收清單的每一項切成一條條件，不呼叫模型，卡片上的合約 SHA-256 就是你確認的內容。工單缺必填內容、驗收清單有不是清單項目的行、或還有待決問題時，`start` 在卡片前停下，逐項指出；writer 做工途中判斷需要人決定時，會停下並把問題寫進結果檔。
 
 **參考依據**：Terraform 的 `plan -out` → `apply <plan>` 流程，僅套用儲存的計畫，不採用計畫產生後的設定修改。Bridge 的 `upgrade --plan-out` → `--plan --approve <sha>` 採用相同模式。以雜湊綁定內容的方式，則參考 Git 的 commit 與 tag。
 
@@ -20,7 +20,7 @@
 
 **做法**：Bridge 會為 reviewer 啟動獨立工作階段，並使用 CLI 提供的唯讀設定：Codex 使用 `exec --sandbox read-only`；Claude Code 使用 `--permission-mode plan --tools Read,Grep,Glob` 與 `--disallowedTools`。
 
-執行前，Codex 會嘗試寫入哨兵檔，確認作業系統沙箱阻擋寫入；Claude Code 則檢查 `init` 事件中的工具清單，確認只有三項讀取工具，且哨兵檔未建立。檢查未通過便不執行。兩種檢查的證據強度不同，文件會分別說明。
+執行前，Codex 會嘗試寫入哨兵檔，確認作業系統沙箱阻擋寫入；Claude Code 則檢查 `init` 事件中的工具清單，確認除了三項讀取工具，只有 Bridge 的 graph 伺服器與 policy 放行的伺服器，且哨兵檔未建立。檢查未通過便不執行。兩種檢查的證據強度不同，文件會分別說明。
 
 **參考依據**：參考 CI 使用唯讀 token 執行 PR 檢查的方式，以 CLI 輸出與作業系統沙箱提供的證據確認限制。
 
@@ -62,25 +62,25 @@
 
 **問題**：Bridge 是全域工具，應避免擅自修改專案既有的 `.gitignore`、`AGENTS.md`、`CLAUDE.md`、`.claude/`，也不應讓執行紀錄混入專案內容。
 
-**做法**：設定、工單與結果副本放在專案的 `.review-bridge/`，透過 `.git/info/exclude` 排除 Git 追蹤。代理入口安裝在使用者層級的 Bridge 專用檔案（`~/.claude/commands/review-bridge.md`、`~/.agents/skills/review-bridge/SKILL.md`），供所有專案共用，並由 `uninstall` 管理移除。執行狀態與日誌存放於作業系統的資料與日誌目錄。
+**做法**：設定、工單與結果副本放在專案的 `.review-bridge/`，資料夾裡放一個只有 `*` 的 `.gitignore`，整個資料夾不進 Git，之後才 `git init` 也一樣。代理入口安裝在使用者層級的 Bridge 專用檔案（`~/.claude/commands/review-bridge.md`、`~/.agents/skills/review-bridge/SKILL.md`），供所有專案共用，並由 `uninstall` 管理移除。執行狀態與日誌存放於作業系統的資料與日誌目錄。
 
 另可選擇寫入 `.vscode/tasks.json`，預設不寫入，須先詢問使用者。
 
-**參考依據**：目錄配置參考 `env-paths` 的 data／log 慣例；寫入 `.vscode/` 前的詢問方式參考 create-vue；修改 `tasks.json` 則使用 VS Code 的 `jsonc-parser` 保留註解。
+**參考依據**：目錄配置參考 `env-paths` 的 data／log 慣例；資料夾自帶只有 `*` 的 `.gitignore`，和 pytest 的 `.pytest_cache`、ruff 的 `.ruff_cache`、uv 的 `.venv` 相同；寫入 `.vscode/` 前的詢問方式參考 create-vue；修改 `tasks.json` 則使用 VS Code 的 `jsonc-parser` 保留註解。
 
 **設計邊界**：除上述可選的 VS Code 整合外，不修改使用者既有檔案，也不在 `AGENTS.md` 追加標記區塊。曾評估 conda／pnpm／nvm 的標記區塊方式，但未採用。使用者自行建立的 skills 也不修改。
 
 ## 隔離個人連接器
 
-**問題**：使用者在 Claude 或 Codex 設定的 MCP 連接器，可能被工作階段繼承，例如 Drive、資料庫或 `node_repl`。若合約翻譯工作階段因此取得刪檔工具，就會超出所需權限。
+**問題**：使用者在 Claude 或 Codex 設定的 MCP 連接器，可能被工作階段繼承，例如 Drive、資料庫或 `node_repl`。若 reviewer 的工作階段因此取得刪檔工具，就會超出所需權限。
 
-**做法**：Claude Code 每次呼叫都使用 `--strict-mcp-config`，專案的 `.mcp.json` 僅提供給 writer。若合約翻譯工作階段的 `init` 事件仍列出 MCP 工具，Bridge 會停止執行。
+**做法**：Claude Code 每次呼叫都使用 `--strict-mcp-config`，只載入 Bridge 指定的伺服器：專案的 `.mcp.json` 僅提供給 writer，Bridge 自己的唯讀 graph 伺服器提供給兩個角色。reviewer 唯讀檢查的 `init` 事件出現其他工具時，檢查失敗，工作不開始。
 
 Codex 每次呼叫都使用 `--disable apps --disable plugins`，並逐一停用 `codex mcp list` 列出的伺服器；清單無法讀取時，便不開始執行。要讓 reviewer 使用特定伺服器，須將其名稱加入 policy 的 `reviewer.mcp_allow`。這些伺服器未經唯讀驗證，卡片會明確標示。
 
 **參考依據**：使用兩種 CLI 既有的隔離選項，並在每次呼叫時明確套用。
 
-**設計邊界**：不另行實作 MCP 代理層，預設也不放行任何伺服器。
+**設計邊界**：不另行實作 MCP 代理層；除了 Bridge 自己的 graph 伺服器，預設不放行任何伺服器。
 
 ## 以程式規則限制執行
 
@@ -102,4 +102,4 @@ Codex 每次呼叫都使用 `--disable apps --disable plugins`，並逐一停用
 
 **參考依據**：資料庫遷移工具記錄各步驟、僅執行尚未完成的遷移；服務管理則參考 `docker compose down`／`up` 與 `brew services` 的停止、啟動流程。
 
-**設計邊界**：不保留 rc2 的舊目錄配置，也不加入需要額外常駐程序的閒置自動關閉機制。
+**設計邊界**：不保留舊版的目錄配置，也不加入需要額外常駐程序的閒置自動關閉機制。

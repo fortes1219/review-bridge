@@ -4,23 +4,23 @@
 
 ## `.review-bridge/bridge.json`
 
-`init` が生成する設定は次のとおりです。
+rc3 の `init` が作成する設定例です。`package.json` はあり、`test` script はないプロジェクトを想定しています。
 
 ```json
 {
   "schema_version": 4,
-  "project_id": "64c4a2f2-7c52-4f70-859f-a94c24008089",
-  "profile_id": null,
+  "project_id": "bdbe7d5a-c1de-4d00-ad6e-59ed13cf8d0f",
+  "profile_id": "node-backend",
   "roles": {
     "writer": { "provider_id": "claude" },
     "reviewer": { "provider_id": "codex" },
     "reviewer_readonly_required": true
   },
   "requires_human_authorization": true,
-  "watch": { "port": 8080, "strict_port": false },
+  "watch": { "port": 53559, "strict_port": false },
   "retention": { "days": 15 },
   "locale": "en",
-  "test": { "profile_id": null, "rules": [] },
+  "test": { "profile_id": "node-backend", "rules": [{ "command": "npm test", "package_script": "test" }] },
   "readiness": { "reviewer_readonly_proven": "not_run" },
   "default_policy_ref": "review-bridge/config/default-policy.json",
   "project_override_ref": ".review-bridge/policy.override.json",
@@ -30,12 +30,13 @@
 
 | フィールド | 説明 |
 |---|---|
-| `project_id` | data home とログディレクトリでプロジェクトを識別する ID。変更しないでください。 |
-| `roles.writer` / `roles.reviewer` | 各役割に `claude` または `codex` を割り当てます。変更は次の `start` で有効になり、カードに表示されます。 |
-| `roles.reviewer_readonly_required`、`requires_human_authorization`、`readiness` | 保護対象です。`init` は順に `true`、`true`、`"not_run"` を書き込みます。`init` と `upgrade` は変更を検出すると停止します。安全制限を解除するスイッチではありません。 |
-| `watch.port` | ローカルページのポート。`strict_port` が `false` で使用中の場合は、次の空きポートを順に探します。 |
-| `retention.days` | 実行ログと終了済み記録の保存日数。`clean` が整理に使います。 |
-| `test.profile_id` / `test.rules` | プロジェクト種別と検証コマンド。下の profiles 表を参照してください。 |
+| `project_id` | データ・ログディレクトリ内の識別子。変更しないでください |
+| `roles.writer` / `roles.reviewer` | 各役割の `claude` または `codex`。変更は次の `start` から適用し、カードに表示 |
+| `roles.reviewer_readonly_required`、`requires_human_authorization`、`readiness` | 保護項目。`init` は順に `true`、`true`、`"not_run"` を設定。初期化と更新時に確認し、変更されていれば停止。安全制限の解除には使えません |
+| `watch.port` | ページのポート。`strict_port: false` なら使用中の番号より上の空きを探索 |
+| `retention.days` | `clean` が適用するログ・終了済み記録の保持日数 |
+| `locale` | カード、`status`、`up`、`down`、`ps`、`init`、結果の言語。`en` または `zh-TW`。`init` がシステム言語から設定 |
+| `test.profile_id` / `test.rules` | プロジェクトの種類とテストコマンド。下の profiles 表を参照 |
 
 ## `.review-bridge/policy.override.json`
 
@@ -97,7 +98,7 @@
 
 `init` の 3 番目の設定で選択します。writer の各ラウンド後に Bridge が使う検証コマンドを決めます。
 
-| `profile_id` | 検出対象 | 検証コマンド |
+| `profile_id` | 検出対象 | テストコマンド |
 |---|---|---|
 | `vue-frontend` | Vue・TypeScript フロントエンド | `npm test` |
 | `node-backend` | Node.js バックエンド | `npm test` |
@@ -107,7 +108,7 @@
 | `java-backend` | Java | `mvnw`／`mvn test`、`gradlew`／`gradle test` |
 | `dotnet-backend` | .NET・C# | `dotnet test` |
 | `php-laravel` | PHP Laravel | `php artisan test` |
-| `none` | — | テストは実行せず、カードと結果に `tests: not configured` と表示。 |
+| `none` | — | テストなし。カードと結果に未設定と明記 |
 
 ## 環境変数
 
