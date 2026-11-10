@@ -1,10 +1,13 @@
 name: CI
 
 # Pushes to master and pull requests, as Vite's CI lists its branches under on.push.branches; a pushed
-# tag runs only publish.yml.
+# tag runs only publish.yml. dev/ci-test is where a change is tried on both systems before it goes to
+# master.
 on:
   push:
-    branches: [master]
+    branches:
+      - master
+      - dev/ci-test
   pull_request:
 
 permissions:
@@ -54,13 +57,27 @@ jobs:
       - run: npm ci
       - run: node scripts/render-commands.mjs --check
 
+  # The installer's tests and the runtime's tests each have a runner of their own and run side by side,
+  # as Vitest's CI splits its suites onto their own runners "so they run in parallel ... instead of
+  # sequentially on a single machine". One after the other in one job they took 18 minutes on
+  # windows-latest (installer 570 s, then runtime 463 s) and 6.5 on ubuntu-latest (2026-11-10, 89fd5ca).
+  # Every test file still runs on both systems. Neither suite is sharded: the installer's time on
+  # Windows is its longest file's (tests/product-init.test.mjs, 514 s; a file's tests run one at a
+  # time), which more runners do not shorten.
   test:
     needs: changed
     if: needs.changed.outputs.should_skip != 'true'
+    name: "Test: ${{ matrix.suite }}, ${{ matrix.os }}"
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        suite: [installer, runtime]
+        include:
+          - suite: installer
+            files: "tests/*.test.mjs" # the files `npm test` runs
+          - suite: runtime
+            files: "review-bridge/tests/*.test.mjs"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +86,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
-      - name: Runtime tests
-        run: node --test "review-bridge/tests/*.test.mjs"
+      # The suite's files are a fixed value of the matrix above.
+      - name: Tests
+        run: node --test "${{ matrix.files }}"
