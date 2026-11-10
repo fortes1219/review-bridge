@@ -153,3 +153,40 @@ claim that nothing else is wrong.
 - **residual_risk:** reading the collector's file too early is unchanged, so a port taken between the probe
   and the bind outside the tests (another program) still fails instead of moving to the next port. The
   message says where the server's log is.
+
+## RB-GATE-2026-007 — a run lock read before its holder wrote it failed the delivery with a parse error
+
+- **affected_gate:** Records (run lock)
+- **symptom:** GitHub Actions `ubuntu-latest` at `89fd5ca`, `review-bridge/tests/result-file.test.mjs:206`
+  "S1d three concurrent deliveries …" failed with `SyntaxError: Unexpected end of JSON input`, the only
+  failure of 537; `windows-latest` passed the same commit.
+- **expected_vs_actual:** expected all three deliveries to return, one result file and one `run_delivered`
+  event; actually one delivery threw the parse error and the test failed.
+- **reproduction:** not on demand in CI; the moment is fixed by a test instead: an empty or half-written file
+  at `run-locks/<run_id>.json`, then `acquireRunLock`. Stack in CI: `JSON.parse` ← `parseJson`
+  (`fileStore.mjs:17`) ← `readJson` ← `readOptional` (`runStore.mjs:140`) ← `acquireRunLock`
+  (`runStore.mjs:270`) ← `withRunLock` ← `deliverRun` ← `deliverOutcome` (`delivery.mjs:686`).
+- **root_cause:** the holder creates the lock file exclusively and writes it after (`fileStore.mjs:60-62`), so
+  it exists empty for a moment. A second taker whose create fails with `EEXIST` read it in that moment; the
+  reader took only a missing file as "no lock", so the parse error went up, and delivery retries only errors
+  that read as a held lock. The reconcile guard is created and read the same way.
+- **fix:** the commit that adds this entry — a lock or guard file with no readable content (empty, cut off,
+  or content that is not a record, such as `null`) is held, as PostgreSQL's `CreateLockFile` reads an empty lock file as one being written or left by a crash
+  (`miscinit.c:1270-1275,1311-1316`); its age is its modification time, as proper-lockfile judges a lock
+  with no content (`lib/lockfile.js:51-85`): a run lock older than `lock_stale` goes through the existing
+  takeover (guard, wait, read again, move aside), a guard older than `reconcile_guard_ttl` is moved aside.
+  The holder still writes the file the same way.
+- **regression_test:** `review-bridge/tests/run-closing.test.mjs` "a run lock whose file is complete with a
+  fresh heartbeat is held", "a run lock file that is empty or half written is held, not a parse error", "an
+  empty run lock file older than lock_stale is taken over; a younger one is not", "an empty run lock written
+  during the takeover's wait is not taken over", "an empty reconcile guard is a reconciliation in progress", "an empty reconcile guard older than reconcile_guard_ttl is taken over,
+  and the stale run lock with it"; `review-bridge/tests/result-file.test.mjs` "S1g a delivery that meets an
+  empty run lock file retries, and delivers once it is gone".
+- **mutation_case:** `RB-M-run-lock-unwritten-parse-error`, `RB-M-run-lock-unwritten-taken-at-once`,
+  `RB-M-run-lock-unwritten-never-stale`, `RB-M-reconcile-guard-unwritten-parse-error`,
+  `RB-M-lock-mark-ignores-unwritten-change` (killed).
+- **residual_risk:** a holder that stalls between creating the file and writing it for longer than
+  `lock_stale` (30 s) loses the lock to a taker, as with proper-lockfile's stale time; any unreadable
+  content, not only an empty or cut-off one, is read the same way. "Run reconciliation is already in
+  progress." is not among the errors delivery retries, so a delivery that meets a live guard still fails
+  as before this fix.

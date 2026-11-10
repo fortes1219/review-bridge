@@ -10,7 +10,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { writeJson } from "../service/records/fileStore.mjs";
-import { consumeRun, createRunRuntimeState, readRun, recordRunState, RunEndedError, stopRunRecord } from "../service/records/runStore.mjs";
+import { acquireRunLock, consumeRun, createRunRuntimeState, readRun, recordRunState, RunEndedError, stopRunRecord } from "../service/records/runStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import { authorizeWorkPackage, cancelWorkPackage, createWorkPackagePlan } from "../features/workOrder/workPackage.mjs";
 import { callStamp, workLockFile } from "../features/workOrder/processRecords.mjs";
@@ -237,4 +237,89 @@ test("two runs' calls in the same millisecond never share a file name", () => {
   const second = callStamp("5e6f7a8b-0000-4000-8000-000000000000");
   assert.match(first, /^\d{8}T\d{9}Z-r1a2b3c4d$/);
   assert.notEqual(first.slice(-9), second.slice(-9));
+});
+
+// RC3.1-LOCK-01: a run lock is created empty and written after, so a second taker can read it in
+// between (CI, ubuntu, result-file "three concurrent deliveries": Unexpected end of JSON input). The
+// tests fix that moment by placing an empty or half-written lock file; none depends on timing.
+const limits = JSON.parse(await fsp.readFile(path.join(bridgeRoot, "config", "default-policy.json"), "utf8")).limits;
+const lockPolicy = { limits };
+
+async function lockFixture(t) {
+  const paths = await project(t);
+  const runId = randomUUID();
+  await fsp.mkdir(paths.runLocksDir, { recursive: true });
+  return { paths, runId, file: path.join(paths.runLocksDir, runId + ".json"), guard: path.join(paths.reconcileGuardsDir, runId + ".json") };
+}
+
+async function placeAt(file, text, modifiedAt) {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  await fsp.writeFile(file, text);
+  await fsp.utimes(file, new Date(modifiedAt), new Date(modifiedAt));
+}
+
+const HALF_LOCK = "{\n  \"schema_version\": 4,\n  \"run_id\": \"";
+
+test("a run lock whose file is complete with a fresh heartbeat is held", async (t) => {
+  const { paths, runId, file } = await lockFixture(t);
+  const now = Date.now();
+  await writeJson(file, { schema_version: 4, run_id: runId, lock_nonce: "holder", pid: process.pid, acquired_at: new Date(now).toISOString(), heartbeat_at: new Date(now).toISOString() });
+  await assert.rejects(acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => {} }), /Run lock is already held\./);
+});
+
+test("a run lock file that is empty or half written is held, not a parse error", async (t) => {
+  const { paths, runId, file } = await lockFixture(t);
+  const now = Date.now();
+  for (const text of ["", HALF_LOCK, "null"]) {
+    await placeAt(file, text, now - 1_000);
+    await assert.rejects(acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => {} }), /Run lock is already held\./);
+    assert.equal(await fsp.readFile(file, "utf8"), text);
+  }
+});
+
+test("an empty run lock file older than lock_stale is taken over; a younger one is not", async (t) => {
+  const { paths, runId, file } = await lockFixture(t);
+  const now = Date.now();
+  await placeAt(file, "", now - limits.lock_stale + 1_000);
+  await assert.rejects(acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => {} }), /Run lock is already held\./);
+  await placeAt(file, "", now - limits.lock_stale - 1_000);
+  const lease = await acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => {} });
+  await lease.assertOwner();
+  assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).lock_nonce, lease.lock_nonce);
+  await lease.release();
+});
+
+test("an empty run lock written during the takeover's wait is not taken over", async (t) => {
+  const { paths, runId, file } = await lockFixture(t);
+  const now = Date.now();
+  const written = JSON.stringify({ schema_version: 4, run_id: runId, lock_nonce: "late-writer", pid: process.pid, acquired_at: new Date(now).toISOString(), heartbeat_at: new Date(now).toISOString() });
+  await placeAt(file, "", now - limits.lock_stale - 1_000);
+  await assert.rejects(acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => { await fsp.writeFile(file, written); } }), /lock advanced/);
+  assert.equal(await fsp.readFile(file, "utf8"), written);
+  // Replaced by another taker's file it has not written yet: still empty, but not the file that was judged stale.
+  await placeAt(file, "", now - limits.lock_stale - 1_000);
+  await assert.rejects(acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => { await placeAt(file, "", now - 1_000); } }), /lock advanced/);
+  assert.equal(await fsp.readFile(file, "utf8"), "");
+});
+
+test("an empty reconcile guard is a reconciliation in progress", async (t) => {
+  const { paths, runId, file, guard } = await lockFixture(t);
+  const now = Date.now();
+  const staleAt = new Date(now - limits.lock_stale - 60_000).toISOString();
+  await writeJson(file, { schema_version: 4, run_id: runId, lock_nonce: "stale", pid: process.pid, acquired_at: staleAt, heartbeat_at: staleAt });
+  for (const text of ["", HALF_LOCK, "null"]) {
+    await placeAt(guard, text, now - 1_000);
+    await assert.rejects(acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => {} }), /Run reconciliation is already in progress\./);
+  }
+});
+
+test("an empty reconcile guard older than reconcile_guard_ttl is taken over, and the stale run lock with it", async (t) => {
+  const { paths, runId, file, guard } = await lockFixture(t);
+  const now = Date.now();
+  const staleAt = new Date(now - limits.lock_stale - 60_000).toISOString();
+  await writeJson(file, { schema_version: 4, run_id: runId, lock_nonce: "stale", pid: process.pid, acquired_at: staleAt, heartbeat_at: staleAt });
+  await placeAt(guard, "", now - limits.reconcile_guard_ttl - 1_000);
+  const lease = await acquireRunLock(paths, runId, lockPolicy, { clock: () => now, sleep: async () => {} });
+  await lease.assertOwner();
+  await lease.release();
 });

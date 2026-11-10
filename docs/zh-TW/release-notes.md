@@ -8,6 +8,10 @@
 
 - **Linux x64 成為可選用的平台。** Linux x64 現在可以原生開工，和 Apple Silicon macOS 一樣：可以選用，但我們自己還沒驗證。第一位使用者在 Ubuntu 26.04 用真的 Claude Code 擔任 writer 與 reviewer，把一張工單跑到交付：reviewer 唯讀檢查通過、Bridge 跑了專案的測試、reviewer 判通過。Codex 在 Linux 上還沒有執行紀錄。升級 Bridge 之後，先執行 `npx review-bridge down`，再執行 `npx review-bridge up`：本機頁面服務只在啟動時讀一次這個平台能不能呼叫模型。
 
+### 修正
+
+- **同一個 run 同時交付時，不再因 `Unexpected end of JSON input` 失敗。** 兩個程序同時交付同一個 run 時（例如 `stop` 和正在收尾的 `start`），其中一個可能剛好在 run lock 已建立、內容還沒寫入的那一刻讀到它，因此直接失敗，也不重試。現在讀不出內容的鎖檔算有人拿著，交付會等一下再重試。程序在寫入前就結束而留下的空鎖檔，超過 `lock_stale`（30 秒）後會被接管，和心跳過期的鎖一樣。
+
 ## 0.3.0-rc.3（2026-11-10）
 
 第一個發行版。

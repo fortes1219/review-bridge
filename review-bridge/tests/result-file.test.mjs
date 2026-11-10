@@ -257,6 +257,24 @@ test("S1f a held run lock is retried; a lock that never frees is reported as del
   assert.equal((await readRun(rt.paths, second.runId)).result_sha256.length, 64);
 });
 
+// RC3.1-LOCK-01: a run lock read before its holder wrote it is a held lock, so delivery waits and
+// retries instead of failing on a parse error. The empty file fixes that moment; the retry's own wait
+// takes it away, as the holder would.
+test("S1g a delivery that meets an empty run lock file retries, and delivers once it is gone", async (t) => {
+  const rt = await runtime(t);
+  const { runId } = await terminalRun(rt, "stopped", { events: [{ event: "stop", status: "stopped", role: "writer", provider: "claude", detail_ref: "pid:1:killed" }] });
+  const lock = path.join(rt.paths.runLocksDir, runId + ".json");
+  await fsp.mkdir(rt.paths.runLocksDir, { recursive: true });
+  await fsp.writeFile(lock, "");
+  let waits = 0;
+  const delivery = await deliverOutcome({ paths: rt.paths, runId, notify: false, retry: { attempts: 3, delayMs: 0 }, sleep: async () => { waits += 1; await fsp.rm(lock, { force: true }); } });
+  assert.equal(waits, 1);
+  assert.equal(delivery.already, false);
+  assert.equal(delivery.skipped, undefined);
+  assert.equal((await readIoEvents(rt.paths, runId)).some((event) => event.event === "delivery_skipped"), false);
+  assert.equal((await projectionEvents(rt, runId)).filter((event) => event.type === "run_delivered").length, 1);
+});
+
 test("S4c a result over 64 KB is trimmed in the fixed order and keeps its headings; the archive holds the full text", async (t) => {
   const rt = await runtime(t);
   const tr = await createTranslator("zh-TW");
