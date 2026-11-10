@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,9 +79,16 @@ test("darwin-arm64 adapter satisfies the contract with explicit CLI paths", asyn
 });
 
 // RC3-LINUX-00: the page and the checks that call no model run on any defined platform; only an
-// adapter the manifest marks active or candidate is eligible to call a model.
+// adapter the manifest marks active or candidate is eligible to call a model. RC3-LINUX-01: the shipped
+// manifest makes linux-x64 a candidate (a delivered run with real CLIs on Ubuntu), still not verified by us.
 test("the adapter for model-free checks: any defined platform, eligible only by the manifest's status", async () => {
   const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const shipped = JSON.parse(fs.readFileSync(path.join(bridgeRoot, "manifest.json"), "utf8"));
+  const shippedLinux = loadAdapterForInspection(shipped, "linux", "x64", { bridgeRoot });
+  assert.deepEqual([shippedLinux.target, shippedLinux.status, shippedLinux.eligible], ["linux-x64", "candidate", true]);
+  assert.equal(shippedLinux.runtime_verified, false);
+  assert.equal(selectAdapter(shipped, "linux", "x64").status, "candidate");
+  // A manifest that marks linux-x64 experimental still keeps it from calling a model.
   const linux = loadAdapterForInspection(manifest, "linux", "x64", { bridgeRoot });
   assert.deepEqual([linux.target, linux.status, linux.eligible], ["linux-x64", "experimental", false]);
   assert.equal(loadAdapterForInspection(manifest, "win32", "x64", { bridgeRoot }).eligible, true);

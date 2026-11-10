@@ -94,4 +94,8 @@ PowerShell 使用系統字碼頁輸出，Codex 則以 UTF-8 讀取，兩者不�
 
 ### Linux 能用嗎
 
-Linux 上原生模型工作一律拒絕執行（fail closed）。Windows x64 已通過原生環境驗證；Apple Silicon macOS 可選用，但尚未完成原生驗證。
+可以。Linux x64 可選用，照文件裝好就能開工，不用改任何檔；但我們自己還沒在 Linux 上用真的模型驗證過。第一位使用者在 Ubuntu 26.04 用真的 Claude Code 擔任 writer 與 reviewer，把一張工單跑到交付（唯讀檢查通過、Bridge 跑了專案的測試、reviewer 判通過）。Codex 在 Linux 上還沒有執行紀錄。
+
+從舊版升級上來、而本機頁面服務還在跑時，先 `down` 再 `up`，見[升級](./guide/maintenance#升級)。
+
+Windows x64 已通過原生環境驗證；Apple Silicon macOS 可選用，但尚未完成原生驗證。

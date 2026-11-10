@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Linux x64 is a candidate platform.** Native work now starts on Linux x64, as on Apple Silicon macOS: selectable, not yet verified by us. The first user ran a work order to delivery on Ubuntu 26.04 with real Claude Code as writer and reviewer: the reviewer read-only check passed, Bridge ran the project's tests, and the reviewer passed. No run with Codex on Linux has been recorded yet. After upgrading Bridge, run `npx review-bridge down` and then `npx review-bridge up`: the local page service reads whether this platform may call a model only when it starts.
+
 ## [0.3.0-rc.3] - 2026-11-10
 
 First release.

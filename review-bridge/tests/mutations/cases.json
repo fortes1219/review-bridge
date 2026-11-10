@@ -176,6 +176,17 @@
       "test": "review-bridge/tests/postgres-server.test.mjs",
       "case": "the search has no limit of its own: with 21 ports taken from the start port, the 22nd is used",
       "expect": "are all taken"
+    },
+    {
+      "id": "RB-M-linux-back-to-experimental",
+      "gate": "Probe",
+      "target": "review-bridge/manifest.json",
+      "anchor": "      \"module\": \"./platforms/linux-x64/adapter.mjs\",\n      \"status\": \"candidate\",",
+      "replacement": "      \"module\": \"./platforms/linux-x64/adapter.mjs\",\n      \"status\": \"experimental\",",
+      "reason": "The shipped manifest marks linux-x64 experimental again, so a Linux user who set up Bridge as documented is refused at the reviewer read-only check and doctor reports no active adapter (Charles, Ubuntu 26.04, 2026-11-10).",
+      "test": "review-bridge/tests/platform.test.mjs",
+      "case": "the adapter for model-free checks: any defined platform, eligible only by the manifest's status",
+      "expect": "experimental"
     }
   ]
 }
