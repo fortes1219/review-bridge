@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -27,12 +27,15 @@ async function freePort() {
   return port;
 }
 
-// A neutral install made by the real init in fake mode; every model call below is the fake CLI.
-async function install(t, { withGit = false } = {}) {
+const gitIn = (root) => (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true });
+
+// A neutral install made by the real init in fake mode, once for this file and kind of project (with Git
+// or without): the template each test copies.
+async function initProject(withGit) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-acceptance-"));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "acceptance-demo", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(0)\"" } }));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
-  const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true });
+  const git = gitIn(root);
   await fsp.mkdir(path.join(root, "src"), { recursive: true });
   await fsp.writeFile(path.join(root, "src", "app.js"), "// app\n");
   if (withGit) {
@@ -44,15 +47,19 @@ async function install(t, { withGit = false } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+// The test's own project: a copy of the template under a new id (isolatedDataHome.mjs copyProject).
+// Every model call below is the fake CLI.
+async function install(t, { withGit = false } = {}) {
+  const template = await projectTemplate("acceptance-run" + (withGit ? ":git" : ""), () => initProject(withGit));
+  const root = await copyProject(t, template, "review-bridge-acceptance-");
   const runtime = runtimeSource;
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtime, "bootstrap.mjs"), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, ...env },
   });
-  t.after(async () => {
-    bridge(["down"]);
-    await fsp.rm(root, { recursive: true, force: true });
-  });
-  return { root, bridge, git, paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }) };
+  return { root, bridge, git: gitIn(root), paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }) };
 }
 
 const ORDER = "# Work order: greeting\n\n<!-- bridge:requested_work -->\n## Work\nPrint a greeting.\n\n<!-- bridge:acceptance -->\n## Acceptance\n- The greeting is printed.\n- The output ends with a newline.\n";
@@ -83,10 +90,13 @@ test("every sealed condition is reported, judged and proven before the work is d
   assert.deepEqual(review.verdicts.map((item) => [item.id, item.verdict]), [["AC1", "pass"], ["AC2", "pass"]]);
   const decided = events.find((event) => event.event === "acceptance");
   assert.equal(decided.decision, "proven");
-  assert.deepEqual(decided.rows.map((row) => [row.id, row.test, row.result]), [["AC1", "passed", "proven"], ["AC2", "passed", "proven"]]);
+  // Each condition is the reviewer's verdict and its evidence; the tests are not a column of it (they ran on
+  // the version the reviewer read), and no condition carries a way to verify it of its own (RC3-COST-01).
+  assert.deepEqual(decided.rows.map((row) => [row.id, row.result]), [["AC1", "proven"], ["AC2", "proven"]]);
+  assert.ok(decided.rows.every((row) => !("test" in row)), JSON.stringify(decided.rows));
   // No Git in this project: the work proof is unknown, and the result says so.
   assert.equal(events.find((event) => event.event === "test_result").work_version.kind, "unknown");
-  assert.match(result, /## Acceptance\n- AC1 proven: The greeting is printed\. \(reviewer: pass; tests: passed; evidence: fake: /);
+  assert.match(result, /## Acceptance\n- AC1 proven: The greeting is printed\. \(reviewer: pass; evidence: fake: /);
   assert.match(result, /Version checked: unknown \(no Git\)/);
 });
 
@@ -134,7 +144,29 @@ test("answers that skip, repeat or contradict a condition are refused, from the 
   }
 });
 
-test("usage Bridge cannot read stops the run at the writer and at the reviewer, instead of counting as zero", async (t) => {
+// Run f645ccf5 (2026-11-09): a reviewer answered PASS with a hard stop, which the review's rules forbid,
+// and the run ended at once. An answer that breaks the rules is asked for once more with what was wrong;
+// only the second one that breaks them ends the run.
+test("a review that breaks the review's rules is asked for again with what was wrong; a second such answer ends the run", async (t) => {
+  const rt = await install(t);
+  const once = await run(rt, "pass-stop-once", { env: { FAKE_CODEX_VERDICT: "pass_hard_stop_once" } });
+  assert.equal(once.exit, 0, JSON.stringify(once.record.last_state));
+  assert.equal(once.record.conclusion, "success");
+  const inputs = once.events.filter((event) => event.event === "review.input");
+  assert.equal(inputs.length, 2, "asked twice for the one call");
+  assert.equal(inputs[0].previous_answer_problems, undefined);
+  assert.deepEqual(inputs[1].previous_answer_problems, ["$.hard_stop: PASS cannot request a hard stop"]);
+  const twice = await run(rt, "pass-stop-twice", { env: { FAKE_CODEX_VERDICT: "pass_hard_stop" } });
+  assert.equal(twice.exit, 79);
+  assert.equal(twice.record.closed_reason, "malformed_review_result");
+  assert.equal(twice.events.filter((event) => event.event === "review.input").length, 2, "one more ask, not more");
+  assert.ok(twice.record.last_state.errors.includes("$.hard_stop: PASS cannot request a hard stop"));
+});
+
+// The budget is the writer's (Owner 2026-11-08): a writer call whose usage cannot be read stops the run,
+// since the budget cannot be kept without it; the reviewer's usage is recorded and counts against no
+// budget, so an unreadable one is shown as unknown and the work goes on.
+test("writer usage Bridge cannot read stops the run instead of counting as zero; the reviewer's is recorded as unknown and stops nothing", async (t) => {
   const rt = await install(t);
   const writer = await run(rt, "writer-usage", { env: { FAKE_CLAUDE_USAGE: "none" } });
   assert.equal(writer.exit, 76);
@@ -142,10 +174,12 @@ test("usage Bridge cannot read stops the run at the writer and at the reviewer, 
   assert.equal(writer.events.some((event) => event.event === "test_result" || event.event === "review.input"), false);
   assert.match(writer.result, /could not read how many tokens the writer call used/);
   const reviewer = await run(rt, "reviewer-usage", { env: { FAKE_CODEX_USAGE: "none" } });
-  assert.equal(reviewer.exit, 76);
-  assert.equal(reviewer.record.closed_reason, "usage_unknown");
-  assert.equal(reviewer.record.last_state.token_limit_role, "reviewer");
-  assert.equal(reviewer.events.some((event) => event.event === "acceptance"), false);
+  assert.equal(reviewer.exit, 0, JSON.stringify(reviewer.record.last_state));
+  assert.equal(reviewer.record.conclusion, "success");
+  assert.equal(reviewer.events.some((event) => event.event === "stop" && event.status === "usage_unknown"), false);
+  const usage = reviewer.events.find((event) => event.event === "usage" && event.role === "reviewer");
+  assert.equal(usage.parse_error, true, JSON.stringify(usage));
+  assert.match(reviewer.result, /^\| reviewer \| 1 \(1 unreadable\) \| unknown \|/m);
 });
 
 test("a project whose rules give no test command still runs: its tests are not configured and each condition rests on the reviewer", async (t) => {
@@ -156,9 +190,11 @@ test("a project whose rules give no test command still runs: its tests are not c
   assert.equal(exit, 0, JSON.stringify(record.last_state));
   assert.equal(record.conclusion, "success");
   assert.equal(events.find((event) => event.event === "test_result").kind, "not_configured");
-  assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => [row.test, row.result]), [["not_used", "proven"], ["not_used", "proven"]]);
+  assert.deepEqual(events.find((event) => event.event === "acceptance").rows.map((row) => row.result), ["proven", "proven"]);
   assert.match(result, /Tests: not configured for this project/);
-  assert.match(result, /tests: not used/);
+  // The conditions rest on the reviewer's verdicts; no condition line speaks of tests.
+  assert.match(result, /- AC1 proven: The greeting is printed\. \(reviewer: pass; evidence: /);
+  assert.doesNotMatch(result, /tests: not used/);
 });
 
 test("a writer that rewrites the Git history stops the run before the tests or review; the human decides", async (t) => {

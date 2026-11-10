@@ -6,13 +6,15 @@
 import { parseOptions } from "./args.mjs";
 import { assertNativeAllowed, assertReviewerProof } from "./guards/nativeGate.mjs";
 import * as backup from "../features/backup/index.mjs";
+import * as graph from "../features/graph/index.mjs";
 import * as records from "../features/records/index.mjs";
 import * as setupCheck from "../features/setupCheck/index.mjs";
 import * as workOrder from "../features/workOrder/index.mjs";
 import {
-  createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, rebuildRunFiles, recordsDatabase, replayUnrecorded,
+  bridgeDataHome, createRunRecorder, deleteRunRecords, fileExists, installRunRecorder, readJson, rebuildRunFiles, recordsDatabase, replayUnrecorded,
 } from "../service/index.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
+import { bridgeRunner } from "../utils/bridgeCommand.mjs";
 
 // clean <run_id> also removes the run from the person's database: one delete, and every row it owns
 // goes with it; its authorization and claim stay, so its card never takes another yes.
@@ -75,8 +77,8 @@ export const COMMANDS = {
   start: {
     audience: "human",
     positional: "taskFile",
-    usage: "<file>",
-    summary: "Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it",
+    usage: "<file|directory>",
+    summary: "Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it",
     options: {
       ...WORK_ORDER_OPTIONS,
       "--yes": YES,
@@ -120,7 +122,7 @@ export const COMMANDS = {
   status: {
     audience: "human",
     configFree: true,
-    summary: "Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database",
+    summary: "Show what Bridge is doing now: the page, this project's runs, and how to look at the database",
     options: { "--after": AFTER, "--json": { ...JSON_OUT } },
     run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.checkService(context.paths) }),
   },
@@ -134,13 +136,13 @@ export const COMMANDS = {
   },
   up: {
     audience: "human",
-    summary: "Start the local page service in the background",
+    summary: "Start the database and the local page service in the background",
     options: { "--fake-cli": FAKE_CLI },
     run: (context) => setupCheck.upService(context),
   },
   down: {
     audience: "human",
-    summary: "Stop the local page service",
+    summary: "Stop the local page service and the database; refused while a run is running",
     options: {},
     run: (context) => setupCheck.downService(context),
   },
@@ -302,6 +304,27 @@ export const COMMANDS = {
     options: {},
     run: (context) => records.removeRecord(context.paths, context.runId, { deliver: deliverQuietly(context), forget: forgetRunRecords(context) }),
   },
+  graph: {
+    audience: "agent",
+    summary: "Read this project's code into its graph again, whole (init does this; start brings it up to date)",
+    options: { "--json": { ...JSON_OUT, help: "Print each step as one JSON line, the last one the summary" } },
+    run: (context) => graph.mapProject({
+      ...context,
+      dataHome: bridgeDataHome(),
+      ensureProject: workOrder.recordProject,
+      translator: () => workOrder.projectTranslator(context.paths),
+      openDatabase: async () => (await import("../service/database/index.mjs")).openDatabase(),
+    }),
+  },
+  "graph-mcp": {
+    audience: "agent",
+    summary: "Bridge's read-only MCP server on this project's graph, over stdio (the writer's and reviewer's CLIs start it)",
+    options: {},
+    run: (context) => graph.serveGraphMcp({
+      ...context,
+      openReadOnlyDatabase: async () => (await import("../service/database/index.mjs")).openReadOnlyDatabase(),
+    }),
+  },
   "roles-check": {
     audience: "agent",
     installer: true,
@@ -323,7 +346,7 @@ export const PROJECT_OPTION = Object.freeze({
 
 // The help line printed after a refusal of the command line itself.
 export function helpHint(command) {
-  return COMMANDS[command] ? " Run: review-bridge " + command + " --help" : " Run: review-bridge --help";
+  return COMMANDS[command] ? " Run: review-bridge " + command + " --help" : " Run: " + bridgeRunner() + " --help";
 }
 
 // Splits a command line into the run id, the positional work order and the options of the table.
@@ -372,7 +395,7 @@ export async function dispatchCommand({ command, args, repoRoot, bridgeRoot, ada
   if (!entry?.run) throw new Error("Unknown command: " + command + "." + helpHint(null));
   const { runId, options } = parseCommandLine(command, args);
   if (!entry.configFree && !(await fileExists(paths.bridgeConfigPath))) {
-    throw new Error("This folder is not set up for Review Bridge. Run: review-bridge init");
+    throw new Error("This folder is not set up for Review Bridge. Run: " + bridgeRunner() + " init");
   }
   await recordRunsOf(paths);
   return await entry.run({ command, args, paths, options, runId, adapter, loadAdapter, inspectionAdapter, adapterId, adapterDefinition, adapterSource });

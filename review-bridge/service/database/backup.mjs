@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
 import { clusterPaths, connect, postgresBinaries, serverRunning, startServer, stopServer } from "./postgresServer.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 const DATABASE_NAME = "bridge";
 // pg_ctl's words from its last call: not part of the cluster.
@@ -28,8 +29,8 @@ export class BackupRefusedError extends Error {
 
 export const runLines = (runs) => runs.map((run) => "  " + run.run_id + "  " + run.root_path).join("\n");
 
-// The runs still running in any project: the server they write to is about to stop.
-async function runningRuns(root) {
+// The runs still running in any project: the server they write to is about to stop (backup, down).
+export async function runningRuns(root) {
   let client;
   try {
     client = await connect(root, { database: DATABASE_NAME });
@@ -64,7 +65,7 @@ export async function backupDatabase({ dataHome = bridgeDataHome(), now = new Da
   await startServer(root, { binaries });
   const running = await runningRuns(root);
   if (running.length) {
-    throw new BackupRefusedError("Not backed up: a run is running. Stop it with review-bridge stop <run_id> in its project, or let it end, then back up again.\n"
+    throw new BackupRefusedError("Not backed up: a run is running. Stop it with " + bridgeRunner() + " stop <run_id> in its project, or let it end, then back up again.\n"
       + runLines(running), running);
   }
   const backupsRoot = databaseBackupsRoot(dataHome);

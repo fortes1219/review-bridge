@@ -13,7 +13,10 @@ import {
   writeFailureRecord,
   writeJson,
   writeText,
+  graphMcpServer,
+  reviewerGraphContext,
 } from "../../service/index.mjs";
+import { graphStats, readProjectGraph } from "./projectGraph.mjs";
 import { assertUnder } from "../../utils/pathGuard.mjs";
 import { EvidenceUnavailableError } from "./workspaceEvidence.mjs";
 import { validateJobPolicy } from "../../policy/policyChecks.mjs";
@@ -106,6 +109,8 @@ export async function buildReviewInput({ paths, job, control }) {
     test_result: job.test_result || null,
     work_version: job.work_version || null,
     open_findings: openFindings,
+    // What broke the review's rules in this call's previous answer, when this is the second ask.
+    ...(Array.isArray(job.previous_answer_problems) && job.previous_answer_problems.length ? { previous_answer_problems: job.previous_answer_problems } : {}),
     read_list: buildReadList({ deltaPaths: proofless ? claimed : changed.map((entry) => entry.path), findings: openFindings }),
     output_schema: "review.result",
   };
@@ -193,7 +198,11 @@ export async function runReviewWorker({
         }
         const template = await fsp.readFile(reviewPromptPath, "utf8");
         const reviewInput = await buildReviewInput({ paths, job, control });
-        if (runId) await appendIoEvent(paths, runId, reviewInput);
+        // What the change touches, read by Bridge from the project's graph and put into the packet.
+        const changedPaths = reviewInput.delta.length ? reviewInput.delta.map((entry) => entry.path) : (job.writer_result?.changed || []).map((entry) => entry.path);
+        const graph = await readProjectGraph(paths, (db, projectId) => reviewerGraphContext({ db, projectId, changedPaths }));
+        if (graph?.text) reviewInput.project_graph = graph.text;
+        if (runId) await appendIoEvent(paths, runId, { ...reviewInput, ...(graph ? { graph: graphStats(graph) } : {}) });
         const prompt = renderPrompt(template, {
           JOB_PATH: metadataPath,
           REPORT_PATH: reportPath,
@@ -211,6 +220,7 @@ export async function runReviewWorker({
         let reads = [];
         let controllerDecided = false;
         let failureTexts = async () => [];
+        let failureCode = null;
         if (dryRun) {
           await writeText(resultPath, [
             "# Review Bridge Dry Run",
@@ -258,6 +268,9 @@ export async function runReviewWorker({
             maxTurns: control.run?.policy_snapshot?.effective_policy?.limits?.max_turns ?? null,
             mcp: control.run?.work_package?.reviewer?.mcp,
             mcpOff: control.run?.work_package?.reviewer?.mcp_off,
+            // Bridge's read-only graph server: what a change touches (T0-GRAPH-01); the read-only check
+            // ran with it.
+            graph: graphMcpServer({ bridgeRoot: paths.bridgeRoot, repoRoot: paths.repoRoot }),
             stdoutPath,
             stderrPath,
             answerPath: resultPath,
@@ -268,6 +281,7 @@ export async function runReviewWorker({
           exitCode = called.exitCode;
           timedOut = called.timedOut;
           failureTexts = called.failureTexts;
+          failureCode = called.failureCode ?? null;
           usage = called.usage;
           reads = reviewerReadEvents(called.reads, reviewInput.read_list, paths.repoRoot);
           if (runId) {
@@ -293,6 +307,7 @@ export async function runReviewWorker({
             phase: "review",
             exitCode,
             timedOut,
+            code: failureCode,
             texts: await failureTexts(),
           });
           const written = await writeFailureRecord(paths, paths.reviewsRoot, jobId, classified, {

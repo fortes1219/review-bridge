@@ -143,6 +143,31 @@ test("what the server says went wrong comes back for the caller to classify", as
   const result = await runCodexAppServerTurn({ invocation: failing, cwd: os.tmpdir(), prompt: "x", timeoutMs: 20_000 });
   assert.equal(result.status, "failed");
   assert.deepEqual(result.errors, ["usage limit reached"], "said twice, kept once");
+  assert.equal(result.errorCode, null, "this error names no code");
+});
+
+test("the server's codexErrorInfo comes back as the error's code; an error it will retry is not an error yet", async () => {
+  const failing = { command: process.execPath, args: ["-e", [
+    "const rl = require('node:readline').createInterface({ input: process.stdin });",
+    "const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');",
+    "rl.on('line', (line) => {",
+    "  const m = JSON.parse(line);",
+    "  if (m.method === 'initialize') send({ id: m.id, result: {} });",
+    "  if (m.method === 'thread/start') send({ id: m.id, result: { thread: { id: 't' } } });",
+    "  if (m.method === 'turn/start') {",
+    "    send({ id: m.id, result: { turn: { id: 'u' } } });",
+    "    send({ method: 'turn/started', params: { threadId: 't', turn: { id: 'u' } } });",
+    "    send({ method: 'error', params: { threadId: 't', turnId: 'u', willRetry: true, error: { message: 'Reconnecting... 1/5', codexErrorInfo: 'unauthorized' } } });",
+    "    send({ method: 'error', params: { threadId: 't', turnId: 'u', willRetry: false, error: { message: 'stream broke', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } } } });",
+    "    send({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'u', status: 'failed', error: { message: 'out of usage', codexErrorInfo: 'usageLimitExceeded' } } } });",
+    "  }",
+    "});",
+    "setInterval(() => {}, 1000);",
+  ].join("\n")] };
+  const result = await runCodexAppServerTurn({ invocation: failing, cwd: os.tmpdir(), prompt: "x", timeoutMs: 20_000 });
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.errors, ["stream broke", "out of usage"]);
+  assert.equal(result.errorCode, "usageLimitExceeded");
 });
 
 test("a completed run returns once every thread has ended, with all usage, and stops the server", async () => {

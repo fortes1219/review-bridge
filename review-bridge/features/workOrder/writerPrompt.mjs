@@ -148,8 +148,9 @@ export function buildHandoff({ workPackage, call, reason, ioEvents = [], openFin
   return handoff;
 }
 
-// D1.2: fixed order. Header, rules, task.input, injected files, handoff.
-export function composeWriterPrompt({ workPackage, control, runId, call, taskInput, references, handoff = null, rulesText, contract = null }) {
+// D1.2: fixed order. Header, rules, task.input, the project's graph, injected files, handoff. The graph
+// section is what Bridge read itself (service/graph/graphContext.mjs); without a graph there is none.
+export function composeWriterPrompt({ workPackage, control, runId, call, taskInput, references, handoff = null, rulesText, contract = null, projectGraph = null }) {
   const scope = workPackage.scope;
   const header = [
     WRITER_MODE_HEADER,
@@ -167,11 +168,11 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     ...(contract ? [
       "Contract: " + contract.sha256 + ". It is the work order as sealed when the human started the work; it is read-only.",
       "Answer with this contract_sha256. If the contract looks wrong, ask through needs_human; never edit it or work from another version.",
-      "In criteria, report every acceptance condition of the contract by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done, apart from the ones the project's tests decide.",
+      "Each acceptance condition is the person's own words, cut from their list. In criteria, report every one by its id, once each: done or not_done, with a short note on how. status is done only if every condition is done.",
     ] : ["There is no contract for this task; leave criteria empty."]),
     ...(workPackage.test?.kind === "command" ? [
-      "Bridge itself runs the project's tests (" + workPackage.test.command + ") outside your sandbox after this call, and their result decides every condition whose verify is test.",
-      "Run them if you can. If they cannot run where you are, write that in unverified and keep status done: it is not a reason to be blocked.",
+      "Bridge itself runs the project's tests (" + workPackage.test.command + ") outside your sandbox after this call; work they fail comes back to you before any review.",
+      "That they cannot run where you are is not a reason to be blocked: write that in unverified and keep status done.",
     ] : []),
     "The files you need are included below; nothing else needs to be opened unless the task cannot be completed without it.",
     "Your final answer must be one writer.result object that matches the JSON schema given to the CLI; no prose outside it.",
@@ -180,6 +181,7 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
   ];
   const rules = ["=== RULES (rules.md) ===", String(rulesText || "").trim(), ""];
   const task = ["=== TASK (task.input) ===", JSON.stringify(taskInput, null, 2), ""];
+  const project = projectGraph ? ["=== PROJECT (review-bridge-graph) ===", projectGraph, ""] : [];
   const files = [];
   for (const file of references) {
     files.push("=== " + file.path + " (" + file.sha256.slice(0, 12) + ") ===");
@@ -187,5 +189,5 @@ export function composeWriterPrompt({ workPackage, control, runId, call, taskInp
     files.push("");
   }
   const tail = handoff ? ["=== HANDOFF ===", JSON.stringify(handoff, null, 2), ""] : [];
-  return [...header, ...rules, ...task, ...files, ...tail].join("\n");
+  return [...header, ...rules, ...task, ...project, ...files, ...tail].join("\n");
 }

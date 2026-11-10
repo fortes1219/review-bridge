@@ -1,8 +1,7 @@
-import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { assertUnder, samePath } from "../../utils/pathGuard.mjs";
-import { ensureDir, fileExists, listJson, readJson, writeJsonAtomic } from "../../service/index.mjs";
+import { ensureDir, listJson, writeJsonAtomic } from "../../service/index.mjs";
 import { timestampId } from "../../utils/dates.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
@@ -36,6 +35,9 @@ export async function enqueueReview({
   testResult = null,
   workVersion = null,
   sealedEvidence = null,
+  // The second ask after an answer that broke the review's rules: its own job, with what was wrong.
+  attempt = 1,
+  formatProblems = [],
 }) {
   const shape = validateHookPayload(payload);
   if (!shape.valid) {
@@ -61,7 +63,7 @@ export async function enqueueReview({
   // The reviewer's priority and effort come from the policy's table, never from the work order's words.
   const policy = { priority: control.reviewer_policy?.priority, reasoning_effort: control.reviewer_policy?.effort };
   const sessionId = String(payload.session_id || "");
-  const hash = createHash("sha256").update(sessionId + "\n" + message, "utf8").digest("hex");
+  const hash = createHash("sha256").update(sessionId + "\n" + message + (attempt > 1 ? "\nreview attempt " + attempt : ""), "utf8").digest("hex");
   const shortHash = hash.slice(0, 16);
 
   for (const directory of [paths.pendingDir, paths.runningDir, paths.doneDir]) {
@@ -93,6 +95,7 @@ export async function enqueueReview({
     call,
     writer_result: writerResult,
     open_findings: openFindings,
+    ...(formatProblems.length ? { previous_answer_problems: formatProblems } : {}),
     test_result: testResult,
     // The version of the work the reviewer reads (RC3-BLOCKER-00).
     work_version: workVersion,
@@ -112,37 +115,6 @@ export async function enqueueReview({
   };
   await writeJsonAtomic(jobPath, job);
   return { accepted: true, duplicate: false, job, jobPath };
-}
-
-export async function queueStatus(paths) {
-  const counts = {};
-  for (const [state, directory] of Object.entries({
-    pending: paths.pendingDir,
-    running: paths.runningDir,
-    done: paths.doneDir,
-    failed: paths.failedDir,
-  })) {
-    counts[state] = (await listJson(directory)).length;
-  }
-
-  let latestReview = null;
-  if (await fileExists(paths.latestPath)) {
-    latestReview = (await fsp.readFile(paths.latestPath, "utf8")).trim();
-  }
-  let latestPriority = null;
-  let latestReasoningEffort = null;
-  const done = await listJson(paths.doneDir);
-  if (done.length) {
-    const latest = await readJson(done.at(-1));
-    latestPriority = latest.priority || "LEGACY_UNRECORDED";
-    latestReasoningEffort = latest.reasoning_effort || "LEGACY_UNRECORDED";
-  }
-  return {
-    ...counts,
-    latest_review: latestReview,
-    latest_priority: latestPriority,
-    latest_reasoning_effort: latestReasoningEffort,
-  };
 }
 
 export async function hasPendingMessageHash(paths, messageHash) {

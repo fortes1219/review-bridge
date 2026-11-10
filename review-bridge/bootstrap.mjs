@@ -16,8 +16,11 @@ import { COMMANDS, dispatchCommand } from "./router/index.mjs";
 import { renderCommandHelp, renderMainHelp } from "./router/help.mjs";
 import { inspectDoctor } from "./features/doctor/index.mjs";
 import { createFakeAdapter, readJson } from "./service/index.mjs";
+import { onDatabaseBackedUp } from "./service/database/notices.mjs";
+import { failureLine, translatedFailure } from "./service/database/serverErrors.mjs";
 import { getBridgePaths, PRIVATE_ROOT_NAME } from "./utils/paths.mjs";
 import { assertReviewerProof, nativeGateDecision } from "./router/guards/nativeGate.mjs";
+import { bridgeRunner } from "./utils/bridgeCommand.mjs";
 
 // Bridge is installed in its own folder; the project it works on is named with --project <folder>,
 // or is the folder the command runs in. Nothing is looked up from where Bridge itself sits.
@@ -63,7 +66,7 @@ async function main() {
   const manifestPath = path.join(bridgeRoot, "manifest.json");
   const manifest = await readJson(manifestPath);
   if (command !== "doctor" && !manifest.commands.includes(command)) {
-    throw new Error("Unknown command: " + command + ". Run: review-bridge --help");
+    throw new Error("Unknown command: " + command + ". Run: " + bridgeRunner() + " --help");
   }
   const fakeRequested = args.includes("--fake-cli");
   // Native model calls are allowed only for the commands that start work on a person's yes (start,
@@ -75,7 +78,7 @@ async function main() {
   if (gate.mode === "native" && !["start", "resume"].includes(command)) await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "logs", "wait", "up", "down", "ps", "prune", "rm", "clean", "stop", "backup"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "logs", "wait", "up", "down", "ps", "prune", "rm", "clean", "stop", "backup", "graph", "graph-mcp"]);
   // Native start and resume take this machine's adapter only after the reviewer check and the yes,
   // so without the proof they are refused the same way on every platform, adapter or not.
   const checksFirst = !fakeRequested && ["start", "resume"].includes(command);
@@ -145,9 +148,31 @@ async function main() {
   });
 }
 
+// The project's language, loaded only when something is said in it; null when it cannot be read.
+async function projectTranslator() {
+  try {
+    const { createTranslator, resolveLocale } = await import("./features/workOrder/i18n.mjs");
+    return await createTranslator(await resolveLocale(getBridgePaths(takeProject(process.argv.slice(2)).repoRoot, bridgeRoot, { privateRootName })));
+  } catch {
+    return null;
+  }
+}
+
+// A failure the person can act on is said in the project's language (RC3-DOWN-01); the translations are
+// loaded only for it.
+async function failureTranslator(error) {
+  return translatedFailure(error) ? await projectTranslator() : null;
+}
+
+// The backup an upgraded Bridge makes before its first new migration is said in the project's language too.
+onDatabaseBackedUp(async (folder) => {
+  const t = await projectTranslator();
+  process.stderr.write((t ? t("database.backed_up", { folder }) : "Backed up the database to " + folder + " before upgrading it.") + "\n");
+});
+
 try {
   process.exitCode = await main();
 } catch (error) {
-  process.stderr.write("Review bridge failed closed: " + error.message + "\n");
+  process.stderr.write(failureLine(error, await failureTranslator(error)) + "\n");
   process.exitCode = 2;
 }

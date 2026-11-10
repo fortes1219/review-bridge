@@ -70,7 +70,9 @@ test("a budget over the policy's limit is refused with its line and the limit", 
 });
 
 test("blocks run from their marker to the next; an unknown or repeated key is refused with its line", () => {
+  // clarifications went with the questions (2026-11-08): a work order is a form, filled in by the person.
   assert.equal(BLOCK_KEYS.length, 17);
+  assert.equal(BLOCK_KEYS.includes("clarifications"), false);
   const read = parseWorkOrder(BODY);
   assert.deepEqual([...read.blocks.keys()], ["requested_work", "acceptance"]);
   assert.deepEqual(read.blocks.get("requested_work").content, [4]);
@@ -78,7 +80,10 @@ test("blocks run from their marker to the next; an unknown or repeated key is re
   assert.deepEqual(refused(BODY + "<!-- bridge:extensions -->\nmore\n"), ["line 8: unknown block key extensions; the keys are " + BLOCK_KEYS.join(", ")]);
   assert.deepEqual(refused(BODY + "<!-- bridge:acceptance -->\n- again\n"), ["line 8: block acceptance is already marked at line 6"]);
   assert.deepEqual(refused(BODY + "<!-- bridge:context --> and text\n"), ["line 8: a block marker is written <!-- bridge:<key> --> on a line of its own"]);
-  assert.deepEqual(refused("<!-- bridge:requested_work -->\nBuild a farm.\n"), ["line 1: the work order has no title; its first line starting with \"# \" is the title"]);
+  // One sentence is a work order, with no title; only saying nothing is refused.
+  assert.deepEqual(parseWorkOrder("I want a shiny button.").title, { line: null, text: "untitled" });
+  assert.deepEqual(parseWorkOrder("<!-- bridge:requested_work -->\nBuild a farm.\n").title, { line: null, text: "untitled" });
+  assert.deepEqual(refused("---\npriority: high\n---\n\n"), ["line 4: the work order says nothing; write what you want done"]);
 });
 
 test("headings, markers, blank lines and the title are structure; other lines outside every block are unused", () => {

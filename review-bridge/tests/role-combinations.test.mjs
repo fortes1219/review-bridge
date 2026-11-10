@@ -1,7 +1,7 @@
 // The four pairings of writer and reviewer (RC3-BLOCKER-02), each run from a real plan through the
 // fake CLIs, which log every call. Which CLI each step reached, what it was told and what the run's
 // records say are read from there and from the database, not from what Bridge says it did.
-import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -12,7 +12,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { mergePolicy } from "../policy/policyRules.mjs";
-import { callRole, RoleCliNotReadyError, settleMcp } from "../service/index.mjs";
+import { callRole, GRAPH_MCP_NAME, RoleCliNotReadyError, settleMcp } from "../service/index.mjs";
 import { readIoEvents } from "../service/records/ioEvents.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
@@ -41,20 +41,24 @@ const BODY = [
   "- The farm is visible.",
 ].join("\n") + "\n";
 
-async function install(t, writer, reviewer) {
+// The real init in fake mode, once for this file and pair of roles: the template each test copies.
+async function initProject(writer, reviewer) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-roles-"));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
   const init = spawnSync(process.execPath, [
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", writer, "--reviewer", reviewer, "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+// The test's own project, with its own call log: a copy of its roles' template under a new id
+// (isolatedDataHome.mjs copyProject).
+async function install(t, writer, reviewer) {
+  const root = await copyProject(t, await projectTemplate(writer + "+" + reviewer, () => initProject(writer, reviewer)), "review-bridge-roles-");
   const callLog = path.join(root, "calls.jsonl");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, FAKE_CALL_LOG: callLog, ...env },
-  });
-  t.after(async () => {
-    bridge(["down"]);
-    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   const calls = async () => (await fsp.readFile(callLog, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   return { root, bridge, calls, paths: getBridgePaths(root, runtimeSource, { privateRootName: ".review-bridge" }) };
@@ -72,7 +76,7 @@ const start = (rt, work, env = {}) => rt.bridge(["work-start", "--plan", work.pl
 const argAfter = (args, name) => args[args.indexOf(name) + 1];
 
 for (const [writer, reviewer] of [["claude", "codex"], ["codex", "codex"], ["codex", "claude"], ["claude", "claude"]]) {
-  test("writer " + writer + ", reviewer " + reviewer + ": translation, work and review reach those CLIs, in separate sessions, and the records say so", { timeout: 240_000 }, async (t) => {
+  test("writer " + writer + ", reviewer " + reviewer + ": work and review reach those CLIs, in separate sessions, and the records say so; the contract takes no call", { timeout: 240_000 }, async (t) => {
     const rt = await install(t, writer, reviewer);
     const work = await plan(rt);
     assert.equal(work.planned.status, 0, work.planned.stderr);
@@ -80,14 +84,14 @@ for (const [writer, reviewer] of [["claude", "codex"], ["codex", "codex"], ["cod
     assert.equal(started.status, 0, started.stderr + started.stdout);
     const calls = await rt.calls();
     assert.deepEqual(calls.map((call) => [call.mode, call.cli]), [
-      ["translation", writer], ["check", reviewer], ["writer", writer], ["review", reviewer],
+      ["writer", writer], ["review", reviewer],
     ]);
     const sessions = calls.map((call) => call.session_id);
-    assert.equal(new Set(sessions).size, 4, "every call is its own session: " + sessions.join(", "));
+    assert.equal(new Set(sessions).size, 2, "every call is its own session: " + sessions.join(", "));
     const runId = work.plan.proposed_run_id;
     const usage = (await readIoEvents(rt.paths, runId)).filter((event) => event.event === "usage");
     assert.deepEqual(usage.map((event) => [event.role, event.provider]), [
-      ["translator", writer], ["contract_checker", reviewer], ["writer", writer], ["reviewer", reviewer],
+      ["writer", writer], ["reviewer", reviewer],
     ]);
     assert.deepEqual(usage.map((event) => event.session_id), sessions, "the record names the session the CLI reported");
     assert.ok(usage.every((event) => !event.parse_error), "each CLI's usage was read");
@@ -133,9 +137,6 @@ test("the other way round: Codex's writer takes them in its requests, Claude's r
   const writer = calls.find((call) => call.mode === "writer");
   assert.deepEqual(writer.thread, { cwd: rt.root, approvalPolicy: "never", sandbox: "workspace-write", model: "gpt-5.6-sol" }, "writes to the workspace only, asks nobody");
   assert.deepEqual([writer.effort, writer.schema], ["high", true]);
-  const translation = calls.find((call) => call.mode === "translation");
-  assert.equal(argAfter(translation.args, "--sandbox"), "read-only");
-  assert.ok(translation.args.includes('model_reasoning_effort="high"'));
   for (const call of calls.filter((entry) => entry.cli === "claude")) {
     assert.deepEqual([argAfter(call.args, "--model"), argAfter(call.args, "--effort")], ["sonnet", "low"], call.mode);
   }
@@ -152,15 +153,12 @@ test("no model anywhere: no CLI is told one, in any role", { timeout: 240_000 },
   }
 });
 
-test("Claude's sessions: a translation has no tool and no MCP server, a reviewer only reads, a writer keeps its own", { timeout: 240_000 }, async (t) => {
+test("Claude's sessions: a reviewer only reads, a writer keeps its own", { timeout: 240_000 }, async (t) => {
   const rt = await install(t, "claude", "claude");
   const started = start(rt, await plan(rt));
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const calls = await rt.calls();
-  const translation = calls.find((call) => call.mode === "translation");
-  assert.equal(argAfter(translation.args, "--tools"), "");
-  assert.ok(translation.args.includes("--strict-mcp-config"), "19 MCP tools were in a real translation's session without this");
-  for (const mode of ["check", "review"]) {
+  for (const mode of ["review"]) {
     const call = calls.find((entry) => entry.mode === mode);
     assert.equal(argAfter(call.args, "--permission-mode"), "plan", mode);
     assert.equal(argAfter(call.args, "--tools"), "Read,Grep,Glob", mode);
@@ -171,38 +169,22 @@ test("Claude's sessions: a translation has no tool and no MCP server, a reviewer
   const writer = calls.find((call) => call.mode === "writer");
   assert.equal(argAfter(writer.args, "--permission-mode"), "auto");
   assert.ok(writer.args.includes("--strict-mcp-config"), "the person's connectors are in no session");
-  assert.equal(writer.args.includes("--mcp-config"), false, "this project has no .mcp.json");
+  // This project has no .mcp.json: the writer's one server is Bridge's graph (T0-GRAPH-01), allowed by name.
+  assert.deepEqual(JSON.parse(argAfter(writer.args, "--mcp-config")).mcpServers[GRAPH_MCP_NAME].alwaysLoad, true, "its tools load up front, not behind ToolSearch");
+  assert.deepEqual(Object.keys(JSON.parse(argAfter(writer.args, "--mcp-config")).mcpServers), [GRAPH_MCP_NAME]);
+  assert.equal(argAfter(writer.args, "--allowedTools"), "mcp__" + GRAPH_MCP_NAME);
 });
 
-test("Codex's sessions turn apps and plugins off, in every call: translation, check, work and review", { timeout: 240_000 }, async (t) => {
+test("Codex's sessions turn apps and plugins off, in every call: work and review", { timeout: 240_000 }, async (t) => {
   const rt = await install(t, "codex", "codex");
   const started = start(rt, await plan(rt));
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const calls = await rt.calls();
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 2);
   for (const call of calls) assert.deepEqual(call.args.slice(0, 4), ["--disable", "apps", "--disable", "plugins"], call.mode);
 });
 
-for (const [label, env, shown] of [
-  ["holds a connector's tools", { FAKE_CLAUDE_EXTRA_TOOLS: "mcp__claude_ai_Google_Drive__trash_file,mcp__claude_ai_Gmail__send" }, /mcp__claude_ai_Google_Drive__trash_file, mcp__claude_ai_Gmail__send/],
-  ["does not show its tools", { FAKE_CLAUDE_NO_INIT: "1" }, /did not show which tools it held/],
-]) {
-  test("a translation session that " + label + " is not used: nothing is sealed, no work starts, and the result says why", { timeout: 240_000 }, async (t) => {
-    const rt = await install(t, "claude", "codex");
-    const work = await plan(rt);
-    const started = start(rt, work, env);
-    assert.equal(started.status, 1, started.stderr + started.stdout);
-    assert.deepEqual((await rt.calls()).map((call) => call.mode), ["translation"], "no check and no writer after it");
-    const runId = work.plan.proposed_run_id;
-    const [row] = await queryRecords("select contract_sha256, closed_reason from runs where run_id = $1", [runId]);
-    assert.deepEqual(row, { contract_sha256: null, closed_reason: "policy_failure" });
-    const usage = (await readIoEvents(rt.paths, runId)).filter((event) => event.event === "usage");
-    assert.equal(usage.length, 1, "what the call spent is still recorded");
-    assert.match(await latestResultCopy(rt.root, "farm"), shown);
-  });
-}
-
-test("a Claude writer in a project with .mcp.json gets that file; its translation does not", { timeout: 240_000 }, async (t) => {
+test("a Claude writer in a project with .mcp.json gets that file", { timeout: 240_000 }, async (t) => {
   const rt = await install(t, "claude", "codex");
   await fsp.writeFile(path.join(rt.root, ".mcp.json"), "{\"mcpServers\":{}}\n");
   const started = start(rt, await plan(rt));
@@ -211,8 +193,7 @@ test("a Claude writer in a project with .mcp.json gets that file; its translatio
   const writer = calls.find((call) => call.mode === "writer");
   assert.ok(writer.args.includes("--strict-mcp-config"));
   assert.equal(argAfter(writer.args, "--mcp-config"), ".mcp.json");
-  const translation = calls.find((call) => call.mode === "translation");
-  assert.equal(translation.args.includes("--mcp-config"), false, "the project's servers are the writer's, not the translation's");
+  assert.deepEqual(Object.keys(JSON.parse(writer.args[writer.args.indexOf("--mcp-config") + 2]).mcpServers), [GRAPH_MCP_NAME], "and Bridge's graph server beside it");
 });
 
 test("a model that is not the role's CLI's is refused before any card, naming its line", { timeout: 120_000 }, async (t) => {
@@ -248,11 +229,11 @@ test("the plan seals the roles: bridge.json changed after it affects the next st
   await fsp.writeFile(rt.paths.bridgeConfigPath, JSON.stringify(swapped));
   const started = start(rt, work);
   assert.equal(started.status, 0, started.stderr + started.stdout);
-  assert.deepEqual((await rt.calls()).map((call) => call.cli), ["claude", "codex", "claude", "codex"], "this run keeps what its card showed");
+  assert.deepEqual((await rt.calls()).map((call) => call.cli), ["claude", "codex"], "this run keeps what its card showed");
   const card = rt.bridge(["start", work.order, "--fake-cli"]);
   assert.match(card.stdout, /^Writer: +codex \(config\), model the CLI's default \(priority table\), effort medium \(priority table\)$/m);
   assert.match(card.stdout, /^Reviewer: +claude \(config\), model the CLI's default \(priority table\), effort medium \(priority table\)$/m);
-  assert.match(card.stdout, /by the writer \(codex\) and 2 check\(s\) by the reviewer \(claude\)/);
+  assert.match(card.stdout, /^Contract: {5}sha256 [0-9a-f]{64}, 1 condition\(s\) cut from the acceptance list$/m);
 });
 
 test("--writer and --reviewer fill the roles for one run; beside --yes they must be what the card showed", { timeout: 240_000 }, async (t) => {
@@ -266,7 +247,7 @@ test("--writer and --reviewer fill the roles for one run; beside --yes they must
   assert.match(other.stdout, /--writer is not what the card showed/);
   const yes = rt.bridge(["start", order, "--writer", "codex", "--yes", "--fake-cli"]);
   assert.equal(yes.status, 0, yes.stderr + yes.stdout);
-  assert.deepEqual((await rt.calls()).map((call) => call.cli), ["codex", "codex", "codex", "codex"]);
+  assert.deepEqual((await rt.calls()).map((call) => call.cli), ["codex", "codex"]);
   assert.equal((await readJson(rt.paths.bridgeConfigPath)).roles.writer.provider_id, "claude", "bridge.json is not changed by a flag");
   const unknown = rt.bridge(["start", order, "--writer", "gemini", "--fake-cli"]);
   assert.notEqual(unknown.status, 0);
@@ -275,7 +256,9 @@ test("--writer and --reviewer fill the roles for one run; beside --yes they must
 
 const MCP_LIST = JSON.stringify([{ name: "node_repl", enabled: true }, { name: "docs_search", enabled: true }]);
 const allowInPolicy = async (rt, names) => fsp.writeFile(rt.paths.policyOverridePath, JSON.stringify({ schema_version: 5, reviewer: { mcp_allow: names } }));
-const offFlags = (args) => args.filter((arg) => /^mcp_servers\./.test(arg));
+const offFlags = (args) => args.filter((arg) => /^mcp_servers\.[^.]+\.enabled=false$/.test(arg));
+// Bridge's graph server, defined for each call by `-c` (T0-GRAPH-01): beside the list, never on it.
+const graphFlags = (args) => args.filter((arg) => arg.startsWith("mcp_servers." + GRAPH_MCP_NAME + ".")).map((arg) => arg.slice(0, arg.indexOf("=")));
 
 test("Codex: every server not on the list is off by name in every call, sealed in the plan; the card, the run and the result say the reviewer has none", { timeout: 240_000 }, async (t) => {
   const rt = await install(t, "codex", "codex");
@@ -286,8 +269,11 @@ test("Codex: every server not on the list is off by name in every call, sealed i
   const started = start(rt, work, { FAKE_CODEX_MCP_LIST: "fail" });
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const calls = await rt.calls();
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 2);
   for (const call of calls) assert.deepEqual(offFlags(call.args), ["mcp_servers.node_repl.enabled=false", "mcp_servers.docs_search.enabled=false"], call.mode);
+  for (const call of calls) {
+    assert.deepEqual(graphFlags(call.args), ["command", "args", "enabled_tools", "omit_tools_from"].map((key) => "mcp_servers." + GRAPH_MCP_NAME + "." + key), call.mode);
+  }
   const [row] = await queryRecords("select reviewer_mcp from runs where run_id = $1", [work.plan.proposed_run_id]);
   assert.deepEqual(row.reviewer_mcp, []);
   assert.match(await latestResultCopy(rt.root, "farm"), /^reviewer:\n  provider: codex\n(?:.*\n){2}  mcp: \[\]\n---/m);
@@ -305,9 +291,9 @@ test("a server on reviewer.mcp_allow stays on in the reviewer's calls only, as i
   const started = start(rt, work);
   assert.equal(started.status, 0, started.stderr + started.stdout);
   const calls = await rt.calls();
-  assert.equal(calls.length, 4);
-  for (const mode of ["translation", "writer"]) assert.deepEqual(offFlags(calls.find((call) => call.mode === mode).args), ["mcp_servers.node_repl.enabled=false", "mcp_servers.docs_search.enabled=false"], mode);
-  for (const mode of ["check", "review"]) assert.deepEqual(offFlags(calls.find((call) => call.mode === mode).args), ["mcp_servers.node_repl.enabled=false"], mode);
+  assert.equal(calls.length, 2);
+  for (const mode of ["writer"]) assert.deepEqual(offFlags(calls.find((call) => call.mode === mode).args), ["mcp_servers.node_repl.enabled=false", "mcp_servers.docs_search.enabled=false"], mode);
+  for (const mode of ["review"]) assert.deepEqual(offFlags(calls.find((call) => call.mode === mode).args), ["mcp_servers.node_repl.enabled=false"], mode);
   const [row] = await queryRecords("select reviewer_mcp from runs where run_id = $1", [work.plan.proposed_run_id]);
   assert.deepEqual(row.reviewer_mcp, ["docs_search"]);
   assert.match(await latestResultCopy(rt.root, "farm"), /^ {2}mcp: \["docs_search"\]$/m);
@@ -367,29 +353,35 @@ test("at the command line: a missing Codex is said as such in the role it fills;
   assert.doesNotMatch(planOnly.stderr, /MCP/);
   const reviewer = rt.bridge(["start", order], absent);
   assert.equal(reviewer.status, 1, reviewer.stderr);
-  assert.match(reviewer.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: review-bridge start /m);
+  assert.match(reviewer.stdout, /^Reviewer read-only check: not passed \(the reviewer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: npx review-bridge start /m);
   assert.doesNotMatch(reviewer.stdout + reviewer.stderr, /MCP/);
   const writer = rt.bridge(["start", order, "--writer", "codex", "--reviewer", "claude"], absent);
   assert.equal(writer.status, 1, writer.stderr);
-  assert.match(writer.stdout, /^Writer: not ready \(the writer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: review-bridge start /m);
+  assert.match(writer.stdout, /^Writer: not ready \(the writer CLI is not installed and signed in\)\nInstall the codex CLI and sign it in \(codex login\), then run: npx review-bridge start /m);
   assert.doesNotMatch(writer.stdout + writer.stderr, /MCP/);
   // No Codex role: nothing about Codex or its list, even with Codex absent. Its check stops at Claude's own CLI.
   const noCodex = rt.bridge(["start", order, "--writer", "claude", "--reviewer", "claude"], absent);
   assert.equal(noCodex.status, 1, noCodex.stderr);
-  assert.match(noCodex.stdout, /Reviewer read-only check: not passed/);
-  assert.doesNotMatch(noCodex.stdout + noCodex.stderr, /MCP|codex/i);
+  assert.match(noCodex.stdout, /Needs authorization/);
+  assert.doesNotMatch(noCodex.stdout, /Reviewer read-only check/, "no model call before a yes, the check's among them");
+  const checked = rt.bridge(["start", order, "--writer", "claude", "--reviewer", "claude", "--yes"], absent);
+  assert.equal(checked.status, 1, checked.stderr);
+  assert.match(checked.stdout, /Reviewer read-only check: not passed/);
+  // The card's own line is the one place MCP is named, and it says none.
+  assert.doesNotMatch((checked.stdout + checked.stderr).replace("Reviewer MCP: none", ""), /MCP|codex/i);
 });
 
-test("a Claude reviewer: nothing on the list, no server at all; on the list, only those from .mcp.json; the writer's rule does not change", { timeout: 240_000 }, async (t) => {
+test("a Claude reviewer: nothing on the list, only Bridge's graph server; on the list, those from .mcp.json beside it; the writer's rule does not change", { timeout: 240_000 }, async (t) => {
   const rt = await install(t, "claude", "claude");
   await fsp.writeFile(path.join(rt.root, ".mcp.json"), JSON.stringify({ mcpServers: { docs_search: { command: "a" }, deploy: { command: "b" } } }));
   const none = start(rt, await plan(rt));
   assert.equal(none.status, 0, none.stderr + none.stdout);
   const first = await rt.calls();
-  for (const mode of ["check", "review"]) {
+  for (const mode of ["review"]) {
     const call = first.find((entry) => entry.mode === mode);
     assert.ok(call.args.includes("--strict-mcp-config"), mode);
-    assert.equal(call.args.includes("--mcp-config"), false, mode);
+    assert.deepEqual(Object.keys(JSON.parse(argAfter(call.args, "--mcp-config")).mcpServers), [GRAPH_MCP_NAME], mode);
+    assert.equal(argAfter(call.args, "--allowedTools"), "mcp__" + GRAPH_MCP_NAME, mode);
   }
   await fsp.rm(path.join(rt.root, "calls.jsonl"));
   await allowInPolicy(rt, ["docs_search"]);
@@ -398,15 +390,14 @@ test("a Claude reviewer: nothing on the list, no server at all; on the list, onl
   const listed = start(rt, work);
   assert.equal(listed.status, 0, listed.stderr + listed.stdout);
   const calls = await rt.calls();
-  for (const mode of ["check", "review"]) {
+  for (const mode of ["review"]) {
     const call = calls.find((entry) => entry.mode === mode);
     assert.ok(call.args.includes("--strict-mcp-config"), mode);
-    assert.deepEqual(Object.keys(JSON.parse(argAfter(call.args, "--mcp-config")).mcpServers), ["docs_search"], mode);
-    assert.equal(argAfter(call.args, "--allowedTools"), "mcp__docs_search", mode);
+    assert.deepEqual(Object.keys(JSON.parse(argAfter(call.args, "--mcp-config")).mcpServers), ["docs_search", GRAPH_MCP_NAME], mode);
+    assert.equal(argAfter(call.args, "--allowedTools"), "mcp__docs_search,mcp__" + GRAPH_MCP_NAME, mode);
   }
   const writer = calls.find((call) => call.mode === "writer");
   assert.equal(argAfter(writer.args, "--mcp-config"), ".mcp.json", "the writer takes the project's whole file, as before");
-  assert.equal(calls.find((call) => call.mode === "translation").args.includes("--mcp-config"), false);
   const [row] = await queryRecords("select reviewer_mcp from runs where run_id = $1", [work.plan.proposed_run_id]);
   assert.deepEqual(row.reviewer_mcp, ["docs_search"]);
   await allowInPolicy(rt, ["docs_search", "absent"]);

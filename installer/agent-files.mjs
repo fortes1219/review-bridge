@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { bridgeDataHome } from "../review-bridge/service/database/dataHome.mjs";
+import { bridgeRunner } from "../review-bridge/utils/bridgeCommand.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY_NAME = "review-bridge";
@@ -70,7 +71,8 @@ const ENTRY_TEXT = {
 };
 
 export async function agentEntryText(provider) {
-  const guide = await fsp.readFile(path.join(packageRoot, "project-templates", "agent-guide.md"), "utf8");
+  // How the person runs Bridge, as init was run (bridgeRunner); a global install runs under npx too.
+  const guide = (await fsp.readFile(path.join(packageRoot, "project-templates", "agent-guide.md"), "utf8")).replaceAll("{{bridge}}", bridgeRunner());
   return ENTRY_TEXT[provider](guide).join("\n");
 }
 

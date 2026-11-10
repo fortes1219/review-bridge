@@ -73,13 +73,44 @@ async function startRun(runtime, { workPackageId, runId, timestamp }) {
   });
 }
 
+// Windows, 2026-11-09: the start read the clock once per field, and a millisecond between the readings
+// left timeout_at short of created_at + run_timeout. A clock that moves on at every reading shows it.
+test("a run's time limit is counted from the moment it records as its start, whatever the clock does between", async () => {
+  const runtime = await makeRuntime("review-bridge-start-clock-");
+  let now = Date.parse("2026-11-09T05:00:00.000Z");
+  const clock = () => now++;
+  const { snapshot } = await loadOrCreatePolicySnapshot(runtime.paths);
+  const workPackage = await createImmutableWorkPackage(runtime.paths, {
+    work_package_id: "start-clock",
+    task: "Exercise the start's clock.",
+    acceptance_criteria: ["the deadline is two hours after the start"],
+    scope: { allowed_paths: ["fixture.txt"] },
+    budget: { rounds: 1, call_timeout: 1, run_timeout: 7_200_000 },
+    breakpoint: "return to owner",
+  }, clock);
+  const authorization = await createAuthorization(runtime.paths, {
+    authorizedBy: "Test Owner", workPackageSha256: workPackage.record.content_sha256, policySha256: snapshot.effective_policy_sha256, ttl: 3_600_000,
+  }, clock);
+  const { run } = await claimStartAuthorization(runtime.paths, authorization.authorization_id, {
+    runId: "start-clock", sessionId: "session-start-clock", executionMode: "fake_cli", workspaceEvidence: { test: true }, clock,
+  });
+  // run_deadline_at is the recovery lease, renewed at every step after this one (appendProjectionEvent).
+  assert.equal(Date.parse(run.timeout_at) - Date.parse(run.created_at), 7_200_000);
+});
+
+// A work order says what to do and gives an acceptance list (the form check, RC3-COST-01); inside its
+// blocks the person's text is kept as written.
 test("R1 multiline task files allow newline, tab, and backticks", async () => {
   const runtime = await makeRuntime("review-bridge-r1-");
   const task = [
     "# Work",
     "",
+    "<!-- bridge:requested_work -->",
     "Update the `README.md` example.",
-    "\tKeep this indented acceptance note.",
+    "\tKeep this indented note.",
+    "",
+    "<!-- bridge:acceptance -->",
+    "- The `README.md` example is updated.",
   ].join("\n");
   const taskFile = path.join(runtime.paths.privateRoot, "work-packages", "r1.md");
   const outPath = path.join(runtime.paths.privateRoot, "r1.plan.json");

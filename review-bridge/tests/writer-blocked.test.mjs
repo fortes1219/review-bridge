@@ -1,7 +1,7 @@
 // A writer that could not run the tests where it is (Codex's sandbox on Windows: spawn EPERM) is not a
 // stopped run. Bridge runs them itself and they decide; the result says what each side knows. Canary,
 // 2026-11-05: a run ended "blocked" with a Why of one line, on a project already holding those files.
-import { dataHome, queryRecords } from "./fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsp from "node:fs/promises";
@@ -29,8 +29,9 @@ async function freePort() {
 const ORDER = "# Work order: farm\n\n<!-- bridge:requested_work -->\nBuild a small farm.\n\n<!-- bridge:acceptance -->\n- The farm is visible.\n- The tests pass.\n";
 const git = (root, ...args) => spawnSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: root, encoding: "utf8", windowsHide: true });
 
-// A Git project. With `tests`, its package.json gives Bridge a test command, so the conditions lean on it.
-async function project(t, { tests = true, testExit = 0 } = {}) {
+// A Git project set up by the real init in fake mode, once for this file and kind of project: the template
+// each test copies. With `tests`, its package.json gives Bridge a test command, so the conditions lean on it.
+async function initProject(tests, testExit) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-blocked-"));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
   if (tests) await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "blocked-demo", dependencies: { express: "4.0.0" }, scripts: { test: "node -e \"process.exit(" + testExit + ")\"" } }));
@@ -41,12 +42,15 @@ async function project(t, { tests = true, testExit = 0 } = {}) {
     path.join(packageRoot, "bridge.mjs"), "init", "--target", root, "--writer", "codex", "--reviewer", "codex", "--yes", "--fake-cli", "--port", String(await freePort()),
   ], { cwd: packageRoot, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, REVIEW_BRIDGE_DATA_HOME: dataHome } });
   assert.equal(init.status, 0, init.stderr);
+  return root;
+}
+
+// The test's own project: a copy of the template under a new id (isolatedDataHome.mjs copyProject).
+async function project(t, { tests = true, testExit = 0 } = {}) {
+  const template = await projectTemplate("writer-blocked:" + (tests ? "tests-exit-" + testExit : "no-tests"), () => initProject(tests, testExit));
+  const root = await copyProject(t, template, "review-bridge-blocked-");
   const callLog = path.join(root, ".git", "calls.jsonl");
   const bridge = (args, env = {}) => spawnSync(process.execPath, [path.join(runtimeSource, "bootstrap.mjs"), ...args], { cwd: root, encoding: "utf8", windowsHide: true, env: { ...process.env, FAKE_CALL_LOG: callLog, ...env } });
-  t.after(async () => {
-    bridge(["down"]);
-    await fsp.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  });
   const run = async (env) => {
     const order = ".review-bridge/work-packages/farm.md";
     await fsp.writeFile(path.join(root, order), ORDER);
@@ -64,28 +68,33 @@ async function project(t, { tests = true, testExit = 0 } = {}) {
 
 const COULD_NOT_RUN = { FAKE_WRITER_STATUS: "blocked", FAKE_WRITER_CRITERIA: "open", FAKE_WRITER_UNVERIFIED: "npm test: spawn EPERM in the sandbox" };
 
-test("blocked only on conditions the tests decide, asking nothing: Bridge's tests and the reviewer judge the work, and it is delivered", { timeout: 180_000 }, async (t) => {
+// Code cannot tell which conditions the tests show (Owner 2026-11-08, choice A): in a project whose tests
+// Bridge runs, a writer blocked on any condition and asking nothing goes on to the tests and the review.
+test("blocked on a condition it could not check, asking nothing, where Bridge runs the tests: the tests and the reviewer judge the work, and it is delivered", { timeout: 180_000 }, async (t) => {
   const { run } = await project(t);
   const { started, modes, row } = await run(COULD_NOT_RUN);
   assert.equal(started.status, 0, started.stderr + started.stdout);
-  assert.deepEqual(modes, ["translation", "check", "writer", "review"], "the review is reached");
+  assert.deepEqual(modes, ["writer", "review"], "the review is reached");
   assert.deepEqual(row, { conclusion: "success", closed_reason: "review_pass" });
 });
 
 test("the tests really do decide: a blocked writer whose tests fail is not delivered, and nothing reviews it", { timeout: 180_000 }, async (t) => {
   const { run } = await project(t, { testExit: 1 });
   const { modes, row } = await run(COULD_NOT_RUN);
-  assert.deepEqual(modes, ["translation", "check", "writer"], "failed tests skip the review");
+  assert.deepEqual(modes, ["writer"], "failed tests skip the review");
   assert.notEqual(row.conclusion, "success");
   assert.equal(row.closed_reason, "rounds_exhausted");
 });
 
-test("status done with a test-decided condition not done is not refused", { timeout: 180_000 }, async (t) => {
+// No condition is the tests' to decide any more, so "done" with one not done is a contradiction even where
+// Bridge runs the tests; the writer who could not run them says so in unverified and stays done.
+test("status done with a condition not done is refused even where Bridge runs the tests", { timeout: 180_000 }, async (t) => {
   const { run } = await project(t);
-  const { started, modes, row } = await run({ FAKE_WRITER_CRITERIA: "open", FAKE_WRITER_UNVERIFIED: "could not run the tests here" });
-  assert.equal(started.status, 0, started.stderr + started.stdout);
-  assert.deepEqual(modes, ["translation", "check", "writer", "review"]);
-  assert.equal(row.conclusion, "success");
+  const { started, modes, row, result } = await run({ FAKE_WRITER_CRITERIA: "open", FAKE_WRITER_UNVERIFIED: "could not run the tests here" });
+  assert.equal(started.status, 79, started.stderr + started.stdout);
+  assert.deepEqual(modes, ["writer"]);
+  assert.equal(row.closed_reason, "malformed_writer_result");
+  assert.match(result, /\$\.status: done while AC1 is not done/);
 });
 
 test("blocked and asking the person stops, and says it: the Why has the writer's words, the changes three lists", { timeout: 180_000 }, async (t) => {
@@ -94,7 +103,7 @@ test("blocked and asking the person stops, and says it: the Why has the writer's
   await fsp.writeFile(path.join(root, "left-behind.txt"), "from before\n");
   await fsp.appendFile(path.join(root, "README.md"), "edited before the run\n");
   const { modes, row, result } = await run({ ...COULD_NOT_RUN, FAKE_WRITER_ASKS: "1" });
-  assert.deepEqual(modes, ["translation", "check", "writer"], "no review");
+  assert.deepEqual(modes, ["writer"], "no review");
   assert.equal(row.closed_reason, "needs_human");
   assert.match(result, /Writer reported status: blocked/);
   assert.match(result, /What the writer says it could not check:\n- npm test: spawn EPERM in the sandbox/);
@@ -110,7 +119,7 @@ test("blocked and asking the person stops, and says it: the Why has the writer's
 test("blocked with no test to decide it stops as before", { timeout: 180_000 }, async (t) => {
   const { run } = await project(t, { tests: false });
   const { modes, row, result } = await run(COULD_NOT_RUN);
-  assert.deepEqual(modes, ["translation", "check", "writer"]);
+  assert.deepEqual(modes, ["writer"]);
   assert.equal(row.closed_reason, "needs_human");
   assert.match(result, /npm test: spawn EPERM in the sandbox/);
 });
@@ -119,7 +128,7 @@ test("status done with a condition only the reviewer can judge still not done is
   const { run } = await project(t, { tests: false });
   const { started, modes, row, result } = await run({ FAKE_WRITER_CRITERIA: "open" });
   assert.equal(started.status, 79, started.stderr + started.stdout);
-  assert.deepEqual(modes, ["translation", "check", "writer"]);
+  assert.deepEqual(modes, ["writer"]);
   assert.equal(row.closed_reason, "malformed_writer_result");
   assert.match(result, /\$\.status: done while AC1 is not done/);
 });
@@ -131,7 +140,13 @@ test("the prompt says who runs the tests only when Bridge will, whichever provid
   });
   const withTests = compose({ kind: "command", command: "npm test" });
   assert.match(withTests, /Bridge itself runs the project's tests \(npm test\) outside your sandbox/);
-  assert.match(withTests, /If they cannot run where you are, write that in unverified and keep status done: it is not a reason to be blocked\./);
-  assert.match(withTests, /status is done only if every condition is done, apart from the ones the project's tests decide/);
+  assert.match(withTests, /That they cannot run where you are is not a reason to be blocked: write that in unverified and keep status done\./);
+  // The writer is not asked to run the tests: Bridge runs them, and the writer's run would be no evidence (Fortes 2026-11-09).
+  assert.doesNotMatch(withTests, /Run them if you can/);
+  // Every condition, with tests or without: none is set apart as the tests'.
+  for (const prompt of [withTests, compose({ kind: "not_configured" })]) {
+    assert.match(prompt, /status is done only if every condition is done\./);
+    assert.doesNotMatch(prompt, /apart from the ones the project's tests decide/);
+  }
   assert.doesNotMatch(compose({ kind: "not_configured" }), /Bridge itself runs/);
 });

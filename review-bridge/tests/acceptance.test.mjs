@@ -11,18 +11,12 @@ import { acceptanceRows, criteriaProblems, decideAcceptance, sameVersion, testsD
 import { runTest } from "../features/workOrder/test.mjs";
 import { effectiveLimits } from "../features/workOrder/writerLoop.mjs";
 
-const condition = (id, verify) => ({ id, statement: "condition " + id, quote: "q", source_refs: [{ start: 1, end: 1 }], verify, run_refs: [] });
-const contract = {
-  acceptance: [
-    condition("AC1", [{ kind: "test", check: null }]),
-    condition("AC2", [{ kind: "reviewer", check: "reads the page" }]),
-  ],
-};
+const condition = (id) => ({ id, statement: "condition " + id, source_refs: [{ start: 1, end: 1 }], run_refs: [] });
+const contract = { acceptance: [condition("AC1"), condition("AC2")] };
 const writer = (criteria, status = "done") => ({ status, criteria });
 const done = (id) => ({ id, status: "done", note: "n" });
 const review = (verdicts, gate = "PASS", findings = []) => ({ gate, findings, verdicts });
 const pass = (id) => ({ id, verdict: "pass", evidence: "file.js:3" });
-const git = (fingerprint) => ({ kind: "git", head: "abc", dirty: true, fingerprint });
 
 test("the writer reports every sealed condition once, and calls the work done only if each one is", () => {
   assert.deepEqual(criteriaProblems(writer([done("AC1"), done("AC2")]), contract), []);
@@ -46,23 +40,19 @@ test("the reviewer judges every sealed condition once, backs a pass with evidenc
   assert.deepEqual(verdictProblems(review([pass("AC1")]), null), ["$.verdicts: there is no contract; leave it empty"]);
 });
 
-test("Bridge decides each condition from the records: a reviewer pass is proven only when its evidence holds", () => {
-  const gatePassed = (version) => ({ kind: "command", passed: true, work_version: version });
-  const rows = (verdicts, testResult, reviewVersion) => acceptanceRows({ contract, writer: writer([done("AC1"), done("AC2")]), review: review(verdicts), test: testResult, reviewVersion });
+test("Bridge decides each condition from the records: the reviewer's pass proves it, its fail fails it, anything else is unknown", () => {
+  const rows = (verdicts) => acceptanceRows({ contract, writer: writer([done("AC1"), done("AC2")]), review: review(verdicts) });
   const results = (list) => list.map((row) => row.result);
-  assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], gatePassed(git("v1")), git("v1"))), ["proven", "proven"]);
-  // The tests ran on one version, the reviewer read another: the condition proven by the tests is not proven.
-  assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], gatePassed(git("v1")), git("v2"))), ["unknown", "proven"]);
-  // Without Git neither version is known: the test result stands, the work proof is unknown.
-  assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], gatePassed({ kind: "unknown", reason: "no_git" }), { kind: "unknown", reason: "no_git" })), ["proven", "proven"]);
-  assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], { kind: "command", passed: false, work_version: git("v1") }, git("v1"))), ["failed", "proven"]);
-  assert.deepEqual(results(rows([pass("AC1"), pass("AC2")], null, git("v1"))), ["unknown", "proven"]);
-  assert.deepEqual(results(rows([pass("AC1"), { id: "AC2", verdict: "cannot_verify", evidence: "needs a browser" }], gatePassed(git("v1")), git("v1"))), ["proven", "unknown"]);
-  assert.deepEqual(results(rows([pass("AC1")], gatePassed(git("v1")), git("v1"))), ["proven", "unknown"]);
-  assert.deepEqual(results(rows([{ id: "AC1", verdict: "fail", evidence: "" }, pass("AC2")], gatePassed(git("v1")), git("v1"))), ["failed", "proven"]);
-  assert.equal(decideAcceptance(rows([pass("AC1"), pass("AC2")], gatePassed(git("v1")), git("v1"))), "proven");
-  assert.equal(decideAcceptance(rows([pass("AC1"), { id: "AC2", verdict: "cannot_verify", evidence: "x" }], gatePassed(git("v1")), git("v1"))), "unknown");
-  assert.equal(decideAcceptance(rows([{ id: "AC1", verdict: "fail", evidence: "" }, pass("AC2")], gatePassed(git("v1")), git("v1"))), "failed");
+  assert.deepEqual(results(rows([pass("AC1"), pass("AC2")])), ["proven", "proven"]);
+  assert.deepEqual(results(rows([pass("AC1"), { id: "AC2", verdict: "cannot_verify", evidence: "needs a browser" }])), ["proven", "unknown"]);
+  assert.deepEqual(results(rows([pass("AC1")])), ["proven", "unknown"]);
+  assert.deepEqual(results(rows([{ id: "AC1", verdict: "fail", evidence: "" }, pass("AC2")])), ["failed", "proven"]);
+  // The tests are no column: failed work never reaches the review, and the run stops when the reviewer
+  // read another version than the tests ran on (version_changed).
+  assert.equal("test" in rows([pass("AC1"), pass("AC2")])[0], false);
+  assert.equal(decideAcceptance(rows([pass("AC1"), pass("AC2")])), "proven");
+  assert.equal(decideAcceptance(rows([pass("AC1"), { id: "AC2", verdict: "cannot_verify", evidence: "x" }])), "unknown");
+  assert.equal(decideAcceptance(rows([{ id: "AC1", verdict: "fail", evidence: "" }, pass("AC2")])), "failed");
   assert.equal(sameVersion({ kind: "unknown" }, { kind: "unknown" }), false);
 });
 
@@ -107,17 +97,16 @@ test("reading the version of a Git project fails loudly when Git fails; only a p
   await assert.rejects(workVersion(root), /Git could not/);
 });
 
-test("a condition the tests decide is not left open by the writer; one only the reviewer can see still is", () => {
-  const contract = { acceptance: [{ id: "AC1", verify: [{ kind: "test", check: null }] }, { id: "AC2", verify: [{ kind: "reviewer", check: "read it" }] }] };
+test("a writer blocked without asking the person goes on to Bridge's tests and the reviewer when the project has tests (2026-11-08 choice A)", () => {
   const report = (status, ac1, ac2, needsHuman = []) => ({ status, needs_human: needsHuman, criteria: [{ id: "AC1", status: ac1, note: "" }, { id: "AC2", status: ac2, note: "" }] });
-  assert.deepEqual(criteriaProblems(report("done", "not_done", "done"), contract), [], "the tests decide AC1");
-  assert.deepEqual(criteriaProblems(report("done", "done", "not_done"), contract), ["$.status: done while AC2 is not done"]);
+  // Code cuts the conditions and cannot tell which ones the tests show: a writer saying done owes every one.
+  assert.deepEqual(criteriaProblems(report("done", "not_done", "done"), contract), ["$.status: done while AC1 is not done"]);
   const command = { kind: "command", command: "npm test" };
-  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), contract, command), true);
-  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "not_done"), contract, command), false, "AC2 is the writer's to finish");
-  assert.equal(testsDecideBlockedWriter(report("blocked", "done", "done"), contract, command), false, "blocked by something it did not name in a condition");
-  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done", [{ question: "which?" }]), contract, command), false, "it asked the person");
-  assert.equal(testsDecideBlockedWriter(report("out_of_scope", "not_done", "done"), contract, command), false);
-  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), contract, { kind: "not_configured" }), false, "no test to decide it");
-  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), contract, null), false);
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), command), true);
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "not_done"), command), true, "the reviewer judges each one");
+  assert.equal(testsDecideBlockedWriter(report("blocked", "done", "done"), command), false, "blocked by something it did not name in a condition");
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done", [{ question: "which?" }]), command), false, "it asked the person");
+  assert.equal(testsDecideBlockedWriter(report("out_of_scope", "not_done", "done"), command), false);
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), { kind: "not_configured" }), false, "no tests: nothing but the writer's word would stand");
+  assert.equal(testsDecideBlockedWriter(report("blocked", "not_done", "done"), null), false);
 });

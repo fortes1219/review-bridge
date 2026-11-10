@@ -12,6 +12,11 @@ export function parseOptions(args, schema) {
     if (value === undefined || value.startsWith("--")) {
       throw new Error("Option " + token + " requires a value.");
     }
+    if (definition.multiple) {
+      (values[definition.key] ??= []).push(value);
+      index += 1;
+      continue;
+    }
     values[definition.key] = definition.type === "number" ? Number(value) : value;
     if (definition.type === "number" && !Number.isFinite(values[definition.key])) {
       throw new Error("Option " + token + " requires a number.");

@@ -1,7 +1,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { listCodexMcpServers, loadOrCreatePolicySnapshot, probeAuditDir, readJson, retentionDays, settleMcp } from "../../service/index.mjs";
+import { graphMcpServer, listCodexMcpServers, loadOrCreatePolicySnapshot, probeAuditDir, readJson, retentionDays, settleMcp } from "../../service/index.mjs";
 import { removeServiceSession, serviceFiles, writeServiceSession } from "./pageService.mjs";
 import { createReviewerProbeService } from "./reviewerProbe.mjs";
 import { DEFAULT_WATCH_PORT, findPortOwner, portBumpNotice, startWatchServer } from "./watchServer.mjs";
@@ -25,6 +25,8 @@ export async function startWatch({ paths, adapter, adapterId, adapterDefinition,
       return { off: settled.reviewerOff, allow: settled.reviewerMcp };
     },
     projectRoot: paths.repoRoot,
+    // Every review is given Bridge's graph server, so the check runs with it (T0-GRAPH-01).
+    graph: graphMcpServer({ bridgeRoot: paths.bridgeRoot, repoRoot: paths.repoRoot }),
     adapter,
     adapterId,
     adapterConfig: adapterDefinition || null,

@@ -52,11 +52,17 @@ const lockOf = (root) => path.join(root, ".review-bridge-install.lock");
 const { getBridgePaths } = await import(sourceModule("utils/paths.mjs"));
 const projectPaths = (root) => getBridgePaths(root, sourceRuntime, { privateRootName: ".review-bridge" });
 const manifestOf = (root) => projectPaths(root).installManifestPath;
+// These tests stop the page service, the way `down` stops it, and leave the database alone: `down` stops
+// the person's database too (RC3-DOWN-01), and the check after an upgrade runs in this process, which
+// keeps its one pool to that database open (database/index.mjs). This file's database is stopped when
+// its tests end (isolatedDataHome).
+const { serviceDown } = await import(sourceModule("features/setupCheck/pageService.mjs"));
+const stopPage = (root) => serviceDown({ paths: projectPaths(root), out: { write() {} } });
 
 async function workspace(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-upgrade-"));
   t.after(async () => {
-    spawnSync(process.execPath, [sourceBootstrap, "down"], { cwd: root, windowsHide: true, stdio: "ignore" });
+    await stopPage(root).catch(() => {});
     await fsp.rm(root, { recursive: true, force: true });
   });
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "vue-test", dependencies: { vue: "latest" }, devDependencies: { vite: "latest" } }));
@@ -189,7 +195,7 @@ function bootstrapRun(root, args, expected = 0) {
 async function fakeRun(root, id) {
   const planPath = path.join(projectPaths(root).logRoot, id + ".plan.json");
   const taskPath = path.join(privateOf(root), "work-packages", id + ".md");
-  // A work order with something to check; one without stops at translation and asks the human.
+  // A work order with what it must say; one without is refused before any card.
   await fsp.writeFile(taskPath, "# Update the README\n\n<!-- bridge:requested_work -->\nUpdate README.md only.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n- README.md says hello.\n");
   bootstrapRun(root, ["work-plan", "--fake-cli", "--task-file", taskPath, "--owner", "o", "--work-package", id, "--breakpoint", "b",
     "--allow-paths", "README.md", "--rounds", "2", "--call-timeout", "60000", "--out", planPath]);
@@ -257,7 +263,7 @@ test("W1 upgrade merges the settings, removes the old tools/ copy, keeps every u
   const before = await persistent(root);
   const { plan, result } = await upgrade(root);
   assert.equal(plan.from.version, "0.1.0-old");
-  assert.equal(plan.to.version, (await readJson(path.join(sourceRuntime, "templates", "PACKAGE_MANIFEST.json"))).version);
+  assert.equal(plan.to.version, (await readJson(path.join(sourceRuntime, "..", "package.json"))).version);
   assert.deepEqual(plan.config_added_keys, ["active_runs"]);
   assert.deepEqual(plan.config_removed_keys, ["state_contract"]);
   // The edited English template is kept; the untouched Chinese one is replaced.
@@ -327,7 +333,7 @@ test("W2 a failure at each step rolls back: persistent data bit for bit, the old
     assert.equal(await serviceRunning(root), true, hook + ": the page service is back");
   }
   // Without the page service it stays off.
-  bootstrapRun(root, ["down"]);
+  assert.equal((await stopPage(root)).exitCode, 0);
   const before = await persistent(root);
   await assert.rejects(upgrade(root, { afterConfig: fail }), /rolled back/);
   sameTree(await persistent(root), before, "no service");
@@ -346,7 +352,7 @@ test("W2b an automatic rollback that cannot finish keeps the marker and names up
   await assert.rejects(upgrade(root, {
     afterLegacyRemoved: async () => { throw new Error("injected"); },
     afterFilesRestored: async () => { throw new Error("restore blocked"); },
-  }), /automatic rollback did not finish \(restore blocked\)\. Bridge stays blocked for new work\. Run: review-bridge upgrade --rollback --target .+\. The backup is in /);
+  }), /automatic rollback did not finish \(restore blocked\)\. Bridge stays blocked for new work\. Run: npx review-bridge upgrade --rollback --target .+\. The backup is in /);
   assert.equal(await exists(markerOf(root)), true, "new work stays blocked");
   await rollback(root);
   sameTree(await persistent(root), before, "after upgrade --rollback");
@@ -394,7 +400,7 @@ test("W3b interrupted after the page service stopped and before the backup: the 
   assert.equal(await serviceRunning(root), true);
   sameTree(await persistent(root), before, "release with service");
   // The same point when nothing was running: only the marker goes.
-  bootstrapRun(root, ["down"]);
+  assert.equal((await stopPage(root)).exitCode, 0);
   crashAt(root, "afterServiceStop");
   const quiet = await planNeutralUpgradeRollback({ target: root });
   assert.equal(quiet.restart_service, false);
@@ -806,7 +812,7 @@ async function assertMoved(roots, expected) {
   }
 }
 
-const PROJECT_ONLY = ["bridge.json", "policy.override.json", "results", "rules.md", "work-packages"];
+const PROJECT_ONLY = [".gitignore", "bridge.json", "policy.override.json", "results", "rules.md", "work-packages"];
 
 test("W13 an upgrade from the older layout moves every old file out of the project, checked by SHA-256, and status still answers", async (t) => {
   const root = await workspace(t);
@@ -838,7 +844,12 @@ test("W13 an upgrade from the older layout moves every old file out of the proje
   }
   await verifyNeutralInstall(root);
   const status = bootstrapRun(root, ["status"]);
-  assert.ok(status.stdout.split("\n").includes("Logs: " + projectPaths(root).logRoot), status.stdout);
+  const statusLines = status.stdout.split(/\r?\n/);
+  assert.ok(statusLines.includes("Logs: " + projectPaths(root).logRoot), status.stdout);
+  // The check after the upgrade opened the database, and status says so (RC3-DOWN-01); the runs come
+  // from the database, with no queue totals counted from the files the upgrade moved.
+  assert.ok(statusLines.includes("Database: running"), status.stdout);
+  assert.equal(statusLines.some((line) => /^Review queue:/.test(line)), false, status.stdout);
   assert.equal((await planNeutralUpgrade({ target: root })).up_to_date, true);
 });
 

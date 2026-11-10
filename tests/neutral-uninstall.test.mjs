@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { separatePerson, stopPage } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -40,8 +40,7 @@ const projectPaths = (root) => getBridgePaths(root, path.join(packageRoot, "revi
 async function workspace(t, { gitRepo = true } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-uninstall-"));
   t.after(async () => {
-    const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
-    spawnSync(process.execPath, [bootstrap, "down"], { cwd: root, windowsHide: true, stdio: "ignore" });
+    await stopPage(root);
     await fsp.rm(root, { recursive: true, force: true });
   });
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "vue-test", dependencies: { vue: "latest" }, devDependencies: { vite: "latest" } }));
@@ -58,6 +57,18 @@ async function workspace(t, { gitRepo = true } = {}) {
 async function install(root) {
   const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
   await applyNeutralInstall(plan, plan.plan_sha256);
+}
+
+// An install from before .review-bridge/.gitignore appended this block to .git/info/exclude and recorded
+// it; uninstall still takes exactly that block away.
+async function olderInstallExclusion(root) {
+  const excludePath = await fsp.realpath(path.join(root, ".git", "info", "exclude"));
+  const before = await fsp.readFile(excludePath, "utf8");
+  const addedPrefixNewline = before.length > 0 && !before.endsWith("\n");
+  await fsp.appendFile(excludePath, (addedPrefixNewline ? "\n" : "") + "# Review Bridge local state\n/.review-bridge/\n");
+  const manifest = projectPaths(root).installManifestPath;
+  const record = JSON.parse(await fsp.readFile(manifest, "utf8"));
+  await fsp.writeFile(manifest, JSON.stringify({ ...record, git_exclusion: { path: excludePath, pattern: "/.review-bridge/", added_prefix_newline: addedPrefixNewline } }, null, 2) + "\n");
 }
 
 async function freePort() {
@@ -151,6 +162,7 @@ test("V1 uninstall removes .review-bridge/, restores the exclusion, keeps .claud
   const excludeBefore = await fsp.readFile(path.join(root, ".git", "info", "exclude"));
   const claudeBefore = await tree(path.join(root, ".claude"));
   await install(root);
+  await olderInstallExclusion(root);
   await addUserData(root);
   const before = await tree(path.join(root, ".review-bridge"));
   const manifest = projectPaths(root).installManifestPath;
@@ -374,6 +386,7 @@ test("V8f / V8j interrupted after the marker is gone: the index finds the journa
   const root = await workspace(t);
   const excludeBefore = await fsp.readFile(path.join(root, ".git", "info", "exclude"));
   await install(root);
+  await olderInstallExclusion(root);
   await crashAt(root, "afterDelete");
   assert.equal(await exists(path.join(root, ".review-bridge")), false);
   assert.notDeepEqual(await fsp.readFile(path.join(root, ".git", "info", "exclude")), excludeBefore);
@@ -486,6 +499,7 @@ test("V6 a process that merely claims the session is never killed", async (t) =>
 test("V9 only the block the install appended is removed, and only while it is still at the end", async (t) => {
   const root = await workspace(t);
   await install(root);
+  await olderInstallExclusion(root);
   const excludePath = path.join(root, ".git", "info", "exclude");
   const withBlock = await fsp.readFile(excludePath, "utf8");
   await fsp.writeFile(excludePath, "# mine\n" + withBlock);
@@ -493,6 +507,7 @@ test("V9 only the block the install appended is removed, and only while it is st
   assert.equal(await fsp.readFile(excludePath, "utf8"), "# mine\n# local\n*.swp\n");
   const second = await workspace(t);
   await install(second);
+  await olderInstallExclusion(second);
   const secondExclude = path.join(second, ".git", "info", "exclude");
   await fsp.appendFile(secondExclude, "added-later/\n");
   const changed = await fsp.readFile(secondExclude, "utf8");

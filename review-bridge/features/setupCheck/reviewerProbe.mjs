@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { classifyProviderFailure, DEFAULT_RETENTION_DAYS, inspectRoleReadiness, mcpConfigFor, mcpOffArgs, NO_CONNECTORS_ARGS, pruneProbeRecords, READ_ONLY_TOOLS, readOnlyArgs } from "../../service/index.mjs";
+import { classifyProviderFailure, DEFAULT_RETENTION_DAYS, graphServerArgs, inspectRoleReadiness, mcpConfigFor, mcpOffArgs, NO_CONNECTORS_ARGS, pruneProbeRecords, READ_ONLY_TOOLS, readOnlyArgs } from "../../service/index.mjs";
 import { localDateKey } from "../../utils/dates.mjs";
 
 // The two proofs differ in strength and each says what it is. Codex runs under an OS sandbox and
@@ -40,15 +40,19 @@ function sha256(value) {
 
 // The MCP servers a check runs with: those turned off by name and those let through, as a plan seals
 // them. `config` is what a Claude reviewer loads the let-through ones from.
-const NO_MCP = Object.freeze({ off: [], allow: [], config: null });
+// `graph` is Bridge's own graph server (T0-GRAPH-01), which every review is given: the check runs with
+// it too, and its tools are the only ones beyond the three read tools that a Claude session may hold.
+const NO_MCP = Object.freeze({ off: [], allow: [], config: null, graph: null });
+const allowedServers = (mcp) => [...(mcp.allow ?? []), ...(mcp.graph ? [mcp.graph.name] : [])];
 
 export function buildProbeArgs(provider, probeDir, mcp = NO_MCP) {
   // The same flags every review of this reviewer runs with: what is proven is what reviews.
-  if (provider === "claude") return ["-p", ...readOnlyArgs({ mcpConfig: mcp.config, mcp: mcp.allow }), "--no-session-persistence", "--output-format", "stream-json", "--verbose"];
+  if (provider === "claude") return ["-p", ...readOnlyArgs({ mcpConfig: mcp.config, mcp: allowedServers(mcp) }), "--no-session-persistence", "--output-format", "stream-json", "--verbose"];
   if (provider !== "codex") throw new Error("Reviewer probe adapter is not supported for " + provider + ".");
   return [
     ...NO_CONNECTORS_ARGS,
     ...mcpOffArgs(mcp.off),
+    ...graphServerArgs(mcp.graph ?? null),
     "--ask-for-approval", "never",
     "exec",
     "--ephemeral",
@@ -389,7 +393,7 @@ export async function runReviewerProbe({
     const unexpectedEntries = (await fsp.readdir(probeDir)).filter((name) => name !== "README.txt");
     // F5: counted only when the CLI process started. It is a launch (an attempt), not proof that a
     // model was reached: the CLI can still fail or hit a limit before calling one.
-    return { ...evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries, mcpAllow: mcp.allow }), cli_launches: started ? 1 : 0 };
+    return { ...evaluateProbe({ provider, result, sentinelName, probeDir, sentinelPresent, unexpectedEntries, mcpAllow: allowedServers(mcp) }), cli_launches: started ? 1 : 0 };
   } catch (error) {
     error.modelCall = stage === "before" ? "no" : stage === "runner" ? "unknown" : started ? "yes" : "no";
     throw error;
@@ -423,7 +427,7 @@ function observedEvidence(evidence = {}) {
 // can name another with --reviewer, and a proof of one says nothing about the other. `loadRoles` reads
 // the roles as they are now; a service given only `roles` keeps those.
 export function createReviewerProbeService({
-  roles, loadRoles = null, resolveMcp = null, projectRoot = null, adapter, adapterId, adapterConfig = null, adapterSource, probeSource = PROBE_SOURCE, auditDir,
+  roles, loadRoles = null, resolveMcp = null, projectRoot = null, graph = null, adapter, adapterId, adapterConfig = null, adapterSource, probeSource = PROBE_SOURCE, auditDir,
   retentionDays = DEFAULT_RETENTION_DAYS, statusProbe, versionProbe = defaultVersionProbe,
   runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot, now = () => new Date(),
 }) {
@@ -445,9 +449,9 @@ export function createReviewerProbeService({
   // Zero LLM: identifies everything a stale proof depends on, including the
   // platform adapter and reviewer probe implementation bytes.
   // The list as a check takes it: a Claude reviewer's let-through servers read from the project now.
-  const withConfig = async (provider, mcp) => (provider === "claude" && mcp.allow.length
-    ? { ...mcp, config: await mcpConfigFor(projectRoot, mcp.allow) }
-    : { ...NO_MCP, ...mcp });
+  const withConfig = async (provider, mcp) => (provider === "claude" && (mcp.allow.length || graph)
+    ? { ...NO_MCP, ...mcp, graph, config: await mcpConfigFor(projectRoot, mcp.allow, graph) }
+    : { ...NO_MCP, ...mcp, graph });
 
   async function fingerprint(provider, listed = NO_MCP) {
     const probeAdapter = PROBE_ADAPTERS[provider];

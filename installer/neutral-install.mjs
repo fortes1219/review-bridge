@@ -16,6 +16,7 @@ import {
   policyIdentity,
 } from "../review-bridge/service/index.mjs";
 import { bridgeDataHome } from "../review-bridge/service/database/dataHome.mjs";
+import { DEFAULT_LOCALE, systemLocale } from "../review-bridge/features/workOrder/i18n.mjs";
 import { projectLogRoot, projectStateRoot, readProjectId } from "../review-bridge/utils/paths.mjs";
 import {
   AGENT_COMMAND_RELATIVE, agentEntriesPending, agentEntriesState, agentFilesState, planAgentEntries, releaseAgentEntries, undoAgentFiles, writeAgentEntries,
@@ -23,9 +24,13 @@ import {
 import { projectPolicyOverride, resolveProfile, detectProject } from "./project-profile.mjs";
 import { validateRoles } from "./role-readiness.mjs";
 import { releaseAllVscodeTasks, vscodeTasksState } from "./vscode-tasks.mjs";
+import { bridgeRunner } from "../review-bridge/utils/bridgeCommand.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const privateName = ".review-bridge";
+// The folder keeps itself out of Git, whether Git is there at init or comes later, and touches no file of
+// the person's: pytest's .pytest_cache/.gitignore (cacheprovider.py), ruff's .ruff_cache, uv's .venv.
+const GIT_IGNORE = Object.freeze({ relative: ".gitignore", text: "# Created by Review Bridge automatically.\n*\n" });
 // The one runtime every project runs from.
 const sourceRuntime = path.join(packageRoot, "review-bridge");
 
@@ -89,37 +94,14 @@ export async function runtimeFingerprint(root = path.join(packageRoot, "review-b
   return sha256(JSON.stringify(files));
 }
 
+// Whether the folder is in a Git repository, and whether Git ignores .review-bridge/ there.
 function gitBoundary(selected) {
-  const gitRootText = git(selected, ["rev-parse", "--show-toplevel"]);
-  if (!gitRootText) return { repository: false, ignored: null, excludePath: null, pattern: null };
+  if (!git(selected, ["rev-parse", "--show-toplevel"])) return { repository: false, ignored: null };
   const target = realNative(selected);
-  const gitRoot = realNative(gitRootText);
-  const gitDirText = git(selected, ["rev-parse", "--absolute-git-dir"]);
-  const excludeText = git(selected, ["rev-parse", "--git-path", "info/exclude"]);
-  if (!gitDirText || !excludeText) throw new Error("Cannot locate local Git exclusion file.");
-  const gitDir = realNative(gitDirText);
-  const excludePath = realNative(path.resolve(selected, excludeText));
-  if (!under(excludePath, gitDir)) throw new Error("Git exclusion path is outside the selected Git directory.");
-  const relativeTarget = path.relative(gitRoot, target).replaceAll("\\", "/");
-  if (relativeTarget === ".." || relativeTarget.startsWith("../") || path.isAbsolute(relativeTarget)) {
-    throw new Error("Target is outside its Git repository.");
-  }
-  const pattern = "/" + (relativeTarget ? relativeTarget + "/" : "") + privateName + "/";
   const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", path.join(target, privateName, CONFIG_RELATIVE)], {
     cwd: target, windowsHide: true, timeout: 10_000, stdio: "ignore",
   }).status === 0;
-  return { repository: true, ignored, excludePath, pattern };
-}
-
-async function assertSafeExcludePath(excludePath) {
-  const parent = await statOptional(path.dirname(excludePath));
-  const file = await statOptional(excludePath);
-  if (parent && (!parent.isDirectory() || parent.isSymbolicLink())) {
-    throw new Error("Local Git exclusion directory is not a normal directory.");
-  }
-  if (file && (!file.isFile() || file.isSymbolicLink())) {
-    throw new Error("Local Git exclusion file is not a normal file.");
-  }
+  return { repository: true, ignored };
 }
 
 export const DEFAULT_WATCH_PORT = 8080;
@@ -157,7 +139,6 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     throw new Error("Bridge neutral state already exists; fresh install cannot overwrite it.");
   }
   const boundary = gitBoundary(root);
-  if (boundary.repository) await assertSafeExcludePath(boundary.excludePath);
   const agentEntries = await planAgentEntries();
   const plan = {
     schema_version: 1,
@@ -174,8 +155,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
     git: boundary,
     agent_entries: agentEntries,
     changes: [
-      ...(boundary.repository && !boundary.ignored ? ["Keep Bridge private state out of Git using local Git exclusion"] : []),
-      "Write the settings and work order templates to .review-bridge/; Bridge keeps its run state and logs in your data and log folders",
+      "Write the settings and work order templates to .review-bridge/, with a .gitignore there that keeps the folder out of Git; Bridge keeps its run state and logs in your data and log folders",
       ...agentEntries.filter((entry) => entry.action === "add" || entry.action === "replace").map((entry) => "Add the /review-bridge entry for your agent, outside the project: " + entry.path),
       "Leave everything else in the project untouched",
       "Serve the local page at http://localhost:" + watchPort + "/ (the next free port if it is taken)",
@@ -190,7 +170,7 @@ export async function planNeutralInstall({ target, profileId = "auto", roles, wa
 // project_id is the project's identity in the person's database (one database for all their
 // projects); the folder's path is only where it was last seen. A copied folder carries the same id;
 // init in the copy gives it its own (Owner 2026-10-25).
-function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { port: DEFAULT_WATCH_PORT, strict_port: false }, retentionDays = DEFAULT_RETENTION_DAYS }) {
+function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { port: DEFAULT_WATCH_PORT, strict_port: false }, retentionDays = DEFAULT_RETENTION_DAYS, locale = DEFAULT_LOCALE }) {
   return {
     schema_version: 4,
     project_id: projectId,
@@ -203,8 +183,8 @@ function neutralBridgeConfig({ projectId, profileId, roles, profile, watch = { p
     requires_human_authorization: true,
     watch: { port: watch.port, strict_port: watch.strict_port },
     retention: { days: retentionDays },
-    // The language pack for result files, notifications and the stdout summary.
-    locale: "en",
+    // The language pack for cards, result files, notifications and the stdout summary: the system's at init.
+    locale,
     // T0-06 G1.3: the profile-approved verification rules; work-plan picks the test command from here.
     test: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
     readiness: { reviewer_readonly_proven: "not_run" },
@@ -512,32 +492,16 @@ async function applyNeutralInstallLocked(plan, claimed) {
   });
   if (fresh.plan_sha256 !== claimed) throw new Error("Neutral install plan is stale.");
   const privateRoot = path.join(plan.target, privateName);
-  const excludePath = plan.git.excludePath;
-  let previousExclude = null;
-  let wroteExclude = false;
-  let addedPrefixNewline = false;
   let createdRoot = false;
   let wroteAgentEntries = false;
   let stateRoot = null;
   let createdState = false;
   try {
-    if (plan.git.repository && !plan.git.ignored) {
-      await assertSafeExcludePath(excludePath);
-      previousExclude = await fsp.readFile(excludePath).catch((error) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      });
-      const before = previousExclude || Buffer.alloc(0);
-      const addition = (before.length && before[before.length - 1] !== 10 ? "\n" : "")
-        + "# Review Bridge local state\n" + plan.git.pattern + "\n";
-      addedPrefixNewline = addition.startsWith("\n");
-      await fsp.mkdir(path.dirname(excludePath), { recursive: true });
-      wroteExclude = true;
-      await fsp.writeFile(excludePath, Buffer.concat([before, Buffer.from(addition, "utf8")]));
-      if (!gitBoundary(plan.target).ignored) throw new Error("Local Git exclusion did not take effect.");
-    }
     await fsp.mkdir(privateRoot);
     createdRoot = true;
+    // First, so nothing written after it is ever seen by Git, then or later.
+    await fsp.writeFile(inPrivate(privateRoot, GIT_IGNORE.relative), GIT_IGNORE.text, "utf8");
+    if (plan.git.repository && !gitBoundary(plan.target).ignored) throw new Error(".review-bridge/.gitignore did not keep the folder out of Git.");
     // The project holds only its settings and work order templates; the runtime stays in the Bridge
     // folder, the run state and the install record in the service's state under the project's id.
     const profile = await resolveProfile(plan.target, plan.profile.id);
@@ -546,6 +510,7 @@ async function applyNeutralInstallLocked(plan, claimed) {
       projectId, profileId: plan.profile.id, roles: plan.roles, profile,
       watch: { port: plan.watch.port, strict_port: plan.watch.strict_port },
       retentionDays: plan.retention?.days ?? DEFAULT_RETENTION_DAYS,
+      locale: await systemLocale(),
     }));
     await writeJson(inPrivate(privateRoot, "policy.override.json"), projectPolicyOverride(profile));
     await fsp.mkdir(path.join(privateRoot, "work-packages"), { recursive: true });
@@ -569,7 +534,9 @@ async function applyNeutralInstallLocked(plan, claimed) {
       work_template_sha256: plan.work_template_sha256,
       rules_sha256: plan.rules_sha256,
       installed_files: installedFiles,
-      git_exclusion: wroteExclude ? { path: excludePath, pattern: plan.git.pattern, added_prefix_newline: addedPrefixNewline } : null,
+      // Installs before .review-bridge/.gitignore recorded the line they added to .git/info/exclude here;
+      // upgrade, rollback and uninstall still take that line away. A new install adds none.
+      git_exclusion: null,
     });
     return { ok: true, target: plan.target, profile: plan.profile.id, roles: plan.roles, private_root: privateRoot };
   } catch (error) {
@@ -578,12 +545,69 @@ async function applyNeutralInstallLocked(plan, claimed) {
     if (createdRoot && path.resolve(privateRoot) === path.resolve(plan.target, privateName)) {
       await fsp.rm(privateRoot, { recursive: true, force: true });
     }
-    if (wroteExclude) {
-      if (previousExclude === null) await fsp.rm(excludePath, { force: true });
-      else await fsp.writeFile(excludePath, previousExclude);
-    }
     throw new Error("Neutral install rolled back: " + error.message);
   }
+}
+
+// What upgrade and uninstall say when .review-bridge/ is here but its record is not: init rebuilds it.
+const NO_RECORD = ".review-bridge/ is here, but its install record is not in Bridge's data folder (the folder was deleted, or this is another machine). Run: " + bridgeRunner() + " init — it rebuilds the record and keeps your settings, work orders and results.";
+
+// init where .review-bridge/ is and its install record in the data folder is not (the data folder deleted,
+// another machine, a reinstalled system), the way `git init` reinitializes an existing repository (git
+// setup.c, "Reinitialized existing Git repository"): what is missing is made, nothing there is
+// overwritten. The person's settings, rules, work orders and results stay as they are. The record counts as
+// installed only the files that are exactly what this version ships, or that this call wrote; every other
+// file is the person's, so upgrade and uninstall keep it. Returns null when the record is there: that is
+// an install, and upgrade is the way to move it.
+export async function reinitializeNeutralInstall({ target }) {
+  const root = path.resolve(target);
+  return await withInstallLock(root, async () => {
+    const privateRoot = path.join(root, privateName);
+    const configPath = inPrivate(privateRoot, CONFIG_RELATIVE);
+    const config = await readJsonOptional(configPath).catch(() => null);
+    if (!config?.project_id) {
+      throw new Error(".review-bridge/ is here but its bridge.json has no project id, so Bridge cannot tell which project it was. Move .review-bridge/ aside and run: " + bridgeRunner() + " init");
+    }
+    const layout = await installLayout(root);
+    if (await statOptional(installPath(layout, layout.manifest))) return null;
+    for (const name of STATE_FOLDERS) await fsp.mkdir(path.join(layout.stateRoot, name), { recursive: true });
+    await fsp.mkdir(path.join(privateRoot, "work-packages"), { recursive: true });
+    const wrote = [];
+    const fill = async (relative, write) => {
+      if (await statOptional(inPrivate(privateRoot, relative))) return;
+      await write(inPrivate(privateRoot, relative));
+      wrote.push(relative);
+    };
+    for (const template of TEMPLATES) await fill(template.relative, (file) => fsp.copyFile(templateSource(template), file));
+    await fill("rules.md", (file) => fsp.copyFile(path.join(packageRoot, "project-templates", "rules.md"), file));
+    await fill("policy.override.json", async (file) => writeJson(file, projectPolicyOverride(await resolveProfile(root, config.profile_id ?? "auto"))));
+    // Kept out of Git as init does; one the person already has there is theirs and left as it is.
+    await fill(GIT_IGNORE.relative, (file) => fsp.writeFile(file, GIT_IGNORE.text, "utf8"));
+    if (gitBoundary(root).repository && !gitBoundary(root).ignored) throw new Error(".review-bridge/ is not kept out of Git: its .gitignore no longer ignores it.");
+    await writeAgentEntries();
+    const shipped = new Map([
+      ...TEMPLATES.map((template) => [template.relative, templateSource(template)]),
+      ["rules.md", path.join(packageRoot, "project-templates", "rules.md")],
+    ]);
+    const shippedHash = new Map();
+    for (const [relative, source] of shipped) shippedHash.set(relative, sha256(await fsp.readFile(source)));
+    const installedFiles = (await fileSnapshot(privateRoot)).filter(([name, hash]) => wrote.includes(name) || shippedHash.get(name) === hash);
+    await writeJson(installPath(layout, layout.manifest), {
+      schema_version: 1,
+      layout: "neutral",
+      profile_id: config.profile_id ?? null,
+      plan_sha256: null,
+      reinitialized_at: new Date().toISOString(),
+      runtime_sha256: await runtimeFingerprint(),
+      bridge_version: await runtimeVersion(sourceRuntime),
+      policy_identity: await sourcePolicyIdentity(),
+      work_template_sha256: await shippedTemplateHashes(),
+      rules_sha256: shippedHash.get("rules.md"),
+      installed_files: installedFiles,
+      git_exclusion: null,
+    });
+    return { reinitialized: true, target: root, private_root: privateRoot, wrote };
+  });
 }
 
 export async function rollbackFreshNeutralInstall(plan) {
@@ -1021,7 +1045,7 @@ async function planFreshUninstall(root, backupRootOverride) {
   const manifestBytes = layout ? await fsp.readFile(installPath(layout, layout.manifest)).catch(() => null) : null;
   if (!manifestBytes) {
     throw new Error((await statOptional(privateRoot))
-      ? "This is not a Review Bridge installation in the .review-bridge/ layout."
+      ? NO_RECORD
       : "No Review Bridge installation here. If an earlier uninstall used --backup-root, run uninstall again with that --backup-root.");
   }
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -1612,8 +1636,9 @@ function sameValue(left, right) {
   return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
+// The version has one source, the package's package.json, which npm publishes; nothing else writes one.
 async function runtimeVersion(runtimeRoot) {
-  const manifest = await readJsonOptional(path.join(runtimeRoot, "templates", "PACKAGE_MANIFEST.json")).catch(() => null);
+  const manifest = await readJsonOptional(path.join(runtimeRoot, "..", "package.json")).catch(() => null);
   return typeof manifest?.version === "string" ? manifest.version : null;
 }
 
@@ -1714,7 +1739,7 @@ async function planFreshUpgrade(root, backupRootOverride) {
   const manifestBytes = layout ? await fsp.readFile(installPath(layout, layout.manifest)).catch(() => null) : null;
   if (!manifestBytes) {
     throw new Error((await statOptional(privateRoot))
-      ? "This is not a Review Bridge installation in the .review-bridge/ layout."
+      ? NO_RECORD
       : "No Review Bridge installation here; install it with init first.");
   }
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -1948,7 +1973,7 @@ async function restartStoppedService(context) {
   if (!context.serviceStopAttempted || !context.marker.service_was_running || await pageServiceRunning(context.root)) return false;
   const outcome = await restartOutcome(context.hooks.restartService, context.root);
   if (!outcome.running) {
-    throw new Error("The Bridge page service that was running " + didNotRestart(outcome) + ", so Bridge stays blocked for new work. Run: review-bridge upgrade --rollback --target " + context.root);
+    throw new Error("The Bridge page service that was running " + didNotRestart(outcome) + ", so Bridge stays blocked for new work. Run: " + bridgeRunner() + " upgrade --rollback --target " + context.root);
   }
   return true;
 }
@@ -2203,7 +2228,7 @@ async function rollbackAfterFailure(context, error) {
     await restartStoppedService(context);
   } catch (rollbackError) {
     throw new Error("The upgrade failed (" + error.message + ") and the automatic rollback did not finish (" + rollbackError.message
-      + "). Bridge stays blocked for new work. Run: review-bridge upgrade --rollback --target " + context.root + ". The backup is in " + context.marker.backup_dir);
+      + "). Bridge stays blocked for new work. Run: " + bridgeRunner() + " upgrade --rollback --target " + context.root + ". The backup is in " + context.marker.backup_dir);
   }
   await fsp.rm(context.markerPath, { force: true });
   const failed = new Error("The upgrade failed and was rolled back; the project's settings are as before: " + error.message

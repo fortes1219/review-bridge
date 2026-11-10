@@ -151,8 +151,13 @@ export async function runCodexAppServerTurn({
   }
   // What the server said went wrong, in its own typed messages, for the caller to classify.
   const errors = [];
-  const noteError = (message) => {
+  // The last error's codexErrorInfo (app-server-protocol's TurnError, rust-v0.166.0) when it is a plain
+  // word: "unauthorized", "usageLimitExceeded" and so on. Some carry an object, which nothing reads.
+  let errorCode = null;
+  const noteError = (error) => {
+    const message = error?.message;
     if (typeof message === "string" && message && !errors.includes(message)) errors.push(message);
+    if (typeof error?.codexErrorInfo === "string") errorCode = error.codexErrorInfo;
   };
   const pending = new Map();
   let nextId = 1;
@@ -205,8 +210,9 @@ export async function runCodexAppServerTurn({
       send({ id: message.id, error: { code: -32000, message: "Review Bridge does not grant requests from the writer." } });
       return;
     }
-    if (message.method === "error") noteError(message.params?.error?.message);
-    if (message.method === "turn/completed") noteError(message.params?.turn?.error?.message);
+    // willRetry: "the error is transient ... this will not interrupt a turn" (ErrorNotification).
+    if (message.method === "error" && !message.params?.willRetry) noteError(message.params?.error);
+    if (message.method === "turn/completed") noteError(message.params?.turn?.error);
     tracker?.observe(message);
     if (tracker) settle();
   });
@@ -275,6 +281,7 @@ export async function runCodexAppServerTurn({
     status: outcome.status,
     error: outcome.error || null,
     errors,
+    errorCode,
     finalMessage: tracker?.finalMessage() ?? null,
     summary,
     tree_kill: treeKill,

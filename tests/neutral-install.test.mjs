@@ -16,6 +16,7 @@ import {
   applyNeutralInstall,
   fileSnapshot,
   planNeutralInstall,
+  reinitializeNeutralInstall,
   removeEmptyDirectories,
   rollbackFreshNeutralInstall,
   runtimeFingerprint,
@@ -52,11 +53,13 @@ test("neutral install keeps existing agent settings byte-for-byte, verifies, and
   assert.equal(await fsp.stat(path.join(root, ".review-bridge", "tools")).catch(() => null), null);
 });
 
-test("Git project gets local private exclusion without changing tracked ignore or agent settings", async (t) => {
+test("a Git project keeps .review-bridge/ out of Git by the folder's own .gitignore; its .gitignore and .git/info/exclude stay as they were", async (t) => {
   const root = await workspace(t);
   const init = spawnSync("git", ["init", "--quiet"], { cwd: root, windowsHide: true });
   assert.equal(init.status, 0);
   await fsp.writeFile(path.join(root, ".gitignore"), "dist/\n");
+  const excludePath = path.join(root, ".git", "info", "exclude");
+  const excludeBefore = await fsp.readFile(excludePath).catch(() => null);
   const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
   assert.equal(plan.git.repository, true);
   assert.equal(plan.git.ignored, false);
@@ -68,6 +71,22 @@ test("Git project gets local private exclusion without changing tracked ignore o
   // Bridge touches no file the person tracks: .review-bridge/, results included, is excluded locally.
   assert.equal(await fsp.readFile(path.join(root, ".gitignore"), "utf8"), "dist/\n");
   assert.equal(spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/results/a.md"], { cwd: root, windowsHide: true }).status, 0);
+  assert.deepEqual(await fsp.readFile(excludePath).catch(() => null), excludeBefore);
+  assert.equal(await fsp.readFile(path.join(root, ".review-bridge", ".gitignore"), "utf8"), "# Created by Review Bridge automatically.\n*\n");
+  assert.equal((await verifyNeutralInstall(root)).valid, true);
+});
+
+// create-vite makes no repository, so a new Vite project is set up before git init; Git must still not see
+// the folder afterwards (pytest's .pytest_cache/.gitignore, ruff's, uv's .venv/.gitignore).
+test("a project set up without Git keeps .review-bridge/ out of Git once the person runs git init", async (t) => {
+  const root = await workspace(t);
+  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  assert.equal(plan.git.repository, false);
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  assert.equal(spawnSync("git", ["init", "--quiet"], { cwd: root, windowsHide: true }).status, 0);
+  const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: root, encoding: "utf8", windowsHide: true });
+  assert.equal(status.status, 0);
+  assert.deepEqual(status.stdout.split("\n").filter(Boolean), ["?? package.json"]);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
 });
 
@@ -93,6 +112,37 @@ test("a Git project named by its Windows short path is set up and excluded like 
   const ignored = spawnSync("git", ["check-ignore", "-q", "--no-index", ".review-bridge/bridge.json"], { cwd: root, windowsHide: true });
   assert.equal(ignored.status, 0);
   assert.equal((await verifyNeutralInstall(root)).valid, true);
+});
+
+// git init in an existing repository reinitializes it (git setup.c): what is missing is made, nothing is
+// overwritten. Here the data folder lost the install record (deleted, another machine).
+test("reinit: .review-bridge/ without its install record gets the record back and keeps every file of the person's", async (t) => {
+  const root = await workspace(t);
+  const plan = await planNeutralInstall({ target: root, roles: { writer: "claude", reviewer: "codex" } });
+  await applyNeutralInstall(plan, plan.plan_sha256);
+  const privateRoot = path.join(root, ".review-bridge");
+  assert.equal(await reinitializeNeutralInstall({ target: root }), null, "with its record it is an install, which upgrade moves");
+  await fsp.appendFile(path.join(privateRoot, "rules.md"), "- Mine.\n");
+  await fsp.writeFile(path.join(privateRoot, "work-packages", "farm.md"), "<!-- bridge:requested_work -->\nBuild a farm.\n\n<!-- bridge:acceptance -->\n- The farm shows.\n");
+  await fsp.rm(path.join(privateRoot, "work-packages", "TEMPLATE.md"));
+  await fsp.rm(path.join(privateRoot, ".gitignore"));
+  const configText = await fsp.readFile(path.join(privateRoot, "bridge.json"), "utf8");
+  const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" });
+  await fsp.rm(paths.stateRoot, { recursive: true, force: true });
+  const before = new Map(await fileSnapshot(privateRoot));
+
+  const done = await reinitializeNeutralInstall({ target: root });
+  assert.deepEqual(done.wrote, ["work-packages/TEMPLATE.md", ".gitignore"], "only what was missing is made");
+  const after = new Map(await fileSnapshot(privateRoot));
+  for (const [name, hash] of before) assert.equal(after.get(name), hash, name + " is as it was");
+  assert.equal(await fsp.readFile(path.join(privateRoot, "bridge.json"), "utf8"), configText);
+  const record = JSON.parse(await fsp.readFile(path.join(paths.stateRoot, "review-bridge-install.json"), "utf8"));
+  const installed = record.installed_files.map(([name]) => name);
+  assert.ok(installed.includes("work-packages/TEMPLATE.md") && installed.includes("work-packages/TEMPLATE.zh-TW.md") && installed.includes(".gitignore"), installed.join(", "));
+  for (const mine of ["rules.md", "work-packages/farm.md", "bridge.json"]) assert.equal(installed.includes(mine), false, mine + " is the person's, so upgrade and uninstall keep it");
+  assert.ok(record.reinitialized_at);
+  await verifyNeutralInstall(root);
+  assert.equal(await reinitializeNeutralInstall({ target: root }), null, "once rebuilt, it is an install again");
 });
 
 test("stale or modified plan cannot create neutral state", async (t) => {
@@ -161,10 +211,14 @@ test("bridge.json carries an owner-editable watch block that verify checks for s
   // the install records each one's hash. rules.md is installed and owner-editable.
   const template = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.md"), "utf8");
   assert.equal(template, await fsp.readFile(new URL("../project-templates/work-package.md", import.meta.url), "utf8"));
-  assert.match(template, /^<!-- bridge:acceptance -->\n## Acceptance$/m);
+  // A work order becomes a contract by form check: what to do and an acceptance list are the two blocks
+  // every work order needs, and each template says so on their headings.
+  assert.match(template, /^<!-- bridge:requested_work -->\n## Work \(required\)$/m);
+  assert.match(template, /^<!-- bridge:acceptance -->\n## Acceptance \(required: one result per item, each starting with "- "/m);
   const chinese = await fsp.readFile(path.join(root, ".review-bridge", "work-packages", "TEMPLATE.zh-TW.md"), "utf8");
   assert.equal(chinese, await fsp.readFile(new URL("../project-templates/work-package.zh-TW.md", import.meta.url), "utf8"));
-  assert.match(chinese, /^<!-- bridge:acceptance -->\n## 驗收$/m);
+  assert.match(chinese, /^<!-- bridge:requested_work -->\n## 要做的事（必填）$/m);
+  assert.match(chinese, /^<!-- bridge:acceptance -->\n## 驗收（必填：一條一個結果，每條用「- 」開頭/m);
   const { createHash } = await import("node:crypto");
   const hashOf = (text) => createHash("sha256").update(text).digest("hex");
   assert.deepEqual(JSON.parse(await fsp.readFile(getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge" }).installManifestPath, "utf8")).work_template_sha256, {
@@ -236,12 +290,16 @@ test("init puts each agent's /review-bridge entry where its CLI looks; the perso
   assert.match(command, /^---\ndescription: .+\nargument-hint: .+\n---\n/);
   assert.match(command, /^argument-hint: start <file> \| stop <run_id> \| resume <run_id> \| clean \[<run_id>\]$/m);
   assert.match(command, /four actions \(\$ARGUMENTS\)/);
+  // The agent runs Bridge as the person can: npx review-bridge, which a global install answers too.
+  assert.match(command, /Run the matching command in this project folder: `npx review-bridge <action> <file\|run_id>`/);
   assert.match(command, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with .--yes./);
   // Codex takes a skill: it requires the description, and it expands no arguments, so none is promised.
   const skill = await fsp.readFile(me.codexEntry, "utf8");
   assert.match(skill, /^---\nname: review-bridge\ndescription: .+\n---\n/);
   assert.doesNotMatch(skill, /\$ARGUMENTS|\{\{args\}\}|argument-hint/);
   assert.match(skill, /one of\nfour actions:/);
+  assert.match(skill, /`npx review-bridge <action> <file\|run_id>`/);
+  assert.doesNotMatch(skill + command, /\{\{bridge\}\}/);
   assert.match(skill, /show the\s+person the card exactly as printed[\s\S]*Only if the person says yes, run the same command again with .--yes./);
   assert.deepEqual(await fsp.readFile(path.join(me.codexHome, "AGENTS.md")), theirs);
   assert.equal((await verifyNeutralInstall(root)).valid, true);

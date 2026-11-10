@@ -30,7 +30,7 @@ test("G1 every other model entry point is closed in native mode", () => {
     const decision = nativeGateDecision({ command, args: [] });
     assert.equal(decision.allowed, false, command);
     assert.equal(decision.reason, "entry_point");
-    assert.match(decision.message, new RegExp("for " + command + ": only start and resume may call a model\\. Run: review-bridge start <file>$"));
+    assert.match(decision.message, new RegExp("for " + command + ": only start and resume may call a model\\. Run: npx review-bridge start <file>$"));
   }
   assert.deepEqual([...NATIVE_MODEL_COMMANDS].sort(), ["bounded-resume", "resume", "review", "start", "work-start"]);
 });

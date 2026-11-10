@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "RB-M-plan-authorize-reads-back",
+      "gate": "Authorization",
+      "target": "review-bridge/features/workOrder/workPackage.mjs",
+      "anchor": "const plan = held ?? await readJson(resolvedPlan);",
+      "replacement": "const plan = await readJson(resolvedPlan);",
+      "reason": "Authorizing reads the plan file back even when the start holds the plan, so a plan file another start is rewriting is read half written.",
+      "test": "review-bridge/tests/work-package.test.mjs",
+      "case": "a start that holds its plan authorizes it while its plan file is being rewritten; one given only the path does not",
+      "expect": "Unexpected end of JSON input"
+    },
+    {
+      "id": "RB-M-plan-run-reads-back",
+      "gate": "Authorization",
+      "target": "review-bridge/features/workOrder/commands.mjs",
+      "anchor": "const plan = held ?? await readJson(path.resolve(options.planPath));",
+      "replacement": "const plan = await readJson(path.resolve(options.planPath));",
+      "reason": "A start reads back the plan file it just wrote before authorizing, so a second start rewriting it is read half written.",
+      "test": "review-bridge/tests/work-package.test.mjs",
+      "case": "a start that holds its plan authorizes it while its plan file is being rewritten; one given only the path does not",
+      "expect": "Unexpected end of JSON input"
+    },
+    {
+      "id": "RB-M-plan-temp-file-kept",
+      "gate": "Records",
+      "target": "review-bridge/service/records/fileStore.mjs",
+      "anchor": "  } catch (error) {\n    await fsp.rm(temp, { force: true }).catch(() => {});\n    throw error;\n  }\n}\n\nasync function syncDirectory",
+      "replacement": "  } catch (error) {\n    throw error;\n  }\n}\n\nasync function syncDirectory",
+      "reason": "A plan write whose rename fails leaves its temporary file beside the plan.",
+      "test": "review-bridge/tests/file-store.test.mjs",
+      "case": "an atomic JSON write whose rename fails keeps the old file and leaves no temp file",
+      "expect": "\\.plan\\.json\\.[0-9a-f-]+\\.tmp"
+    },
+    {
+      "id": "RB-M-install-no-gitignore",
+      "gate": "Install",
+      "target": "installer/neutral-install.mjs",
+      "anchor": "    await fsp.writeFile(inPrivate(privateRoot, GIT_IGNORE.relative), GIT_IGNORE.text, \"utf8\");\n",
+      "replacement": "",
+      "reason": "init writes no .review-bridge/.gitignore, so a project set up before git init shows .review-bridge/ to Git.",
+      "test": "tests/neutral-install.test.mjs",
+      "case": "a project set up without Git keeps .review-bridge/ out of Git once the person runs git init",
+      "expect": "\\?\\? \\.review-bridge/"
+    },
+    {
+      "id": "RB-M-reinit-no-gitignore",
+      "gate": "Install",
+      "target": "installer/neutral-install.mjs",
+      "anchor": "    await fill(GIT_IGNORE.relative, (file) => fsp.writeFile(file, GIT_IGNORE.text, \"utf8\"));\n",
+      "replacement": "",
+      "reason": "Re-initializing a .review-bridge/ without its .gitignore leaves it without one.",
+      "test": "tests/neutral-install.test.mjs",
+      "case": "reinit: .review-bridge/ without its install record gets the record back and keeps every file of the person's",
+      "expect": "only what was missing is made"
+    },
+    {
+      "id": "RB-M-command-bare-name",
+      "gate": "Install",
+      "target": "review-bridge/utils/bridgeCommand.mjs",
+      "anchor": "  const [name, version = \"\"] = String(env.npm_config_user_agent || \"\").split(\" \")[0].split(\"/\");\n",
+      "replacement": "  return \"review-bridge\";\n  const [name, version = \"\"] = String(env.npm_config_user_agent || \"\").split(\" \")[0].split(\"/\");\n",
+      "reason": "Every printed command names review-bridge, which a person who ran Bridge through npx does not have.",
+      "test": "review-bridge/tests/bridge-command.test.mjs",
+      "case": "a printed Bridge command is the package manager's one-off form, npx when none is named",
+      "expect": "actual: 'review-bridge'"
+    },
+    {
+      "id": "RB-M-command-ignores-pnpm",
+      "gate": "Install",
+      "target": "review-bridge/utils/bridgeCommand.mjs",
+      "anchor": "  if (name === \"pnpm\") return \"pnpm dlx review-bridge\";\n",
+      "replacement": "",
+      "reason": "A pnpm user is told to run npx, not pnpm dlx.",
+      "test": "review-bridge/tests/bridge-command.test.mjs",
+      "case": "a printed Bridge command is the package manager's one-off form, npx when none is named",
+      "expect": "expected: 'pnpm dlx review-bridge'"
+    },
+    {
+      "id": "RB-M-entry-keeps-placeholder",
+      "gate": "Install",
+      "target": "installer/agent-files.mjs",
+      "anchor": ".replaceAll(\"{{bridge}}\", bridgeRunner())",
+      "replacement": "",
+      "reason": "The agent entry tells the agent to run {{bridge}} instead of a command that runs.",
+      "test": "tests/neutral-install.test.mjs",
+      "case": "init puts each agent's /review-bridge entry where its CLI looks; the person's other files there stay",
+      "expect": "\\{\\{bridge\\}\\} <action>"
+    },
+    {
+      "id": "RB-M-vscode-bare-name",
+      "gate": "Install",
+      "target": "installer/vscode-tasks.mjs",
+      "anchor": "const [RUNNER, ...RUNNER_ARGS] = bridgeRunner().split(\" \");",
+      "replacement": "const [RUNNER, ...RUNNER_ARGS] = [\"review-bridge\"];",
+      "reason": "The VS Code tasks run review-bridge, which a person who ran Bridge through npx does not have.",
+      "test": "tests/vscode-tasks.test.mjs",
+      "case": "six shell tasks run the existing CLI, with the file and the run ids as arguments and the terminal focused",
+      "expect": "'npx'"
+    },
+    {
+      "id": "RB-M-language-ignores-runner",
+      "gate": "Install",
+      "target": "review-bridge/features/workOrder/i18n.mjs",
+      "anchor": "const vars = { bridge: bridgeRunner(), ...given };",
+      "replacement": "const vars = { bridge: \"review-bridge\", ...given };",
+      "reason": "Every line in a language pack names review-bridge, which a person who ran Bridge through npx does not have.",
+      "test": "review-bridge/tests/i18n.test.mjs",
+      "case": "ps and down say the page's state in the project's language",
+      "expect": "Bridge 沒在跑，執行 review-bridge up"
+    },
+    {
+      "id": "RB-M-command-line-left-bare",
+      "gate": "Install",
+      "target": "review-bridge/features/workOrder/commands.mjs",
+      "anchor": "write(\"This folder is not set up for Review Bridge. Run: \" + bridgeRunner() + \" init\");",
+      "replacement": "write(\"This folder is not set up for Review Bridge. Run: review-bridge init\");",
+      "reason": "One line is left naming review-bridge after the others were changed; the function test cannot see it.",
+      "test": "review-bridge/tests/bridge-command.test.mjs",
+      "case": "no shipped line tells the person to run a bare review-bridge command; --help alone names the program",
+      "expect": "review-bridge/features/workOrder/commands\\.mjs:\\d+"
+    },
+    {
+      "id": "RB-M-yes-midwrite-says-changed",
+      "gate": "Authorization",
+      "target": "review-bridge/features/workOrder/commands.mjs",
+      "anchor": "return refuse(t((await cardUsed(db, card.plan_sha256)) ? \"yes.used\" : \"yes.changed\", { again }));",
+      "replacement": "return refuse(t(\"yes.changed\", { again }));",
+      "reason": "A second yes that reads the work order while the first start writes its id in place says the person changed it, when the card was used.",
+      "test": "tests/product-init.test.mjs",
+      "case": "--yes is refused when the work order changed after the card, when no card was shown, or when the card was used",
+      "expect": "The work order changed after you saw the card"
+    },
+    {
+      "id": "RB-M-line-yes-midwrite-says-changed",
+      "gate": "Authorization",
+      "target": "review-bridge/features/workOrder/line.mjs",
+      "anchor": "refuse(t((await anyCardUsed(records.db, onCard.map((card) => card.plan_sha256))) ? \"line.yes.used\" : \"line.yes.changed\", { again }))",
+      "replacement": "refuse(t(\"line.yes.changed\", { again }))",
+      "reason": "A second yes to a directory that reads one of its work orders while the first line writes its id in place says it changed, when the card was used.",
+      "test": "review-bridge/tests/work-order-line.test.mjs",
+      "case": "a card lists the directory in order, prints no work order's text, and one yes runs each as its own run",
+      "expect": "The directory changed after you saw the card"
+    },
+    {
+      "id": "RB-M-task-file-short-path",
+      "gate": "Records",
+      "target": "review-bridge/features/workOrder/workOrderRecords.mjs",
+      "anchor": "return nfc(path.relative(realAsFarAsItGoes(repoRoot), realAsFarAsItGoes(path.resolve(repoRoot, file))).split(path.sep).join(\"/\"));",
+      "replacement": "const real = (target) => { try { return realpathSync.native(target); } catch { return path.resolve(target); } };\n  return nfc(path.relative(real(repoRoot), real(path.resolve(repoRoot, file))).split(path.sep).join(\"/\"));",
+      "reason": "A work order not yet on disk, in a project reached by its Windows short path, is named by a path that climbs out of the project (../../…).",
+      "test": "review-bridge/tests/work-order-name.test.mjs",
+      "case": "a project named by its Windows short path names a work order not yet on disk by its path in the project",
+      "expect": "'(\\.\\./)+"
+    }
+  ]
+}

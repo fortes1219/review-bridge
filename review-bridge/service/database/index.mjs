@@ -4,11 +4,16 @@
 // it is idle, so a command never has to close it.
 import pg from "pg";
 
-import { BackupRefusedError, backupDatabase, runLines } from "./backup.mjs";
+import { BackupRefusedError, backupDatabase, runLines, runningRuns } from "./backup.mjs";
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
 import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
-import { clusterPaths, connect, connectionSettings, ensureCluster, postgresBinaries, startServer } from "./postgresServer.mjs";
+import { databaseBackedUp } from "./notices.mjs";
+import { UnknownMigrationsError } from "./serverErrors.mjs";
+import {
+  clearOldServer, clusterPaths, connect, connectionSettings, dataDirectoryProblem, ensureCluster, postgresBinaries, serverState, startServer, stopServer,
+} from "./postgresServer.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 export const DATABASE_NAME = "bridge";
 const opened = new Map();
@@ -43,7 +48,7 @@ export async function backUpBeforeMigrating(root, { dataHome, dir = MIGRATIONS_D
   } catch (error) {
     if (!(error instanceof BackupRefusedError) || !error.runs.length) throw error;
     throw new BackupRefusedError("Bridge backs up the database before it applies " + state.pending.length + " new migration(s), and a run is running."
-      + " Let it end, or stop it with review-bridge stop <run_id> in its project, then run the command again.\n" + runLines(error.runs), error.runs);
+      + " Let it end, or stop it with " + bridgeRunner() + " stop <run_id> in its project, then run the command again.\n" + runLines(error.runs), error.runs);
   }
 }
 
@@ -54,8 +59,8 @@ async function open(dataHome, dir) {
   await startServer(root, { binaries });
   await ensureDatabase(root);
   const backup = await backUpBeforeMigrating(root, { dataHome, dir });
-  // stderr: a command's stdout may be JSON.
-  if (backup) process.stderr.write("Backed up the database to " + backup + " before upgrading it.\n");
+  // One line, in the project's language when the command entry gave it (notices.mjs).
+  if (backup) await databaseBackedUp(backup);
   const pool = new pg.Pool({ ...(await connectionSettings(root, { database: DATABASE_NAME })), max: 4, allowExitOnIdle: true, idleTimeoutMillis: 1000 });
   // A connection the server ends between queries is reported here; the next query reports it again.
   pool.on("error", () => {});
@@ -103,10 +108,69 @@ export async function openDatabase({ dataHome = bridgeDataHome(), migrationsDir 
   if (!opened.has(dataHome)) {
     opened.set(dataHome, open(dataHome, migrationsDir).catch((error) => {
       opened.delete(dataHome);
-      // A refusal to upgrade while a run is running is said as it is, not as a database gone away.
-      if (error instanceof BackupRefusedError) throw error;
+      // A refusal to upgrade while a run is running, or to open a database a newer Bridge migrated, is said
+      // as it is, not as a database gone away.
+      if (error instanceof BackupRefusedError || error instanceof UnknownMigrationsError) throw error;
       throw new DatabaseUnavailableError(error, databaseRoot(dataHome));
     }));
   }
   return await opened.get(dataHome);
 }
+
+// The person's database for reading only, as Bridge's MCP server reads the graph: nothing is started,
+// created or migrated, and every transaction is read-only with a server-side time limit
+// (default_transaction_read_only and statement_timeout, PostgreSQL's runtime-config-client; postgres-mcp
+// reads in a READ ONLY transaction the same way). A statement past the limit is ended by the server,
+// so none is left running when the reader goes. A server that is not running is an error to the caller.
+export async function openReadOnlyDatabase({ dataHome = bridgeDataHome(), statementTimeoutMs = 10_000 } = {}) {
+  const root = databaseRoot(dataHome);
+  const pool = new pg.Pool({
+    ...(await connectionSettings(root, { database: DATABASE_NAME })),
+    options: "-c default_transaction_read_only=on -c statement_timeout=" + statementTimeoutMs,
+    max: 2, allowExitOnIdle: true, idleTimeoutMillis: 1000,
+  });
+  pool.on("error", () => {});
+  return { query: (sql, values) => pool.query(sql, values).catch((error) => { throw unavailable(error); }), close: () => pool.end() };
+}
+
+// The person's database as `status` says it, nothing started: `running`, `stopped`, or `unusable` with
+// what pg_ctl status would say about its data directory (dataDirectoryProblem) and where it is.
+export async function databaseStatus({ dataHome = bridgeDataHome() } = {}) {
+  const root = databaseRoot(dataHome);
+  const unusable = await dataDirectoryProblem(root);
+  if (unusable) return { state: "unusable", ...unusable };
+  return { state: (await serverState(root, { binaries: await postgresBinaries() })).running ? "running" : "stopped" };
+}
+
+// The database half of `review-bridge down`, in the order docker compose down takes (the page first,
+// then what it uses). `runsRunning` is asked before anything is stopped, since a running run writes to
+// this server whichever project it is in. `stopDatabase` then stops a running server with pg_ctl's fast
+// shutdown, or clears what a server that is gone left behind (clearOldServer; nothing is listed when it
+// stopped cleanly). `server` replaces the server calls in tests.
+const serverCalls = async (server) => server ?? {
+  binaries: await postgresBinaries(), state: serverState, runs: runningRuns, stop: stopServer, clear: clearOldServer,
+};
+
+export async function runsRunning({ dataHome = bridgeDataHome(), server = null } = {}) {
+  const root = databaseRoot(dataHome);
+  const calls = await serverCalls(server);
+  if (!(await calls.state(root, { binaries: calls.binaries })).running) return [];
+  return await calls.runs(root);
+}
+
+export async function stopDatabase({ dataHome = bridgeDataHome(), server = null } = {}) {
+  const root = databaseRoot(dataHome);
+  const calls = await serverCalls(server);
+  const state = await calls.state(root, { binaries: calls.binaries });
+  if (!state.cluster) return { database: "none" };
+  if (state.running) {
+    await calls.stop(root, { binaries: calls.binaries });
+    opened.delete(dataHome);
+    return { database: "stopped" };
+  }
+  const cleared = await calls.clear(root, { binaries: calls.binaries });
+  if (cleared.cleared === "in_use") return { database: "in_use", pid: cleared.pid };
+  return { database: cleared.cleared === "nothing" ? "not_running" : "cleared" };
+}
+
+export { runLines };

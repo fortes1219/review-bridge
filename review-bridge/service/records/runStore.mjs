@@ -16,11 +16,13 @@ import {
 } from "./fileStore.mjs";
 import { priorityChoice, reviewerPolicyFromSnapshot } from "../../policy/policyRules.mjs";
 import { digest } from "../../utils/digest.mjs";
+import { nfc, workOrderNameProblem } from "../../utils/workOrderName.mjs";
 import { loadOrCreatePolicySnapshot } from "./policySnapshots.mjs";
 import {
   activeRuns, DatabaseUnavailableError, eventLine, eventRecordsAfter, lastEventSequence, numberedLine, projectRuns, recordsDatabase,
   replayUnrecorded, runRecorder,
 } from "./runRecords.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 // A run's status and conclusion, as GitHub Actions has them for a workflow run; why it closed is
 // its closed_reason. The one list of closed reasons; retention and the CLI read it from here so a
@@ -30,7 +32,7 @@ export const CLOSED_REASONS = Object.freeze([
   "review_pass", "review_hard_stop", "runtime_policy_identity_changed", "stopped", "superseded", "database_unavailable",
   "rate_limited", "cancelled", "policy_failure",
   "rounds_exhausted", "writer_timeout", "writer_failed", "reviewer_failed", "controller_failure",
-  "token_limit", "reference_changed", "contract_rejected", "contract_changed", "contract_unconfirmed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
+  "token_limit", "reference_changed", "contract_rejected", "contract_changed", "usage_unknown", "acceptance_unverified", "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
   "needs_human", "malformed_writer_result", "malformed_review_result", "run_timeout", "evidence_unavailable",
 ]);
 // Closed by the stop command, by a start of a newer version, because the database went away, or
@@ -40,7 +42,7 @@ export const STOP_REASONS = Object.freeze(["stopped", "superseded", "database_un
 // closes; from then on the run is settled, and a stop cannot take it over.
 const SETTLING_STATES = new Set(["pass", "hard_stop", "rate_limited"]);
 const ACTION_REQUIRED = new Set([
-  "hard_stop", "needs_human", "rounds_exhausted", "contract_unconfirmed", "acceptance_unverified",
+  "hard_stop", "needs_human", "rounds_exhausted", "acceptance_unverified",
   "start_point_lost", "evidence_changed", "version_changed", "evidence_unconfirmable", "scope_unverified",
 ]);
 
@@ -72,7 +74,7 @@ function conclusionOf(run, reason, gate) {
 // A run recorded under an older policy shape is neither resumed nor delivered.
 export function assertCurrentPolicy(policySchemaVersion, runId) {
   if (policySchemaVersion !== 5) {
-    throw new Error("This run's policy is from an older Bridge; run: review-bridge clean " + runId);
+    throw new Error("This run's policy is from an older Bridge; run: " + bridgeRunner() + " clean " + runId);
   }
 }
 
@@ -90,8 +92,15 @@ function assertId(value, label) {
   return text;
 }
 
+// The one id that is a person's word, not a hash or a uuid: the work order's file name.
+function assertWorkPackageId(value) {
+  const problem = workOrderNameProblem(String(value || ""));
+  if (problem || !value) throw new Error("Work package id " + (problem || "is required") + ": " + JSON.stringify(value));
+  return nfc(value);
+}
+
 function workPackageFile(paths, id, sha256) {
-  return path.join(paths.workPackagesDir, assertId(id, "Work package id"), sha256 + ".json");
+  return path.join(paths.workPackagesDir, assertWorkPackageId(id), sha256 + ".json");
 }
 
 function authorizationFile(paths, authorizationId) {
@@ -332,7 +341,7 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
   await assertNoMaintenance(paths);
   const record = {
     schema_version: 4,
-    work_package_id: assertId(input.work_package_id, "Work package id"),
+    work_package_id: assertWorkPackageId(input.work_package_id),
     source: input.source || null,
     task: String(input.task || ""),
     acceptance_criteria: input.acceptance_criteria || [],
@@ -344,7 +353,8 @@ export async function createImmutableWorkPackage(paths, input, clock = Date.now)
     ...(input.references !== undefined ? { references: structuredClone(input.references) } : {}),
     ...(input.test !== undefined ? { test: structuredClone(input.test) } : {}),
     ...(input.task_file !== undefined ? { task_file: input.task_file } : {}),
-    ...(input.contract_steps ? { contract_steps: structuredClone(input.contract_steps) } : {}),
+    // The contract the yes covered: code cut it from the work order when the plan was made.
+    ...(input.contract_sha256 ? { contract_sha256: input.contract_sha256 } : {}),
     // The priority this work runs at, and each role's model and effort, as the plan settled them.
     ...(input.priority ? { priority: input.priority, writer: structuredClone(input.writer), reviewer: structuredClone(input.reviewer) } : {}),
     created_at: nowIso(clock),
@@ -503,6 +513,9 @@ export async function claimStartAuthorization(paths, authorizationId, {
       };
     }
   }
+  // One reading of the clock for the run's start: its deadlines are counted from the moment it records as
+  // its creation (three readings left timeout_at a millisecond short of run_timeout, Windows 2026-11-09).
+  const startedAt = nowIso(clock);
   const run = {
     schema_version: 4,
     run_id: claim.run_id,
@@ -520,12 +533,12 @@ export async function claimStartAuthorization(paths, authorizationId, {
     execution_mode: executionMode,
     budget: { ...structuredClone(workPackage.budget), consumed_rounds: 0 },
     recovery_window: snapshot.effective_policy.limits.recovery_window,
-    run_deadline_at: plusMs(nowIso(clock), snapshot.effective_policy.limits.recovery_window),
+    run_deadline_at: plusMs(startedAt, snapshot.effective_policy.limits.recovery_window),
     // The run's own time limit, counted from its start; checked where the run already checks for a stop.
-    timeout_at: workPackage.budget.run_timeout ? plusMs(nowIso(clock), workPackage.budget.run_timeout) : null,
+    timeout_at: workPackage.budget.run_timeout ? plusMs(startedAt, workPackage.budget.run_timeout) : null,
     workspace_evidence: workspaceEvidence,
     last_state: null,
-    created_at: nowIso(clock),
+    created_at: startedAt,
     work_package_id: workPackage.work_package_id,
     last_event_sequence: 0,
     updated_at: nowIso(clock),

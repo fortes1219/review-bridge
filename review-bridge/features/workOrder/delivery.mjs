@@ -22,9 +22,12 @@ import {
   tokenTotal,
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
+import { workOrderDirectory } from "../../utils/paths.mjs";
+import { nfc } from "../../utils/workOrderName.mjs";
 import { acceptanceRows } from "./acceptance.mjs";
 import { contractPath, loadContract } from "./contract.mjs";
 import { createTranslator, resolveLocale } from "./i18n.mjs";
+import { parseWorkOrder, sealedText, UNTITLED } from "./workOrderFormat.mjs";
 import { resultIdentity } from "./workOrderRecords.mjs";
 import { createWorkspaceDelta } from "./workspaceEvidence.mjs";
 
@@ -45,6 +48,7 @@ const NEXT_STEP = Object.freeze({
   rate_limited: "result.next.quota", token_limit: "result.next.quota",
   review_hard_stop: "result.next.findings", rounds_exhausted: "result.next.findings", acceptance_unverified: "result.next.findings",
   run_timeout: "result.next.timeout", writer_timeout: "result.next.timeout",
+  needs_human: "result.next.needs_human",
 });
 
 // The work order as sealed at the start against the file as it is now. Null when they match
@@ -74,7 +78,7 @@ export function workOrderChange(sealed, current) {
 
 async function currentWorkOrder(paths, taskFile) {
   try {
-    return await fsp.readFile(path.resolve(paths.repoRoot, ...taskFile.split("/")), "utf8");
+    return sealedText(await fsp.readFile(path.resolve(paths.repoRoot, ...taskFile.split("/")), "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return null;
     return { unreadable: error.code || "error" };
@@ -144,20 +148,21 @@ function number(value) {
 // missing (Codex 2026-10-14: a partial sum was presented as the whole). Calls are counted from
 // the run's own records: one task.input per writer call, one review.input per review minus the
 // reviews the controller decided itself (scope violations), which never called the reviewer.
+// The contract has a row of its own, always: code cuts it from the work order, so it spent nothing (Owner
+// 2026-11-08). A run from before that day shows what translating and checking it spent.
+const CONTRACT_ROLES = Object.freeze(["translator", "contract_checker"]);
+const rowOf = (event) => (CONTRACT_ROLES.includes(event.role) ? "contract" : event.role);
+
 export function tokenRows(events) {
   const count = (predicate) => events.filter(predicate).length;
   const expected = {
+    contract: count((event) => event.event === "usage" && rowOf(event) === "contract"),
     writer: count((event) => event.event === "task.input"),
     reviewer: count((event) => event.event === "review.input") - count((event) => event.event === "review.result" && event.source === "controller"),
   };
-  // Translating and checking the contract come before the writer's first call; each has a row only when it ran.
-  for (const role of ["translator", "contract_checker"]) {
-    const calls = count((event) => event.event === "usage" && event.role === role);
-    if (calls) expected[role] = calls;
-  }
   const rows = {};
   for (const role of Object.keys(expected)) {
-    const usage = events.filter((event) => event.event === "usage" && event.role === role);
+    const usage = events.filter((event) => event.event === "usage" && rowOf(event) === role);
     const readable = usage.filter((event) => !event.parse_error);
     const calls = Math.max(expected[role], usage.length);
     const unreadable = (usage.length - readable.length) + Math.max(0, expected[role] - usage.length);
@@ -172,6 +177,16 @@ export function tokenRows(events) {
     };
   }
   return rows;
+}
+
+// The graph's statements and prompt tokens over the writer's and reviewer's prompts; null when none read it.
+export function graphTotals(events) {
+  const read = events.filter((event) => (event.event === "task.input" || event.event === "review.input") && event.graph);
+  if (!read.length) return null;
+  return {
+    queries: read.reduce((total, event) => total + number(event.graph.queries), 0),
+    tokens: read.reduce((total, event) => total + number(event.graph.tokens), 0),
+  };
 }
 
 function writerCalls(run, events) {
@@ -234,14 +249,9 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
     if (run.closed_reason === "version_changed") why.push(t(state.changed_after === "test" ? "result.why.version_changed.test" : "result.why.version_changed"));
     if (run.closed_reason === "evidence_unconfirmable") why.push(t("result.why.evidence_unconfirmable"));
     if (run.closed_reason === "scope_unverified") why.push(t("result.why.scope_unverified"));
-    if (state.contract_questions?.length) {
-      why.push(t("result.why.contract.questions"));
-      for (const question of state.contract_questions) why.push("- " + question);
-    }
-    if (run.closed_reason === "contract_unconfirmed") {
-      why.push(t("result.why.contract.unconfirmed"));
-      for (const line of (state.contract_problems || []).slice(0, 10)) why.push("- " + line);
-    }
+    // The writer stopped for the person (Owner 2026-11-06: a person stopped is met on their own document,
+    // in their words): what is theirs to decide, and that the work order is where they answer it.
+    if (run.closed_reason === "needs_human") why.push(t("result.why.needs_human.decide", { file: workPackage?.task_file || name }));
     if (writer?.needs_human?.length) {
       why.push(t("result.why.needs_human.questions"));
       for (const item of writer.needs_human) why.push("- " + t("result.why.needs_human.question", { question: item.question, options: (item.options || []).join(" / ") }));
@@ -317,7 +327,8 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
 
   // Every way a run ends short of success is met by starting the work order again, said in one line
   // with no command; the closed reason only picks what to do first (Owner 2026-11-04).
-  const next = [t(kind === "success" ? "result.next.success" : NEXT_STEP[run.closed_reason] || "result.next.start_again")];
+  // The work order is named by its file name only: the next step is plain words, with no path or command.
+  const next = [t(kind === "success" ? "result.next.success" : NEXT_STEP[run.closed_reason] || "result.next.start_again", { file: path.basename(workPackage?.task_file || name) })];
 
   // The changed list is computed at delivery time. A late delivery (prune after a crash, days on)
   // would otherwise present the owner's later edits as the run's work; it says so instead.
@@ -365,25 +376,35 @@ export function composeSections({ t, run, workPackage, plan, events, delta, unco
     }
     tokens.push("| " + [label, row.calls, row.input, row.cache_read, row.cache_write, row.output, row.total, row.cost_usd === null ? "" : row.cost_usd.toFixed(4) + " " + t("result.tokens.cost_unit")].join(" | ") + " |");
   }
+  // What Bridge read from the project's graph for the prompts: its statements and the tokens it put in,
+  // which the writer's and reviewer's input above already count; no model cost of its own.
+  const graph = graphTotals(events);
+  if (graph) tokens.push(t("result.tokens.graph", graph));
 
   const line = oneLine({ t, kind, review, gate, workPackage, state, failure, stop, run });
   return { name, head, acceptance, orderChange: orderChangeLines(t, orderChange), why, stderrTail, next, proof, noProof, changed, changedNote, violations, unverified, claimed, startUncommitted, tokens, line, calls };
 }
 
 // RC3-BLOCKER-00: one line per sealed condition, as Bridge decided it, and the version it was
-// checked on. A run that stopped before the decision still lists every condition, unknown.
+// checked on. A run the reviewer never judged lists none here (Fortes 2026-11-09, runs 8709b3f5 and
+// f645ccf5): every line would read "unknown, reviewer none, evidence none", beside the writer's own
+// account of each condition, which is the one with something in it.
 function acceptanceSection({ t, contract, events, writer, review, gate }) {
   const decided = last(events, "acceptance");
+  if (!decided && !review) return [];
   const reviewInput = last(events, "review.input");
-  const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review, test: gate, reviewVersion: reviewInput?.work_version || null }) : []);
+  const rows = decided?.rows || (contract ? acceptanceRows({ contract, writer, review }) : []);
   if (!rows.length) return [];
   const version = decided?.review_version || reviewInput?.work_version || gate?.work_version || null;
   const lines = rows.map((row) => "- " + t("result.acceptance.row", {
     id: row.id, result: t("result.acceptance." + row.result), statement: row.statement,
-    verdict: row.verdict || t("result.acceptance.none"), gate: t("result.acceptance.gate." + row.test), evidence: row.evidence || t("result.acceptance.none"),
+    verdict: row.verdict || t("result.acceptance.none"), evidence: row.evidence || t("result.acceptance.none"),
   }));
   if (version?.kind === "git") lines.push(t(version.dirty ? "result.acceptance.version.dirty" : "result.acceptance.version.git", { head: String(version.head || "none").slice(0, 12) }));
   else if (version) lines.push(t("result.acceptance.version.unknown"));
+  // The project's graph the reviewer asked was not brought up to date at this run's start.
+  const graph = last(events, "graph_update");
+  if (graph && graph.updated === false) lines.push(t("result.acceptance.graph_not_updated", { reason: graph.reason }));
   return lines;
 }
 
@@ -539,14 +560,23 @@ function identityLines(t, identity) {
 
 const two = (number) => String(number).padStart(2, "0");
 // A file name holds no \ / : * ? " < > | or control characters on Windows, nor a trailing dot or space.
-const fileNamePart = (text) => String(text).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+// In NFC, as the records name it, so one work order has one folder on every machine.
+const fileNamePart = (text) => nfc(text).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/[. ]+$/, "");
+
+const isUntitled = (task) => {
+  try { return task ? parseWorkOrder(task).title.line === null : false; } catch { return false; }
+};
 
 // The work order's own folder for the person's copies: .review-bridge/results/<work order file>/, one
-// folder per work order as Playwright keeps test-results/<test>/ (DECISIONS 2026-11-04).
+// folder per work order as Playwright keeps test-results/<test>/ (DECISIONS 2026-11-04). A work order in
+// a directory of work-packages/ has it under that directory's name, one level, as the directory is. One
+// with no title goes under untitled/ (Owner 2026-11-06); its files keep the work package's name, so such
+// work orders share the folder without meeting.
 function resultFolder(paths, { identity, workPackage, plan }) {
   const taskFile = !identity.unavailable ? identity.source_file : plan?.task_file || workPackage?.task_file || null;
   const name = taskFile ? path.basename(taskFile).replace(/\.md$/i, "") : workPackage.work_package_id;
-  return { name, folder: path.join(paths.resultsDir, fileNamePart(name)) };
+  const directory = taskFile ? workOrderDirectory(taskFile) : null;
+  return { name, folder: path.join(paths.resultsDir, ...(directory ? [fileNamePart(directory)] : []), fileNamePart(taskFile && isUntitled(workPackage?.task) ? UNTITLED : name)) };
 }
 
 // The person's copy of a run's result (DECISIONS 2026-11-03, RC3-FIX-01 round 2): one file per run in

@@ -31,24 +31,16 @@ import {
   writeText,
 } from "../../service/index.mjs";
 import { digest } from "../../utils/digest.mjs";
+import { nfc, workOrderNameProblem } from "../../utils/workOrderName.mjs";
 import { createWorkspaceBaseline, matchesForbiddenPath } from "./workspaceEvidence.mjs";
 import { recheckTest, selectTest } from "./test.mjs";
-import { MAX_TRANSLATION_ATTEMPTS } from "./contract.mjs";
+import { buildContract, sealContract } from "./contract.mjs";
 import { processFile, startLockFile, workLockFile } from "./processRecords.mjs";
 import { priorityChoice } from "../../policy/policyRules.mjs";
-import { BUDGET_KEYS, budgetProblems, MIN_CALL_TIMEOUT, parseWorkOrder, WorkOrderFormatError } from "./workOrderFormat.mjs";
+import { BUDGET_KEYS, budgetProblems, formProblems, MIN_CALL_TIMEOUT, parseWorkOrder, sealedText, WorkOrderFormatError, WorkOrderFormError, workOrderIdOf } from "./workOrderFormat.mjs";
 import { stopRun } from "./writerLoop.mjs";
-
-// The model calls that turn a work order into a contract run before any work, so the plan names
-// them for the human to approve: who translates, who checks, how often, and for how long.
-function contractSteps(settled) {
-  return {
-    translate: { role: "writer", provider: settled.writer.provider, model: settled.writer.model },
-    check: { role: "reviewer", provider: settled.reviewer.provider },
-    max_attempts: MAX_TRANSLATION_ATTEMPTS,
-    call_timeout: settled.budget.call_timeout,
-  };
-}
+import { cardStillMatches } from "./workOrderRecords.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 // Who fills each role in this run: the flag given at the terminal, else bridge.json. The plan seals
 // it, so changing bridge.json later only affects the next start (Owner 2026-11-04).
@@ -125,6 +117,15 @@ function requiredText(value, label, maximum) {
   return text;
 }
 
+// Refused here, before any card: at the yes it would be too late to say. Not trimmed first: a file whose
+// name starts with a space is not the file without it.
+function workPackageIdOf(value) {
+  if (!String(value || "").trim()) throw new Error("Work package id is required.");
+  const problem = workOrderNameProblem(value);
+  if (problem) throw new Error("The work order's name " + JSON.stringify(String(value)) + " " + problem + ". Rename the file, or give --work-package.");
+  return nfc(value);
+}
+
 function parseAllowedPaths(value) {
   const values = [...new Set(String(value || "").split(",").map((entry) => entry.trim().replaceAll("\\", "/")).filter(Boolean))];
   if (!values.length) throw new Error("At least one allowed path is required.");
@@ -144,11 +145,11 @@ function parseAllowedPaths(value) {
 // A plan is content-addressed, as a policy snapshot is, so one made by an older Bridge (its budget in
 // calls and minutes, or its change types) is never rewritten; it is refused where it is read, and a
 // new card is made.
-export const PLAN_SCHEMA_VERSION = 7;
+export const PLAN_SCHEMA_VERSION = 10;
 
 export function assertCurrentPlan(plan) {
   if (plan?.operation !== "start_work_package") throw new Error("Unsupported work plan.");
-  if (plan.schema_version === 4 || plan.schema_version === 5 || plan.schema_version === 6) throw new Error("This plan was made by an older Bridge and is not read again. Run: review-bridge start <file> to make a new card");
+  if ([4, 5, 6, 7].includes(plan.schema_version)) throw new Error("This plan was made by an older Bridge and is not read again. Run: " + bridgeRunner() + " start <file> to make a new card");
   if (plan.schema_version !== PLAN_SCHEMA_VERSION) throw new Error("Unsupported work plan.");
 }
 
@@ -218,6 +219,36 @@ function settleWorkOrder(policy, format, { rounds, callTimeout, roles }) {
   };
 }
 
+// Why one file of a directory cannot be run, in a line of the card, or null. Asked before any plan is
+// made: a plan seals how many are on the card. What is wrong with the setting itself and not the
+// file (a flag over the policy's limit, a policy no writer can hold to) is thrown, as at a single start.
+export async function workOrderChecker(paths, { writer, reviewer, rounds, callTimeout }) {
+  const { snapshot } = await loadOrCreatePolicySnapshot(paths);
+  const roles = await selectedRoles(paths, { writer, reviewer });
+  return (fileName, text) => {
+    // What init puts there to copy from.
+    if (/^TEMPLATE.*\.md$/.test(fileName)) return "it is a template to copy from";
+    // The work package's id is its file name, and a run's records are named after it.
+    const nameProblem = workOrderNameProblem(path.basename(fileName, path.extname(fileName)));
+    if (nameProblem) return "its file name " + nameProblem;
+    let taskText;
+    try {
+      taskText = requiredText(text, "Task", 40_000);
+    } catch (error) {
+      return error.message.replace(/\.$/, "");
+    }
+    try {
+      // What a work order must say is not judged here: start checks it for the whole line before the card.
+      const format = parseWorkOrder(taskText);
+      settleWorkOrder(snapshot.effective_policy, format, { rounds, callTimeout, roles });
+    } catch (error) {
+      if (error instanceof WorkOrderFormatError) return error.problems[0];
+      throw error;
+    }
+    return null;
+  };
+}
+
 export async function createWorkPackagePlan({
   paths,
   task,
@@ -242,6 +273,9 @@ export async function createWorkPackagePlan({
   // Which work order this file is (Q13), as the card shows it; sealed with the plan, so the yes
   // approves it too.
   workOrder = null,
+  // Where this plan stands on a directory's card: { id, directory, position, total, step }. The plans of
+  // one card share the id, as one migrate shares Knex's batch number; there is no table of cards.
+  line = null,
 }) {
   if (Boolean(task) === Boolean(taskFile)) throw new Error("Provide exactly one of --task or --task-file.");
   let taskText = task;
@@ -249,17 +283,20 @@ export async function createWorkPackagePlan({
   if (taskFile) {
     const resolved = assertUnder(path.resolve(taskFile), paths.privateRoot, "Task file");
     if (!(await fileExists(resolved))) throw new Error("Task file is missing.");
-    taskText = await fsp.readFile(resolved, "utf8");
+    // Sealed without the id line Bridge keeps in the front matter: that line is Bridge's, not the work order.
+    taskText = sealedText(await fsp.readFile(resolved, "utf8"));
     // T0-07 V2.1: the result file is written beside this path later.
     taskFileRelative = path.relative(paths.repoRoot, resolved).split(path.sep).join("/");
   }
   taskText = requiredText(taskText, "Task", 40_000);
-  // A work-order file is sealed as text here and turned into a contract by the model only after
-  // the human starts the work; inline --task text is the legacy/test path and needs --allow-paths.
+  // A work-order file is sealed as text here and its contract is cut from it here, by code, so the one
+  // card shows both; inline --task text is the legacy/test path and needs --allow-paths.
   const workOrderFile = Boolean(taskFile);
-  // The work order's own format is read before anything else; a work order Bridge cannot split
-  // starts nothing, and the refusal names the lines.
+  // The work order's own format is read before anything else; a work order Bridge cannot split, or
+  // one without what it must say, starts nothing, and the refusal names the blocks and the lines.
   const format = workOrderFile ? parseWorkOrder(taskText) : null;
+  const form = format ? formProblems(format) : null;
+  if (form && !form.ok) throw new WorkOrderFormError(form);
   const { snapshot } = await loadOrCreatePolicySnapshot(paths);
   const roles = await selectedRoles(paths, { writer, reviewer });
   const settled = settleWorkOrder(snapshot.effective_policy, format, { rounds, callTimeout, roles });
@@ -271,9 +308,13 @@ export async function createWorkPackagePlan({
   settled.reviewer.mcp = mcp.reviewerMcp;
   const scope = await resolveScope({ paths, workOrderFile, allowedPaths });
   const rules = workOrderFile ? await snapshotRules(paths) : null;
-  const contract = workOrderFile ? contractSteps(settled) : null;
   // T0-06 G2: the verification is decided here, from the installed rules, and sealed for approval.
   const test = await selectTest({ paths, repoRoot: paths.repoRoot, bridgeConfig: await readJson(paths.bridgeConfigPath).catch(() => ({})) });
+  const workPackageId = workPackageIdOf(workPackage);
+  // The contract, cut by code from the text this plan seals: the same text is the same contract.
+  const contract = format
+    ? await sealContract(paths, buildContract({ workPackage: { work_package_id: workPackageId, task_file: taskFileRelative, task: taskText }, format }))
+    : null;
   const plan = {
     schema_version: PLAN_SCHEMA_VERSION,
     operation: "start_work_package",
@@ -281,15 +322,16 @@ export async function createWorkPackagePlan({
     repo_root: paths.repoRoot,
     proposed_run_id: randomUUID(),
     proposed_session_id: randomUUID(),
-    work_package_id: requiredText(workPackage, "Work package id", 80),
+    work_package_id: workPackageId,
     owner: requiredText(owner, "Owner", 80),
     breakpoint: requiredText(breakpoint, "Breakpoint", 160),
     task: taskText,
     task_sha256: digest(taskText),
     task_file: taskFileRelative,
     ...(workOrder ? { work_order: workOrder } : {}),
+    ...(line ? { line } : {}),
     rules,
-    ...(contract ? { contract_steps: contract } : {}),
+    ...(contract ? { contract_sha256: contract.sha256, contract_conditions: contract.contract.acceptance.length } : {}),
     scope,
     test,
     // What every call of this run will use, each with the layer it came from (settleWorkOrder).
@@ -313,7 +355,7 @@ export function planFilePath(paths, plan, planName = null) {
 // E8: whether the work-order file still reads as the plan sealed it (the SHA-256 the card showed).
 export async function workOrderUnchanged(plan, taskFile) {
   const now = await fsp.readFile(path.resolve(taskFile), "utf8").catch(() => null);
-  return now !== null && digest(now.trim()) === plan.task_sha256;
+  return now !== null && digest(sealedText(now).trim()) === plan.task_sha256;
 }
 
 // E10: the first option given beside --yes that is not what the card showed, or null. The card is
@@ -467,6 +509,55 @@ async function stopEarlierVersions(paths, plan) {
   return stopped;
 }
 
+// The immutable work package and the authorization one plan starts from. The authorization's id is the
+// plan's, so a directory's yes writes it first and that plan's start finds the same one here.
+async function planAuthorization(paths, plan, { authorizedVia, ttl, clock = Date.now }) {
+  const workPackage = await createImmutableWorkPackage(paths, {
+    work_package_id: plan.work_package_id,
+    task: plan.task,
+    acceptance_criteria: [],
+    scope: plan.scope,
+    budget: plan.budget,
+    breakpoint: plan.breakpoint,
+    rules: plan.rules || null,
+    contract_sha256: plan.contract_sha256 || null,
+    test: plan.test || null,
+    task_file: plan.task_file || null,
+    priority: plan.priority,
+    writer: plan.writer,
+    reviewer: plan.reviewer,
+  }, () => Date.parse(plan.created_at));
+  return await createAuthorization(paths, {
+    authorizationId: "plan-" + plan.plan_sha256,
+    kind: "start",
+    // C4: the OS user running work-start, never the name typed into the plan.
+    authorizedBy: os.userInfo().username,
+    authorizedVia,
+    workOrderSha256: plan.task_file ? plan.task_sha256 : null,
+    workPackageSha256: workPackage.record.content_sha256,
+    policySha256: plan.effective_policy_sha256,
+    ttl,
+    sourcePlanSha256: plan.plan_sha256,
+  }, clock);
+}
+
+// One yes to a directory's card: an authorization per plan, with one moment and one way of saying yes.
+// A policy changed since the card refuses the yes whole. Each plan's own checks run when its turn comes.
+export async function authorizeCard(paths, plans, { authorizedVia, clock = Date.now }) {
+  const { snapshot } = await loadOrCreatePolicySnapshot(paths);
+  const stale = plans.find((plan) => plan.effective_policy_sha256 !== snapshot.effective_policy_sha256);
+  if (stale) throw new Error("The policy changed after the card was shown: Bridge was upgraded or its policy changed. Nothing was authorized. Run start again.");
+  const moment = clock();
+  const authorizations = [];
+  for (const plan of plans) {
+    authorizations.push({
+      planSha256: plan.plan_sha256,
+      authorization: await planAuthorization(paths, plan, { authorizedVia, ttl: snapshot.effective_policy.limits.authorization_ttl, clock: () => moment }),
+    });
+  }
+  return authorizations;
+}
+
 // A run created by a start that then failed is closed, never left running.
 export async function closeFailedStart(paths, runId, error) {
   const message = String(error?.message || error);
@@ -474,9 +565,10 @@ export async function closeFailedStart(paths, runId, error) {
   await consumeRun(paths, runId, "controller_failure", null).catch(() => {});
 }
 
-export async function authorizeWorkPackage({ paths, planPath, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
+// `plan` is the plan its caller already holds; only a caller without it reads the file.
+export async function authorizeWorkPackage({ paths, planPath, plan: held = null, approval, executionMode = "native", authorizedVia = "approve_flag" }) {
   const resolvedPlan = assertUnderOne(path.resolve(planPath), [paths.logRoot, paths.privateRoot], "Work plan");
-  const plan = await readJson(resolvedPlan);
+  const plan = held ?? await readJson(resolvedPlan);
   assertCurrentPlan(plan);
   const actual = planDigest(plan);
   if (plan.plan_sha256 !== actual || String(approval || "").toLowerCase() !== actual) {
@@ -495,11 +587,17 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
     const current = await snapshotRules(paths);
     if (current.sha256 !== plan.rules.sha256) throw new Error("批准後 " + plan.rules.path + " 變了，重新建 plan");
   }
-  // Starting authorizes the work order as it is now; one edited since the plan is not what was sealed.
+  // Starting authorizes the work order as it is now; one edited since the plan is not what was sealed,
+  // and one whose front matter id changed since the card is another work order than the card showed.
   if (plan.task_file) {
     const current = await fsp.readFile(path.resolve(paths.repoRoot, ...plan.task_file.split("/")), "utf8").catch(() => null);
-    if (current === null || digest(current.trim()) !== plan.task_sha256) {
+    if (current === null || digest(sealedText(current).trim()) !== plan.task_sha256) {
       throw new Error("The work order " + plan.task_file + " changed after the plan was built. Build a new plan.");
+    }
+    if (!cardStillMatches(plan.work_order, current)) {
+      const now = workOrderIdOf(current);
+      throw new Error("The work order " + plan.task_file + " changed after the plan was built: its front matter "
+        + (now ? "now holds work order id " + now : "no longer holds its work order id") + "; nothing was created. Build a new plan.");
     }
   }
   // T0-06 G2.5: the sealed test entry point must still exist when the human approves.
@@ -558,33 +656,7 @@ export async function authorizeWorkPackage({ paths, planPath, approval, executio
     if (await readRun(paths, plan.proposed_run_id).then(() => true, () => false)) {
       throw new Error("Work plan already consumed, generate a new plan.");
     }
-    const workPackage = await createImmutableWorkPackage(paths, {
-      work_package_id: plan.work_package_id,
-      task: plan.task,
-      acceptance_criteria: [],
-      scope: plan.scope,
-      budget: plan.budget,
-      breakpoint: plan.breakpoint,
-      rules: plan.rules || null,
-      contract_steps: plan.contract_steps || null,
-      test: plan.test || null,
-      task_file: plan.task_file || null,
-      priority: plan.priority,
-      writer: plan.writer,
-      reviewer: plan.reviewer,
-    }, () => Date.parse(plan.created_at));
-    const authorization = await createAuthorization(paths, {
-      authorizationId: "plan-" + plan.plan_sha256,
-      kind: "start",
-      // C4: the OS user running work-start, never the name typed into the plan.
-      authorizedBy: os.userInfo().username,
-      authorizedVia,
-      workOrderSha256: plan.task_file ? plan.task_sha256 : null,
-      workPackageSha256: workPackage.record.content_sha256,
-      policySha256: snapshot.effective_policy_sha256,
-      ttl: snapshot.effective_policy.limits.authorization_ttl,
-      sourcePlanSha256: plan.plan_sha256,
-    });
+    const authorization = await planAuthorization(paths, plan, { authorizedVia, ttl: snapshot.effective_policy.limits.authorization_ttl });
     const workspaceEvidence = await createWorkspaceBaseline({
       paths,
       planSha256: plan.plan_sha256,

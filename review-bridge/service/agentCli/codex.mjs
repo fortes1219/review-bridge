@@ -11,11 +11,21 @@ import { parseReviewerUsage } from "./usage.mjs";
 
 const normalizePath = (value) => String(value || "").replaceAll("\\", "/").replace(/^\.\//, "");
 
+// How many distinct errors a stream keeps: one of nothing but errors stays this long.
+const MAX_STREAM_FAILURES = 20;
+
 // D5.1 / D5.2: `codex exec --json` prints one event per line; usage and commands are taken from it.
+// So are its errors, which 0.166 writes there and not to stderr (exec/src/event_processor_with_jsonl_output.rs):
+// only these two event types, never an item, so words a tool printed are not read as Codex's own.
+// "Reconnecting..." is an error event too, and only says it is trying again.
 export function parseCodexJsonl(text) {
   let usage = null;
   let threadId = null;
   const commands = [];
+  const failures = [];
+  const noteFailure = (message) => {
+    if (typeof message === "string" && message && !/^Reconnecting\.\.\./.test(message) && !failures.includes(message) && failures.length < MAX_STREAM_FAILURES) failures.push(message);
+  };
   let unparsable = 0;
   for (const line of String(text || "").split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -23,11 +33,13 @@ export function parseCodexJsonl(text) {
     try { record = JSON.parse(line); } catch { unparsable += 1; continue; }
     if (record?.type === "thread.started" && record.thread_id) threadId = String(record.thread_id);
     if (record?.type === "turn.completed" && record.usage && typeof record.usage === "object") usage = record.usage;
+    if (record?.type === "error") noteFailure(record.message);
+    if (record?.type === "turn.failed") noteFailure(record.error?.message);
     if (record?.type === "item.completed" && record.item?.type === "command_execution" && record.item.command) {
       commands.push(String(record.item.command).slice(0, 200));
     }
   }
-  return { usage, thread_id: threadId, commands, unparsable_lines: unparsable };
+  return { usage, thread_id: threadId, commands, failures, unparsable_lines: unparsable };
 }
 
 // A path the command names, when one can be read off mechanically; otherwise null.
@@ -80,6 +92,18 @@ export function reviewerUsageEvent({ usage, trailerTokens, call, durationMs }) {
 export const NO_CONNECTORS_ARGS = Object.freeze(["--disable", "apps", "--disable", "plugins"]);
 export const mcpOffArgs = (names = []) => names.flatMap((name) => ["-c", "mcp_servers." + name + ".enabled=false"]);
 
+// Bridge's own graph server, defined for this call only: `-c` takes a dotted path and a TOML value
+// (codex-rs config_override.rs), the stdio server's keys are `command` and `args`, and `enabled_tools`
+// registers only the listed tools (config mcp_types.rs). `omit_tools_from = ["deferred"]` puts its tools
+// in the model's first tool list instead of behind tool search (core mcp_tool_exposure.rs, spec_plan.rs).
+// A JSON string or array of strings is also a TOML one.
+export const graphServerArgs = (graph) => (graph ? [
+  "-c", "mcp_servers." + graph.name + ".command=" + JSON.stringify(graph.command),
+  "-c", "mcp_servers." + graph.name + ".args=" + JSON.stringify(graph.args),
+  "-c", "mcp_servers." + graph.name + ".enabled_tools=" + JSON.stringify(graph.tools),
+  "-c", "mcp_servers." + graph.name + ".omit_tools_from=" + JSON.stringify(["deferred"]),
+] : []);
+
 // The MCP servers a session of Bridge's would load. Calls no model and starts no server. A name that
 // cannot be put in a config path cannot be turned off, so it is an error like an unreadable list.
 export async function listCodexMcpServers(adapter) {
@@ -104,11 +128,12 @@ const commandRead = (command) => {
 
 // `codex exec` has no switch that removes every tool, so a session with no business reading files
 // still gets the read-only sandbox: it can write nothing, and it can read the project.
-async function callExec({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
+async function callExec({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], graph = null, stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
   const executable = await adapter.resolveExecutable("codex");
   const args = [
     ...NO_CONNECTORS_ARGS,
     ...mcpOffArgs(mcpOff),
+    ...graphServerArgs(graph),
     "--ask-for-approval", "never",
     "-c", "model_reasoning_effort=\"" + effort + "\"",
     // A model of null leaves the choice to the CLI.
@@ -146,7 +171,9 @@ async function callExec({ adapter, role, call, prompt, schemaPath, model, effort
     finalRecord: null,
     reportedSession: null,
     maxTurnsReached: false,
-    failureTexts: async () => [codexDiagnosticTrailer(stderr)],
+    // Exec gives no code: its events carry only a message.
+    failureCode: null,
+    failureTexts: async () => [...stream.failures, codexDiagnosticTrailer(stderr)],
   };
 }
 
@@ -165,11 +192,11 @@ async function commandsOf(eventsPath) {
 
 // The writer: a thread whose sandbox writes to the workspace only and asks nobody. The app server
 // takes the model and the effort in its requests; it has no -m, and `-c` would only say the same.
-async function callWriter({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
+async function callWriter({ adapter, role, call, prompt, schemaPath, model, effort, cwd, mcpOff = [], graph = null, stdoutPath, stderrPath, answerPath, timeoutMs, onSpawn }) {
   const executable = await adapter.resolveExecutable("codex");
   const startedAt = Date.now();
   const result = await runCodexAppServerTurn({
-    invocation: adapter.buildInvocation("codex", executable, [...NO_CONNECTORS_ARGS, ...mcpOffArgs(mcpOff), "app-server"]),
+    invocation: adapter.buildInvocation("codex", executable, [...NO_CONNECTORS_ARGS, ...mcpOffArgs(mcpOff), ...graphServerArgs(graph), "app-server"]),
     cwd,
     prompt,
     // A model of null leaves the choice to the CLI.
@@ -200,6 +227,7 @@ async function callWriter({ adapter, role, call, prompt, schemaPath, model, effo
     finalRecord: { thread_id: threadId, status: result.status, final_message: result.finalMessage },
     reportedSession: null,
     maxTurnsReached: false,
+    failureCode: result.errorCode,
     failureTexts: async () => [...result.errors, result.error?.message || "", codexDiagnosticTrailer(await readEvidenceTail(stderrPath))],
   };
 }

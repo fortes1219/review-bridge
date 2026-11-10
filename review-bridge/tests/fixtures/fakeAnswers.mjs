@@ -12,8 +12,6 @@ import { getBridgePaths } from "../../utils/paths.mjs";
 const stateRoot = () => getBridgePaths(process.cwd(), path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."), { privateRootName: ".review-bridge" }).stateRoot;
 
 export function modeOf(prompt) {
-  if (prompt.includes("[REVIEW_BRIDGE_MODE: CONTRACT_TRANSLATION]")) return "translation";
-  if (prompt.includes("[REVIEW_BRIDGE_MODE: CONTRACT_CHECK]")) return "check";
   if (prompt.includes("[REVIEW_BRIDGE_MODE: WRITER_ONLY]")) return "writer";
   if (prompt.includes("You are the independent reviewer")) return "review";
   if (prompt.includes("sandbox self-test")) return "probe";
@@ -26,27 +24,6 @@ export function logCall(cli, mode, details = {}) {
 }
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Conditions read off the numbered acceptance blocks in the prompt: every line becomes one condition
-// quoting its text, a list marker left out. FAKE_CONTRACT_FILE replaces it with a prepared answer,
-// or with an array of answers, one per attempt, so a test can hand the harness anything.
-export function translationAnswer(prompt) {
-  const attempt = Number(/Attempt: (\d+)/.exec(prompt)?.[1] || 1);
-  if (process.env.FAKE_CONTRACT_FILE) {
-    const prepared = JSON.parse(fs.readFileSync(process.env.FAKE_CONTRACT_FILE, "utf8"));
-    return Array.isArray(prepared) ? prepared[Math.min(attempt, prepared.length) - 1] : prepared;
-  }
-  const numbered = [...prompt.matchAll(/^ *(\d+)\| (.*)$/gm)].map((match) => ({ line: Number(match[1]), text: match[2] }));
-  const gate = prompt.includes("Bridge will run this verification");
-  const acceptance = numbered.map((entry, index) => {
-    const text = /^\s*(?:\d+[.)]|[-*])\s+(.+)$/.exec(entry.text)?.[1] ?? entry.text.trim();
-    return {
-      id: "AC" + (index + 1), statement: text, quote: text, source_refs: [{ start: entry.line, end: entry.line }],
-      verify: [gate ? { kind: "test", check: null } : { kind: "reviewer", check: "fake: the reviewer reads the change" }],
-    };
-  });
-  return { event: "contract.translation", acceptance };
-}
 
 // FAKE_CONTRACT_TAMPER=1 makes the writer rewrite the sealed contract file, as a model trying to
 // change its own instructions would.
@@ -144,30 +121,6 @@ export function writerAnswer(prompt) {
   };
 }
 
-// The contract check: every condition judged faithful unless FAKE_CONTRACT_CHECK asks for one
-// of the other outcomes the harness must handle. "_first" outcomes apply to attempt 1 only.
-export function checkAnswer(prompt) {
-  const mode = process.env.FAKE_CONTRACT_CHECK || "faithful";
-  const attempt = Number(/Attempt: (\d+)/.exec(prompt)?.[1] || 1);
-  const sha256 = /^Candidate: ([0-9a-f]{64})$/m.exec(prompt)?.[1] || "0".repeat(64);
-  const open = prompt.indexOf("=== CANDIDATE CONDITIONS ===");
-  const close = prompt.indexOf("=== END CANDIDATE CONDITIONS ===");
-  const conditions = JSON.parse(prompt.slice(open + "=== CANDIDATE CONDITIONS ===".length, close));
-  const wrong = mode === "unfaithful_always" || (mode === "unfaithful_first" && attempt === 1);
-  const ids = conditions.map((item) => item.id);
-  return {
-    event: "contract.check",
-    candidate_sha256: sha256,
-    acceptance: (mode === "skip_ac" ? ids.slice(0, -1) : ids).map((id, index) => ({
-      id, faithful: !(wrong && index === 0), note: wrong && index === 0 ? "says more than its lines" : null,
-    })),
-    missing: mode === "missing_first" && attempt === 1 ? [{ source_refs: [{ start: 1, end: 1 }], note: "fake: a stated requirement was left out" }] : [],
-    ambiguities: mode === "ambiguous" ? [{ question: "Which page should show the farm?", source_refs: [] }] : [],
-    cannot_confirm: mode === "cannot_confirm",
-    cannot_confirm_reason: mode === "cannot_confirm" ? "fake: the work order refers to a design not given" : null,
-  };
-}
-
 export function reviewInput(prompt) {
   const open = prompt.indexOf("=== review.input ===");
   const close = prompt.indexOf("=== end review.input ===");
@@ -198,9 +151,14 @@ export async function reviewWork() {
   }
 }
 
+// FAKE_ON_<what>=<text>: this behaviour only for a work order whose text carries <text>, so one work
+// order of a directory can differ from the others.
+export const fakeOn = (prompt, what) => Boolean(process.env["FAKE_ON_" + what]) && prompt.includes(process.env["FAKE_ON_" + what]);
+
 export function reviewAnswer(prompt) {
   const input = reviewInput(prompt);
-  const gate = process.env.FAKE_CODEX_GATE || "PASS";
+  // FAKE_ON_REVIEW_FAIL: the reviewer fails this one work order.
+  const gate = fakeOn(prompt, "REVIEW_FAIL") ? "FAIL" : process.env.FAKE_CODEX_GATE || "PASS";
   const deltaPath = input.delta?.[0]?.path || input.read_list?.[0]?.path || "README.md";
   const openIds = (input.open_findings || []).map((finding) => finding.id);
   const keep = process.env.FAKE_CODEX_KEEP || "";
@@ -212,8 +170,9 @@ export function reviewAnswer(prompt) {
   // One verdict per contract condition in review.input. FAKE_CODEX_VERDICT picks the outcome Bridge
   // must handle: "cannot_verify" or "fail_under_pass" on the first condition, "missing" drops the
   // last, "no_evidence" passes the first with no evidence. A FAIL gate fails the first condition.
+  // It is not FAKE_CODEX_GATE, which --fake-cli sets from its scenario (fakeAdapter.mjs).
+  const mode = process.env.FAKE_CODEX_VERDICT || "";
   const verdictsOutput = () => {
-    const mode = process.env.FAKE_CODEX_VERDICT || "";
     const failing = gate === "FAIL" || gate === "HARD_STOP";
     const items = conditionIds.map((id, index) => {
       if (index === 0 && (failing || mode === "fail_under_pass")) return { id, verdict: "fail", evidence: "fake: blocked by the first finding" };
@@ -232,14 +191,18 @@ export function reviewAnswer(prompt) {
     findings = [finding("F9", "HIGH", deltaPath)];
   }
   if (gate === "MALFORMED") return { event: "review.result", gate: "MAYBE" };
+  // FAKE_CODEX_VERDICT "pass_hard_stop": a PASS that asks for a hard stop, which the review's rules forbid
+  // (run f645ccf5); "pass_hard_stop_once": only until Bridge asks again with what was wrong.
+  const passStop = gate === "PASS" && (mode === "pass_hard_stop" || (mode === "pass_hard_stop_once" && !input.previous_answer_problems));
+  const passing = gate === "PASS" || gate === "PASS_WITH_HIGH";
   return {
     event: "review.result",
     work_order: input.work_order || "unknown",
     contract_sha256: process.env.FAKE_CODEX_CONTRACT === "other" ? "0".repeat(64) : input.contract_sha256 ?? null,
     call: input.call || 1,
-    gate: gate === "PASS" || gate === "PASS_WITH_HIGH" ? "PASS" : "FAIL",
-    hard_stop: gate === "HARD_STOP",
-    hard_stop_reason: gate === "HARD_STOP" ? "needs_human_decision" : null,
+    gate: passing ? "PASS" : "FAIL",
+    hard_stop: gate === "HARD_STOP" || passStop,
+    hard_stop_reason: gate === "HARD_STOP" || passStop ? "needs_human_decision" : null,
     findings: gate === "FAIL_EMPTY" ? [] : findings,
     verified: ["fake: read the delta"],
     not_run: ["fake: project tests"],

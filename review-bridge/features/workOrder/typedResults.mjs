@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { nfc } from "../../utils/workOrderName.mjs";
 import { criteriaProblems, verdictProblems } from "./acceptance.mjs";
 
 export { CODEX_USAGE_FIELDS, parseCodexJsonl, pathFromCommand, reviewerUsageEvent } from "../../service/agentCli/codex.mjs";
@@ -14,6 +15,8 @@ const schemasDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "s
 export const WRITER_RESULT_SCHEMA = path.join(schemasDir, "writer.result.schema.json");
 export const REVIEW_RESULT_SCHEMA = path.join(schemasDir, "review.result.schema.json");
 export const MALFORMED_EXIT_CODE = 79;
+// A review.result that breaks its rules is asked for again once, with what was wrong; the second ends the run.
+export const REVIEW_FORMAT_ATTEMPTS = 2;
 export const SEVERITY_RANK = Object.freeze({ HIGH: 3, MEDIUM: 2, LOW: 1 });
 
 const schemaCache = new Map();
@@ -97,7 +100,7 @@ export async function validateWriterResult(value, { workOrder, call, contractSha
     ? validateAgainstSchema(value, await loadSchema(WRITER_RESULT_SCHEMA))
     : ["$: not an object"];
   if (!errors.length) {
-    if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
+    if (nfc(value.work_order) !== nfc(workOrder)) errors.push("$.work_order: expected " + workOrder);
     if (value.call !== call) errors.push("$.call: expected " + call);
     errors.push(...contractEchoErrors(value, contractSha256));
     errors.push(...criteriaProblems(value, contract));
@@ -150,7 +153,7 @@ export async function validateReviewResult(value, { workOrder, call, repoRoot, p
     ? validateAgainstSchema(value, await loadSchema(REVIEW_RESULT_SCHEMA))
     : ["$: not an object"];
   if (errors.length) return { ok: false, errors };
-  if (value.work_order !== workOrder) errors.push("$.work_order: expected " + workOrder);
+  if (nfc(value.work_order) !== nfc(workOrder)) errors.push("$.work_order: expected " + workOrder);
   if (value.call !== call) errors.push("$.call: expected " + call);
   errors.push(...contractEchoErrors(value, contractSha256));
   errors.push(...verdictProblems(value, contract));

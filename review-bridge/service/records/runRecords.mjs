@@ -80,8 +80,8 @@ async function acceptanceFacts(client, runId, sequence, event) {
     [runId, sequence, orNull(event.call), event.decision, json(event.review_version)]);
   for (const row of event.rows || []) {
     await client.query(
-      "insert into acceptance_rows (run_id, sequence, ac_id, statement, writer, verdict, test, result, evidence) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-      [runId, sequence, row.id, orNull(row.statement), orNull(row.writer), orNull(row.verdict), row.test, row.result, orNull(row.evidence)],
+      "insert into acceptance_rows (run_id, sequence, ac_id, statement, writer, verdict, result, evidence) values ($1, $2, $3, $4, $5, $6, $7, $8)",
+      [runId, sequence, row.id, orNull(row.statement), orNull(row.writer), orNull(row.verdict), row.result, orNull(row.evidence)],
     );
   }
   return without(event, ACCEPTANCE_COLUMNS);
@@ -128,17 +128,18 @@ export class SequenceConflictError extends Error {
 // the broker checks it). Returns the numbered line, and for an I/O event the sequence of the run's
 // I/O event before it (0 for none), so the file can tell whether it holds that one; null when the
 // database does not know the run. `late`: written after the fact (replayUnrecorded), marked so on
-// the event. A run_delivered event sets the run's delivered_at in the same update; a usage event adds
-// its tokens to the run's tokens_used (runUsageTotal).
+// the event. A run_delivered event sets the run's delivered_at in the same update; a writer's usage event
+// adds what the budget counts of it to the run's tokens_used (runUsageTotal, budgetTokens).
 async function append(client, entry, { late = false } = {}) {
   const state = STATE_EVENT_TYPES.includes(entry.type);
+  const counted = entry.type === "usage" && entry.line.role === "writer";
   const sets = (state
     ? ", status = $3, closed_reason = $4, closed_at = $5, conclusion = $6, run_deadline_at = $7, contract_sha256 = $8"
     : "") + (entry.type === "run_delivered" ? ", delivered_at = $2" : "")
-    + (entry.type === "usage" ? ", tokens_used = tokens_used + $3" : "");
+    + (counted ? ", tokens_used = tokens_used + $3" : "");
   const { rows } = await client.query(
     "update runs set last_event_sequence = last_event_sequence + 1, updated_at = $2" + sets + " where run_id = $1 returning last_event_sequence",
-    [entry.runId, entry.occurredAt, ...(state ? STATE(entry.line.projection) : []), ...(entry.type === "usage" ? [tokenTotal(entry.line.tokens)] : [])],
+    [entry.runId, entry.occurredAt, ...(state ? STATE(entry.line.projection) : []), ...(counted ? [budgetTokens(entry.line.tokens)] : [])],
   );
   if (!rows.length) return null;
   const sequence = rows[0].last_event_sequence;
@@ -290,6 +291,17 @@ export async function activeRuns(db, projectId) {
   return (await db.query("select run_id, work_order_id, content_sha256, status from runs where project_id = $1 and status = 'in_progress' order by created_at", [projectId])).rows;
 }
 
+// The project's running runs that belong to a directory's line, with where they are in it (runs_active,
+// then each one's plan by its key).
+export async function activeLineSteps(db, projectId) {
+  const { rows } = await db.query(
+    "select r.run_id, r.created_at, p.source_file, p.body->'line' as line from runs r join plans p using (plan_sha256)"
+    + " where r.project_id = $1 and r.status = 'in_progress' and p.body ? 'line' order by r.created_at",
+    [projectId],
+  );
+  return rows;
+}
+
 // The running runs of one work order (a start replaces them; an unchanged one refuses the start).
 export async function activeRunsOfWorkOrder(db, workOrderId) {
   return (await db.query("select run_id, content_sha256 from runs where work_order_id = $1 and status = 'in_progress'", [workOrderId])).rows;
@@ -320,6 +332,14 @@ export async function runDetail(db, runId) {
 }
 
 // Token total the ceilings are measured against (D4.1).
+// What the writer's budget counts of a call (Owner 2026-11-08): what it read new, wrote to the cache and
+// wrote out, not what it read back from the cache. Each kind is recorded apart; this is only the budget's sum.
+export function budgetTokens(tokens) {
+  return ["input", "cache_write", "output"]
+    .map((key) => (Number.isFinite(tokens?.[key]) ? tokens[key] : 0))
+    .reduce((sum, value) => sum + value, 0);
+}
+
 export function tokenTotal(tokens) {
   return ["input", "cache_write", "cache_read", "output"]
     .map((key) => (Number.isFinite(tokens?.[key]) ? tokens[key] : 0))

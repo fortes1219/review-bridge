@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "review-bridge.contract",
-  "description": "A sealed work-order contract: the work-order text as authorized, every field Bridge copied from the work order's marked blocks, the conditions a writer cut from its acceptance blocks and a reviewer checked, and who did both. Read-only after sealing.",
+  "description": "A sealed work-order contract: the work-order text as authorized, every field Bridge copied from the work order's marked blocks, and the conditions Bridge cut from its acceptance lists. No model writes it. Read-only after sealing.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,8 +9,6 @@
     "schema_version",
     "work_package_id",
     "source",
-    "translated_by",
-    "checked_by",
     "ticket",
     "context",
     "outcome",
@@ -21,7 +19,6 @@
     "verification_hints",
     "reproduction",
     "references",
-    "open_questions",
     "unused_lines"
   ],
   "properties": {
@@ -29,7 +26,7 @@
       "const": "review-bridge.contract"
     },
     "schema_version": {
-      "const": 2
+      "const": 4
     },
     "work_package_id": {
       "type": "string",
@@ -62,50 +59,6 @@
         }
       }
     },
-    "translated_by": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "role",
-        "provider",
-        "model",
-        "attempt"
-      ],
-      "properties": {
-        "role": {
-          "const": "writer"
-        },
-        "provider": {
-          "type": "string",
-          "minLength": 1
-        },
-        "model": {
-          "type": ["string", "null"],
-          "minLength": 1
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
-        }
-      }
-    },
-    "checked_by": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "role",
-        "provider"
-      ],
-      "properties": {
-        "role": {
-          "const": "reviewer"
-        },
-        "provider": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
-    },
     "ticket": {
       "type": "object",
       "additionalProperties": false,
@@ -130,7 +83,6 @@
             },
             "source_refs": {
               "type": "array",
-              "minItems": 1,
               "items": {
                 "type": "object",
                 "additionalProperties": false,
@@ -646,9 +598,7 @@
         "required": [
           "id",
           "statement",
-          "quote",
           "source_refs",
-          "verify",
           "run_refs"
         ],
         "properties": {
@@ -659,12 +609,7 @@
           "statement": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1000
-          },
-          "quote": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 1000
+            "maxLength": 4000
           },
           "source_refs": {
             "type": "array",
@@ -684,34 +629,6 @@
                 "end": {
                   "type": "integer",
                   "minimum": 1
-                }
-              }
-            }
-          },
-          "verify": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "kind",
-                "check"
-              ],
-              "properties": {
-                "kind": {
-                  "enum": [
-                    "test",
-                    "reviewer"
-                  ]
-                },
-                "check": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "minLength": 1,
-                  "maxLength": 300
                 }
               }
             }
@@ -987,45 +904,6 @@
           "source_refs": {
             "type": "array",
             "minItems": 1,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "start",
-                "end"
-              ],
-              "properties": {
-                "start": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "end": {
-                  "type": "integer",
-                  "minimum": 1
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "open_questions": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "question",
-          "source_refs"
-        ],
-        "properties": {
-          "question": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 500
-          },
-          "source_refs": {
-            "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,

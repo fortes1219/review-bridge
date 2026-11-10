@@ -1,91 +1,112 @@
 # Review Bridge
 
+![Review Bridge — AI work audit and verification harness](docs/public/readme-cover.png)
+
+Review Bridge is an AI work audit and verification harness. It runs your work orders with a writer agent and an independent, read-only reviewer. You approve the plan; Bridge enforces the scope, budget, test command, and stopping point. The agents can't change those limits.
+
+## Get started
+
 ```sh
-npm i -g review-bridge
 cd your-project
-review-bridge init
+npx review-bridge init
 ```
 
-Release candidates are on the next tag: `npm i -g review-bridge@next`.
+There's no need to install Bridge globally. Commands printed by Bridge use the same `npx review-bridge …` form. If you prefer a global install, run `npm i -g review-bridge`; `npx` will then use that copy.
 
-Review Bridge runs your work orders with two separate agents: a writer that does the work and an independent, read-only reviewer that checks it. Bridge itself decides the scope, the budget, the verification command and when to stop and hand back to you; the agents cannot change those.
+Read the [documentation](https://review-bridge.akasa-lab.dev/) in English, Japanese, or Traditional Chinese.
 
 ## What `init` does
 
-`init` asks three questions, each with a default you can take with Enter:
+`init` asks four questions. Press Enter to accept each default:
 
-1. the writer (`claude` or `codex`; your saved default, else `claude`),
-2. the reviewer (your saved default, else `codex`),
-3. the project type (what detection finds in the folder, else `none`).
+1. **Writer:** `claude` or `codex`. Uses your saved default, or `claude` if you haven't set one.
+2. **Reviewer:** uses your saved default, or `codex`.
+3. **Project type:** uses the type detected in the current folder, or `none`.
+4. **VS Code tasks:** asks whether to add them to the project. The default is no.
 
-Then it sets the current folder up and prints the next commands:
+Bridge then sets up the current folder and prints the commands to run next. It:
 
-- creates `.review-bridge/` with the project settings (`bridge.json`, `policy.override.json`, `rules.md`) and the work-order templates (`TEMPLATE.md` in English, `TEMPLATE.zh-TW.md` in Chinese); in a Git repository the whole folder, results included, is kept out of Git through `.git/info/exclude` (tracked `.gitignore` is never edited);
-- runs four fake self-tests (`PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, `RATE_LIMIT`) that call no model;
-- starts the local page on `127.0.0.1`;
-- adds Bridge's own entry outside the project, where each agent looks for yours, so every project sees it: the command `~/.claude/commands/review-bridge.md` for Claude Code (`/review-bridge`; `CLAUDE_CONFIG_DIR` is honoured) and the skill `~/.agents/skills/review-bridge/SKILL.md` for Codex (`$review-bridge`). A file of yours already at that path is left alone. `uninstall` of the last project set up removes them unless you edited them.
+- Creates `.review-bridge/` with project settings (`bridge.json`, `policy.override.json`, `rules.md`) and work-order templates (`TEMPLATE.md` in English and `TEMPLATE.zh-TW.md` in Traditional Chinese). The folder has its own `.gitignore` containing `*`, which keeps its contents, including results, out of Git even if you initialize Git later. Your project's `.gitignore` stays unchanged.
+- Runs four self-tests with fake CLIs (`PASS`, `FAIL_THEN_PASS`, `HARD_STOP`, `RATE_LIMIT`). None calls a model.
+- Starts the local page on `127.0.0.1`.
+- Installs a user-level entry point for each agent, shared across projects: `~/.claude/commands/review-bridge.md` for Claude Code (`/review-bridge`, respecting `CLAUDE_CONFIG_DIR`) and `~/.agents/skills/review-bridge/SKILL.md` for Codex (`$review-bridge`). Existing files at those paths are left alone. Uninstalling the last configured project removes Bridge's entries unless you've edited them.
 
-Nothing outside `.review-bridge/` changes in the project: no application file, no `.gitignore`, `AGENTS.md`, `CLAUDE.md` or `.claude/`, so `git status` shows nothing. The one exception is yours to choose: the last question offers to add [VS Code tasks](#in-vs-code) to `.vscode/tasks.json`, and the answer is no unless you say yes. Options answer the questions instead (`--writer`, `--reviewer`, `--profile <type|none>`, `--target <folder>`); without a terminal, or with `--yes`, nothing is asked and the defaults are used.
+Within the project, Bridge writes only to `.review-bridge/`, so setup leaves `git status` clean. It doesn't edit application files, `.gitignore`, `AGENTS.md`, `CLAUDE.md`, or `.claude/`. If you opt in to [VS Code tasks](#in-vs-code), it also updates `.vscode/tasks.json`.
 
-The project type only picks the verification command Bridge runs after every writer call (for example `npm test`). With `none`, or when the project has no such command, the work still starts; the card, the run's records and the result all say the tests are not configured.
+Use `--writer`, `--reviewer`, `--profile <type|none>`, or `--target <folder>` to supply answers as options. Without an interactive terminal, or with `--yes`, setup uses the defaults without prompting.
+
+The project type selects the test command Bridge runs after each writer call, such as `npm test`. Choosing `none`, or having no matching test command, doesn't prevent work from starting. The card, run records, and result file explicitly say that tests aren't configured.
 
 ## Requirements
 
-- Node.js 22 or newer, with npm.
-- Git. Work runs without it, but the work proof needs Git: with Git, Bridge records the commit a run starts from and reads the changes from Git; without it, the result says there is no work proof.
-- The `claude` and/or `codex` CLI, installed and signed in, for the roles you choose.
+- Node.js 22.8 or newer, with npm.
+- Git for work proof. Bridge can run without Git, but the result will say no work proof is available. With Git, Bridge records the starting commit and reads the actual changes from Git.
+- The `claude` and/or `codex` CLI, installed and signed in for the roles you choose.
 
 ## Your first work order
 
-Copy the template and describe the work and its acceptance results, in any language:
+Copy the template, then describe the work and its acceptance criteria in any language:
 
 ```sh
 cp .review-bridge/work-packages/TEMPLATE.md .review-bridge/work-packages/add-readme.md
 ```
 
-Then, in Claude Code, type:
+In Claude Code, enter:
 
 ```text
 /review-bridge start .review-bridge/work-packages/add-readme.md
 ```
 
-In Codex the same thing is `$review-bridge start .review-bridge/work-packages/add-readme.md`. The agent runs `start`, which seals the work order with its scope, budget and verification into a plan, checks once per page session that the reviewer cannot write files, prints a card with what you are authorizing and stops with `Needs authorization`. The agent shows you the card word for word and runs the command again with `--yes` only after you say yes. Your yes is the only authorization, and the authorization records that it came through an agent. The work then prints one line per step (at a terminal, a spinner while each step waits) and ends with the result file: one per run in the work order's own folder, `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md` (for example `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`; no source_id when the work order has none), never overwritten. Beside it is the sealed contract the result names, `contract.v<version>.<short SHA-256>.json`. It opens with who it is about, from Bridge's database: the source_id, title and file of the work order, the sealed version of it the result is about (not the file as it is now), the contract SHA-256, the run id and the commit that was checked. Delete them whenever you like, since Bridge keeps its own record. Bridge never commits, pushes or deploys.
+In Codex, use `$review-bridge start .review-bridge/work-packages/add-readme.md`.
 
-`/review-bridge` takes the same four actions as the commands below: `start <file>`, `stop <run_id>`, `resume <run_id>` and `clean [<run_id>]`.
+The agent runs `start`. Bridge checks the required work and acceptance blocks, copies them into a contract, and splits the acceptance list into individual conditions. This is all done in code, without calling a model. It then seals the work order, contract, scope, budget, and test command into a plan, shows a card identifying the contract, and stops at `Needs authorization`.
+
+The agent shows you the full card and reruns the command with `--yes` only after you approve it. That one approval starts the run. Bridge checks the reviewer's read-only restrictions once per local page session, then continues without further questions. The authorization record notes that your approval came through an agent.
+
+During execution, Bridge prints one line per step, with a spinner in an interactive terminal. Each run produces a new result file in `.review-bridge/results/<work order file>/`, named `<source_id> <work order file> <local date> <hh-mm-ss> <conclusion>.md`. For example: `results/queue-summary/CANARY-1 queue-summary 2026-11-03 23-48-12 success.md`. The `source_id` prefix is omitted when the work order has none. Existing results are never overwritten.
+
+The sealed contract appears beside the result as `contract.v<version>.<short SHA-256>.json`. The result header identifies the work order's `source_id`, title, file, sealed version, contract SHA-256, run ID, and checked commit, using records from Bridge's database. The version refers to what was sealed for that run, even if you've since edited the work order.
+
+Result files and contract files are readable copies; deleting them doesn't remove the database records. Bridge never commits, pushes, or deploys.
+
+Both agent entry points support the same four actions as the CLI: `start <file>`, `stop <run_id>`, `resume <run_id>`, and `clean [<run_id>]`.
 
 ### In VS Code
 
-Bridge's commands can be VS Code tasks: open Quick Open and type `task review-bridge`, or use `Terminal > Run Task`. There are six, `review-bridge: start`, `stop`, `resume`, `clean`, `status` and `logs`. `start` runs on the file open in the editor; the others ask for a run id or a file. They run the same commands in the integrated terminal, and you answer the card there.
+Run Bridge commands as VS Code tasks: open Quick Open and type `task review-bridge`, or choose **Terminal > Run Task**. The six tasks are `review-bridge: start`, `stop`, `resume`, `clean`, `status`, and `logs`. The start task uses the file open in the editor; the others prompt for a run ID or file as needed. They use the integrated terminal, where you can approve the card.
 
-| Where | How | Who sees them |
+| Location | How to add tasks | Available in |
 |---|---|---|
-| This project, `.vscode/tasks.json` | Say yes to the last question of `init`, or run `review-bridge vscode` | This project |
-| Your user tasks (`Tasks: Open User Tasks`) | `review-bridge vscode --user` | All your projects |
+| Project `.vscode/tasks.json` | Opt in during `init`, or run `npx review-bridge vscode` | This project |
+| User tasks (`Tasks: Open User Tasks`) | Run `npx review-bridge vscode --user` | All your projects |
 
-Whether `.vscode/tasks.json` goes into Git is your choice: Bridge neither adds it nor excludes it. Until it is committed or ignored, Git counts it as a change, so a run's result says the commit had changes. Only tasks labelled `review-bridge:` and inputs with an id starting `review-bridge-` are Bridge's; everything else in the file, comments and layout included, stays as it is. `uninstall` takes them out again, and removes the file only if nothing else is in it; your user tasks stay until the last project set up is uninstalled. A file Bridge cannot read, or one that does not use tasks version 2.0.0, is left alone and Bridge says so.
+You decide whether to commit or ignore `.vscode/tasks.json`; Bridge does neither. Until you do, Git counts it as a change, and run results note that the starting commit had uncommitted changes.
 
-The user tasks are those of VS Code's default profile. A profile with its own tasks, VS Code Insiders, VSCodium and a portable install keep theirs elsewhere; use `review-bridge vscode` in the project for those. In a workspace with several folders, a user task runs in the first folder, not necessarily the one holding your work order.
+Bridge manages only tasks labeled `review-bridge:` and inputs whose IDs start with `review-bridge-`. Other tasks, inputs, comments, and formatting stay intact. `uninstall` removes Bridge's entries and deletes the file only if nothing else remains. User-level tasks stay until you uninstall the last configured project. If a file can't be read or doesn't use tasks version 2.0.0, Bridge leaves it alone and explains why.
+
+User-level tasks apply to VS Code's default profile. Other profiles, VS Code Insiders, VSCodium, and portable installations store tasks elsewhere; use project-level tasks for those. In a multi-root workspace, a user task runs in the first folder, which may differ from the folder containing your work order.
 
 ### At a terminal (advanced use and CI)
 
-The four actions are also commands. At a terminal, `start` asks where the work should stop for you, shows the card and asks `Start this work? [y/N]` itself.
+You can also run the four actions directly. In an interactive terminal, `start` asks where work should stop, displays the card, and prompts `Start this work? [y/N]`.
 
-| You want to | Command |
+| Action | Command |
 |---|---|
-| start a work order | `review-bridge start <file>` |
-| pause it (its records are kept) | `review-bridge stop <run_id>` |
-| carry it on | `review-bridge resume <run_id>` |
-| clear finished records | `review-bridge clean [<run_id>]` |
+| Start a work order | `npx review-bridge start <file>` |
+| Run a directory of work orders in sequence | `npx review-bridge start .review-bridge/work-packages/<directory>/` |
+| Pause a run and keep its records | `npx review-bridge stop <run_id>` |
+| Resume a stopped work order | `npx review-bridge resume <run_id>` |
+| Clear finished records | `npx review-bridge clean [<run_id>]` |
 
-`review-bridge status` shows what is running and the run ids.
+Use `npx review-bridge status` to see running work and run IDs.
 
 ## Work order format
 
-A work order is a Markdown file: optional frontmatter, a title, and blocks marked for the contract fields. Bridge reads only this format; it splits the file itself and fills every contract field from its block, copying the text as written. A model only cuts the acceptance blocks into numbered conditions. If you generate work orders from another tool, this section is the whole interface.
+A work order is a Markdown file with optional frontmatter, a title, and marked blocks for contract fields. Bridge copies each block's text into the matching field and splits the acceptance list into numbered conditions. No model is involved. If another tool generates your work orders, use the format below.
 
 ### Frontmatter
 
-The frontmatter is data, read as YAML when the work is planned (the way Astro reads content collections): the first line is `---`, and it ends at the next line that is only `---`. Every key is optional, and a file without frontmatter is valid.
+Bridge reads the frontmatter as YAML when it plans the work. Start it on the first line with `---` and end it with another line containing only `---`. You can omit the frontmatter entirely; all keys you supply yourself are optional.
 
 ```yaml
 ---
@@ -105,12 +126,14 @@ source_id: SHOP-412         # your own tracker's id; Bridge stores it and never 
 ---
 ```
 
-- Any other key is refused, with its line. So is a value out of range: a priority or effort that is not one of the values above, a budget value that is not a positive whole number, or one above the policy's limit (the refusal names the limit).
-- `writer` holds for every writer call: the work, each fix and the contract translation. `reviewer` holds for every reviewer call: the contract check and each review. A key you leave out comes from the policy's priority table. Who fills each role is not here: that is `bridge.json`, or `--writer` and `--reviewer` for one run, and the card names them.
-- A model must belong to the role's CLI, or the work order is refused before the card: for `claude`, an alias (`fable`, `opus`, `sonnet`, `haiku`) or a name with `claude-` in it; for `codex`, a name starting `gpt-`, `codex-` or `o` and a digit. A model from a custom Codex provider goes in Codex's own config, with `model` left out here.
-- A top-level `effort` is still read, as `writer.effort`; writing both is refused.
-- Each value is settled in a fixed order: a flag given at the terminal (`--rounds`, `--call-timeout`), then the work order, then the policy's priority table (effort and model), then the policy's limits. The plan records each value with the layer it came from (`cli`, `work_order`, `priority`, `config`), and the card shows both.
-- `run_timeout` is the run's own time limit, like a GitHub Actions job's `timeout-minutes` (default 6 hours). A run that reaches it is closed as `timed_out` with the reason `run_timeout`; every call is cut to the time left.
+- **Bridge manages the work-order ID.** After your first approval, it writes `id: <uuid>` at the top of the frontmatter. Keep that line. Renaming or moving the file, or changing its step number, doesn't change its identity; editing its contents creates a new version. A file without an ID is a new work order. A copy containing another file's ID gets its own. The ID line is excluded from the sealed text and contract hash.
+- Unknown keys are rejected with their line numbers. Invalid values are also rejected: an unsupported priority or effort, a budget value that isn't a positive integer, or a value above the policy ceiling. The error identifies the relevant limit.
+- `writer` settings apply to implementation and each correction; `reviewer` settings apply to each review. Omitted values come from the policy's priority table. Choose the provider for each role in `bridge.json`, or with `--writer` and `--reviewer` for a single run. The card shows the selected providers.
+- A model must match its role's CLI, or Bridge rejects the work order before showing the card. For `claude`, use an alias (`fable`, `opus`, `sonnet`, `haiku`) or a name containing `claude-`. For `codex`, use a name starting with `gpt-`, `codex-`, or `o` followed by a digit. To use a model from a custom Codex provider, configure it in Codex and omit `model` here.
+- Top-level `effort` is still accepted as `writer.effort`. Specifying both is rejected.
+- Settings take precedence in this order: CLI flags (`--rounds`, `--call-timeout`), work order, policy priority table for model and effort, then policy limits. The plan records each value and its source (`cli`, `work_order`, `priority`, `config`); the card shows both.
+- `tokens` and `tokens_per_call` limit the writer's usage. They count new input, cache writes, and output. Cache reads appear separately in the result's token table and don't count against the budget. Reviewer usage is also recorded, but isn't subject to a token budget.
+- `run_timeout` limits the whole run, like a GitHub Actions job's `timeout-minutes`. The default is 6 hours. At the limit, Bridge closes the run with `conclusion: timed_out` and `closed_reason: run_timeout`. Each call's timeout is capped by the remaining run time.
 
 ### Body
 
@@ -127,20 +150,30 @@ Fix the total in CheckoutSummary so it is recalculated once a discount is applie
 
 <!-- bridge:acceptance -->
 ## Acceptance
-1. After a valid discount code, the total shows the discounted amount within one second.
-2. After an invalid code, the total is unchanged and an error message is shown.
+- After a valid discount code, the total shows the discounted amount within one second.
+- After an invalid code, the total is unchanged and an error message is shown.
 ```
 
-- The first line starting with `# ` is the title.
-- A block runs from its `<!-- bridge:<key> -->` line to the next marker or the end of the file. The `##` headings are for people, in any language; Bridge does not read them.
-- The keys are exactly the 17 contract fields: `context`, `outcome`, `requested_work`, `run_plan`, `scope_notes.include`, `scope_notes.exclude`, `scope_notes.must_keep`, `scope_notes.expected_locations`, `acceptance`, `verification_hints`, `reproduction.environment`, `reproduction.steps`, `reproduction.actual`, `reproduction.expected`, `reproduction.frequency`, `references`, `open_questions`. An unknown key, or a key used twice, is refused with its line.
-- The smallest work order is a title, a `requested_work` block and an `acceptance` block. Without any acceptance, the work stops before any model call and asks you for a result that can be checked.
-- `open_questions`: a block holding only `none` (or `無`), or nothing, means there are none. Any other line is one question, and the work stops before any model call until you answer it in the work order.
-- Frontmatter, the title, markers, `##` and `###` headings and blank lines are structure. Any other line outside every block is kept in the contract as an unused line.
+- The first line starting with `# ` is the title. Without one, the title is `untitled`; results go in `results/untitled/` and use the work-order file name.
+- A block starts at its `<!-- bridge:<key> -->` marker and ends at the next marker or the end of the file. `##` headings are for readers and can use any language; Bridge doesn't parse them as field names.
+- There are exactly 17 recognized keys: `context`, `outcome`, `requested_work`, `run_plan`, `scope_notes.include`, `scope_notes.exclude`, `scope_notes.must_keep`, `scope_notes.expected_locations`, `acceptance`, `verification_hints`, `reproduction.environment`, `reproduction.steps`, `reproduction.actual`, `reproduction.expected`, `reproduction.frequency`, `references`, and `open_questions`. Unknown or duplicate keys are rejected with their line numbers.
+- Two blocks are required: `requested_work` (or a `run_plan`) and `acceptance`. Other blocks are copied when present and left empty when omitted. The next section explains how missing required blocks are handled.
+- An empty `open_questions` block, or one containing only `none` or `無`, means there are no open questions. Any other line is treated as an unanswered question, and `start` stops before the card until you answer it in the work order.
+- Frontmatter, the title, markers, `##` and `###` headings, and blank lines are structure. Other text outside all marked blocks is preserved in the contract as unused lines.
+
+### From work order to contract
+
+Contract creation validates a form; it doesn't ask a model to interpret your request. No model is called, and contract creation shows 0 tokens in the result's token table. Bridge copies each marked block into its matching contract field and parses the acceptance list using markdown-it, the Markdown parser used by VitePress. Each item in the outermost list, including its nested content, becomes one acceptance condition.
+
+Use Markdown list markers: `- `, `* `, `+ `, or a numbered marker such as `1. `. Formats such as `一、` and `（1）` aren't Markdown list markers. Bridge rejects those lines and explains the accepted format.
+
+If a required block is missing or empty, or an acceptance-list line isn't a valid item, `start` lists the problems and stops before the card. If you've removed a required block's marker, Bridge appends the marker and heading to the work order without changing your existing text. Fill in the block and run `start` again.
+
+For a directory, Bridge checks every work order before showing the card and reports all incomplete ones together. One incomplete work order prevents the whole pipeline from starting. The writer also rejects any contract missing work instructions or an acceptance condition, regardless of how it was created.
 
 ### Run plan
 
-Only for work laid out as two or more runs. Each `### ` line opens a run named by its text. Inside a run, four lines carry fixed keys, read as YAML; every other line is the run's work:
+Use a run plan only when the work is organized into two or more runs. Each `### ` heading names a run. Within it, four fixed keys are read as YAML; other lines describe the work:
 
 ```markdown
 <!-- bridge:run_plan -->
@@ -159,9 +192,9 @@ Add the cart.
   - The cart drives with the arrow keys.
 ```
 
-- `effort` and `budget` take the same values as in the frontmatter. `depends_on` is one run name or a list such as `[RUN A, RUN B]`; a name that is no run here, or a loop, is refused.
-- `acceptance` takes the indented lines after it as that run's own conditions. The work order's `acceptance` block holds the results across runs. A run plan with only one run is refused.
-- Bridge records the run plan in the contract; it still starts one run for the whole work order.
+- `effort` and `budget` use the same values as in frontmatter. `depends_on` accepts one run name or a list such as `[RUN A, RUN B]`. Unknown run names and dependency cycles are rejected.
+- Indented items under `acceptance` define that run's conditions. The work order's main `acceptance` block describes the results across runs. A run plan containing only one run is rejected.
+- Bridge records the run plan in the contract. It still creates one execution run for the entire work order.
 
 ## Commands
 
@@ -172,28 +205,28 @@ Add the cart.
 Usage: review-bridge <command> [options]
 
 Commands:
-  init                Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
-  start <file>        Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
-  stop <run_id>       Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
-  resume <run_id>     Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them
-  clean [<run_id>]    Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
-  status              Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
-  logs <run_id|file>  Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
-  up                  Start the local page service in the background
-  down                Stop the local page service
-  ps                  Show whether the local page service is running, and its address
-  watch               Run the local page in this terminal until Ctrl+C
-  upgrade             Move this folder's setup to the installed Review Bridge version, with a backup
-  uninstall           Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
-  doctor              Check which platform adapter this machine uses, without running any work
-  backup              Copy your database, for all your projects, with the database stopped (refused while a run is running)
+  init                    Set up Review Bridge in this folder: asks for the writer, the reviewer and the project type
+  start <file|directory>  Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+  stop <run_id>           Pause a running work order: its model process is stopped and its records are kept (resume <run_id> carries it on)
+  resume <run_id>         Carry on a stopped work order: a new run of the same work order with the same stop point and scope; its roles, models, effort and budget are settled again, and the same card and yes as start show them
+  clean [<run_id>]        Clear records: without a run id, fold finished runs into day files and drop what is past retention; with one, remove that finished run (a running one is refused)
+  status                  Show what Bridge is doing now: the page, this project's runs, and how to look at the database
+  logs <run_id|file>      Show a run's log folder and what each file in it is; for a work order (its file or source_id), its runs newest first
+  up                      Start the database and the local page service in the background
+  down                    Stop the local page service and the database; refused while a run is running
+  ps                      Show whether the local page service is running, and its address
+  watch                   Run the local page in this terminal until Ctrl+C
+  upgrade                 Move this folder's setup to the installed Review Bridge version, with a backup
+  uninstall               Remove Review Bridge from a folder, with a backup (Review Bridge itself: npm uninstall -g review-bridge)
+  doctor                  Check which platform adapter this machine uses, without running any work
+  backup                  Copy your database, for all your projects, with the database stopped (refused while a run is running)
 
 Options:
   -v, --version   Print the version
   -h, --help      Print this help; --help --all also lists the commands for agents and scripts
 
 Run review-bridge <command> --help for a command's options.
-Update Review Bridge: npm i -g review-bridge@latest
+Update Review Bridge: npx review-bridge takes the latest version by itself; a global install updates with npm i -g review-bridge@latest
 Remove Review Bridge: npm uninstall -g review-bridge
 ```
 
@@ -228,9 +261,9 @@ Options:
 ### start
 
 ```text
-Usage: review-bridge start <file> [options]
+Usage: review-bridge start <file|directory> [options]
 
-Run a work order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
+Run a work order, or a directory of them in file name order: plan it, check the reviewer can only read, show what you authorize, ask once, then run it
 
 Options:
   --writer <claude|codex>
@@ -314,7 +347,7 @@ Options:
 ```text
 Usage: review-bridge status [options]
 
-Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database
+Show what Bridge is doing now: the page, this project's runs, and how to look at the database
 
 Options:
   --after <run_id>
@@ -346,7 +379,7 @@ Options:
 ```text
 Usage: review-bridge up [options]
 
-Start the local page service in the background
+Start the database and the local page service in the background
 
 Options:
   --project <folder>
@@ -360,7 +393,7 @@ Options:
 ```text
 Usage: review-bridge down [options]
 
-Stop the local page service
+Stop the local page service and the database; refused while a run is running
 
 Options:
   --project <folder>
@@ -667,6 +700,32 @@ Options:
       The project folder (string; default: the current folder)
 ```
 
+#### graph
+
+```text
+Usage: review-bridge graph [options]
+
+Read this project's code into its graph again, whole (init does this; start brings it up to date)
+
+Options:
+  --json
+      Print each step as one JSON line, the last one the summary (boolean)
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
+#### graph-mcp
+
+```text
+Usage: review-bridge graph-mcp [options]
+
+Bridge's read-only MCP server on this project's graph, over stdio (the writer's and reviewer's CLIs start it)
+
+Options:
+  --project <folder>
+      The project folder (string; default: the current folder)
+```
+
 #### roles-check
 
 ```text
@@ -689,23 +748,23 @@ Options:
 
 ## Where data lives
 
-- In the project, only what you write and read: `.review-bridge/bridge.json`, `policy.override.json` and `rules.md` (the settings), `work-packages/` (your work orders) and `results/` (one folder per work order with its results and contracts).
-- For you, shared by all your projects: your settings (`settings.json`, the default roles), the database, and each project's run state in `projects/<project_id>/` (the queue, locks, event copies, evidence, the install record), in `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS and `~/.local/share/review-bridge` on Linux. `REVIEW_BRIDGE_DATA_HOME` moves it.
-- Each run's logs (the prompt, stream and stderr of every model call, the test output, the plan and the card you said yes to), in your platform's log folder under `<project_id>/<run_id>/`: `%LOCALAPPDATA%\ReviewBridge\Log` on Windows, `~/Library/Logs/ReviewBridge` on macOS, `$XDG_STATE_HOME/review-bridge` (`~/.local/state/review-bridge`) on Linux, or `logs/` under `REVIEW_BRIDGE_DATA_HOME`. A run's folder goes when the run is past the retention days, or with `clean <run_id>`. `review-bridge status` prints the folder; `review-bridge logs <run_id>` lists a run's files and `review-bridge logs <work order>` its runs.
-- A project set up before this is moved once by `upgrade`: the settings up into `.review-bridge/`, the old run state (`review-queue/`, `reviews/`, `archive/`) into `projects/<project_id>/`, and the old call logs, plans and cards into the log folder, each file under its own name and checked by SHA-256; a call log, plan or card of a run that retention already removed goes. If `upgrade` is cut off, run it again and it finishes. Result files an older Bridge left directly in `results/` stay where they are; they are your copies, delete them whenever you like.
-- Backups, in `backups` under that folder: `backups/database` holds the copies `review-bridge backup` makes of the database; `backups/installer` holds what `upgrade` and `uninstall` keep (or `--backup-root <folder>`). They can hold private work data; do not publish them.
+- **Project files:** `.review-bridge/bridge.json`, `policy.override.json`, and `rules.md` hold settings. `work-packages/` holds your work orders, and `results/` has one folder per work order containing its results and contracts.
+- **Shared user data:** your default roles in `settings.json`, the database, and project runtime state in `projects/<project_id>/` live under `%LOCALAPPDATA%\ReviewBridge` on Windows, `~/Library/Application Support/ReviewBridge` on macOS, or `~/.local/share/review-bridge` on Linux. There's one database per user account, and every project you set up shares it. Running `init` in ten projects gives you ten entries in that one database, not ten databases, and it makes no difference whether you run Bridge through `npx` or a global install. Runtime state includes queues, locks, event copies, evidence, and install records. Set `REVIEW_BRIDGE_DATA_HOME` to use another location.
+- **Run logs:** each model call's prompt, stream, and stderr, plus test output, the plan, and the approved card, go under `<project_id>/<run_id>/` in the platform's log directory: `%LOCALAPPDATA%\ReviewBridge\Log` on Windows, `~/Library/Logs/ReviewBridge` on macOS, or `$XDG_STATE_HOME/review-bridge` (default `~/.local/state/review-bridge`) on Linux. With `REVIEW_BRIDGE_DATA_HOME`, they go in its `logs/` subfolder. Log folders are removed after the retention period or by `clean <run_id>`. `npx review-bridge status` prints the log directory; `npx review-bridge logs <run_id>` lists a run's files, and `npx review-bridge logs <work order>` lists its runs.
+- **Older project layouts:** `upgrade` moves settings to `.review-bridge/`, old runtime state (`review-queue/`, `reviews/`, `archive/`) to `projects/<project_id>/`, and call logs, plans, and cards to the log directory. It preserves file names and verifies copies with SHA-256. Logs, plans, and cards for runs already removed by retention are discarded. If the upgrade is interrupted, rerun it to finish. Older result files directly under `results/` stay where they are; they're readable copies you can delete when you no longer need them.
+- **Backups:** `backups/database` under the data directory holds database backups created by `npx review-bridge backup`. `backups/installer` holds backups from `upgrade` and `uninstall`, unless you set `--backup-root <folder>`. Backups may contain private work data; don't publish them.
 
-`review-bridge backup` is PostgreSQL's file system level backup: it refuses while a run is running, stops the database, copies its whole folder (the data and its password file) and starts it again. To restore one, copy its `postgres` folder into an empty folder, set `REVIEW_BRIDGE_DATA_HOME` to that folder, and run Bridge there.
+`npx review-bridge backup` uses PostgreSQL's file-level backup procedure. It refuses to run while any run is active; otherwise, it stops the database, copies the full directory, including its password file, and restarts it. To restore a backup, copy its `postgres` folder into an empty directory, set `REVIEW_BRIDGE_DATA_HOME` to that directory, and run Bridge.
 
-To look at every table in VS Code, install Microsoft's PostgreSQL extension (or SQLTools with its PostgreSQL driver) and add a connection with:
+To browse the database in VS Code, install Microsoft's PostgreSQL extension or SQLTools with its PostgreSQL driver. Add a connection with:
 
-- Server: `127.0.0.1`
-- Port: `5432`, PostgreSQL's default; when it is taken, the next free port up, looked for again at each start
-- User: `bridge`
-- Database: `bridge`
-- Password: copy it from the password file, `postgres/secret` in the folder above (`%LOCALAPPDATA%\ReviewBridge\postgres\secret` on Windows); only your user can read it
+- **Server:** `127.0.0.1`
+- **Port:** `5432` by default. If it's occupied, Bridge finds the next available port, checking again at each startup.
+- **User:** `bridge`
+- **Database:** `bridge`
+- **Password:** copy it from `postgres/secret` under the data directory (`%LOCALAPPDATA%\ReviewBridge\postgres\secret` on Windows). Only your user account can read this file.
 
-`init` and `review-bridge status` end with the same four values, the port in use and the password file:
+`init` and `npx review-bridge status` print the connection details, including the port in use and the password-file location:
 
 ```text
 Database in VS Code: install Microsoft's PostgreSQL extension and add a connection with
@@ -713,41 +772,42 @@ Database in VS Code: install Microsoft's PostgreSQL extension and add a connecti
   Password: copy it from C:\Users\you\AppData\Local\ReviewBridge\postgres\secret
 ```
 
-To start from another port, add `"database": { "port": 5440 }` to your `settings.json` in the same folder. It takes effect the next time the database starts: after your computer restarts, or at once with `review-bridge backup`, which stops and starts it.
+To start searching from a different port, add `"database": { "port": 5440 }` to `settings.json` in the data directory. It takes effect the next time the database starts: after a system restart, or immediately by running `npx review-bridge backup`, which stops and restarts it.
 
-The database is the record; the run state under `projects/<project_id>/` is the running copy, and the logs and result files can be deleted without losing anything. Every work order, version, card (plan), authorization, contract, run, event, verdict and delivery is a row in it. The server listens on 127.0.0.1 only and keeps running between commands.
+The database is the source of truth. Work orders, versions, plan cards, authorizations, contracts, runs, events, verdicts, and deliveries are all stored there. Runtime files under `projects/<project_id>/` are working copies. Deleting logs or result files doesn't remove the database records. PostgreSQL listens only on `127.0.0.1` and keeps running between commands.
 
 ## Upgrade and remove
 
-```sh
-npm i -g review-bridge@latest     # then, in each project: review-bridge upgrade
-npm uninstall -g review-bridge    # remove a project's setup first: review-bridge uninstall --target .
-```
+With `npx`, you don't need a separate package update step. Running `npx review-bridge` without a version checks npm for the latest release. If you installed Bridge globally, update it with `npm i -g review-bridge@latest`.
+
+When a new version includes database migrations, the first command backs up the database before applying them and prints the backup location. Check the changelog for that version's migrations. Then run `npx review-bridge upgrade` in each project to update its settings, templates, and local page.
+
+To remove Bridge from a project, run `npx review-bridge uninstall --target .` in that project. After uninstalling the project setups, remove a global installation with `npm uninstall -g review-bridge`.
 
 ## Safety model
 
-- A missing, malformed, expired or consumed authorization fails closed.
-- The writer and the reviewer run in separate sessions, also when one provider fills both; the reviewer is read-only. With `codex` that is an OS sandbox that denied a real write. With `claude` it is a session in plan mode holding only `Read`, `Grep` and `Glob`, as its own `init` event shows; if your Claude Code keeps other tools there (an MCP connector, say), the check does not pass and the work does not start.
-- Your personal connectors stay out of the sessions Bridge starts. With Claude Code, none of its calls load your MCP servers, and a project's `.mcp.json` reaches the writer only. A translation session that still lists an MCP tool is not used, and the run stops and says which. With Codex, apps and plugins are off in every call, and each server in `codex mcp list` is turned off by name; if that list cannot be read, the work does not start. To let a server through to the reviewer, name it in the project policy's `reviewer.mcp_allow`: it goes through as it is, nothing shows it cannot write, and the card says so. Only the reviewer's calls keep it; the writer and the translation do not. A Claude reviewer takes it from the project's `.mcp.json`.
-- Bridge runs the verification command itself before the reviewer's verdict can pass.
-- Native model work starts only on your yes to the card (at the terminal, or through an agent with `--yes`) and only after the reviewer's read-only check passed in the local page service; `start` and `resume` run that check first. Keeping an agent from saying yes on its own is the agent tool's job (its permission prompts), not Bridge's.
-- Bridge state must be on a local filesystem; synchronized and network folders (OneDrive, Dropbox, iCloud Drive, UNC, NFS, SMB) are refused.
+- **Authorization is required.** Missing, malformed, expired, or already consumed authorization blocks execution.
+- **Review stays independent.** Writer and reviewer use separate sessions, even when both use the same provider. The reviewer is read-only. Codex's check verifies that its OS sandbox denied a real write. Claude Code's check verifies a plan-mode session containing only `Read`, `Grep`, and `Glob`, as reported by its `init` event. If other tools remain, such as an MCP connector, the check fails and work doesn't start.
+- **Personal connectors are isolated.** Claude Code calls don't inherit your personal MCP servers; only the writer receives the project's `.mcp.json`. Codex calls disable apps, plugins, and each server named by `codex mcp list`. If Bridge can't read that list, it won't start work. You can allow named servers for the reviewer through the project policy's `reviewer.mcp_allow`. Those servers are passed through without read-only verification, and the card states that limitation. They apply only to reviewer calls; a Claude reviewer loads them from the project's `.mcp.json`.
+- **Bridge runs verification.** It runs the project's verification command itself before the reviewer's verdict can pass.
+- **You approve model work.** `start` and `resume` make their first model call only after your approval, to check the reviewer's read-only restrictions through the local page service. Native work proceeds only if that check passes. There is one card and one approval, given in the terminal or relayed by an agent with `--yes`. Preventing an agent from approving on your behalf depends on the agent tool's permission prompts.
+- **Runtime state stays local.** Bridge rejects synchronized or network locations for its state, including OneDrive, Dropbox, iCloud Drive, UNC, NFS, and SMB.
 
 ## Platforms
 
-Windows x64 is native-verified. Apple Silicon macOS is a selectable candidate, not native-verified. Linux is experimental and fails closed for native work.
+Native execution has been verified on Windows x64. Apple Silicon macOS is available as an unverified candidate. Linux is experimental and blocks native execution.
 
 ### Windows
 
-Codex runs its commands in Windows PowerShell, which loads your `$PROFILE`. On a Windows set to Chinese (or any non-UTF-8 code page), PowerShell writes in that code page and Codex reads it as UTF-8, so its Chinese output arrives broken. Add this line to your profile (`notepad $PROFILE` in PowerShell; create the file if it does not exist):
+Codex runs commands in Windows PowerShell, which loads your `$PROFILE`. On systems using Chinese or another non-UTF-8 code page, PowerShell writes in that encoding while Codex reads the output as UTF-8. This can garble Chinese text. Add the following line to your profile. Open it with `notepad $PROFILE` in PowerShell, creating the file if needed:
 
 ```powershell
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 ```
 
-Or use PowerShell 7 (`pwsh`), which writes UTF-8. `review-bridge doctor` tells you when PowerShell does not write UTF-8; it never changes your profile.
+Alternatively, use PowerShell 7 (`pwsh`), which outputs UTF-8. `npx review-bridge doctor` reports when PowerShell isn't using UTF-8; it doesn't modify your profile.
 
-Measured on Windows with Codex 0.166, in one Vue and Vitest project: inside Codex's sandbox `npm test` failed with `spawn EPERM`, and passed only with `npm test -- --configLoader native --pool threads`. This does not stop a run: Bridge runs your tests itself, outside the sandbox, after each writer call. A Codex writer may report that it could not run them. Other platforms and projects were not measured.
+In one measured Vue and Vitest project on Windows with Codex 0.166, `npm test` failed inside Codex's sandbox with `spawn EPERM`. It passed with `npm test -- --configLoader native --pool threads`. This doesn't block a Bridge run: Bridge executes your tests itself, outside the agent sandbox, after each writer call. A Codex writer may still report that it couldn't run them. This observation hasn't been verified on other platforms or projects.
 
 ## Development
 

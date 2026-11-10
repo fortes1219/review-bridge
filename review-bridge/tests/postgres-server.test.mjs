@@ -8,7 +8,8 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
-  bridgeDataHome, clusterPaths, connect, DEFAULT_PORT, ensureCluster, postgresBinaries, serverLogFiles, serverRunning, startServer, stopServer,
+  bridgeDataHome, clearOldServer, clusterPaths, connect, DEFAULT_PORT, ensureCluster, leftoverProcesses, OldServerError, postgresBinaries, serverLogFiles,
+  serverProcesses, serverRunning, startServer, stopServer,
 } from "../service/database/postgresServer.mjs";
 import { bridgeLogHome } from "../service/database/dataHome.mjs";
 
@@ -91,7 +92,13 @@ test("a folder that holds files but no cluster is refused and left untouched", a
   await assert.rejects(startServer(root, { binaries }), /There is no PostgreSQL cluster/);
 });
 
-test("a server killed without warning comes back with every committed row", { timeout: 120_000 }, async (t) => {
+// RC3-DOWN-01 (Fortes 2026-11-08, A): a start clears nothing a dead server left, as PostgreSQL and
+// Postgres.app do. While the killed postmaster's children are still going, a start refuses with the
+// sentence (OldServerError) and stops nothing; once they have gone by themselves the next start comes
+// back. Skipped on Windows: it kills a process and is run in the Linux container (Owner 2026-11-04).
+test("a server killed without warning: a start stops nothing it left, and comes back with every committed row once that is gone", {
+  timeout: 120_000, skip: process.platform === "win32" && "it kills a server; this one runs in the Linux container",
+}, async (t) => {
   const root = await cluster(t);
   await startServer(root, { binaries });
   await query(root, "create table kept(id int primary key)");
@@ -101,70 +108,32 @@ test("a server killed without warning comes back with every committed row", { ti
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline && await serverRunning(root, { binaries })) await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(await serverRunning(root, { binaries }), false, "the killed server is not running");
-  await startServer(root, { binaries });
+  for (;;) {
+    const refused = await startServer(root, { binaries }).then(() => null, (error) => error);
+    if (refused === null) break;
+    assert.ok(refused instanceof OldServerError, "a start that meets what the dead server left says so: " + refused.message);
+    assert.ok(Date.now() < deadline, "the killed server's processes did not go by themselves within 30s");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
   assert.notEqual(await postmasterPid(root), postmaster, "a new server was started");
   assert.deepEqual(await query(root, "select count(*)::int as n from kept"), [{ n: 500 }]);
   assert.match(await serverLog(root), /not properly shut down|automatic recovery/);
 });
 
-// A server that died and left children: no process is started or stopped here. The pid file, what
-// pg_ctl says and the process list are all made up; only their file is real, in the test's own folder.
-const HINT_OUTPUT = "FATAL:  pre-existing shared memory block is still in use\nHINT:  Check if there are any old server processes still running, and terminate them.\n";
-const OLD_POSTMASTER = 900_001;
-const BRIDGE_CHILD = 900_002;
-const OTHER_CHILD = 900_003;
-
-async function deadServer(t, { oldAlive }) {
-  const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-pg-seams-"));
-  t.after(() => fsp.rm(home, { recursive: true, force: true }));
-  const root = path.join(home, "postgres");
-  const { data } = clusterPaths(root);
-  await fsp.mkdir(data, { recursive: true });
-  await fsp.writeFile(path.join(data, "PG_VERSION"), "18\n");
-  const pidFile = path.join(data, "postmaster.pid");
-  await fsp.writeFile(pidFile, OLD_POSTMASTER + "\n" + data + "\n0\n5432\n");
-  const fakeBinaries = { pg_ctl: "fake-pg_ctl", postgres: path.join(home, "bin", "postgres") };
-  // Windows lists the full path, ps the command name.
-  const program = process.platform === "win32" ? fakeBinaries.postgres : path.basename(fakeBinaries.postgres);
-  const calls = { starts: 0, listed: [], signals: [], ready: 0 };
-  const seams = {
-    binaries: fakeBinaries,
-    tool: async () => ({ code: 3, stdout: "", stderr: "" }),
-    // As PostgreSQL does: the failed start takes the pid file with it; a good one writes its own.
-    detached: async (file, args) => {
-      calls.starts += 1;
-      if (calls.starts === 1) {
-        await fsp.rm(pidFile, { force: true });
-        return { code: 1, stdout: HINT_OUTPUT, stderr: "" };
-      }
-      await fsp.writeFile(pidFile, "900010\n" + data + "\n0\n" + /-p (\d+)/.exec(args.at(-1))[1] + "\n");
-      return { code: 0, stdout: "", stderr: "" };
-    },
-    children: async (parent) => {
-      calls.listed.push(parent);
-      return [{ pid: BRIDGE_CHILD, program }, { pid: OTHER_CHILD, program: path.join(home, "other", "not-postgres") }];
-    },
-    alive: (pid) => (pid === OLD_POSTMASTER ? oldAlive : !calls.signals.includes(pid)),
-    signal: (pid) => { calls.signals.push(pid); },
-    ready: async () => { calls.ready += 1; },
-  };
-  return { root, calls, seams };
-}
-
-test("a dead postmaster's child that runs Bridge's postgres is the only one stopped, and the start is tried once more", async (t) => {
-  const { root, calls, seams } = await deadServer(t, { oldAlive: false });
-  const { port } = await startServer(root, seams);
-  assert.deepEqual(calls.listed, [OLD_POSTMASTER], "the old pid was read before the failed start removed its file");
-  assert.deepEqual(calls.signals, [BRIDGE_CHILD]);
-  assert.equal(calls.starts, 2);
-  assert.equal(calls.ready, 1);
-  assert.ok(Number.isInteger(port) && port > 0);
-});
-
-test("while the pid file's process is alive nothing is stopped, listed or signalled", async (t) => {
-  const { root, calls, seams } = await deadServer(t, { oldAlive: true });
-  await assert.rejects(startServer(root, seams), /pre-existing shared memory block is still in use/);
-  assert.deepEqual([calls.listed, calls.signals, calls.starts], [[], [], 1]);
+// RC3-DOWN-01: the real process list, asked the way clearOldServer asks it (one parent's children of
+// this binary), finds a running server's children by their program; a running server is never cleared.
+// The seam cases are in database-down.test.mjs. Skipped on Windows: on the Owner's machine no test lists
+// real processes (Owner 2026-11-04); it runs in the Linux container.
+test("the real process list finds a postmaster's children by their program, and a running server is not cleared", {
+  timeout: 120_000, skip: process.platform === "win32" && "no test lists real processes on Windows; this one runs in the Linux container",
+}, async (t) => {
+  const root = await cluster(t);
+  await startServer(root, { binaries });
+  const postmaster = await postmasterPid(root);
+  const found = await serverProcesses(binaries, postmaster);
+  assert.ok(found.length > 0 && found.every((entry) => entry.ppid === postmaster && !entry.postmaster), "only its children, each by its program");
+  assert.deepEqual(leftoverProcesses(found, postmaster).map((entry) => entry.pid), found.map((entry) => entry.pid));
+  assert.deepEqual(await clearOldServer(root, { binaries }), { cleared: "nothing", stopped: [] }, "a running server is not touched");
 });
 
 async function portFree(port) {

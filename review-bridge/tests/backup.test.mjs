@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, queryRecords, stopServerIn } from "./fixtures/isolatedDataHome.mjs";
+import { dataHome, queryRecords, stopServerIn, stopPage } from "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -62,7 +62,7 @@ async function projectWithRun() {
 
 test.after(async () => {
   if (!project) return;
-  project.bridge(["down"]);
+  await stopPage(project.root);
   await fsp.rm(project.root, { recursive: true, force: true });
 });
 
@@ -207,7 +207,7 @@ test("a new database, or one with every migration applied, is not backed up when
 
 test("an upgrade is refused while a run is running: no copy is made and no new migration is applied", { timeout: 120_000 }, async (t) => {
   const { runId } = await projectWithRun();
-  const dir = await migrationsWith(t, { "2099-01-01-0001-refused.sql": "create table upgrade_refused (id int);\n" });
+  const dir = await migrationsWith(t, { "20990101000001_refused.sql":"create table upgrade_refused (id int);\n" });
   const before = await backupFolders();
   await queryRecords("update runs set status = 'in_progress' where run_id = $1", [runId]);
   try {
@@ -224,11 +224,11 @@ test("an upgrade is refused while a run is running: no copy is made and no new m
 // Last: it leaves one more migration applied to this file's database.
 test("an upgraded Bridge backs up the database before its first new migration, and the copy is the database before it", { timeout: 300_000 }, async (t) => {
   await projectWithRun();
-  const dir = await migrationsWith(t, { "2099-01-01-0000-upgrade.sql": "create table upgrade_check (id int);\n" });
+  const dir = await migrationsWith(t, { "20990101000000_upgrade.sql":"create table upgrade_check (id int);\n" });
   const before = await backupFolders();
   const db = await openDatabase({ dataHome, migrationsDir: dir });
   try {
-    assert.deepEqual((await db.query("select name from schema_migrations where name like '2099%'")).rows, [{ name: "2099-01-01-0000-upgrade.sql" }]);
+    assert.deepEqual((await db.query("select name from schema_migrations where name like '2099%'")).rows, [{ name: "20990101000000_upgrade.sql" }]);
   } finally {
     await db.close();
   }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import "./review-bridge/utils/nodeVersion.mjs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -22,8 +22,9 @@ import { projectLogRoot, projectStateRoot } from "./review-bridge/utils/paths.mj
 import {
   applyNeutralInstall, applyNeutralUninstall, applyNeutralUpgrade, applyNeutralUpgradeRollback, formatUpgradePlan, formatUpgradeResult,
   formatUpgradeRollbackPlan, formatUpgradeRollbackResult, loadInstalledServiceModules, planNeutralInstall, planNeutralUninstall, planNeutralUpgrade, planNeutralUpgradeRollback,
-  rollbackFreshNeutralInstall, verifyNeutralInstall,
+  reinitializeNeutralInstall, rollbackFreshNeutralInstall, verifyNeutralInstall,
 } from "./installer/neutral-install.mjs";
+import { bridgeRunner } from "./review-bridge/utils/bridgeCommand.mjs";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 // The one runtime: every project's commands, self-tests and page service run from here.
@@ -82,7 +83,7 @@ async function runFakeScenarios(target, privateName) {
   for (const scenario of scenarios) {
     const id = "init-self-test-" + scenario.name.toLowerCase().replaceAll("_", "-");
     const taskPath = path.join(workRoot, id + ".md");
-    // A minimal work order: the fake translation turns its one acceptance line into AC1.
+    // A minimal work order: its one acceptance item is cut into AC1.
     await fsp.writeFile(taskPath, [
       "# Review Bridge self-test",
       "",
@@ -263,10 +264,20 @@ async function init(options) {
     write: (text) => process.stdout.write(text),
     inspectProvider: async (provider) => (await inspectSelectedRoles({ writer: provider, reviewer: provider })).checks.writer,
     setUpProject,
+    // The record rebuilt, the setup checked as init checks it, and the project read into its graph again,
+    // as a first init does.
+    reinitialize: async (target, t) => {
+      const done = await reinitializeNeutralInstall({ target });
+      if (!done) return done;
+      await verifyNeutralInstall(target);
+      const graph = await mapProject(target, () => {}).then(graphOutcome, graphFailure(t));
+      return { ...done, graph_lines: graph.lines };
+    },
   });
 }
 
-async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, step) {
+// `t` is the Guide's language, the one written into bridge.json: every step is said in it.
+async function setUpProject({ target, roles, profileId, watchPort, fakeCli, t }, step) {
   if (watchPort !== undefined && (!Number.isInteger(watchPort) || watchPort < 1 || watchPort > 65535)) {
     throw new Error("--port must be 1 through 65535.");
   }
@@ -274,7 +285,7 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
   // Live readiness is reported, never forced: the fake self-tests below are model-free
   // and need no CLI or login, and native work stays blocked either way.
   const roleReadiness = await inspectSelectedRoles(roles);
-  const plan = await step("Setting up .review-bridge/", async () => {
+  const plan = await step(t("init.step.setting_up"), async () => {
     const planned = await planNeutralInstall({ target, profileId, roles, watchPort });
     await applyNeutralInstall(planned, planned.plan_sha256);
     return planned;
@@ -282,8 +293,8 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
   let verification;
   let scenarios;
   try {
-    verification = await step("Checking the setup", () => verifyNeutralInstall(target));
-    scenarios = await step("Running the four fake self-tests", () => runDisposableFakeScenarios(target, ".review-bridge"));
+    verification = await step(t("init.step.checking"), () => verifyNeutralInstall(target));
+    scenarios = await step(t("init.step.self_tests"), () => runDisposableFakeScenarios(target, ".review-bridge"));
   } catch (error) {
     try {
       await rollbackFreshNeutralInstall(plan);
@@ -293,7 +304,10 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
     throw new Error(`Setup failed and was rolled back: ${error.message}`);
   }
   const realMode = await inspectNativeReadiness(roles);
-  const service = await step("Starting the local page", () => startService(target, fakeCli));
+  const service = await step(t("init.step.page"), () => startService(target, fakeCli));
+  // The project's graph (T0-GRAPH-01). The setup stands without it, as it does without the page: a
+  // graph that could not be built is said, with the command that builds it.
+  const graph = await step(t("init.step.mapping"), (update) => mapProject(target, update)).then(graphOutcome, graphFailure(t));
   const database = await databaseConnection();
   return {
     ok: true,
@@ -315,12 +329,54 @@ async function setUpProject({ target, roles, profileId, watchPort, fakeCli }, st
     service_started: service.started,
     service_reason: service.reason,
     service_notice: service.notice,
+    graph: graph.summary && {
+      files: graph.summary.files, definitions: graph.summary.definitions, references: graph.summary.references, imports: graph.summary.imports,
+      folders: graph.summary.folders, incomplete: graph.summary.incomplete, problems: graph.summary.problems,
+    },
+    graph_lines: graph.lines,
     next_step: {
       action: "open_work_template",
       path: ".review-bridge/work-packages/TEMPLATE.md",
       note: "The local page shows role readiness without model calls; the reviewer write-denial check runs only when you press its button.",
     },
   };
+}
+
+// What init says about the graph: the lines `graph` rendered in the project's language, or why it was not
+// built. The setup stands either way.
+const graphOutcome = (summary) => ({ summary, lines: summary.lines ?? [] });
+const graphFailure = (t) => (error) => ({ summary: null, lines: [t("init.graph_failed", { error: error.message })] });
+
+// Reads the project into its graph through Bridge's runtime (`graph --json`): each line it prints is
+// one step, shown on the step's own line, and the last is the summary. Nothing is written in the project.
+function mapProject(target, update) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [bootstrapPath, "graph", "--project", target, "--json"], { cwd: target, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let pending = "";
+    let stderr = "";
+    let summary = null;
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      pending += chunk;
+      let newline;
+      while ((newline = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        let event;
+        try { event = JSON.parse(line); } catch { continue; }
+        if (event.phase === "found") update("0/" + event.total + " files");
+        else if (event.phase === "installed") update("installed " + event.spec);
+        else if (event.phase === "parsed") update(event.done + "/" + event.total + " files, " + event.definitions + " definitions");
+        else if (event.phase === "done") summary = event;
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0 && summary) resolve(summary);
+      else reject(new Error(stderr.trim() || "the graph command exited with " + code + "."));
+    });
+  });
 }
 
 // Starts the project's resident page service through Bridge's runtime, then verifies it with
@@ -424,7 +480,7 @@ async function vscode(options) {
   }
   const target = path.resolve(options.target ?? ".");
   if (!fs.existsSync(path.join(target, ".review-bridge"))) {
-    throw new Error("This folder is not set up (" + target + "). Run review-bridge init here first, or use --user for all projects.");
+    throw new Error("This folder is not set up (" + target + "). Run " + bridgeRunner() + " init here first, or use --user for all projects.");
   }
   const file = projectTasksFile(target);
   return { ok: true, scope: "project", path: file, action: await writeVscodeTasks(file) };

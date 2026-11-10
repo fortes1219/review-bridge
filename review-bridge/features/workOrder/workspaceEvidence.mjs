@@ -135,6 +135,11 @@ function uncommittedSince(repoRoot, commit) {
   return [...new Set([...tracked, ...untracked].map(normalizeRelative).filter((entry) => !isExcluded(entry)))].sort();
 }
 
+// What a run started now would list as uncommitted at its start; null without Git.
+export function uncommittedNow(repoRoot) {
+  return isGitWorkTree(repoRoot) ? uncommittedSince(repoRoot, headCommit(repoRoot) || EMPTY_TREE) : null;
+}
+
 // Content hash of every path Git says differs from the run's start, plus untracked files, plus
 // watched ignored files, plus whatever was already changed when the run started.
 async function stateSinceStart(repoRoot, start, uncommitted = uncommittedSince(repoRoot, start.start_commit)) {

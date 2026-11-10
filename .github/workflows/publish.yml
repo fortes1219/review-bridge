@@ -20,14 +20,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
-      # A release candidate (v1.2.3-rc.1) goes to the next dist-tag; anything else to latest.
+      # Every release is latest, npm's default (npm-dist-tag.md: publishing sets latest unless --tag is
+      # given), so the npx review-bridge Bridge prints, with no version, runs the release just published.
       - name: Publish to npm
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF_NAME" == *-rc* ]]; then
-            npm publish --provenance --access public --tag next
-          else
-            npm publish --provenance --access public
-          fi
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

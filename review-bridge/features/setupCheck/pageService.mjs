@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileExists, isPidAlive, readJson, writeJsonAtomic } from "../../service/index.mjs";
+import { createTranslator, resolveLocale } from "../workOrder/i18n.mjs";
 
 // T0-01 contract: "running" means the recorded process answers on its recorded
 // port with its own service id. Nothing here decides from a pid alone, a file's
@@ -12,8 +13,9 @@ const READY_TIMEOUT_MS = 10_000;
 const READY_POLL_MS = 250;
 const STOP_TIMEOUT_MS = 5_000;
 const PROBE_TIMEOUT_MS = 2_000;
-export const NOT_RUNNING_LINE = "Bridge 沒在跑，執行 review-bridge up";
 export const CHECK_REASONS = Object.freeze(["running", "no_session", "pid_dead", "unreachable", "timeout", "wrong_service"]);
+// What these say is in the project's language, as the database lines beside them are (Fortes 2026-11-09).
+const wordsFor = async (paths) => createTranslator(await resolveLocale(paths));
 
 // Everything the resident service exposes after a restart is read back from these files: its session
 // in the service's state, its output in the project's log folder, never in the project.
@@ -109,8 +111,9 @@ async function readText(file) {
 export async function serviceUp({ paths, bootstrapPath, watchArgs = [], out = process.stdout }) {
   const files = serviceFiles(paths);
   const current = await checkService(paths);
+  const t = await wordsFor(paths);
   if (current.running) {
-    out.write("已在跑：" + current.url + "\n");
+    out.write(t("page.up.already_running", { url: current.url }) + "\n");
     return { exitCode: 0, url: current.url, already_running: true, reason: current.reason };
   }
   // B4: whatever the stale record said, it is not a running service.
@@ -146,7 +149,7 @@ export async function serviceUp({ paths, bootstrapPath, watchArgs = [], out = pr
     if (exited === null) { try { process.kill(child.pid); } catch {} }
     const stderrTail = (await readText(files.stderrPath)).trim().split(/\r?\n/).pop();
     const reason = exited !== null && stderrTail ? stderrTail : check.reason;
-    out.write("Bridge 沒有啟動：" + reason + "\n");
+    out.write(t("page.up.failed", { reason }) + "\n");
     return { exitCode: 2, url: null, already_running: false, reason: check.reason };
   }
   child.unref();
@@ -154,17 +157,18 @@ export async function serviceUp({ paths, bootstrapPath, watchArgs = [], out = pr
   for (const line of (await readText(files.stdoutPath)).split(/\r?\n/)) {
     if (line.includes("占用，改用")) out.write(line + "\n");
   }
-  out.write("網頁：" + check.url + "\n");
+  out.write(t("page.up.started", { url: check.url }) + "\n");
   return { exitCode: 0, url: check.url, already_running: false, reason: check.reason };
 }
 
 export async function serviceDown({ paths, out = process.stdout }) {
+  const t = await wordsFor(paths);
   const check = await checkService(paths);
   if (!check.running) {
     // B7: nothing verified as ours is running. A stale record is dropped; a pid that
     // did not prove its identity is never killed on the record's say-so.
     await removeServiceSession(paths);
-    out.write("Bridge 沒在跑\n");
+    out.write(t("page.down.not_running") + "\n");
     return { exitCode: 1, reason: check.reason };
   }
   const { pid } = check.session;
@@ -176,20 +180,22 @@ export async function serviceDown({ paths, out = process.stdout }) {
     after = await checkService(paths);
   }
   if (isPidAlive(pid) && !["unreachable", "no_session"].includes(after.reason)) {
-    out.write("Bridge 沒有停下來（pid " + pid + "）。\n");
+    out.write(t("page.down.failed", { pid }) + "\n");
     return { exitCode: 2, reason: after.reason };
   }
   await removeServiceSession(paths);
-  out.write("Bridge 已停止。\n");
+  out.write(t("page.down.stopped") + "\n");
   return { exitCode: 0, reason: "stopped" };
 }
 
 export async function serviceStatus({ paths, out = process.stdout }) {
+  const t = await wordsFor(paths);
   const check = await checkService(paths);
   if (!check.running) {
-    out.write(NOT_RUNNING_LINE + "\n");
+    out.write(t("page.not_running") + "\n");
     return { exitCode: 1, running: false, reason: check.reason };
   }
-  out.write(check.url + "\n進行中 0\n");
+  // The page's address only: a count printed here was never counted (Fortes 2026-11-09); `status` lists the runs.
+  out.write(check.url + "\n");
   return { exitCode: 0, running: true, url: check.url, reason: check.reason };
 }

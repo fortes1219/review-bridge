@@ -3,18 +3,19 @@
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline/promises";
 
 import {
-  activeRuns, assertRunResumable, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
-  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, writeJson,
+  activeLineSteps, activeRuns, appendIoEvent, assertRunResumable, bridgeDataHome, createRunRuntimeState, fileExists, loadControlView, loadOrCreatePolicySnapshot, loadSingleActiveControlView,
+  inspectProvider, listCodexMcpServers, projectRuns, readJson, RoleCliNotReadyError, recordsDatabase, runDetail, SIGN_IN_COMMANDS, updateGraph, writeJsonAtomic,
 } from "../../service/index.mjs";
 import { localTimestamp } from "../../utils/dates.mjs";
-import { confirmWorkStart, contractStepsLine, startCard } from "./confirmStart.mjs";
+import { askYes, cardTranslator, confirmWorkStart, contractLine, needsAuthorizationLine, readiness, startCard } from "./confirmStart.mjs";
 import { loadContract } from "./contract.mjs";
 import { deliverOutcome, stdoutLines } from "./delivery.mjs";
+import { createTranslator, resolveLocale } from "./i18n.mjs";
+import { directoryOfTarget, fileLineRunning, startDirectory } from "./line.mjs";
 import { runReviewWorker, validateReviewWorker } from "./review.mjs";
-import { queueStatus, waitForPending } from "./reviewQueue.mjs";
+import { waitForPending } from "./reviewQueue.mjs";
 import {
   authorizeWorkPackage,
   cancelWorkPackage,
@@ -29,8 +30,10 @@ import {
 import {
   canonicalTaskFile, cardFor, cardUsed, clearProject, ensureProject, identifyWorkOrder, markCardShown, recordCard, recordContract, recordStart, withdrawCard,
 } from "./workOrderRecords.mjs";
-import { parseWorkOrder } from "./workOrderFormat.mjs";
+import { refuseForm, writeWorkOrderIds } from "./workOrderForm.mjs";
+import { formProblems, parseWorkOrder, sealedText, WorkOrderFormError, workOrderIdOf } from "./workOrderFormat.mjs";
 import { runBoundedResume, stopRun, validateBoundedResume } from "./writerLoop.mjs";
+import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 export const DEFAULT_BREAKPOINT = "after the review";
 
@@ -60,7 +63,7 @@ const workPackageName = (options) => options.workPackage || (options.taskFile ? 
 // recorded.
 async function openRecords(paths) {
   const config = await readJson(paths.bridgeConfigPath);
-  if (!config.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: review-bridge upgrade");
+  if (!config.project_id) throw new Error("This project was set up before Bridge kept its records in a database. Run: " + bridgeRunner() + " upgrade");
   // The router's opener writes a run's kept events first; a direct call opens it plainly.
   const database = recordsDatabase() || (async () => (await import("../../service/database/index.mjs")).openDatabase());
   const db = await database();
@@ -68,10 +71,21 @@ async function openRecords(paths) {
   return { db, projectId: config.project_id };
 }
 
+// The project's language for what another feature prints; the router hands this to the graph feature.
+export const projectTranslator = (paths) => cardTranslator(paths);
+
+// The project's row, which the graph's rows point at; the router hands this to the graph feature.
+export async function recordProject(db, paths) {
+  await ensureProject(db, { projectId: paths.projectId, root: paths.repoRoot });
+}
+
 // The work order's path in the project, spelled as the file system spells it (the records' key).
 const taskFileOf = (paths, file) => canonicalTaskFile(paths.repoRoot, path.resolve(file));
 
-async function planFromOptions({ paths, options, command, adapter, inspectionAdapter }) {
+// `batch` is one card's worth of plans (a directory's): its records are opened once, and what does not
+// change from file to file (the CLI's state, its list of MCP servers) is asked once.
+async function planFromOptions({ paths, options, command, adapter, inspectionAdapter, batch = null, line = null }) {
+  const once = (key, work) => (batch ? (batch.cache[key] ??= work()) : work());
   const named = workPackageName(options);
   if (!options.outPath && !(options.taskFile && named)) throw new Error(command + " needs a work order. Run: review-bridge " + command + " .review-bridge/work-packages/<file>.md");
   if (options.update !== undefined && options.asNew) throw new Error("Give --update <work_order_id> or --as-new, not both.");
@@ -87,12 +101,17 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
   const defaults = command === "start" && !interactive();
   const breakpoint = options.breakpoint || answers.breakpoint || (defaults ? DEFAULT_BREAKPOINT : undefined);
   if (options.taskFile && !breakpoint) throw new Error("A breakpoint is required. Add --breakpoint \"<where to stop>\" or answer the prompt.");
-  const text = options.taskFile ? await fsp.readFile(path.resolve(options.taskFile), "utf8").catch(() => null) : null;
-  // A work order Bridge cannot split is refused, with its lines, before anything about it is recorded.
-  if (text !== null) parseWorkOrder(text.trim());
-  const records = text !== null ? await openRecords(paths) : null;
+  const raw = options.taskFile ? await fsp.readFile(path.resolve(options.taskFile), "utf8").catch(() => null) : null;
+  // What the person wrote, without the id line Bridge keeps in the front matter; the id says which work order.
+  const text = raw === null ? null : sealedText(raw);
+  // A work order Bridge cannot split, or one without what it must say, is refused, with its lines, before
+  // anything about it is recorded.
+  const format = text !== null ? parseWorkOrder(text.trim()) : null;
+  const form = format ? formProblems(format) : null;
+  if (form && !form.ok) throw new WorkOrderFormError(form);
+  const records = text !== null ? batch?.records ?? await openRecords(paths) : null;
   const workOrder = records ? await identifyWorkOrder(records.db, {
-    projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), repoRoot: paths.repoRoot,
+    projectId: records.projectId, fileName: taskFileOf(paths, options.taskFile), text: text.trim(), id: workOrderIdOf(raw), repoRoot: paths.repoRoot,
     update: options.update, asNew: Boolean(options.asNew),
   }) : null;
   // Calls no model, so it uses the adapter for model-free checks; a fake run's is the fake CLI.
@@ -110,12 +129,13 @@ async function planFromOptions({ paths, options, command, adapter, inspectionAda
     callTimeout: options.callTimeout,
     writer: options.writer,
     reviewer: options.reviewer,
-    listCodexMcp: async () => await listCodexMcpServers(await modelFree()),
+    listCodexMcp: () => once("mcp", async () => await listCodexMcpServers(await modelFree())),
     // The fake CLI has nothing to install or sign in to.
-    checkCodex: options.fakeCli ? null : async () => (await inspectProvider("codex", { adapter: await modelFree() })).next_action,
+    checkCodex: options.fakeCli ? null : () => once("codex", async () => (await inspectProvider("codex", { adapter: await modelFree() })).next_action),
     outPath: options.outPath,
     planName: options.planName,
     workOrder,
+    line,
   });
   if (records) await recordCard(records.db, { projectId: records.projectId, plan, snapshot: (await loadOrCreatePolicySnapshot(paths)).snapshot, shown: false });
   return { plan, records };
@@ -131,7 +151,7 @@ export async function planWork({ paths, options, adapter, inspectionAdapter }) {
       plan.task_file ? "工單：" + plan.task_file : "工作包：" + plan.work_package_id,
       "範圍：" + ({ default: "預設（整個專案減禁改清單）", explicit: "指定" })[plan.scope.source] + "，" + plan.scope.allowed_paths.length + " 條路徑",
       "驗收：" + (plan.test?.kind === "command" ? "會跑 " + plan.test.command + "（profile 核准）" : plan.test?.label || "沒有設定測試"),
-      ...(plan.contract_steps ? [contractStepsLine(plan.contract_steps)] : []),
+      ...(plan.contract_sha256 ? ["合約：" + contractLine(await cardTranslator(paths), plan)] : []),
       "plan：" + plan.plan_path,
       "sha：" + plan.plan_sha256,
       // T0-08: native work-start refuses --approve; the human confirms the card at the terminal.
@@ -158,9 +178,12 @@ export async function planWork({ paths, options, adapter, inspectionAdapter }) {
     return 0;
   }
   const shown = shownPath(plan.plan_path);
-  process.stdout.write("Plan written to " + shown + "\nNext: review-bridge work-start --plan " + shown + "\n");
+  process.stdout.write("Plan written to " + shown + "\nNext: " + bridgeRunner() + " work-start --plan " + shown + "\n");
   return 0;
 }
+
+// The plan as sealed and written: the same body without where it was written, as recordCard keeps it.
+const sealedBody = ({ plan_path: _written, ...body }) => body;
 
 // A path as the person can paste it back: relative to where they are when that is shorter.
 function shownPath(file) {
@@ -169,17 +192,36 @@ function shownPath(file) {
   return /\s/.test(shown) ? "\"" + shown + "\"" : shown;
 }
 
+// `update` is the graph's own (tests give another). Nothing here stops the run: a record that cannot be
+// written is said too, and the run's own next record meets the same database.
+export async function updateRunGraph(paths, records, runId, { update = updateGraph, record = appendIoEvent, write = (text) => process.stderr.write(text) } = {}) {
+  try {
+    await update({ db: records.db, projectId: records.projectId, projectRoot: paths.repoRoot, dataHome: bridgeDataHome() });
+    return null;
+  } catch (error) {
+    const reason = String(error?.message || error);
+    const t = await cardTranslator(paths);
+    write(t("start.graph_not_updated", { reason }) + "\n");
+    await record(paths, runId, { event: "graph_update", updated: false, reason }).catch((recordError) => write(String(recordError?.message || recordError) + "\n"));
+    return reason;
+  }
+}
+
 // Authorizes the approved plan and runs it to its end; every way out delivers once. A work order's
 // start is one database transaction around the file authorization (recordStart): the work order and
 // its version, the authorization and its claim. When that transaction fails after the run was made,
 // the run is closed before any model call.
-async function runAuthorized({ paths, options, adapter, approval, authorizedVia, onStep, endSteps = () => {} }) {
-  const plan = await readJson(path.resolve(options.planPath));
+// A start that holds its plan in memory passes it in and the file it wrote is not read back, as Vite's
+// optimizer hands its metadata on in memory and reads _metadata.json only at the next start; work-start
+// (`held` null) reads the file it was given.
+async function runAuthorized({ paths, options, plan: held = null, adapter, approval, authorizedVia, onStep, endSteps = () => {} }) {
+  const plan = held ?? await readJson(path.resolve(options.planPath));
   const records = plan.task_file ? await openRecords(paths) : null;
   let started = null;
   const authorize = async () => (started = await authorizeWorkPackage({
     paths,
     planPath: options.planPath,
+    plan,
     approval,
     executionMode: options.fakeCli ? "fake_cli" : "native",
     authorizedVia,
@@ -187,6 +229,16 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
   let authorization;
   try {
     authorization = records ? await recordStart(records.db, { planSha256: approval, authorize }) : await authorize();
+    // The contract the plan sealed is recorded under its SHA-256, against the work order version it came from.
+    if (records && plan.contract_sha256) {
+      await recordContract(records.db, {
+        workOrderId: authorization.workOrderId, contentSha256: plan.task_sha256, contractSha256: plan.contract_sha256, contract: await loadContract(paths, plan.contract_sha256),
+      });
+    }
+    // The work order and its authorization are in the records now, so its id goes into the file, as Jira
+    // gives an issue its key before the key is printed on it (Owner 2026-11-08). A check that failed before
+    // this point left neither. Before any model call; a file it cannot write closes this start.
+    if (records) await writeWorkOrderIds(paths, [{ ...plan, work_order: { ...plan.work_order, work_order_id: authorization.workOrderId } }]);
   } catch (error) {
     if (started) {
       await closeFailedStart(paths, started.run.run_id, error);
@@ -194,12 +246,11 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
     }
     throw error;
   }
-  // The sealed contract is recorded under its SHA-256, against the work order version it came from.
-  const onContractSealed = records
-    ? async (contractSha256) => await recordContract(records.db, {
-      workOrderId: authorization.workOrderId, contentSha256: plan.task_sha256, contractSha256, contract: await loadContract(paths, contractSha256),
-    })
-    : null;
+  // The project's graph is brought up to date before the writer's first call, from the files Git says
+  // changed. The work does not depend on it: a graph that cannot be updated goes into this run's records
+  // (the result shows it beside the verdicts, so the person knows the reviewer judged on the old graph),
+  // is said in the project's language, and the writer and reviewer read it as it was.
+  if (records) await updateRunGraph(paths, records, authorization.run.run_id);
   // The replaced version is delivered here too, in case its own work-start is gone.
   for (const runId of authorization.superseded) {
     await deliverOutcome({ paths, runId, adapter, notify: true })
@@ -218,7 +269,6 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
       runtimeState: createRunRuntimeState(paths, authorization.run.run_id),
       workLock: authorization.workLock,
       onStep,
-      onContractSealed,
     });
   } finally {
     endSteps();
@@ -240,7 +290,7 @@ async function runAuthorized({ paths, options, adapter, approval, authorizedVia,
 // checked and before the person is asked. --approve and --yes carry the person's yes through an
 // agent; without them and without a terminal the card is printed and nothing starts.
 export async function startWork({ paths, options, adapter, guard }) {
-  if (!options.planPath) throw new Error("work-start needs a plan. Run: review-bridge work-plan <file> first, or review-bridge start <file> to do both.");
+  if (!options.planPath) throw new Error("work-start needs a plan. Run: " + bridgeRunner() + " work-plan <file> first, or " + bridgeRunner() + " start <file> to do both.");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
@@ -252,7 +302,7 @@ export async function startWork({ paths, options, adapter, guard }) {
   const approval = options.approval || await confirmWorkStart(paths, options.planPath, {
     assumeYes: Boolean(options.yes),
     ask: interactive(),
-    again: "review-bridge work-start --plan " + shownPath(path.resolve(options.planPath)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : ""),
+    again: bridgeRunner() + " work-start --plan " + shownPath(path.resolve(options.planPath)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : ""),
   });
   if (approval === null) return 1;
   return await runAuthorized({ paths, options, adapter, approval, authorizedVia: relayed ? "agent" : "terminal" });
@@ -271,7 +321,7 @@ const CHECK_REFUSALS = Object.freeze({
 function checkFailureLines(check, again) {
   const why = CHECK_REFUSALS[check.reason] || check.reason;
   const next = check.reason === "page_runs_fake_cli"
-    ? "Run: review-bridge down, then " + again
+    ? "Run: " + bridgeRunner() + " down, then " + again
     : check.reason === "reviewer_not_ready"
       ? "Sign the reviewer in (" + (SIGN_IN_COMMANDS[check.provider] || "see its CLI's help") + "), then run: " + again
       : "Run: " + again + " again" + (check.url ? ", or open " + check.url + " and press Check" : "");
@@ -308,65 +358,6 @@ async function runSteps() {
   };
 }
 
-// After the plan, start and resume go the same way: the reviewer read-only check (once per page
-// session; `reviewerCheck` is the router's, run in the page service), the card, the person's yes,
-// the run. The yes is the only authorization. At a terminal it is asked; an agent shows the person
-// the card printed here and runs `again` with --yes once they said yes (Owner 2026-10-25). The
-// gate's reviewer proof is asserted before either.
-async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerCheck, plan, again }) {
-  const { db } = await openRecords(paths);
-  // E10: a card that was not shown, or was answered no at the terminal, takes no later --yes.
-  const noCard = async () => {
-    if (!options.yes) await withdrawCard(db, plan.plan_sha256);
-    return 1;
-  };
-  if (options.fakeCli) {
-    write("Reviewer read-only check: not needed with the fake CLI (no model is called)");
-  } else {
-    const check = await reviewerCheck({
-      reviewer: plan.reviewer.provider,
-      mcp: { off: plan.reviewer.mcp_off, allow: plan.reviewer.mcp },
-      onStart: (reviewer) => write("Checking that the reviewer (" + reviewer + ") cannot write files: one model call..."),
-    });
-    if (!check.ok) {
-      for (const line of checkFailureLines(check, again)) write(line);
-      return await noCard();
-    }
-    write("Reviewer read-only check: passed" + (check.already ? " (earlier in this page session)" : ""));
-  }
-  write("");
-  write(await startCard(paths, plan));
-  await markCardShown(db, plan.plan_sha256);
-  if (!options.yes && !interactive()) {
-    write("Needs authorization. If the person says yes, run again: " + again + " --yes");
-    return 1;
-  }
-  await guard(plan.reviewer.provider, { off: plan.reviewer.mcp_off, allow: plan.reviewer.mcp });
-  // A native start takes this machine's adapter only now, after the check (bootstrap leaves it).
-  const runAdapter = adapter || await loadAdapter();
-  if (!options.yes) {
-    const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
-    let answer;
-    try {
-      answer = await terminal.question("Start this work? [y/N] ");
-    } finally {
-      terminal.close();
-    }
-    if (!/^y(?:es)?$/i.test(answer.trim())) {
-      write("Not started. Nothing was authorized.");
-      return await noCard();
-    }
-  }
-  write("");
-  const steps = await runSteps();
-  return await runAuthorized({
-    paths, options: { ...options, planPath: plan.plan_path }, adapter: runAdapter, approval: plan.plan_sha256,
-    authorizedVia: options.yes ? "agent" : "terminal",
-    onStep: steps.step,
-    endSteps: steps.end,
-  });
-}
-
 // E8, E10: --yes is the yes to the card printed before it, and one card is one yes. The card is
 // found in the database (Q14: this project's latest printed, not withdrawn plan for this file) and
 // taken as it is, without planning again: refused when there is none, when the work order no longer
@@ -376,17 +367,26 @@ async function runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerC
 async function cardForYes({ paths, planName = null, taskFile, options, again }) {
   const { db, projectId } = await openRecords(paths);
   const card = await cardFor(db, { projectId, fileName: taskFileOf(paths, taskFile) });
+  // The person was stopped here, so it is said in their language (Owner 2026-11-06), as the card is.
+  const t = await cardTranslator(paths);
   const refuse = (line) => { write(line); return null; };
-  if (!card) return refuse("No card was shown for this work order, so there is no yes to run on. Run: " + again + " and show the person the card.");
-  if (card.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse("This card was made by an older Bridge and is not read again. Run: " + again + " and show the person the new card.");
-  if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) return refuse("The work order changed after you saw the card. Run: " + again + " and look again.");
+  if (!card) return refuse(t("yes.no_card", { again }));
+  // A directory's card printed no work order's text, so its yes is not a yes to this one alone.
+  if (card.body.line) return refuse(t("yes.directory_card", { directory: card.body.line.directory, again }));
+  if (card.body.schema_version !== PLAN_SCHEMA_VERSION) return refuse(t("yes.old_card", { again }));
+  // The start that took this card writes the work order's id into the file after its claim, in place, as
+  // ESLint and Prettier write a person's files: read meanwhile, the file can be half written. So a file that
+  // does not read as the card showed is first asked of the records, which say whether the card was used.
+  if (!(await workOrderUnchanged({ task_sha256: card.content_sha256 }, taskFile))) {
+    return refuse(t((await cardUsed(db, card.plan_sha256)) ? "yes.used" : "yes.changed", { again }));
+  }
   const option = optionAgainstCard(card.body, options);
-  if (option) return refuse(option + " is not what the card showed. Run: " + again + " --yes without it, or " + again + " to show the person a new card.");
-  if (await cardUsed(db, card.plan_sha256)) return refuse("This card was already said yes to; one card starts one run. Run: " + again + " and show the person the new card.");
-  if (!(card.authorization_expires_at > new Date())) return refuse("The card was valid until " + card.authorization_expires_at.toISOString() + ". Run: " + again + " and show the person the new card.");
+  if (option) return refuse(t("yes.option", { option, again }));
+  if (await cardUsed(db, card.plan_sha256)) return refuse(t("yes.used", { again }));
+  if (!(card.authorization_expires_at > new Date())) return refuse(t("yes.expired", { until: card.authorization_expires_at.toISOString(), again }));
   const planPath = options.outPath || planFilePath(paths, card.body, planName);
-  await writeJson(planPath, card.body);
-  write("Plan from the card: " + shownPath(planPath));
+  await writeJsonAtomic(planPath, card.body);
+  write(t("yes.plan_from_card", { path: shownPath(planPath) }));
   return { ...card.body, plan_path: planPath };
 }
 
@@ -403,32 +403,93 @@ function notReadyLines(error, again) {
   ];
 }
 
-async function planOrSay({ paths, options, command, adapter, inspectionAdapter, again }) {
+async function planOrSay({ paths, options, command, adapter, inspectionAdapter, again, batch = null, line = null }) {
   let planned;
   try {
-    planned = await planFromOptions({ paths, options, command, adapter, inspectionAdapter });
+    planned = await planFromOptions({ paths, options, command, adapter, inspectionAdapter, batch, line });
   } catch (error) {
+    if (error instanceof WorkOrderFormError) {
+      const absolute = path.resolve(options.taskFile);
+      await refuseForm(await createTranslator(await resolveLocale(paths)), error, { absolute, file: taskFileOf(paths, absolute), again, write });
+      return null;
+    }
     if (!(error instanceof RoleCliNotReadyError)) throw error;
     for (const line of notReadyLines(error, again)) write(line);
     return null;
   }
-  if (planned.plan) write("Plan written to " + shownPath(planned.plan.plan_path));
+  if (planned.plan && !batch) write("Plan written to " + shownPath(planned.plan.plan_path));
   return planned.plan || null;
 }
 
-// `start <file>`: the person's one command from a work order to its result.
+// One work order (Owner 2026-11-08): one card, one yes, the run. The contract was cut by code when the
+// plan was made and the card names it, so no model is called before the yes and nothing is asked after it.
+// --yes says yes to the card printed last.
+async function startFile({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again, planOptions = {}, planName = null, command = "start" }) {
+  const { db } = await openRecords(paths);
+  const taskFile = planOptions.taskFile ?? options.taskFile;
+  const plan = options.yes
+    ? await cardForYes({ paths, planName, taskFile, options, again })
+    : await planOrSay({ paths, options: { ...options, ...planOptions }, command, adapter, inspectionAdapter, again });
+  if (!plan) return 1;
+  const ready = readiness({ options, adapter, loadAdapter, guard, reviewerCheck, plan, again, checkFailureLines });
+  const t = await cardTranslator(paths);
+  write("");
+  write(await startCard(paths, plan, t));
+  await markCardShown(db, plan.plan_sha256);
+  const yesGiven = Boolean(options.yes);
+  if (!yesGiven) {
+    if (!interactive()) { write(needsAuthorizationLine(t, again)); return 1; }
+    if (!(await askYes(t("card.ask")))) {
+      await withdrawCard(db, plan.plan_sha256);
+      write(t("card.declined"));
+      return 1;
+    }
+  }
+  const prepared = await ready();
+  if (!prepared) {
+    if (!yesGiven) await withdrawCard(db, plan.plan_sha256);
+    return 1;
+  }
+  write("");
+  const steps = await runSteps();
+  return await runAuthorized({
+    paths, options: { ...options, planPath: plan.plan_path }, plan: sealedBody(plan), adapter: prepared.adapter, approval: plan.plan_sha256,
+    authorizedVia: yesGiven ? "agent" : "terminal",
+    onStep: steps.step,
+    endSteps: steps.end,
+  });
+}
+
+// `start <file>`: the person's one command from a work order to its result. `start <directory>`: the
+// same for every work order in a directory of work-packages/, one after another, on one yes.
 export async function startWorkOrder({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck }) {
-  if (!options.taskFile) throw new Error("start needs a work order. Run: review-bridge start .review-bridge/work-packages/<file>.md");
+  if (!options.taskFile) throw new Error("start needs a work order. Run: " + bridgeRunner() + " start .review-bridge/work-packages/<file>.md");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
+  const directory = await directoryOfTarget(paths, options.taskFile);
+  if (directory) {
+    const again = bridgeRunner() + " start " + shownPath(directory.absolute).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
+    return await startDirectory({
+      paths, options, adapter, loadAdapter, guard, reviewerCheck, directory,
+      tools: {
+        openRecords, interactive, shownPath, checkFailureLines,
+        // A role's CLI not ready is said once and ends the card; no card was shown yet to take back.
+        planOne: ({ row, batch, line }) => planOrSay({
+          paths, command: "start", adapter, inspectionAdapter, batch, line, again,
+          options: { ...options, yes: false, taskFile: row.absolute, breakpoint: options.breakpoint || DEFAULT_BREAKPOINT },
+        }),
+        runPlan: ({ plan, adapter: runAdapter, authorizedVia, onStep }) => runAuthorized({
+          paths, options: { ...options, planPath: plan.plan_path }, plan: sealedBody(plan), adapter: runAdapter, approval: plan.plan_sha256, authorizedVia, onStep,
+        }),
+      },
+    });
+  }
+  const running = await fileLineRunning(paths, openRecords, path.resolve(options.taskFile));
+  if (running) { write(running); return 1; }
   // Forward slashes: the command is pasted into any shell, bash included, and Windows takes them.
-  const again = "review-bridge start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
-  const plan = options.yes
-    ? await cardForYes({ paths, taskFile: options.taskFile, options, again })
-    : await planOrSay({ paths, options, command: "start", adapter, inspectionAdapter, again });
-  if (!plan) return 1;
-  return await runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerCheck, plan, again });
+  const again = bridgeRunner() + " start " + shownPath(path.resolve(options.taskFile)).replaceAll("\\", "/") + (options.fakeCli ? " --fake-cli" : "");
+  return await startFile({ paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again });
 }
 
 // `resume <run_id>`: a stopped run is closed for good (its records were sealed by the controller
@@ -437,28 +498,26 @@ export async function startWorkOrder({ paths, options, adapter, loadAdapter, ins
 // roles come from bridge.json or the flags as they are now, and its priority, model, effort and
 // budget from the work order again; the card shows them all.
 export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck }) {
-  if (!runId) throw new Error("resume needs a run id. Run: review-bridge status to see the runs, then review-bridge resume <run_id>");
+  if (!runId) throw new Error("resume needs a run id. Run: " + bridgeRunner() + " status to see the runs, then " + bridgeRunner() + " resume <run_id>");
   if (options.fakeScenario && !options.fakeCli) {
     throw new Error("--fake-scenario requires --fake-cli. Add --fake-cli, or leave --fake-scenario out.");
   }
   const control = await loadControlView(paths, runId).catch(() => null);
-  if (!control) throw new Error("There is no run " + runId + " here. Run: review-bridge status");
-  if (control.authorization_status === "active") throw new Error("Run " + runId + " is still running. Pause it first: review-bridge stop " + runId);
+  if (!control) throw new Error("There is no run " + runId + " here. Run: " + bridgeRunner() + " status");
+  if (control.authorization_status === "active") throw new Error("Run " + runId + " is still running. Pause it first: " + bridgeRunner() + " stop " + runId);
   const workPackage = control.run.work_package;
-  if (!workPackage.task_file) throw new Error("Run " + runId + " was not started from a work order file. Run: review-bridge start <file>");
-  write("Carrying on run " + runId + " (" + workPackage.task_file + ") as a new run");
+  if (!workPackage.task_file) throw new Error("Run " + runId + " was not started from a work order file. Run: " + bridgeRunner() + " start <file>");
   const taskFile = path.join(paths.repoRoot, ...workPackage.task_file.split("/"));
+  // resume saves one work order and has nothing to do with its directory's line; it waits for that line.
+  const running = await fileLineRunning(paths, openRecords, taskFile);
+  if (running) { write(running); return 1; }
+  write("Carrying on run " + runId + " (" + workPackage.task_file + ") as a new run");
   // One plan per stopped run, so the card and its --yes name the same one.
   const planName = workPackage.work_package_id + ".resume-" + runId;
-  const again = "review-bridge resume " + runId + (options.fakeCli ? " --fake-cli" : "");
-  const plan = options.yes ? await cardForYes({ paths, planName, taskFile, options, again }) : await planOrSay({
-    paths,
-    adapter,
-    inspectionAdapter,
-    again,
-    command: "resume",
-    options: {
-      ...options,
+  const again = bridgeRunner() + " resume " + runId + (options.fakeCli ? " --fake-cli" : "");
+  return await startFile({
+    paths, options, adapter, loadAdapter, inspectionAdapter, guard, reviewerCheck, again, planName, command: "resume",
+    planOptions: {
       taskFile,
       workPackage: workPackage.work_package_id,
       breakpoint: workPackage.breakpoint,
@@ -466,26 +525,25 @@ export async function resumeWorkOrder({ paths, runId, options, adapter, loadAdap
       planName,
     },
   });
-  if (!plan) return 1;
-  return await runOnYes({ paths, options, adapter, loadAdapter, guard, reviewerCheck, plan, again });
 }
 
 // `clean --all` (Owner 2026-10-25): the project's work orders, versions, plans, authorizations
 // and contracts leave the person's database in one transaction; the project id is kept as cleared
 // and never used again. Refused while one of its runs is running, and with a run id.
 export async function clearProjectRecords({ paths, runId, options }) {
-  if (runId) throw new Error("clean --all clears the whole project; give no run id. Run: review-bridge clean --all");
+  if (runId) throw new Error("clean --all clears the whole project; give no run id. Run: " + bridgeRunner() + " clean --all");
   const { db, projectId } = await openRecords(paths);
   const active = await activeRuns(db, projectId);
-  if (active.length) throw new Error(active.length + " run(s) of this project are running. Stop them first: review-bridge stop " + active[0].run_id);
+  if (active.length) throw new Error(active.length + " run(s) of this project are running. Stop them first: " + bridgeRunner() + " stop " + active[0].run_id);
   const counts = await clearProject(db, projectId);
   if (options.json) {
     write(JSON.stringify({ project_id: projectId, cleared: counts }, null, 2));
     return 0;
   }
   write("Cleared this project's records: " + counts.work_orders + " work order(s), " + counts.work_order_versions + " version(s), "
-    + counts.plans + " plan(s), " + counts.authorizations + " authorization(s), " + counts.contracts + " contract(s), " + counts.runs + " run(s).");
-  write("This project's id is not used again. To use Bridge here again: review-bridge uninstall --target ., then review-bridge init");
+    + counts.plans + " plan(s), " + counts.authorizations + " authorization(s), " + counts.contracts + " contract(s), " + counts.runs + " run(s), "
+    + counts.graph_files + " graph file(s).");
+  write("This project's id is not used again. To use Bridge here again: " + bridgeRunner() + " uninstall --target ., then " + bridgeRunner() + " init");
   return 0;
 }
 
@@ -505,52 +563,81 @@ export async function statusRecords(paths, { after = null } = {}) {
     step = "runs";
     const { runs, more } = await projectRuns(db, projectId, { limit: STATUS_RUNS, after });
     const active = await activeRuns(db, projectId);
+    const lines = active.length ? await activeLineSteps(db, projectId) : [];
     step = "logs";
-    return { db, projectId, runs, more, active, logs: paths.logRoot };
+    return { db, projectId, runs, more, active, lines, logs: paths.logRoot };
   } catch (error) {
     error.status_step = step;
     throw error;
   }
 }
 
-export async function statusOverview({ paths, options, page }) {
+// `status` only looks (RC3-DOWN-01): a database that `down` stopped is said to be stopped, never started
+// to answer, as brew services list reports a service; its runs are shown once it is up again.
+// A data directory that does not exist, cannot be read or is no cluster is said with where it is, and
+// exits 4, as pg_ctl status does ("If an accessible data directory is not specified, pg_ctl returns an
+// exit status of 4"; LSB: status unknown); nothing says up would start it (Fortes 2026-11-09).
+// `databaseStatus` and `records` are seams for tests.
+// The runs are the database's alone, listed and not totalled, as gh run list does (Fortes 2026-11-08):
+// the page service's review-queue folders are its working copy, emptied when it restarts.
+const DATA_DIRECTORY_UNUSABLE = 4;
+
+export async function statusOverview({ paths, options, page, databaseStatus = null, records = statusRecords }) {
   if (!(await fileExists(paths.bridgeConfigPath))) {
-    write("This folder is not set up for Review Bridge. Run: review-bridge init");
+    write("This folder is not set up for Review Bridge. Run: " + bridgeRunner() + " init");
     return 0;
   }
   const service = await page();
-  const { db, projectId, runs, more, active, logs } = await statusRecords(paths, { after: options.after || null });
-  const queue = await queueStatus(paths);
+  const t = await createTranslator(await resolveLocale(paths));
+  const server = await (databaseStatus ?? (await import("../../service/database/index.mjs")).databaseStatus)();
+  if (server.state !== "running") {
+    const unusable = server.state === "unusable";
+    const exitCode = unusable ? DATA_DIRECTORY_UNUSABLE : 0;
+    if (options.json) {
+      const detail = unusable ? { problem: server.problem, path: server.path, ...(server.code ? { code: server.code } : {}) } : {};
+      write(JSON.stringify({ page: { running: service.running, url: service.url, reason: service.reason }, database: { running: false, ...detail } }, null, 2));
+      return exitCode;
+    }
+    write(service.running ? t("status.page.running", { url: service.url }) : t("status.page.not_running"));
+    write(unusable ? t("status.database." + server.problem, { path: server.path, code: server.code }) : t("status.database.stopped"));
+    return exitCode;
+  }
+  const { db, projectId, runs, more, active, lines, logs } = await records(paths, { after: options.after || null });
+  const latestReview = (await fsp.readFile(paths.latestPath, "utf8").catch(() => "")).trim() || null;
   // Who the next start uses, from the one place that says it; a run keeps what its card showed.
   const { roles: configured } = await readJson(paths.bridgeConfigPath);
   const roles = { writer: configured?.writer?.provider_id ?? null, reviewer: configured?.reviewer?.provider_id ?? null };
   if (options.json) {
     write(JSON.stringify({
       page: { running: service.running, url: service.url, reason: service.reason },
-      roles, project_id: projectId, active_runs: active.length, runs, more, review_queue: queue, logs, database: db.connection,
+      roles, project_id: projectId, active_runs: active.length, lines, runs, more, latest_review: latestReview, logs, database: { running: true, ...db.connection },
     }, null, 2));
     return 0;
   }
-  write("Page: " + (service.running ? service.url : "not running; start it with review-bridge up"));
+  // Every line in the project's language, as the database lines beside them are (Fortes 2026-11-09).
+  write(service.running ? t("status.page.running", { url: service.url }) : t("status.page.not_running"));
+  write(t("status.database.running"));
   if (!runs.length && !options.after) {
-    write("Work: none yet. Put a work order in .review-bridge/work-packages/ and run: review-bridge start <file>");
+    write(t("status.work.none"));
   } else {
-    write("Work: " + active.length + " running");
+    write(t("status.work.running", { count: active.length }));
+    for (const { line, source_file: sourceFile, run_id: runId, created_at: startedAt } of lines) {
+      write("  " + t("status.work.line", { directory: line.directory, position: line.position, total: line.total, file: path.posix.basename(sourceFile), run: runId, time: localTimestamp(startedAt) }));
+    }
     for (const run of runs) {
       write("  " + [run.run_id, run.status.padEnd(11), (run.conclusion || "-").padEnd(15), (run.closed_reason || "-").padEnd(20), run.source_file, localTimestamp(run.created_at)].join("  "));
     }
-    if (more) write("  More: review-bridge status --after " + runs.at(-1).run_id);
+    if (more) write("  " + t("status.more", { run: runs.at(-1).run_id }));
   }
-  write("Review queue: pending " + queue.pending + ", running " + queue.running + ", done " + queue.done + ", failed " + queue.failed);
-  if (queue.latest_review) write("Latest review: " + queue.latest_review);
-  write("Roles: writer " + roles.writer + ", reviewer " + roles.reviewer);
+  if (latestReview) write(t("status.latest_review", { file: latestReview }));
+  write(t("status.roles", { writer: roles.writer, reviewer: roles.reviewer }));
   // The run's call logs live outside the project, one folder per run (review-bridge logs <run_id>).
-  write("Logs: " + logs);
+  write(t("status.logs", { folder: logs }));
   // What VS Code's PostgreSQL extension asks for; the password stays in its owner-only file.
   const { host, port, database, user, passwordFile } = db.connection;
-  write("Database in VS Code: install Microsoft's PostgreSQL extension and add a connection with");
-  write("  Server " + host + "  Port " + port + "  User " + user + "  Database " + database);
-  write("  Password: copy it from " + passwordFile);
+  write(t("status.database.vscode"));
+  write("  " + t("database.vscode.connection", { host, port, user, database }));
+  write("  " + t("database.vscode.password", { file: passwordFile }));
   return 0;
 }
 

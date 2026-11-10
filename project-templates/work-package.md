@@ -1,4 +1,5 @@
 ---
+# To run this one after another, put them in one subdirectory of work-packages/ with file names starting 01-, 02-.
 # Every key is optional; delete what you do not need. Any other key is refused.
 # priority: medium        # low / medium / high / urgent; picks the models and effort from the policy's table
 # writer: { model: gpt-5.6-sol, effort: high }   # over the priority table; the model must be the writer's CLI's
@@ -14,7 +15,7 @@
 ---
 # [One sentence describing this work]
 
-> Copy this file and fill in the blocks you need; delete the ones you do not. Each block runs from its `<!-- bridge:... -->` line to the next one, and Bridge copies it into the contract field of that name as written. The `##` headings are for you, in any language; Bridge does not read them. Running the start-work command authorizes the work order as it is at that moment.
+> Copy this file and fill in the blocks you need; delete the ones you do not, except Work and Acceptance, which every work order needs. Each block runs from its `<!-- bridge:... -->` line to the next one, and Bridge copies it into the contract field of that name as written. The `##` headings are for you, in any language; Bridge does not read them. Running the start-work command authorizes the work order as it is at that moment.
 
 <!-- bridge:context -->
 ## Background and current state
@@ -25,7 +26,7 @@
 [When the work is done, what will users see or be able to do?]
 
 <!-- bridge:requested_work -->
-## Work
+## Work (required)
 [Which changes or deliverables are required this time? Paragraphs, lists, image links or tables are all fine.]
 
 <!-- bridge:run_plan -->
@@ -48,9 +49,9 @@
 [Files or modules likely to be touched, if known]
 
 <!-- bridge:acceptance -->
-## Acceptance
-1. [Result one, with the situations or limits it applies to]
-2. [Result two, with the situations or limits it applies to]
+## Acceptance (required: one result per item, each starting with "- "; each item is one condition the reviewer judges)
+- [Result one, with the situations or limits it applies to]
+- [Result two, with the situations or limits it applies to]
 
 <!-- bridge:verification_hints -->
 ## Verification hints (the test command itself is chosen by Bridge from the installed rules)

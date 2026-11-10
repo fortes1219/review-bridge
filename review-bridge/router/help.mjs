@@ -31,7 +31,7 @@ export function renderMainHelp({ all = false } = {}) {
     "  -h, --help      Print this help; --help --all also lists the commands for agents and scripts",
     "",
     "Run review-bridge <command> --help for a command's options.",
-    "Update Review Bridge: npm i -g review-bridge@latest",
+    "Update Review Bridge: npx review-bridge takes the latest version by itself; a global install updates with npm i -g review-bridge@latest",
     "Remove Review Bridge: npm uninstall -g review-bridge",
     "",
   ].join("\n");

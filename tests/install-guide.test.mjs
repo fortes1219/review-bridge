@@ -55,6 +55,7 @@ function recordingUi(answers = []) {
     spinner() {
       return {
         start: (label) => calls.push({ start: label }),
+        message: (text) => calls.push({ progress: text }),
         stop: (label) => calls.push({ done: label }),
         error: (label) => calls.push({ failed: label }),
       };
@@ -101,6 +102,28 @@ async function guide(t, options, { answers, interactive = true, files = {}, save
   return { project, dataHome, ui, setup, run, written: () => written };
 }
 
+// Windows, 2026-11-09: on a Chinese system init printed English steps around one Chinese graph line. As
+// create-vue says its whole wizard in one language (ECOSYSTEM-REFERENCES A), every line is the person's.
+test("in the person's language the Guide asks, works and ends in that language, and hands it to the setup", async (t) => {
+  const saved = process.env.LANG;
+  process.env.LANG = "zh_TW.UTF-8";
+  t.after(() => { process.env.LANG = saved; });
+  const run = await guide(t, {}, { files: { "package.json": JSON.stringify({ name: "app" }) } });
+  await run.run;
+  const said = run.ui.calls;
+  assert.deepEqual(said.filter((call) => call.select).map((call) => call.select), ["選擇 writer：", "選擇 reviewer：", "選擇專案類型："]);
+  assert.deepEqual(said[1].options, ["claude (已登入)", "codex (需要登入)"]);
+  assert.ok(said.find((call) => call.select === "選擇專案類型：").options.includes("none (不指定專案類型)"));
+  assert.ok(said.some((call) => call.confirm === "要把 VS Code 工作加進這個專案的 .vscode/tasks.json 嗎？"));
+  const outro = said.find((call) => call.outro).outro;
+  assert.match(outro, /^完成。接下來：\n\n  把工單 \.md 放進 \.review-bridge\/work-packages\/，然後在 Claude Code 輸入：\n/);
+  assert.match(outro, /\n  網頁：http:\/\/localhost:8080\/\n\n  在 VS Code 看資料庫：/);
+  assert.match(outro, /\n    Password：從 .+secret 複製$/);
+  assert.doesNotMatch(outro, /Done\.|put a work order|at a terminal|page:|copy it from/);
+  // The steps are the setup's to say: it gets the same language.
+  assert.equal(run.setup.seen[0].t("init.step.setting_up"), "設定 .review-bridge/");
+});
+
 test("the Guide asks writer, reviewer and project type, then works one step per line and ends with Done", async (t) => {
   const run = await guide(t, {}, { files: { "package.json": JSON.stringify({ name: "app" }) } });
   const result = await run.run;
@@ -119,13 +142,34 @@ test("the Guide asks writer, reviewer and project type, then works one step per 
     { start: "Checking the setup" }, { done: "Checking the setup" },
     { start: "Running the four fake self-tests" }, { done: "Running the four fake self-tests" },
     { start: "Starting the local page" }, { done: "Starting the local page" },
-    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" + DATABASE_LINES },
+    { outro: "Done. Now:\n\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    npx review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8080/" + DATABASE_LINES },
   ]);
   assert.deepEqual(run.setup.seen.map(({ target, roles, profileId }) => ({ target, roles, profileId })),
     [{ target: run.project, roles: { writer: "claude", reviewer: "codex" }, profileId: "node-backend" }]);
   assert.equal(result.ok, true);
   assert.equal(result.printed, true);
   assert.equal(run.written(), "");
+});
+
+// T0-GRAPH-01: mapping the project says how far it is on its own line, and init ends with what it read.
+test("a long step shows its progress on its spinner line, and the Done message begins with what was mapped", async (t) => {
+  const project = await tempDir(t, "review-bridge-guide-project-");
+  const dataHome = await tempDir(t, "review-bridge-guide-home-");
+  const ui = recordingUi();
+  const lines = ["Mapped 2 file(s): 3 definition(s), 1 reference(s), 1 import(s)."];
+  await runGuide({}, {
+    packageRoot, cwd: project, interactive: true, ui, dataHome, asRoot: () => false,
+    inspectProvider: async () => signedIn,
+    setUpProject: async (settings, step) => {
+      await step("Mapping the project", async (update) => { update("1/2 files, 1 definitions"); update("2/2 files, 3 definitions"); });
+      return { ok: true, target: settings.target, url: "http://localhost:8080/", database: DATABASE, graph_lines: lines };
+    },
+  });
+  const mapped = ui.calls.slice(ui.calls.findIndex((call) => call.start === "Mapping the project"));
+  assert.deepEqual(mapped.slice(0, 4), [
+    { start: "Mapping the project" }, { progress: "Mapping the project: 1/2 files, 1 definitions" }, { progress: "Mapping the project: 2/2 files, 3 definitions" }, { done: "Mapping the project" },
+  ]);
+  assert.match(ui.calls.at(-1).outro, /^Mapped 2 file\(s\): 3 definition\(s\), 1 reference\(s\), 1 import\(s\)\.\n\nDone\. Now:\n/);
 });
 
 // RC3-VSCODE-01: the last question, before any work; nothing outside .review-bridge/ without a yes.
@@ -179,7 +223,7 @@ test("a tasks file Bridge cannot read does not undo the setup: the file stays an
   assert.equal(result.ok, true);
   assert.equal(await fsp.readFile(file, "utf8"), "{ broken");
   assert.deepEqual(broken.ui.calls.find((call) => call.failed), { failed: "Adding VS Code tasks" });
-  assert.match(broken.ui.calls.at(-1).outro, /VS Code tasks were not added: .*cannot be read as a tasks file.* Fix it, then run: review-bridge vscode/);
+  assert.match(broken.ui.calls.at(-1).outro, /VS Code tasks were not added: .*cannot be read as a tasks file.* Fix it, then run: npx review-bridge vscode/);
 });
 
 test("an empty folder preselects none, and none is set up as a project without a type", async (t) => {
@@ -259,7 +303,7 @@ test("a folder already set up, or root on macOS and Linux, is refused before any
     inspectProvider: async () => signedIn, setUpProject: async () => { throw new Error("setup must not run"); },
   });
   const before = done.ui.calls.length;
-  await assert.rejects(again, /This folder is already set up .* review-bridge upgrade/);
+  await assert.rejects(again, /This folder is already set up .* npx review-bridge upgrade/);
   assert.equal(done.ui.calls.length, before);
 
   const root = await guide(t, {}, { asRoot: true, setUp: false });
@@ -283,8 +327,8 @@ test("an option the Guide does not know is refused", async (t) => {
 test("Done names cd when the project is not the current folder, then the agent's start, the terminal's start, the page and the database for VS Code", () => {
   const cwd = path.join(os.tmpdir(), "work");
   assert.equal(doneMessage(path.join(cwd, "my app"), cwd, "http://localhost:8081/", DATABASE),
-    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/" + DATABASE_LINES);
-  assert.match(doneMessage(cwd, cwd, null, DATABASE), /\n  page: not running; start it with review-bridge up\n/);
+    "Done. Now:\n\n  cd \"my app\"\n  put a work order .md in .review-bridge/work-packages/, then in Claude Code type:\n    /review-bridge start .review-bridge/work-packages/<file>.md\n    (in Codex: $review-bridge start .review-bridge/work-packages/<file>.md)\n  at a terminal, for advanced use and CI:\n    npx review-bridge start .review-bridge/work-packages/<file>.md\n  page: http://localhost:8081/" + DATABASE_LINES);
+  assert.match(doneMessage(cwd, cwd, null, DATABASE), /\n  page: not running; start it with npx review-bridge up\n/);
 });
 
 test("--version prints the package version and --help describes the npm command", () => {
@@ -308,9 +352,13 @@ test("uninstall without --target says how npm removes Review Bridge", () => {
   assert.match(result.stderr, /uninstall needs --target <folder>\. To remove Review Bridge itself, run: npm uninstall -g review-bridge/);
 });
 
-test("Node older than 22 is named in one line", () => {
+// The minimum is 22.8 (utils/nodeVersion.mjs MINIMUM_NODE: util.styleText honours the colour variables from there).
+test("Node older than 22.8 is named in one line", () => {
   assert.equal(nodeTooOld("20.11.0"), true);
-  assert.equal(nodeTooOld("22.0.0"), false);
+  assert.equal(nodeTooOld("22.0.0"), true);
+  assert.equal(nodeTooOld("22.7.9"), true);
+  assert.equal(nodeTooOld("22.8.0"), false);
+  assert.equal(nodeTooOld("24.0.0"), false);
 });
 
 test("an unreadable settings file is refused, never taken as nothing saved", async (t) => {
@@ -365,11 +413,19 @@ test("--help lists the commands for people; --help --all adds the ones for agent
   const run = (...args) => spawnSync(process.execPath, [bridge, ...args], { cwd: packageRoot, encoding: "utf8", windowsHide: true });
   const listed = (text) => text.split("\n").filter((line) => /^  [a-z]/.test(line)).map((line) => line.trim().split(/\s/)[0]);
   const human = ["init", "start", "stop", "resume", "clean", "status", "logs", "up", "down", "ps", "watch", "upgrade", "uninstall", "doctor", "backup"];
-  const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "roles-check"];
+  const agent = ["work-plan", "work-start", "work-status", "work-cancel", "review", "bounded-resume", "wait", "prune", "rm", "graph", "graph-mcp", "roles-check"];
   assert.deepEqual(listed(run("--help").stdout), human);
   assert.deepEqual(listed(run("--help", "--all").stdout).sort(), [...human, ...agent].sort());
   assert.match(run("init", "--help").stdout, /\n\nAfterwards you start work through your agent: in Claude Code type \/review-bridge start <file>; in Codex, \$review-bridge start <file>\. review-bridge start <file> at a terminal is for advanced use and CI\.\n/);
-  assert.match(run("status", "--help").stdout, /Show what Bridge is doing now: the page, this project's runs, the review queue, and how to look at the database/);
+  // status lists the runs from the database and no totals counted from files (Fortes 2026-11-08).
+  const statusHelp = run("status", "--help").stdout;
+  assert.match(statusHelp, /Show what Bridge is doing now: the page, this project's runs, and how to look at the database/);
+  assert.doesNotMatch(statusHelp, /review queue/i);
+  // up and down start and stop the database with the page, as docker compose up and down (RC3-DOWN-01);
+  // ps shows the page's address and nothing counted.
+  assert.match(run("up", "--help").stdout, /Start the database and the local page service in the background/);
+  assert.match(run("down", "--help").stdout, /Stop the local page service and the database; refused while a run is running/);
+  assert.match(run("ps", "--help").stdout, /Show whether the local page service is running, and its address/);
   assert.match(run("prune", "--help").stdout, /Same as clean without a run id/);
   assert.match(run("rm", "--help").stdout, /Same as clean <run_id>/);
 });

@@ -60,20 +60,21 @@ function cli(args, { env = process.env, cwd = packageRoot } = {}) {
 test("six shell tasks run the existing CLI, with the file and the run ids as arguments and the terminal focused", () => {
   assert.deepEqual(BRIDGE_TASKS.map((task) => task.label), LABELS);
   assert.deepEqual(BRIDGE_TASKS.map((task) => [task.command, ...task.args]), [
-    ["review-bridge", "start", "${file}"],
-    ["review-bridge", "stop", "${input:review-bridge-run-id}"],
-    ["review-bridge", "resume", "${input:review-bridge-run-id}"],
-    ["review-bridge", "clean", "${input:review-bridge-clean-run-id}"],
-    ["review-bridge", "status"],
-    ["review-bridge", "logs", "${input:review-bridge-logs-target}"],
+    ["npx", "review-bridge", "start", "${file}"],
+    ["npx", "review-bridge", "stop", "${input:review-bridge-run-id}"],
+    ["npx", "review-bridge", "resume", "${input:review-bridge-run-id}"],
+    ["npx", "review-bridge", "clean", "${input:review-bridge-clean-run-id}"],
+    ["npx", "review-bridge", "status"],
+    ["npx", "review-bridge", "logs", "${input:review-bridge-logs-target}"],
   ]);
   for (const task of BRIDGE_TASKS) {
     assert.equal(task.type, "shell");
     assert.deepEqual(task.problemMatcher, []);
     assert.deepEqual(task.presentation, { focus: true });
     assert.doesNotMatch(JSON.stringify(task), /node|bootstrap\.mjs/);
-    assert.ok(COMMANDS[task.args[0]], task.args[0] + " is a command of the CLI");
-    assert.equal(COMMANDS[task.args[0]].audience, "human");
+    // npx review-bridge <action>: the action follows the package name.
+    assert.ok(COMMANDS[task.args[1]], task.args[1] + " is a command of the CLI");
+    assert.equal(COMMANDS[task.args[1]].audience, "human");
   }
   const used = new Set(BRIDGE_TASKS.flatMap((task) => task.args).flatMap((arg) => /\$\{input:(.+)\}/.exec(arg)?.[1] ?? []));
   assert.deepEqual(BRIDGE_INPUTS.map((input) => input.id).sort(), [...used].sort(), "every input is used, and every use has one");
@@ -197,7 +198,7 @@ test("writing says what it did, and releasing leaves the person's file or takes 
   // A comment is the person's: it keeps the file.
   await fsp.writeFile(file, `// keep this\n{\n  "version": "2.0.0"\n}\n`);
   assert.equal(await writeVscodeTasks(file), "added");
-  await fsp.writeFile(file, (await fsp.readFile(file, "utf8")).replace(`"command": "review-bridge",`, `"command": "older",`));
+  await fsp.writeFile(file, (await fsp.readFile(file, "utf8")).replace(`"command": "npx",`, `"command": "older",`));
   assert.equal(await writeVscodeTasks(file), "updated");
   assert.equal(await releaseVscodeTasks(file), "removed");
   assert.equal(await fsp.readFile(file, "utf8"), `// keep this\n{\n  "version": "2.0.0"\n}\n`);

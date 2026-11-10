@@ -10,6 +10,9 @@ import { readEvidenceTail } from "./providerFailure.mjs";
 const finite = (value) => (Number.isFinite(value) ? value : 0);
 const emptyTokens = () => ({ input: 0, cache_write: 0, cache_read: 0, output: 0 });
 
+const assistantText = (record) => (Array.isArray(record.message?.content) ? record.message.content : [])
+  .filter((block) => block?.type === "text").map((block) => String(block.text || "")).join("\n");
+
 // D3.2: one JSON object per line from `--output-format stream-json`; a single JSON
 // object (legacy `--output-format json`, fakes) is accepted as the result alone.
 export function parseClaudeStream(text) {
@@ -18,6 +21,8 @@ export function parseClaudeStream(text) {
   let result = null;
   let init = null;
   let unparsable = 0;
+  // The CLI's own typed error on the session's latest assistant line, with the words it came with.
+  let apiError = null;
   // Per-message usage, kept for a call that ends without a final result (stopped, timed out).
   // The CLI repeats an assistant message once per content block, so a message id counts once.
   const messageUsage = new Map();
@@ -34,6 +39,7 @@ export function parseClaudeStream(text) {
     if (record?.type === "system" && record.subtype === "init") { init = record; continue; }
     if (record?.type === "assistant") {
       const subagent = Boolean(record.parent_tool_use_id);
+      if (!subagent) apiError = record.error ? { code: String(record.error), text: assistantText(record) } : null;
       if (record.message?.usage && !messageUsage.has(record.message.id ?? messageUsage.size)) {
         messageUsage.set(record.message.id ?? messageUsage.size, { subagent, usage: record.message.usage });
       }
@@ -63,7 +69,7 @@ export function parseClaudeStream(text) {
     streamUsage.tokens.cache_read += finite(usage.cache_read_input_tokens);
     streamUsage.tokens.output += finite(usage.output_tokens);
   }
-  return { result, init, reads, streamUsage, unparsable_lines: unparsable };
+  return { result, init, reads, streamUsage, apiError, unparsable_lines: unparsable };
 }
 
 // The four token fields Claude Code 2.1.280 was verified to put in result.usage (2026-10-13).
@@ -146,46 +152,63 @@ export async function projectMcpServers(cwd) {
   return config?.mcpServers && typeof config.mcpServers === "object" ? config.mcpServers : {};
 }
 
-// The allowed servers only, as the one string --mcp-config takes: the file as a whole may hold others.
-export async function mcpConfigFor(cwd, names) {
-  const servers = await projectMcpServers(cwd);
+// Bridge's own graph server as an --mcp-config entry: an entry with no `type` is a stdio server, and
+// `alwaysLoad` loads its tools into the first prompt instead of deferring them behind ToolSearch (Claude
+// Code's MCP docs, "Exempt a server from deferral"). Without it a session sees only their names, and a
+// reviewer's `--tools Read,Grep,Glob` leaves out ToolSearch itself, so it could never load them.
+const graphServers = (graph) => (graph ? { [graph.name]: { command: graph.command, args: graph.args, alwaysLoad: true } } : {});
+
+// The allowed servers only, plus Bridge's graph server, as the one string --mcp-config takes: the file
+// as a whole may hold others.
+export async function mcpConfigFor(cwd, names, graph = null) {
+  const servers = names.length ? await projectMcpServers(cwd) : {};
   const absent = names.filter((name) => !servers[name]);
   if (absent.length) throw new Error("This project's .mcp.json no longer defines " + absent.join(", ") + ".");
-  return JSON.stringify({ mcpServers: Object.fromEntries(names.map((name) => [name, servers[name]])) });
+  return JSON.stringify({ mcpServers: { ...Object.fromEntries(names.map((name) => [name, servers[name]])), ...graphServers(graph) } });
 }
 
-// The reviewer's flags, plus the servers the policy lets through. --strict-mcp-config stays: only these
-// load. In print mode nobody can answer a prompt, so a let-through server is allowed by name too.
+// The reviewer's flags, plus the servers the policy lets through and Bridge's graph server.
+// --strict-mcp-config stays: only these load. In print mode nobody can answer a prompt, so each is
+// allowed by its server name (`mcp__<server>`, Claude Code's permission rules).
 export function readOnlyArgs({ mcpConfig = null, mcp = [] } = {}) {
   return [...READ_ONLY_ARGS, ...(mcpConfig ? ["--mcp-config", mcpConfig, "--allowedTools", mcp.map((name) => "mcp__" + name).join(",")] : [])];
 }
 
-const ACCESS_ARGS = Object.freeze({
+export const ACCESS_ARGS = Object.freeze({
   none: () => ["--tools", "", "--strict-mcp-config"],
   read: (_disallowedTools, _projectMcp, readOnly) => [...readOnlyArgs(readOnly), "--no-session-persistence"],
   // Sub-agents are allowed for implementation; a project override can still disallow tools. The MCP
   // servers a writer has are the project's own, from its .mcp.json, which --strict-mcp-config would
-  // otherwise drop along with the person's.
-  write: (disallowedTools, projectMcp) => [
-    "--permission-mode", "auto",
-    ...(disallowedTools.length ? ["--disallowedTools", disallowedTools.join(",")] : []),
-    "--strict-mcp-config",
-    ...(projectMcp ? ["--mcp-config", PROJECT_MCP_CONFIG] : []),
-  ],
+  // otherwise drop along with the person's, and Bridge's graph server, allowed by name.
+  write: (disallowedTools, projectMcp, _readOnly, graph) => {
+    const configs = [...(projectMcp ? [PROJECT_MCP_CONFIG] : []), ...(graph ? [JSON.stringify({ mcpServers: graphServers(graph) })] : [])];
+    return [
+      "--permission-mode", "auto",
+      ...(disallowedTools.length ? ["--disallowedTools", disallowedTools.join(",")] : []),
+      "--strict-mcp-config",
+      ...(configs.length ? ["--mcp-config", ...configs] : []),
+      ...(graph ? ["--allowedTools", "mcp__" + graph.name] : []),
+    ];
+  },
 });
 
 // One call: `access` is what the session may do (none, read or write). The session id is the
 // caller's where it has one. The answer is written to `answerPath`, like Codex's last message.
 export async function callClaude({
-  adapter, access, role, call = 0, prompt, schemaPath, model = null, effort, cwd, sessionId = null, maxTurns = null, disallowedTools = [], mcp = [],
+  adapter, access, role, call = 0, prompt, schemaPath, model = null, effort, cwd, sessionId = null, maxTurns = null, disallowedTools = [], mcp = [], graph = null,
   stdoutPath, stderrPath, answerPath = null, timeoutMs, onSpawn,
 }) {
   const executable = await adapter.resolveExecutable("claude");
   const projectMcp = access === "write" && Boolean(await fsp.stat(path.join(cwd, PROJECT_MCP_CONFIG)).then((stat) => stat.isFile(), () => false));
+  const readGraph = access === "read" ? graph : null;
+  const readOnly = {
+    mcp: [...mcp, ...(readGraph ? [readGraph.name] : [])],
+    mcpConfig: access === "read" && (mcp.length || readGraph) ? await mcpConfigFor(cwd, mcp, readGraph) : null,
+  };
   const args = [
     "-p",
     ...(sessionId ? ["--session-id", sessionId] : []),
-    ...ACCESS_ARGS[access](disallowedTools, projectMcp, { mcp, mcpConfig: access === "read" && mcp.length ? await mcpConfigFor(cwd, mcp) : null }),
+    ...ACCESS_ARGS[access](disallowedTools, projectMcp, readOnly, access === "write" ? graph : null),
     // A model of null leaves the choice to the CLI.
     ...(model ? ["--model", model] : []),
     "--effort", effort,
@@ -225,9 +248,11 @@ export async function callClaude({
     maxTurnsReached: stream.result?.subtype === "error_max_turns",
     // The MCP tools its own init event says the session held; null when the stream shows no list.
     mcpToolsHeld: Array.isArray(stream.init?.tools) ? stream.init.tools.filter((tool) => String(tool).startsWith("mcp__")) : null,
+    failureCode: stream.apiError?.code ?? null,
     // The CLI marks its own error with is_error; only then is `result` its message (a usage limit is
     // reported there). Otherwise `result` is the model's text and is not read.
     failureTexts: async () => [
+      stream.apiError?.text || "",
       stream.result?.is_error === true ? String(stream.result.result || "") : "",
       await readEvidenceTail(stderrPath),
       stream.result ? "" : await readEvidenceTail(stdoutPath),
