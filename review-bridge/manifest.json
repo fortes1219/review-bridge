@@ -41,7 +41,7 @@
     "linux-x64": {
       "id": "linux-x64-node",
       "module": "./platforms/linux-x64/adapter.mjs",
-      "status": "experimental",
+      "status": "candidate",
       "runtime_verified": false
     }
   }

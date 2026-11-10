@@ -2,6 +2,12 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號依 [Semantic Versioning](https://semver.org/lang/zh-TW/)。英文原文在 repo 的 `CHANGELOG.md`。
 
+## 未發行
+
+### 變更
+
+- **Linux x64 成為可選用的平台。** Linux x64 現在可以原生開工，和 Apple Silicon macOS 一樣：可以選用，但我們自己還沒驗證。第一位使用者在 Ubuntu 26.04 用真的 Claude Code 擔任 writer 與 reviewer，把一張工單跑到交付：reviewer 唯讀檢查通過、Bridge 跑了專案的測試、reviewer 判通過。Codex 在 Linux 上還沒有執行紀錄。升級 Bridge 之後，先執行 `npx review-bridge down`，再執行 `npx review-bridge up`：本機頁面服務只在啟動時讀一次這個平台能不能呼叫模型。
+
 ## 0.3.0-rc.3（2026-11-10）
 
 第一個發行版。
