@@ -187,6 +187,61 @@
       "test": "review-bridge/tests/platform.test.mjs",
       "case": "the adapter for model-free checks: any defined platform, eligible only by the manifest's status",
       "expect": "experimental"
+    },
+    {
+      "id": "RB-M-run-lock-unwritten-parse-error",
+      "gate": "Records",
+      "target": "review-bridge/service/records/runStore.mjs",
+      "anchor": "      const found = await readLockFile(file);\n      if (!found) continue;",
+      "replacement": "      const found = await readOptional(file).then((record) => record && { record });\n      if (!found) continue;",
+      "reason": "A run lock read between its exclusive create and its write throws the parse error again, so a delivery racing another fails outright (CI ubuntu, result-file S1d, 2026-11-11).",
+      "test": "review-bridge/tests/run-closing.test.mjs",
+      "case": "a run lock file that is empty or half written is held, not a parse error",
+      "expect": "Unexpected end of JSON input"
+    },
+    {
+      "id": "RB-M-run-lock-unwritten-taken-at-once",
+      "gate": "Records",
+      "target": "review-bridge/service/records/runStore.mjs",
+      "anchor": "if (clock() - found.modifiedAt < policy.limits.lock_stale || !allowReconcile) throw",
+      "replacement": "if (!allowReconcile) throw",
+      "reason": "A run lock with no readable content is treated as stale at once, so a taker moves aside the lock its holder is still writing and two processes hold the run.",
+      "test": "review-bridge/tests/run-closing.test.mjs",
+      "case": "a run lock file that is empty or half written is held, not a parse error",
+      "expect": "Missing expected rejection"
+    },
+    {
+      "id": "RB-M-run-lock-unwritten-never-stale",
+      "gate": "Records",
+      "target": "review-bridge/service/records/runStore.mjs",
+      "anchor": "if (clock() - found.modifiedAt < policy.limits.lock_stale || !allowReconcile) throw",
+      "replacement": "if (true) throw",
+      "reason": "A run lock with no readable content counts as held whatever its age, so the empty file a holder left when it died before writing blocks the run for good.",
+      "test": "review-bridge/tests/run-closing.test.mjs",
+      "case": "an empty run lock file older than lock_stale is taken over; a younger one is not",
+      "expect": "Run lock is already held"
+    },
+    {
+      "id": "RB-M-reconcile-guard-unwritten-parse-error",
+      "gate": "Records",
+      "target": "review-bridge/service/records/runStore.mjs",
+      "anchor": "      const guardFound = await readLockFile(file);",
+      "replacement": "      const guardFound = await readOptional(file).then((record) => record && { record });",
+      "reason": "A reconcile guard read between its exclusive create and its write throws the parse error again, so a stale-lock takeover racing another fails outright.",
+      "test": "review-bridge/tests/run-closing.test.mjs",
+      "case": "an empty reconcile guard is a reconciliation in progress",
+      "expect": "Unexpected end of JSON input"
+    },
+    {
+      "id": "RB-M-lock-mark-ignores-unwritten-change",
+      "gate": "Records",
+      "target": "review-bridge/service/records/runStore.mjs",
+      "anchor": "return found.unwritten ? \"unwritten \" + found.modifiedAt : ",
+      "replacement": "return found.unwritten ? \"unwritten\" : ",
+      "reason": "During the takeover's wait the lock file is replaced by another taker's file, just created and not yet written; a takeover that compares files with no readable content by a fixed value sees no change and moves that taker's lock aside.",
+      "test": "review-bridge/tests/run-closing.test.mjs",
+      "case": "an empty run lock written during the takeover's wait is not taken over",
+      "expect": "Missing expected rejection"
     }
   ]
 }

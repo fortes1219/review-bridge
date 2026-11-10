@@ -8,6 +8,7 @@ import {
   ensureDir,
   fileExists,
   listJson,
+  parseJson,
   readJson,
   readLastLine,
   writeJsonAtomicDurable,
@@ -139,9 +140,48 @@ async function readOptional(file) {
   try {
     return await readJson(file);
   } catch (error) {
-    if (error?.code === "ENOENT" || (process.platform === "win32" && error?.code === "EPERM")) return null;
+    if (isGone(error)) return null;
     throw error;
   }
+}
+
+function isGone(error) {
+  return error?.code === "ENOENT" || (process.platform === "win32" && error?.code === "EPERM");
+}
+
+// A lock file is created empty and written after (exclusive create, then write), as PostgreSQL's
+// CreateLockFile does (miscinit.c:1270-1275); a reader can land in between and find it empty or half
+// written. That is a lock being written, not a broken one (miscinit.c:1311-1316), so it is held; its age
+// is the file's modification time, as proper-lockfile judges a lock that has no content
+// (lib/lockfile.js:51-85). A file that is gone is null, as in readOptional.
+async function readLockFile(file) {
+  let text;
+  try {
+    text = await fsp.readFile(file, "utf8");
+  } catch (error) {
+    if (isGone(error)) return null;
+    throw error;
+  }
+  let record;
+  try {
+    record = parseJson(text);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+  // Content that parses but is not a record (`null`, a number, a list) has no fields to read either.
+  if (record !== null && typeof record === "object" && !Array.isArray(record)) return { record };
+  try {
+    return { unwritten: true, modifiedAt: (await fsp.stat(file)).mtimeMs };
+  } catch (error) {
+    if (isGone(error)) return null;
+    throw error;
+  }
+}
+
+// What a takeover compares before and after its wait: the holder's nonce and heartbeat, or, for a
+// file with no readable content, its modification time.
+function lockMark(found) {
+  return found.unwritten ? "unwritten " + found.modifiedAt : found.record.lock_nonce + " " + found.record.heartbeat_at;
 }
 
 async function pidAlive(pid) {
@@ -199,10 +239,14 @@ async function acquireReconcileGuard(paths, runId, policy, { clock }) {
       if (isTransientCreateError(error)) { await new Promise((resolve) => setTimeout(resolve, 25)); continue; }
       if (error.code !== "EEXIST") throw error;
       // The holder may release between our failed create and this read; that is a free guard, so try again.
-      const existing = await readOptional(file);
-      if (!existing) continue;
-      if (Date.parse(existing.expires_at) > clock()) throw new Error("Run reconciliation is already in progress.");
-      const moved = await moveExpiredRecord(file, existing.guard_nonce || "unknown");
+      const guardFound = await readLockFile(file);
+      if (!guardFound) continue;
+      // A guard with no readable content lives as long as a written one: reconcile_guard_ttl from its creation.
+      const expired = guardFound.unwritten
+        ? clock() - guardFound.modifiedAt >= policy.limits.reconcile_guard_ttl
+        : Date.parse(guardFound.record.expires_at) <= clock();
+      if (!expired) throw new Error("Run reconciliation is already in progress.");
+      const moved = await moveExpiredRecord(file, guardFound.record?.guard_nonce || "unknown");
       if (!moved) continue;
     }
   }
@@ -267,24 +311,29 @@ export async function acquireRunLock(paths, runId, policy, {
       if (isTransientCreateError(error)) { lastTransient = error.code; await new Promise((resolve) => setTimeout(resolve, 25)); continue; }
       if (error.code !== "EEXIST") throw error;
       // The holder may release between our failed create and this read; that is a free lock, so try again.
-      const existing = await readOptional(file);
-      if (!existing) continue;
-      const heartbeatExpired = clock() - Date.parse(existing.heartbeat_at)
-        >= policy.limits.lock_stale;
-      const live = await pidAlive(Number(existing.pid)) && !heartbeatExpired;
-      if (live || !heartbeatExpired || !allowReconcile) throw new Error("Run lock is already held.");
+      const found = await readLockFile(file);
+      if (!found) continue;
+      if (found.unwritten) {
+        // Being written, or left by a holder that died before writing it: held until it is lock_stale old.
+        if (clock() - found.modifiedAt < policy.limits.lock_stale || !allowReconcile) throw new Error("Run lock is already held.");
+      } else {
+        const existing = found.record;
+        const heartbeatExpired = clock() - Date.parse(existing.heartbeat_at)
+          >= policy.limits.lock_stale;
+        const live = await pidAlive(Number(existing.pid)) && !heartbeatExpired;
+        if (live || !heartbeatExpired || !allowReconcile) throw new Error("Run lock is already held.");
+      }
       const guard = await acquireReconcileGuard(paths, runId, policy, { clock });
       try {
-        const originalNonce = existing.lock_nonce;
-        const originalHeartbeat = existing.heartbeat_at;
+        const originalMark = lockMark(found);
         await sleep(policy.limits.reconcile_grace);
         await guard.assertOwner();
-        const reread = await readOptional(file);
+        const reread = await readLockFile(file);
         if (!reread) continue;
-        if (reread.lock_nonce !== originalNonce || reread.heartbeat_at !== originalHeartbeat) {
+        if (lockMark(reread) !== originalMark) {
           throw new Error("Stale-lock takeover aborted because the lock advanced.");
         }
-        const moved = await moveExpiredRecord(file, originalNonce || "unknown");
+        const moved = await moveExpiredRecord(file, found.record?.lock_nonce || "unknown");
         if (!moved) continue;
       } finally {
         await guard.release();

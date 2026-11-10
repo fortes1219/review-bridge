@@ -11,6 +11,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Linux x64 is a candidate platform.** Native work now starts on Linux x64, as on Apple Silicon macOS: selectable, not yet verified by us. The first user ran a work order to delivery on Ubuntu 26.04 with real Claude Code as writer and reviewer: the reviewer read-only check passed, Bridge ran the project's tests, and the reviewer passed. No run with Codex on Linux has been recorded yet. After upgrading Bridge, run `npx review-bridge down` and then `npx review-bridge up`: the local page service reads whether this platform may call a model only when it starts.
 
+### Fixed
+
+- **Deliveries racing for one run no longer fail with `Unexpected end of JSON input`.** When two processes delivered the same run at once (for example `stop` and a `start` that was closing), one could read the run lock in the moment between its creation and its content and fail without a retry. A lock file with no readable content now counts as held, so the delivery waits and retries; one left empty by a process that died is taken over once it is older than `lock_stale` (30 seconds), as a lock with a stale heartbeat already was.
+
 ## [0.3.0-rc.3] - 2026-11-10
 
 First release.
