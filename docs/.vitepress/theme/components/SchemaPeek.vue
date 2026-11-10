@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-// A long schema shown as its first lines, cut with a fade, and the whole file in a native <dialog>
+// Preview a file with a fade, then open its full text in a native <dialog>.
 // (showModal: Esc closes it, focus stays inside). The text is the file itself, imported with ?raw.
 type Locale = 'zh-TW' | 'en' | 'ja'
 
@@ -15,9 +15,9 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), { locale: 'zh-TW', previewLines: 24 })
 
 const LABELS: Record<Locale, { open: (count: number) => string, close: string }> = {
-  'zh-TW': { open: (count) => `看完整 schema（${count} 行）`, close: '關閉' },
-  en: { open: (count) => `View full schema (${count} lines)`, close: 'Close' },
-  ja: { open: (count) => `スキーマ全体を表示（${count} 行）`, close: '閉じる' },
+  'zh-TW': { open: (count) => `展開完整內容（${count} 行）`, close: '關閉' },
+  en: { open: (count) => `View full file (${count} lines)`, close: 'Close' },
+  ja: { open: (count) => `全文を表示（${count} 行）`, close: '閉じる' },
 }
 
 const lines = computed(() => props.source.replace(/\n$/, '').split('\n'))

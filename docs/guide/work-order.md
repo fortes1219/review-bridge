@@ -2,7 +2,8 @@
 
 <script setup>
 import SchemaPeek from "../.vitepress/theme/components/SchemaPeek.vue"
-import contractSchema from "../../review-bridge/features/workOrder/schemas/contract.schema.json?raw"
+import simpleContract from "./samples/add-readme.contract.8d086ca.json?raw"
+import fullContract from "./samples/checkout-discount.contract.5e73907.json?raw"
 </script>
 
 A work order is a Markdown file in `.review-bridge/work-packages/`. Bridge parses the block markers, copies each block into the matching contract field, and splits the acceptance list into numbered conditions (AC1, AC2, and so on). This is done in code without a model call and records 0 tokens in the result.
@@ -67,21 +68,21 @@ Once validation passes, Bridge builds the contract in code, before showing the a
 - `open_questions` has no contract field. Bridge checks it before work starts so unanswered questions block the start.
 - The contract also contains the sealed work-order text (`source.lines`) and that text's SHA-256 (`source.sha256`).
 
-Bridge then computes a SHA-256 for the whole contract, independent of JSON key order. Here is the contract line from the [captured English fake-CLI run](./start#the-card):
+Bridge then computes a SHA-256 for the whole contract, independent of JSON key order, and shows it on the card. For the simple work order on this page, the contract hash is:
 
 ```text
-Contract:     sha256 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3, 2 condition(s) cut from the acceptance list
+sha256 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3
 ```
 
 Your approval authorizes the contract with that hash. Bridge stores it under the hash in its data directory and recomputes the hash whenever it reads the file. A mismatch stops the work. A copy also goes into `.review-bridge/results/<work-order>/contract.v<version>.<first-seven-hash-characters>.json`. Editing the work-order file doesn't change the sealed version. Run `start` again to use the edited text as the next version of the same work order.
 
-### Contract schema
+### The contract for the simple example
 
-Before sealing a contract, Bridge validates it against this JSON Schema (draft-07). It validates it again when reading it back. All top-level fields must be present. Optional work-order content uses `null` or `[]`; individual `budget` settings may be omitted. Objects reject additional fields.
+Bridge generated and sealed this JSON from the simple work order above. The two acceptance items become `AC1` and `AC2`; their `source_refs` point to line ranges in `source.lines`. Because the work order doesn't set `priority`, `effort`, or `budget`, those fields are `null` in `ticket`; the card uses the configured defaults. Other empty blocks use `null` or `[]`. `open_questions` has no separate contract field.
 
-<SchemaPeek title="contract.schema.json" :source="contractSchema" locale="en" />
+<SchemaPeek title="add-readme.md → contract 8d086ca" :source="simpleContract" locale="en" />
 
-There is no `open_questions` field in the schema. Unanswered questions block the start; they don't become a contract field.
+Bridge validates the contract against `contract.schema.json` (JSON Schema draft-07) before sealing it and whenever it reads it back. All top-level fields must be present; individual `budget` settings may be omitted. Objects reject additional fields.
 
 ### What the writer receives
 
@@ -107,7 +108,7 @@ Bridge checks the verdict for each condition. An overall PASS alone doesn't esta
 
 ### How this appears in the result
 
-The `Acceptance` section has one row per AC: Bridge's decision, your original condition, and the reviewer's verdict and evidence. The last line identifies the version checked. This excerpt comes from the same English fake-CLI run; the evidence text is a fixed fixture response:
+The `Acceptance` section has one row per AC: Bridge's decision, your original condition, and the reviewer's verdict and evidence. The last line identifies the version checked. This excerpt comes from the English fake-CLI run documented in [Results, logs, and the database](./results). The evidence text is a fixed fixture response:
 
 ```markdown
 ## Acceptance
@@ -227,6 +228,10 @@ Every time; all checkouts using discount codes.
 ## Open questions
 none
 ```
+
+Here is the contract Bridge generated and sealed from the complete example above. It has five conditions: the three work-order conditions become `AC1`–`AC3`, followed by RUN A's `AC4` and RUN B's `AC5`. Each run's condition names that run in `run_refs`. The frontmatter values for `priority`, `writer.effort`, and `budget` appear in `ticket`.
+
+<SchemaPeek title="checkout-discount.md → contract 5e73907" :source="fullContract" locale="en" />
 
 The table below maps work-order blocks to contract fields and explains how they are used. Both roles receive the full contract in every prompt, so both can read every field.
 

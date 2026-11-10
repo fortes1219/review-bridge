@@ -1,0 +1,372 @@
+{
+  "schema": "review-bridge.contract",
+  "schema_version": 4,
+  "work_package_id": "checkout-discount",
+  "source": {
+    "path": ".review-bridge/work-packages/checkout-discount.md",
+    "sha256": "dc64bf208fd1f2b0b1bdef31b5c5dcca7a6f2b18962bbc5236703ae327bdaa69",
+    "lines": [
+      "---",
+      "priority: high",
+      "writer: { effort: high }",
+      "reviewer: { effort: medium }",
+      "budget:",
+      "  rounds: 2",
+      "  run_timeout: 7200000",
+      "source_id: SHOP-412",
+      "---",
+      "# Checkout total does not update after applying a discount code",
+      "",
+      "<!-- bridge:context -->",
+      "## Background",
+      "After entering a discount code in CheckoutSummary and receiving API status 200, the total still shows the original price. Support received 14 reports this week. The discount API response changed in 2026-10: it previously returned `total` and now returns `subtotal`, `discount`, and `total`.",
+      "",
+      "<!-- bridge:outcome -->",
+      "## Expected outcome",
+      "Show the discounted total within one second of entering a valid code. For an invalid code, keep the total unchanged and show an error message.",
+      "",
+      "<!-- bridge:requested_work -->",
+      "## Requested work",
+      "1. Fix CheckoutSummary to use the API's new `total` after applying a discount code.",
+      "2. For an invalid code, show the API error message and keep the previous total.",
+      "3. Add unit tests for both cases.",
+      "",
+      "<!-- bridge:run_plan -->",
+      "## Run plan",
+      "### RUN A",
+      "Fix the total calculation and display for valid discount codes.",
+      "- effort: high",
+      "- acceptance:",
+      "  - After a valid code, the total equals the API's total.",
+      "",
+      "### RUN B",
+      "Handle invalid-code errors.",
+      "- depends_on: RUN A",
+      "- budget: { rounds: 1 }",
+      "- acceptance:",
+      "  - An invalid code shows an error and leaves the total unchanged.",
+      "",
+      "<!-- bridge:scope_notes.include -->",
+      "## Include",
+      "- Discount input and total in checkout",
+      "- Unit tests for these two cases",
+      "",
+      "<!-- bridge:scope_notes.exclude -->",
+      "## Exclude",
+      "- The discount API itself (a separate backend ticket)",
+      "- The cart subtotal",
+      "",
+      "<!-- bridge:scope_notes.must_keep -->",
+      "## Must keep",
+      "- Total calculation without a discount code remains unchanged",
+      "- All existing checkout tests must pass",
+      "- Do not change API paths or parameters",
+      "",
+      "<!-- bridge:scope_notes.expected_locations -->",
+      "## Likely locations (hints only, not authorization to edit)",
+      "- src/components/checkout/CheckoutSummary.vue",
+      "- src/composables/useDiscount.ts",
+      "- tests/unit/checkout/",
+      "",
+      "<!-- bridge:acceptance -->",
+      "## Acceptance",
+      "1. Within one second of entering a valid code, the displayed discounted total equals the API's `total`.",
+      "2. An invalid code leaves the total unchanged and displays the API's error message.",
+      "3. `npm test` passes. Both new tests fail before the fix and pass after it.",
+      "",
+      "<!-- bridge:verification_hints -->",
+      "## Verification hints",
+      "- Test data: `WELCOME10` (valid, 10% off), `EXPIRED` (invalid, API returns 422 and \"Discount code expired\").",
+      "- Existing tests: `tests/unit/checkout/CheckoutSummary.spec.ts`.",
+      "",
+      "<!-- bridge:reproduction.environment -->",
+      "## Bug: environment",
+      "Chrome 130, Windows 11, frontend v2.14.0, test environment.",
+      "",
+      "<!-- bridge:reproduction.steps -->",
+      "## Bug: steps to reproduce",
+      "1. Put one item priced at 1000 in the cart and open checkout.",
+      "2. Enter `WELCOME10` and apply it.",
+      "3. Check the total.",
+      "",
+      "<!-- bridge:reproduction.actual -->",
+      "## Bug: actual result",
+      "API returns 200, but the total still shows 1000.",
+      "",
+      "<!-- bridge:reproduction.expected -->",
+      "## Bug: expected result",
+      "The total shows 900.",
+      "",
+      "<!-- bridge:reproduction.frequency -->",
+      "## Bug: frequency and impact",
+      "Every time; all checkouts using discount codes.",
+      "",
+      "<!-- bridge:references -->",
+      "## References, attachments, and dependencies",
+      "- Discount API documentation: docs/api/discount.md",
+      "- Related ticket: SHOP-398 (API response change)",
+      "",
+      "<!-- bridge:open_questions -->",
+      "## Open questions",
+      "none"
+    ]
+  },
+  "ticket": {
+    "title": {
+      "text": "Checkout total does not update after applying a discount code",
+      "source_refs": [
+        {
+          "start": 10,
+          "end": 10
+        }
+      ]
+    },
+    "source_id": {
+      "text": "SHOP-412",
+      "source_refs": [
+        {
+          "start": 8,
+          "end": 8
+        }
+      ]
+    },
+    "priority": "high",
+    "effort": "high",
+    "budget": {
+      "rounds": 2,
+      "run_timeout": 7200000
+    }
+  },
+  "context": {
+    "text": "After entering a discount code in CheckoutSummary and receiving API status 200, the total still shows the original price. Support received 14 reports this week. The discount API response changed in 2026-10: it previously returned `total` and now returns `subtotal`, `discount`, and `total`.",
+    "source_refs": [
+      {
+        "start": 14,
+        "end": 14
+      }
+    ]
+  },
+  "outcome": {
+    "text": "Show the discounted total within one second of entering a valid code. For an invalid code, keep the total unchanged and show an error message.",
+    "source_refs": [
+      {
+        "start": 18,
+        "end": 18
+      }
+    ]
+  },
+  "requested_work": {
+    "text": "1. Fix CheckoutSummary to use the API's new `total` after applying a discount code.\n2. For an invalid code, show the API error message and keep the previous total.\n3. Add unit tests for both cases.",
+    "source_refs": [
+      {
+        "start": 22,
+        "end": 24
+      }
+    ]
+  },
+  "scope_notes": {
+    "include": {
+      "text": "- Discount input and total in checkout\n- Unit tests for these two cases",
+      "source_refs": [
+        {
+          "start": 43,
+          "end": 44
+        }
+      ]
+    },
+    "exclude": {
+      "text": "- The discount API itself (a separate backend ticket)\n- The cart subtotal",
+      "source_refs": [
+        {
+          "start": 48,
+          "end": 49
+        }
+      ]
+    },
+    "must_keep": {
+      "text": "- Total calculation without a discount code remains unchanged\n- All existing checkout tests must pass\n- Do not change API paths or parameters",
+      "source_refs": [
+        {
+          "start": 53,
+          "end": 55
+        }
+      ]
+    },
+    "expected_locations": {
+      "text": "- src/components/checkout/CheckoutSummary.vue\n- src/composables/useDiscount.ts\n- tests/unit/checkout/",
+      "source_refs": [
+        {
+          "start": 59,
+          "end": 61
+        }
+      ]
+    }
+  },
+  "run_plan": {
+    "runs": [
+      {
+        "name": "RUN A",
+        "text": "Fix the total calculation and display for valid discount codes.",
+        "depends_on": [],
+        "depends_on_quote": null,
+        "source_refs": [
+          {
+            "start": 29,
+            "end": 29
+          }
+        ],
+        "effort": "high",
+        "budget": null
+      },
+      {
+        "name": "RUN B",
+        "text": "Handle invalid-code errors.",
+        "depends_on": [
+          "RUN A"
+        ],
+        "depends_on_quote": "- depends_on: RUN A",
+        "source_refs": [
+          {
+            "start": 35,
+            "end": 35
+          }
+        ],
+        "effort": null,
+        "budget": {
+          "rounds": 1
+        }
+      }
+    ]
+  },
+  "acceptance": [
+    {
+      "id": "AC1",
+      "statement": "Within one second of entering a valid code, the displayed discounted total equals the API's `total`.",
+      "source_refs": [
+        {
+          "start": 65,
+          "end": 65
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC2",
+      "statement": "An invalid code leaves the total unchanged and displays the API's error message.",
+      "source_refs": [
+        {
+          "start": 66,
+          "end": 66
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC3",
+      "statement": "`npm test` passes. Both new tests fail before the fix and pass after it.",
+      "source_refs": [
+        {
+          "start": 67,
+          "end": 67
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC4",
+      "statement": "After a valid code, the total equals the API's total.",
+      "source_refs": [
+        {
+          "start": 32,
+          "end": 32
+        }
+      ],
+      "run_refs": [
+        "RUN A"
+      ]
+    },
+    {
+      "id": "AC5",
+      "statement": "An invalid code shows an error and leaves the total unchanged.",
+      "source_refs": [
+        {
+          "start": 39,
+          "end": 39
+        }
+      ],
+      "run_refs": [
+        "RUN B"
+      ]
+    }
+  ],
+  "verification_hints": [
+    {
+      "text": "- Test data: `WELCOME10` (valid, 10% off), `EXPIRED` (invalid, API returns 422 and \"Discount code expired\").\n- Existing tests: `tests/unit/checkout/CheckoutSummary.spec.ts`.",
+      "source_refs": [
+        {
+          "start": 71,
+          "end": 72
+        }
+      ]
+    }
+  ],
+  "reproduction": {
+    "environment": {
+      "text": "Chrome 130, Windows 11, frontend v2.14.0, test environment.",
+      "source_refs": [
+        {
+          "start": 76,
+          "end": 76
+        }
+      ]
+    },
+    "steps": {
+      "text": "1. Put one item priced at 1000 in the cart and open checkout.\n2. Enter `WELCOME10` and apply it.\n3. Check the total.",
+      "source_refs": [
+        {
+          "start": 80,
+          "end": 82
+        }
+      ]
+    },
+    "actual": {
+      "text": "API returns 200, but the total still shows 1000.",
+      "source_refs": [
+        {
+          "start": 86,
+          "end": 86
+        }
+      ]
+    },
+    "expected": {
+      "text": "The total shows 900.",
+      "source_refs": [
+        {
+          "start": 90,
+          "end": 90
+        }
+      ]
+    },
+    "frequency": {
+      "text": "Every time; all checkouts using discount codes.",
+      "source_refs": [
+        {
+          "start": 94,
+          "end": 94
+        }
+      ]
+    }
+  },
+  "references": [
+    {
+      "text": "- Discount API documentation: docs/api/discount.md\n- Related ticket: SHOP-398 (API response change)",
+      "source_refs": [
+        {
+          "start": 98,
+          "end": 99
+        }
+      ]
+    }
+  ],
+  "unused_lines": []
+}

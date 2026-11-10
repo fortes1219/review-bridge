@@ -2,7 +2,8 @@
 
 <script setup>
 import SchemaPeek from "../../.vitepress/theme/components/SchemaPeek.vue"
-import contractSchema from "../../../review-bridge/features/workOrder/schemas/contract.schema.json?raw"
+import simpleContract from "./samples/add-readme.contract.0c7d78a.json?raw"
+import fullContract from "./samples/checkout-discount.contract.4294592.json?raw"
 </script>
 
 工單是放在 `.review-bridge/work-packages/` 的 Markdown 檔案。Bridge 用程式依區塊標記解析內容，將原文抄進合約的對應欄位，並把驗收清單的每一項切成一條編號條件（AC1、AC2…）。這一步不呼叫模型，結果檔的 token 表記為 0。
@@ -70,18 +71,18 @@ Bridge 檢查格式與必填內容，不會判斷需求是否足夠清楚。如�
 整份合約再算一個 SHA-256（JSON 的 key 順序不影響結果），印在卡片上：
 
 ```
-合約：sha256 c666cd9a479796f426873f72595bb8d441f5bc322692c253b35604516f0946b4，從驗收清單切出 2 條條件
+合約：sha256 0c7d78a93f884d2f74eecfe9fef54d6689574b0ce57dfd9b3722cb5cd68fdb11，從驗收清單切出 2 條條件
 ```
 
 你按「好」，授權的就是這個 hash 的合約。Bridge 把合約以 hash 為檔名存在自己的資料目錄，每次讀都重算一次，對不上就停下，不拿改過的合約做工。結果資料夾另有一份副本：`.review-bridge/results/<工單>/contract.v<版本>.<hash 前 7 碼>.json`。之後再改 `.md`，已封存的這一版不會變；要採用新內容，就再 `start` 一次，成為同一張工單的下一版。
 
-### 合約的 schema
+### 上面那張工單的合約
 
-合約封存前要先通過這份 JSON Schema（draft-07），讀回來時也再驗一次。頂層欄位都必須存在，工單未填的選填內容以 `null` 或 `[]` 表示；`budget` 裡的各項設定則可省略。每個物件都不收額外的欄位。
+下面是 Bridge 0.3.0-rc.3 以模擬 CLI 處理上方簡單工單後，實際封存的合約，內容未經改寫。卡片顯示的就是上面的 hash。兩條驗收條件成了 `AC1`、`AC2`，`source_refs` 則標出它們在 `source.lines` 裡的行號。工單沒有指定 `priority`、`effort`、`budget`，所以 `ticket` 內對應的值是 `null`，卡片採用設定檔的預設值。其他未填的區塊以 `null` 或 `[]` 表示；`open_questions` 不會成為獨立的合約欄位。
 
-<SchemaPeek title="contract.schema.json" :source="contractSchema" />
+<SchemaPeek title="add-readme.md → contract 0c7d78a" :source="simpleContract" />
 
-`open_questions` 不在 schema 裡：它只擋開工，不進合約。
+合約封存前、讀回來時，都要通過 JSON Schema（draft-07，`contract.schema.json`）：頂層欄位都必須存在，`budget` 裡的各項可省略，每個物件都不收額外的欄位。
 
 ### writer 拿到什麼
 
@@ -107,7 +108,7 @@ Bridge 照逐條判定決定，不看 reviewer 整體怎麼說：`pass` 記為�
 
 ### 結果檔怎麼呈現
 
-結果檔的「驗收」一節每條 AC 一行：Bridge 的決定、你寫的原文、reviewer 的判定與證據；最後一行是檢查的版本。同一次樣本 run 的這一節（證據是模擬 CLI 的固定文字）：
+結果檔的「驗收」一節每條 AC 一行：Bridge 的決定、你寫的原文、reviewer 的判定與證據；最後一行是檢查的版本。下例摘錄自[結果、紀錄與資料庫](./results)的模擬執行紀錄；證據是模擬 CLI 的固定文字：
 
 ```markdown
 ## 驗收
@@ -227,6 +228,10 @@ API 回 200，總價仍顯示 1000。
 ## 待決問題
 無
 ```
+
+下面是這張完整工單經 Bridge 0.3.0-rc.3 的模擬 CLI 處理後，實際封存的合約，內容未經改寫。卡片顯示「從驗收清單切出 5 條條件」：工單本身的三條是 `AC1`～`AC3`，RUN A、RUN B 的條件接著編為 `AC4`、`AC5`，並以 `run_refs` 標明所屬的 run。frontmatter 的 `priority`、`writer.effort`、`budget` 則記入 `ticket`。
+
+<SchemaPeek title="checkout-discount.md → contract 4294592" :source="fullContract" />
 
 各區塊進合約的哪個欄位、怎麼被用，如下表。整份合約會放進 writer 與 reviewer 的每一次 prompt，所以每個欄位兩個角色都讀得到；表上寫的是誰拿它做什麼。
 

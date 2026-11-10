@@ -2,7 +2,8 @@
 
 <script setup>
 import SchemaPeek from "../../.vitepress/theme/components/SchemaPeek.vue"
-import contractSchema from "../../../review-bridge/features/workOrder/schemas/contract.schema.json?raw"
+import simpleContract from "./samples/add-readme.contract.5ee7076.json?raw"
+import fullContract from "./samples/checkout-discount.contract.d591e64.json?raw"
 </script>
 
 作業指示は `.review-bridge/work-packages/` に置く Markdown ファイルです。Bridge がマーカーごとに内容を読み取り、対応するコントラクトの項目へ転記して、完了条件を AC1、AC2…に分割します。すべてコードで処理し、モデルは呼び出しません。結果のトークン数は 0 です。
@@ -67,21 +68,21 @@ Bridge が検証するのは形式と必須項目です。依頼の意味が十�
 - `open_questions` に対応するフィールドはありません。実行前のチェックで使い、未回答の質問があれば開始を止めます。
 - コントラクト自体にも、固定した作業指示の全文（`source.lines`）と、その全文の SHA-256（`source.sha256`）を含めます。
 
-さらに、コントラクト全体の SHA-256 を計算します。JSON のキーの順序が変わってもハッシュは変わりません。次は[英語の模擬実行](./start#the-card)でカードに表示された行です。
+さらに、コントラクト全体の SHA-256 を計算し、カードに表示します。JSON のキーの順序が変わってもハッシュは変わりません。このページの最初の作業指示から生成したコントラクトのハッシュは次のとおりです。
 
 ```text
-Contract:     sha256 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3, 2 condition(s) cut from the acceptance list
+sha256 5ee707678180e4f56d9dabaa80123bce8699122133fcbc468ce52589ee36c46a
 ```
 
 承認の対象は、このハッシュで示すコントラクトです。Bridge はハッシュをファイル名にしてデータディレクトリへ保存し、読み込むたびに再計算します。一致しなければ実行を止めます。結果フォルダーにも `.review-bridge/results/<作業指示>/contract.v<版>.<ハッシュ先頭7文字>.json` というコピーを作成します。後から作業指示のファイルを編集しても、固定済みの版は変わりません。編集後の内容を使うには、もう一度 `start` を実行して同じ作業指示の次の版を作ります。
 
-### コントラクトのスキーマ
+### 最初の作業指示から生成されるコントラクト
 
-固定する前に、この JSON Schema（draft-07）で形式を検証します。読み込み時にも再検証します。トップレベルのフィールドはすべて必須です。任意の内容が未記入なら `null` または `[]` を使いますが、`budget` 内の各設定は省略できます。各オブジェクトは定義にないフィールドを受け付けません。
+上の簡単な作業指示から、Bridge が生成して固定した JSON です。2 つの完了条件が `AC1`、`AC2` になり、`source_refs` は `source.lines` 内の行範囲を示しています。作業指示では `priority`、`effort`、`budget` を指定していないため、`ticket` 内の値は `null` です。カードには設定ファイルの既定値を表示します。未記入のブロックは `null` または `[]` で表し、`open_questions` は独立したフィールドにはしません。
 
-<SchemaPeek title="contract.schema.json" :source="contractSchema" locale="ja" />
+<SchemaPeek title="add-readme.md → コントラクト 5ee7076" :source="simpleContract" locale="ja" />
 
-スキーマに `open_questions` フィールドはありません。未回答の質問は開始を止めるためのチェックに使い、コントラクトのフィールドにはしません。
+固定する前と読み込み時に、`contract.schema.json`（JSON Schema draft-07）で形式を検証します。トップレベルのフィールドはすべて必須ですが、`budget` 内の各設定は省略できます。各オブジェクトは定義にないフィールドを受け付けません。
 
 ### writer に渡すもの
 
@@ -107,7 +108,7 @@ Bridge は条件ごとの判定を確認します。全体が PASS というだ�
 
 ### 結果ファイルでの表示
 
-`Acceptance` セクションに、AC ごとに Bridge の判定、条件の原文、reviewer の判定と証拠を 1 行で表示します。最後の行は確認対象のバージョンです。以下は同じ英語の模擬実行からの抜粋で、証拠の文章は模擬 CLI の固定応答です。実際の出力を英語のまま掲載しています。
+`Acceptance` セクションに、AC ごとに Bridge の判定、条件の原文、reviewer の判定と証拠を 1 行で表示します。最後の行は確認対象のバージョンです。以下は[結果・ログ・データベース](./results)で紹介している英語の模擬実行からの抜粋です。証拠の文章は模擬 CLI の固定応答で、実際の出力を英語のまま掲載しています。
 
 ```markdown
 ## Acceptance
@@ -227,6 +228,10 @@ API は 200 を返すが、合計は 1000 のまま。
 ## 未決の質問
 none
 ```
+
+上の詳しい作業指示から生成して固定したコントラクトです。完了条件は計 5 つで、全体の 3 条件が `AC1`〜`AC3`、RUN A の条件が `AC4`、RUN B が `AC5` になります。各 run の条件には、`run_refs` で対象の run を記録します。frontmatter の `priority`、`writer.effort`、`budget` は `ticket` に入ります。
+
+<SchemaPeek title="checkout-discount.md → コントラクト d591e64" :source="fullContract" locale="ja" />
 
 各ブロックの保存先と用途は次のとおりです。コントラクト全体を毎回の prompt に含めるため、writer と reviewer はどちらもすべてのフィールドを読めます。
 

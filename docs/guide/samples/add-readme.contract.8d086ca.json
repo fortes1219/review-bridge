@@ -1,0 +1,109 @@
+{
+  "schema": "review-bridge.contract",
+  "schema_version": 4,
+  "work_package_id": "add-readme",
+  "source": {
+    "path": ".review-bridge/work-packages/add-readme.md",
+    "sha256": "dd809d32c9fc786386419edd11073137994ddce20f02d23e79bd8fd9fc2cdde7",
+    "lines": [
+      "---",
+      "source_id: DOC-1",
+      "---",
+      "# Add a README to the project",
+      "",
+      "<!-- bridge:context -->",
+      "## Background",
+      "The project has no README, so new teammates do not know how to start it.",
+      "",
+      "<!-- bridge:requested_work -->",
+      "## Requested work",
+      "Add README.md at the project root, explaining the project and how to start it.",
+      "",
+      "<!-- bridge:acceptance -->",
+      "## Acceptance",
+      "1. README.md exists at the project root, with the project name on its first line.",
+      "2. The README has a \"Getting started\" section.",
+      "",
+      "<!-- bridge:open_questions -->",
+      "## Open questions",
+      "none"
+    ]
+  },
+  "ticket": {
+    "title": {
+      "text": "Add a README to the project",
+      "source_refs": [
+        {
+          "start": 4,
+          "end": 4
+        }
+      ]
+    },
+    "source_id": {
+      "text": "DOC-1",
+      "source_refs": [
+        {
+          "start": 2,
+          "end": 2
+        }
+      ]
+    },
+    "priority": null,
+    "effort": null,
+    "budget": null
+  },
+  "context": {
+    "text": "The project has no README, so new teammates do not know how to start it.",
+    "source_refs": [
+      {
+        "start": 8,
+        "end": 8
+      }
+    ]
+  },
+  "outcome": null,
+  "requested_work": {
+    "text": "Add README.md at the project root, explaining the project and how to start it.",
+    "source_refs": [
+      {
+        "start": 12,
+        "end": 12
+      }
+    ]
+  },
+  "scope_notes": {
+    "include": null,
+    "exclude": null,
+    "must_keep": null,
+    "expected_locations": null
+  },
+  "run_plan": null,
+  "acceptance": [
+    {
+      "id": "AC1",
+      "statement": "README.md exists at the project root, with the project name on its first line.",
+      "source_refs": [
+        {
+          "start": 16,
+          "end": 16
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC2",
+      "statement": "The README has a \"Getting started\" section.",
+      "source_refs": [
+        {
+          "start": 17,
+          "end": 17
+        }
+      ],
+      "run_refs": []
+    }
+  ],
+  "verification_hints": [],
+  "reproduction": null,
+  "references": [],
+  "unused_lines": []
+}

@@ -1,0 +1,109 @@
+{
+  "schema": "review-bridge.contract",
+  "schema_version": 4,
+  "work_package_id": "add-readme",
+  "source": {
+    "path": ".review-bridge/work-packages/add-readme.md",
+    "sha256": "a4121eeed2c52c81a8ce5ab2a456bf4039a2b710680fb5fbf7d8379d2e3297dd",
+    "lines": [
+      "---",
+      "source_id: DOC-1",
+      "---",
+      "# プロジェクトに README を追加する",
+      "",
+      "<!-- bridge:context -->",
+      "## 背景と現状",
+      "ルートに README がなく、新しいメンバーが起動方法を把握できない。",
+      "",
+      "<!-- bridge:requested_work -->",
+      "## 作業内容",
+      "ルートに README.md を追加し、プロジェクトの用途と起動方法を説明する。",
+      "",
+      "<!-- bridge:acceptance -->",
+      "## 完了条件",
+      "1. ルートに README.md があり、先頭行がプロジェクト名である。",
+      "2. README に「起動方法」の節がある。",
+      "",
+      "<!-- bridge:open_questions -->",
+      "## 未決の質問",
+      "none"
+    ]
+  },
+  "ticket": {
+    "title": {
+      "text": "プロジェクトに README を追加する",
+      "source_refs": [
+        {
+          "start": 4,
+          "end": 4
+        }
+      ]
+    },
+    "source_id": {
+      "text": "DOC-1",
+      "source_refs": [
+        {
+          "start": 2,
+          "end": 2
+        }
+      ]
+    },
+    "priority": null,
+    "effort": null,
+    "budget": null
+  },
+  "context": {
+    "text": "ルートに README がなく、新しいメンバーが起動方法を把握できない。",
+    "source_refs": [
+      {
+        "start": 8,
+        "end": 8
+      }
+    ]
+  },
+  "outcome": null,
+  "requested_work": {
+    "text": "ルートに README.md を追加し、プロジェクトの用途と起動方法を説明する。",
+    "source_refs": [
+      {
+        "start": 12,
+        "end": 12
+      }
+    ]
+  },
+  "scope_notes": {
+    "include": null,
+    "exclude": null,
+    "must_keep": null,
+    "expected_locations": null
+  },
+  "run_plan": null,
+  "acceptance": [
+    {
+      "id": "AC1",
+      "statement": "ルートに README.md があり、先頭行がプロジェクト名である。",
+      "source_refs": [
+        {
+          "start": 16,
+          "end": 16
+        }
+      ],
+      "run_refs": []
+    },
+    {
+      "id": "AC2",
+      "statement": "README に「起動方法」の節がある。",
+      "source_refs": [
+        {
+          "start": 17,
+          "end": 17
+        }
+      ],
+      "run_refs": []
+    }
+  ],
+  "verification_hints": [],
+  "reproduction": null,
+  "references": [],
+  "unused_lines": []
+}
