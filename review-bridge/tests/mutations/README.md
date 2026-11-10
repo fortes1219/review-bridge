@@ -18,6 +18,9 @@ under the system temp folder; the working tree, the index and the refs are not t
 - `invalid`: the anchor is gone (the code changed shape), the case is not green before the mistake, no test
   ran, or the case failed for another reason. Never counted as killed.
 
+A case that survives stays in the list with the reason in its `reason`: a mistake no test can tell apart (an
+equivalent mutant, where another guard gives the same result) or one no test reaches yet.
+
 A case has: `id`, `gate` (Authorization, Contract, Probe, Budget, Delivery, Records, Install), `target`
 (the file), `anchor` and `replacement` (the mistake), `reason` (what goes wrong), `test` and `case` (the
 file and the test name), and `expect` (a regular expression the failing output must match).

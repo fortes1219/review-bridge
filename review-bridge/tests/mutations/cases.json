@@ -18,7 +18,7 @@
       "target": "review-bridge/features/workOrder/commands.mjs",
       "anchor": "const plan = held ?? await readJson(path.resolve(options.planPath));",
       "replacement": "const plan = await readJson(path.resolve(options.planPath));",
-      "reason": "A start reads back the plan file it just wrote before authorizing, so a second start rewriting it is read half written.",
+      "reason": "A start reads back the plan file it just wrote before authorizing, so a second start rewriting it is read half written. Survives: tests reach this read through start --yes, but at that moment the plan file is always whole, so reading it back and not reading it look the same (fail-open ledger RB-GATE-2026-003).",
       "test": "review-bridge/tests/work-package.test.mjs",
       "case": "a start that holds its plan authorizes it while its plan file is being rewritten; one given only the path does not",
       "expect": "Unexpected end of JSON input"
@@ -154,6 +154,28 @@
       "test": "review-bridge/tests/work-order-name.test.mjs",
       "case": "a project named by its Windows short path names a work order not yet on disk by its path in the project",
       "expect": "'(\\.\\./)+"
+    },
+    {
+      "id": "RB-M-port-taken-not-skipped",
+      "gate": "Records",
+      "target": "review-bridge/service/database/postgresServer.mjs",
+      "anchor": "    if (await portFree(port)) return port;\n",
+      "replacement": "    return port;\n",
+      "reason": "The port search takes the start port without checking that it is free, so a taken start port is handed to PostgreSQL. Survives as an equivalent mutant: the second guard, moving to the next port when the server says it could not create its sockets, lands on the same port, so the probe is redundant rather than untested. Kept to show that, and that the second guard works.",
+      "test": "review-bridge/tests/postgres-server.test.mjs",
+      "case": "a start port that is taken gives the next port up, and the server is found there",
+      "expect": "PostgreSQL did not start"
+    },
+    {
+      "id": "RB-M-port-search-limited",
+      "gate": "Records",
+      "target": "review-bridge/service/database/postgresServer.mjs",
+      "anchor": "  for (let port = from; port <= 65535; port += 1) {\n    if (await portFree(port)) return port;",
+      "replacement": "  for (let port = from; port <= Math.min(65535, from + 20); port += 1) {\n    if (await portFree(port)) return port;",
+      "reason": "The port search gives up after 20 ports, so a start port with 21 taken ports above it is refused.",
+      "test": "review-bridge/tests/postgres-server.test.mjs",
+      "case": "the search has no limit of its own: with 21 ports taken from the start port, the 22nd is used",
+      "expect": "are all taken"
     }
   ]
 }
