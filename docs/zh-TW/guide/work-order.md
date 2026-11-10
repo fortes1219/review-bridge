@@ -1,5 +1,10 @@
 # 第一張工單
 
+<script setup>
+import SchemaPeek from "../../.vitepress/theme/components/SchemaPeek.vue"
+import contractSchema from "../../../review-bridge/features/workOrder/schemas/contract.schema.json?raw"
+</script>
+
 工單是放在 `.review-bridge/work-packages/` 的 Markdown 檔案。Bridge 用程式依區塊標記解析內容，將原文抄進合約的對應欄位，並把驗收清單的每一項切成一條編號條件（AC1、AC2…）。這一步不呼叫模型，結果檔的 token 表記為 0。
 
 如果你用其他工具產生工單，請讓輸出符合本頁的固定格式。
@@ -51,6 +56,67 @@ source_id: DOC-1
 如果你刪掉了「要做的事」或「驗收」的區塊標記，Bridge 會把標記和小標題補回檔案最後面，讓你知道要寫在哪裡；你寫過的每一行都不會被改。標題（`# `）可以不寫，沒有標題時記為 `untitled`。
 
 Bridge 檢查格式與必填內容，不會判斷需求是否足夠清楚。如何寫出可驗證的要求，見[把需求講清楚](../principles/asking)。
+
+## 表單過了之後：工單變成合約
+
+表單檢查通過後、卡片出現之前，Bridge 用程式把工單抄成一份合約。這一步不呼叫模型。
+
+- 每個區塊的內容逐字抄進合約的同名欄位，附上它在封存原文裡的行號（`source_refs`）；未填的區塊依欄位以 `null` 或 `[]` 表示。區塊外、又不屬於文件結構的行，放進 `unused_lines`。
+- 驗收清單的每一項切成一條條件，依序編成 `AC1`、`AC2`…。`statement` 是那一項的原文（去掉清單符號），附行號。
+- frontmatter 和標題放進 `ticket`：標題、`source_id`、`priority`、writer 的 `effort`、`budget`。
+- `open_questions` 不進合約，它只在開工前擋住還沒回答的問題。
+- 合約自己帶著封存的工單全文（`source.lines`）和這份全文的 SHA-256（`source.sha256`）。
+
+整份合約再算一個 SHA-256（JSON 的 key 順序不影響結果），印在卡片上：
+
+```
+合約：sha256 c666cd9a479796f426873f72595bb8d441f5bc322692c253b35604516f0946b4，從驗收清單切出 2 條條件
+```
+
+你按「好」，授權的就是這個 hash 的合約。Bridge 把合約以 hash 為檔名存在自己的資料目錄，每次讀都重算一次，對不上就停下，不拿改過的合約做工。結果資料夾另有一份副本：`.review-bridge/results/<工單>/contract.v<版本>.<hash 前 7 碼>.json`。之後再改 `.md`，已封存的這一版不會變；要採用新內容，就再 `start` 一次，成為同一張工單的下一版。
+
+### 合約的 schema
+
+合約封存前要先通過這份 JSON Schema（draft-07），讀回來時也再驗一次。頂層欄位都必須存在，工單未填的選填內容以 `null` 或 `[]` 表示；`budget` 裡的各項設定則可省略。每個物件都不收額外的欄位。
+
+<SchemaPeek title="contract.schema.json" :source="contractSchema" />
+
+`open_questions` 不在 schema 裡：它只擋開工，不進合約。
+
+### writer 拿到什麼
+
+每一次呼叫，prompt 裡都有整份合約和它的 hash，再加上 Bridge 從專案 graph 查出來的 PROJECT 段（見[專案的 graph](./start#專案的-graph)）。writer 要對每一條 AC 各回報一次 `done` 或 `not_done`，全部 `done` 才能說做完。少報、重報、報了不存在的 AC，或還有條件沒做完卻說做完，Bridge 都不收。
+
+### reviewer 拿到什麼
+
+同一份合約。reviewer 的回答要對每一條 AC 各給一個判定：
+
+- `pass`：附上證據（檔案與行號，或測試輸出）；
+- `fail`：附一條指向那條 AC 的 finding；
+- `cannot_verify`：寫出缺了什麼。
+
+有一條 `fail` 就不能整體判 PASS。回答不合這些規則時，Bridge 退回請它重答一次；第二次還不合，就結束這次工作。
+
+### Bridge 怎麼決定
+
+Bridge 照逐條判定決定，不看 reviewer 整體怎麼說：`pass` 記為「已證實」，`fail` 記為「不成立」，`cannot_verify` 或沒有判定記為「未知」。
+
+- 每一條都已證實：交付。
+- 有一條不成立：reviewer 這輪一定是 FAIL，退回 writer 修。
+- reviewer 判 PASS，但有條件是未知：不當成通過交付。這次工作停下，結果檔標題是「要你決定」，「為什麼」段寫「reviewer 判通過，但不是每條驗收條件都證實成立（見「驗收」），所以 Bridge 不當成通過交付。」
+
+### 結果檔怎麼呈現
+
+結果檔的「驗收」一節每條 AC 一行：Bridge 的決定、你寫的原文、reviewer 的判定與證據；最後一行是檢查的版本。同一次樣本 run 的這一節（證據是模擬 CLI 的固定文字）：
+
+```markdown
+## 驗收
+- AC1 已證實：根目錄有 README.md，第一行是專案名稱。（reviewer：pass；證據：fake: read the delta and the test output for AC1）
+- AC2 已證實：README 裡有一段「如何啟動」。（reviewer：pass；證據：fake: read the delta and the test output for AC2）
+檢查的版本：commit 0a46a29129db 加上未 commit 的改動。
+```
+
+整份結果檔見[結果、紀錄與資料庫](./results)。
 
 ## 完整的工單
 
@@ -162,26 +228,29 @@ API 回 200，總價仍顯示 1000。
 無
 ```
 
-各區塊的用途如下：
+各區塊進合約的哪個欄位、怎麼被用，如下表。整份合約會放進 writer 與 reviewer 的每一次 prompt，所以每個欄位兩個角色都讀得到；表上寫的是誰拿它做什麼。
 
-| 區塊 | 使用者 | 用途 |
+| 區塊 | 合約欄位 | 怎麼用 |
 |---|---|---|
-| `context`、`outcome` | writer、reviewer | 原文填入合約，說明工作背景與預期成果 |
-| `requested_work` | writer | 具體工作內容，必填 |
-| `run_plan` | Bridge | 描述兩個以上的計畫步驟；會記入合約，目前仍以一次 run 執行整張工單 |
-| `scope_notes.include` / `exclude` / `must_keep` | writer、reviewer | 供 reviewer 核對修改是否超出範圍，以及必須保留的行為是否受損 |
-| `scope_notes.expected_locations` | writer | 提示可能修改的位置；**不代表修改授權**，實際範圍以卡片的 `Scope` 為準 |
-| `acceptance` | reviewer、Bridge | 必填；Bridge 把清單的每一項切成 AC1、AC2…，結果檔逐條列出驗收判定 |
-| `verification_hints` | writer、reviewer | 提供測試資料與既有測試名稱；實際測試指令由專案類型決定 |
-| `reproduction.*` | writer、reviewer | 描述缺陷的環境、重現步驟、實際結果、預期結果與頻率；功能工單可省略 |
-| `references` | writer | 連結、檔案路徑與相關工單 |
-| `open_questions` | Bridge | 列出尚待回答的問題；除 `無`、`none` 或空白外，其他內容都會讓 `start` 在卡片前停下，等你在工單裡回答 |
+| frontmatter、`# ` 標題 | `ticket` | 標題、`source_id`、`priority`、writer 的 `effort`、`budget`。卡片上的生效值與來源由這裡、終端機旗標與 policy 算出 |
+| `context`、`outcome` | `context`、`outcome` | 工作背景與預期成果，writer 和 reviewer 都讀 |
+| `requested_work` | `requested_work` | 要做的事；必填（有 `run_plan` 時可省略） |
+| `run_plan` | `run_plan.runs[]`：名稱、內容、`depends_on`、`effort`、`budget` | 記進合約；這一版仍以一次 run 做完整張工單 |
+| `scope_notes.include`／`exclude`／`must_keep` | `scope_notes.include`／`exclude`／`must_keep` | reviewer 據此核對有沒有超出範圍、必須維持的行為有沒有壞 |
+| `scope_notes.expected_locations` | `scope_notes.expected_locations` | 只是提示 writer 從哪裡找；**不是修改授權**，授權的邊界是卡片上的「範圍」 |
+| `acceptance` | `acceptance[]`：`AC1`、`AC2`… | 必填；每一項一條條件。writer 逐條回報，reviewer 逐條判定，Bridge 逐條決定，結果檔逐條列出 |
+| `run_plan` 裡各 run 的 `acceptance` | 接在工單驗收之後編號，`run_refs` 記是哪個 run | 範例的三條是 `AC1`～`AC3`，RUN A、RUN B 各一條成為 `AC4`、`AC5` |
+| `verification_hints` | `verification_hints[]` | 測試資料與既有測試的名字，給 writer 和 reviewer 參考；實際跑哪個測試由專案的測試規則決定（卡片的「測試」） |
+| `reproduction.*` | `reproduction`（五項都沒寫時是 `null`） | 缺陷的環境、重現步驟、實際結果、預期結果與頻率；功能工單可省略 |
+| `references` | `references[]` | 連結、檔案路徑與相關工單 |
+| `open_questions` | 不進合約 | 只擋開工：除 `無`、`none` 或空白外，其他內容都會讓 `start` 在卡片前停下，等你在工單裡回答 |
+| 區塊外、不屬於文件結構的行 | `unused_lines` | 原文附行號保留，不當成任何區塊 |
 
 ## 區塊格式
 
 - 第一個以 `# ` 開頭的行是工單標題。
 - 每個區塊從 `<!-- bridge:<key> -->` 標記開始，到下一個標記或檔案結尾為止。
-- 區塊 key 對應合約的 17 個欄位：`context`、`outcome`、`requested_work`、`run_plan`、`scope_notes.include`、`scope_notes.exclude`、`scope_notes.must_keep`、`scope_notes.expected_locations`、`acceptance`、`verification_hints`、`reproduction.environment`、`reproduction.steps`、`reproduction.actual`、`reproduction.expected`、`reproduction.frequency`、`references`、`open_questions`。未知 key 或重複 key 都會被拒絕，錯誤訊息會列出行號。
+- 可用的區塊 key 共 17 種：`context`、`outcome`、`requested_work`、`run_plan`、`scope_notes.include`、`scope_notes.exclude`、`scope_notes.must_keep`、`scope_notes.expected_locations`、`acceptance`、`verification_hints`、`reproduction.environment`、`reproduction.steps`、`reproduction.actual`、`reproduction.expected`、`reproduction.frequency`、`references`、`open_questions`。未知 key 或重複 key 都會被拒絕，錯誤訊息會列出行號。
 - `open_questions`：填入 `無`、`none` 或留空，表示沒有待決問題。其他每一行都視為問題；`start` 會在顯示卡片前停下，等你在工單中回答。
 - frontmatter、標題、區塊標記、`##`／`###` 小標題與空行屬於文件結構。區塊外的其他內容會以「未使用的行」保留在合約中。
 

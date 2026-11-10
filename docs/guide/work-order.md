@@ -1,5 +1,10 @@
 # Your first work order
 
+<script setup>
+import SchemaPeek from "../.vitepress/theme/components/SchemaPeek.vue"
+import contractSchema from "../../review-bridge/features/workOrder/schemas/contract.schema.json?raw"
+</script>
+
 A work order is a Markdown file in `.review-bridge/work-packages/`. Bridge parses the block markers, copies each block into the matching contract field, and splits the acceptance list into numbered conditions (AC1, AC2, and so on). This is done in code without a model call and records 0 tokens in the result.
 
 If another tool generates your work orders, have it output the fixed format on this page.
@@ -51,6 +56,67 @@ none
 If you remove a required work or acceptance marker, Bridge appends the marker and heading so you know where to fill it in. It doesn't change your existing lines. A `# ` title is optional; without one, the title is `untitled`.
 
 Bridge checks structure and required content, not whether your requirements are clear enough. For practical ways to make them verifiable, see [When Bridge needs your input](../principles/asking).
+
+## From work order to contract
+
+Once validation passes, Bridge builds the contract in code, before showing the authorization card. No model is called.
+
+- Each marked block is copied into its matching contract field. `source_refs` records its line ranges in the sealed work order. Empty optional blocks use `null` or `[]`. Text outside the blocks goes into `unused_lines`, except for document structure such as headings.
+- Each acceptance list item becomes a condition, numbered `AC1`, `AC2`, and so on. Its `statement` keeps the original text without the list marker, along with the source line ranges.
+- The title and selected frontmatter values go into `ticket`: title, `source_id`, `priority`, writer `effort`, and `budget`.
+- `open_questions` has no contract field. Bridge checks it before work starts so unanswered questions block the start.
+- The contract also contains the sealed work-order text (`source.lines`) and that text's SHA-256 (`source.sha256`).
+
+Bridge then computes a SHA-256 for the whole contract, independent of JSON key order. Here is the contract line from the [captured English fake-CLI run](./start#the-card):
+
+```text
+Contract:     sha256 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3, 2 condition(s) cut from the acceptance list
+```
+
+Your approval authorizes the contract with that hash. Bridge stores it under the hash in its data directory and recomputes the hash whenever it reads the file. A mismatch stops the work. A copy also goes into `.review-bridge/results/<work-order>/contract.v<version>.<first-seven-hash-characters>.json`. Editing the work-order file doesn't change the sealed version. Run `start` again to use the edited text as the next version of the same work order.
+
+### Contract schema
+
+Before sealing a contract, Bridge validates it against this JSON Schema (draft-07). It validates it again when reading it back. All top-level fields must be present. Optional work-order content uses `null` or `[]`; individual `budget` settings may be omitted. Objects reject additional fields.
+
+<SchemaPeek title="contract.schema.json" :source="contractSchema" locale="en" />
+
+There is no `open_questions` field in the schema. Unanswered questions block the start; they don't become a contract field.
+
+### What the writer receives
+
+Every writer prompt includes the full contract and its hash, plus a PROJECT section with information Bridge retrieved from the [project graph](./start#project-graph). The writer must report `done` or `not_done` for every AC and can report the work complete only when all are `done`. Bridge rejects missing, duplicate, or unknown AC IDs, as well as a completion claim with conditions still unfinished.
+
+### What the reviewer receives
+
+The reviewer receives the same contract and must give a verdict for every AC:
+
+- `pass`: include evidence, such as a file and line number or test output.
+- `fail`: include a finding linked to that AC.
+- `cannot_verify`: explain what is missing.
+
+A failed condition rules out an overall PASS. If the response breaks these rules, Bridge asks the reviewer to correct it once. A second invalid response ends the run.
+
+### How Bridge decides
+
+Bridge checks the verdict for each condition. An overall PASS alone doesn't establish that the work is complete. A `pass` becomes `proven`, a `fail` becomes `failed`, and `cannot_verify` or a missing verdict becomes `unknown`.
+
+- **Every condition proven:** deliver the work.
+- **A condition failed:** the review must be FAIL. Send the work back to the writer if correction rounds remain.
+- **Overall PASS with an unknown condition:** stop without delivering the work as passed. The result is titled `Your decision needed`; `Why` explains that not every acceptance condition was shown to hold.
+
+### How this appears in the result
+
+The `Acceptance` section has one row per AC: Bridge's decision, your original condition, and the reviewer's verdict and evidence. The last line identifies the version checked. This excerpt comes from the same English fake-CLI run; the evidence text is a fixed fixture response:
+
+```markdown
+## Acceptance
+- AC1 proven: README.md exists at the project root, with the project name on its first line. (reviewer: pass; evidence: fake: read the delta and the test output for AC1)
+- AC2 proven: The README has a "Getting started" section. (reviewer: pass; evidence: fake: read the delta and the test output for AC2)
+Checked on commit none plus uncommitted changes.
+```
+
+See [Results, logs, and the database](./results) for the full result file.
 
 ## Complete example
 
@@ -162,20 +228,23 @@ Every time; all checkouts using discount codes.
 none
 ```
 
-Here's what each block is used for:
+The table below maps work-order blocks to contract fields and explains how they are used. Both roles receive the full contract in every prompt, so both can read every field.
 
-| Block | Used by | Purpose |
+| Work-order content | Contract field | How it is used |
 |---|---|---|
-| `context`, `outcome` | writer, reviewer | Copied into the contract to explain the background and expected result |
-| `requested_work` | writer | Required work instructions |
-| `run_plan` | Bridge | Two or more planned steps; stored in the contract, with one execution run for the entire work order |
-| `scope_notes.include` / `exclude` / `must_keep` | writer, reviewer | Help check scope and preserve required behavior |
-| `scope_notes.expected_locations` | writer | Suggest likely files; **doesn't authorize edits**. The card's `Scope` sets the actual boundary |
-| `acceptance` | reviewer, Bridge | Required list, split into AC1, AC2, and so on, with a decision for each in the result |
-| `verification_hints` | writer, reviewer | Test data and existing test names; the project type selects the actual test command |
-| `reproduction.*` | writer, reviewer | Bug environment, steps, actual and expected results, and frequency; omit for feature work |
-| `references` | writer | Links, paths, and related work orders |
-| `open_questions` | Bridge | Unanswered questions. Anything other than `none`, `無`, or blank stops `start` before the card until you answer in the work order |
+| Frontmatter and `# ` title | `ticket` | Title, `source_id`, `priority`, writer `effort`, and `budget`. These values, CLI flags, and policy determine the effective settings and sources shown on the card |
+| `context`, `outcome` | `context`, `outcome` | Background and expected outcome, available to both roles |
+| `requested_work` | `requested_work` | Work instructions; required unless there is a `run_plan` |
+| `run_plan` | `run_plan.runs[]`: name, text, `depends_on`, `effort`, `budget` | Stored in the contract; this version executes the entire work order as one run |
+| `scope_notes.include` / `exclude` / `must_keep` | `scope_notes.include` / `exclude` / `must_keep` | Help the reviewer check scope and behavior that must be preserved |
+| `scope_notes.expected_locations` | `scope_notes.expected_locations` | Suggest where the writer should look; **doesn't authorize edits**. The card's `Scope` sets the boundary |
+| `acceptance` | `acceptance[]`: `AC1`, `AC2`, and so on | Required. The writer reports, the reviewer judges, and Bridge decides each condition; the result lists them individually |
+| Each run's `acceptance` inside `run_plan` | Additional `acceptance[]` items; `run_refs` names the planned run | Numbered after the work-order conditions. Above, the three main conditions become `AC1`–`AC3`, followed by RUN A's `AC4` and RUN B's `AC5` |
+| `verification_hints` | `verification_hints[]` | Test data and existing test names for both roles. The project's test rules determine the command shown under `Tests` on the card |
+| `reproduction.*` | `reproduction`, or `null` when all five blocks are empty | Bug environment, steps, actual and expected results, and frequency; omit for feature work |
+| `references` | `references[]` | Links, file paths, and related work orders |
+| `open_questions` | No field | Pre-start check only. Anything other than `none`, `無`, or blank stops `start` before the card until you answer in the work order |
+| Text outside blocks that isn't document structure | `unused_lines` | Preserved with source line ranges; not treated as a block |
 
 ## Block format
 

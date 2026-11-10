@@ -1,5 +1,10 @@
 # 最初の作業指示
 
+<script setup>
+import SchemaPeek from "../../.vitepress/theme/components/SchemaPeek.vue"
+import contractSchema from "../../../review-bridge/features/workOrder/schemas/contract.schema.json?raw"
+</script>
+
 作業指示は `.review-bridge/work-packages/` に置く Markdown ファイルです。Bridge がマーカーごとに内容を読み取り、対応するコントラクトの項目へ転記して、完了条件を AC1、AC2…に分割します。すべてコードで処理し、モデルは呼び出しません。結果のトークン数は 0 です。
 
 他のツールで作業指示を生成する場合は、このページの固定形式で出力してください。
@@ -51,6 +56,67 @@ none
 作業内容や完了条件の必須マーカーを削除した場合は、Bridge がマーカーと見出しを末尾に補い、記入場所を示します。既存の文章は変更しません。`# ` のタイトルは省略でき、その場合は `untitled` になります。
 
 Bridge が検証するのは形式と必須項目です。依頼の意味が十分に明確かどうかまでは判断しません。検証できる要件の書き方は[ユーザーの判断が必要なとき](../principles/asking)で説明しています。
+
+## 作業指示からコントラクトへ
+
+形式チェックを通過すると、Bridge は承認カードを表示する前に、作業指示からコントラクトを作成します。すべてコードで処理し、モデルは呼び出しません。
+
+- マーカーで区切った本文を、対応するコントラクトのフィールドへ転記します。`source_refs` には、固定した原文の行範囲を記録します。任意のブロックが空なら `null` または `[]` になります。ブロック外の文章は、見出しなどの文書構造を除き、`unused_lines` に残します。
+- 完了条件のリストを 1 項目ずつ取り出し、`AC1`、`AC2`…と番号を付けます。`statement` にはリスト記号を除いた原文を入れ、元の行範囲も記録します。
+- タイトルと frontmatter の一部を `ticket` に保存します。対象はタイトル、`source_id`、`priority`、writer の `effort`、`budget` です。
+- `open_questions` に対応するフィールドはありません。実行前のチェックで使い、未回答の質問があれば開始を止めます。
+- コントラクト自体にも、固定した作業指示の全文（`source.lines`）と、その全文の SHA-256（`source.sha256`）を含めます。
+
+さらに、コントラクト全体の SHA-256 を計算します。JSON のキーの順序が変わってもハッシュは変わりません。次は[英語の模擬実行](./start#the-card)でカードに表示された行です。
+
+```text
+Contract:     sha256 8d086cae7ac4a9cb7202943d6ff17540235a0b0a6bed7ef4024161683c6e82e3, 2 condition(s) cut from the acceptance list
+```
+
+承認の対象は、このハッシュで示すコントラクトです。Bridge はハッシュをファイル名にしてデータディレクトリへ保存し、読み込むたびに再計算します。一致しなければ実行を止めます。結果フォルダーにも `.review-bridge/results/<作業指示>/contract.v<版>.<ハッシュ先頭7文字>.json` というコピーを作成します。後から作業指示のファイルを編集しても、固定済みの版は変わりません。編集後の内容を使うには、もう一度 `start` を実行して同じ作業指示の次の版を作ります。
+
+### コントラクトのスキーマ
+
+固定する前に、この JSON Schema（draft-07）で形式を検証します。読み込み時にも再検証します。トップレベルのフィールドはすべて必須です。任意の内容が未記入なら `null` または `[]` を使いますが、`budget` 内の各設定は省略できます。各オブジェクトは定義にないフィールドを受け付けません。
+
+<SchemaPeek title="contract.schema.json" :source="contractSchema" locale="ja" />
+
+スキーマに `open_questions` フィールドはありません。未回答の質問は開始を止めるためのチェックに使い、コントラクトのフィールドにはしません。
+
+### writer に渡すもの
+
+毎回の prompt に、コントラクト全体とそのハッシュ、Bridge が[プロジェクトの graph](./start#project-graph)から取得した情報を含む PROJECT セクションを渡します。writer は各 AC について `done` または `not_done` を報告し、すべて `done` の場合だけ完了を報告できます。AC の報告漏れ、重複、存在しない ID、未完了の条件があるのに完了とする回答は受け付けません。
+
+### reviewer に渡すもの
+
+reviewer にも同じコントラクトを渡し、各 AC に対して次のいずれかの判定を求めます。
+
+- `pass`：ファイルと行番号、テスト出力などの証拠を示します。
+- `fail`：その AC に対応する finding を示します。
+- `cannot_verify`：確認に何が足りないかを説明します。
+
+1 条件でも `fail` なら、全体を PASS にはできません。回答がこれらのルールに合わない場合、Bridge は一度だけ修正を求めます。再回答も不正なら、その run を終了します。
+
+### Bridge の判定
+
+Bridge は条件ごとの判定を確認します。全体が PASS というだけでは、作業を完了扱いにしません。`pass` は `proven`（成立）、`fail` は `failed`（不成立）、`cannot_verify` または判定なしは `unknown`（未確認）として記録します。
+
+- **すべて成立**：作業完了とします。
+- **不成立の条件がある**：レビュー全体も FAIL です。修正回数が残っていれば writer に戻します。
+- **全体は PASS だが未確認の条件がある**：完了扱いにせず、実行を止めます。結果のタイトルは `Your decision needed` となり、`Why` にすべての完了条件を確認できていないことを記載します。
+
+### 結果ファイルでの表示
+
+`Acceptance` セクションに、AC ごとに Bridge の判定、条件の原文、reviewer の判定と証拠を 1 行で表示します。最後の行は確認対象のバージョンです。以下は同じ英語の模擬実行からの抜粋で、証拠の文章は模擬 CLI の固定応答です。実際の出力を英語のまま掲載しています。
+
+```markdown
+## Acceptance
+- AC1 proven: README.md exists at the project root, with the project name on its first line. (reviewer: pass; evidence: fake: read the delta and the test output for AC1)
+- AC2 proven: The README has a "Getting started" section. (reviewer: pass; evidence: fake: read the delta and the test output for AC2)
+Checked on commit none plus uncommitted changes.
+```
+
+結果ファイル全体は[結果・ログ・データベース](./results)を参照してください。
 
 ## 完全な例
 
@@ -162,20 +228,23 @@ API は 200 を返すが、合計は 1000 のまま。
 none
 ```
 
-各ブロックの用途は次のとおりです。
+各ブロックの保存先と用途は次のとおりです。コントラクト全体を毎回の prompt に含めるため、writer と reviewer はどちらもすべてのフィールドを読めます。
 
-| ブロック | 利用者 | 用途 |
+| 作業指示の内容 | コントラクトのフィールド | 用途 |
 |---|---|---|
-| `context`、`outcome` | writer、reviewer | 背景と期待する成果を原文のままコントラクトへ転記 |
-| `requested_work` | writer | 必須の作業内容 |
-| `run_plan` | Bridge | 2 つ以上の計画上の手順。コントラクトに保存し、実行自体は作業指示全体で 1 run |
-| `scope_notes.include` / `exclude` / `must_keep` | writer、reviewer | 範囲超過や維持すべき動作の破損を確認 |
-| `scope_notes.expected_locations` | writer | 変更候補の場所。**変更の許可ではありません**。実際の範囲はカードの `Scope` が基準 |
-| `acceptance` | reviewer、Bridge | 必須。各項目を AC1、AC2…に分割し、結果に個別の判定を表示 |
-| `verification_hints` | writer、reviewer | テストデータや既存テスト名。実際のテストコマンドはプロジェクトの種類で決定 |
-| `reproduction.*` | writer、reviewer | 不具合の環境、手順、実際・期待する結果、頻度。機能開発では省略可能 |
-| `references` | writer | リンク、ファイルパス、関連する作業指示 |
-| `open_questions` | Bridge | 未回答の質問。空欄、`none`、`無` 以外があると、回答が書き込まれるまでカードの前で停止 |
+| frontmatter と `# ` タイトル | `ticket` | タイトル、`source_id`、`priority`、writer の `effort`、`budget`。これらの値、CLI フラグ、policy から、カードに表示する設定値と設定元を決定 |
+| `context`、`outcome` | `context`、`outcome` | 背景と期待する成果。両方の役割に渡す |
+| `requested_work` | `requested_work` | 作業内容。`run_plan` がなければ必須 |
+| `run_plan` | `run_plan.runs[]`：名前、本文、`depends_on`、`effort`、`budget` | コントラクトに記録。この版では作業指示全体を 1 回の run で実行 |
+| `scope_notes.include` / `exclude` / `must_keep` | `scope_notes.include` / `exclude` / `must_keep` | reviewer が対象範囲と維持すべき動作を確認 |
+| `scope_notes.expected_locations` | `scope_notes.expected_locations` | writer が調べる場所の手がかり。**編集の許可ではない**。範囲はカードの `Scope` が基準 |
+| `acceptance` | `acceptance[]`：`AC1`、`AC2`… | 必須。writer が報告し、reviewer が審査し、Bridge が条件ごとに判定。結果にも個別に表示 |
+| `run_plan` 内の各 run の `acceptance` | `acceptance[]` に追加し、`run_refs` に該当 run を記録 | 作業指示全体の条件に続けて採番。上の例では全体の 3 条件が `AC1`〜`AC3`、RUN A の条件が `AC4`、RUN B が `AC5` |
+| `verification_hints` | `verification_hints[]` | 両方の役割が参照するテストデータと既存テスト名。実際のコマンドはプロジェクトのテストルールで決まり、カードの `Tests` に表示 |
+| `reproduction.*` | `reproduction`。5 ブロックとも空なら `null` | 不具合の環境、手順、実際・期待する結果、頻度。機能開発では省略可能 |
+| `references` | `references[]` | リンク、ファイルパス、関連する作業指示 |
+| `open_questions` | フィールドなし | 開始前のチェックのみ。空欄、`none`、`無` 以外があれば、回答が作業指示に書かれるまでカードの前で停止 |
+| ブロック外で文書構造に当たらない文章 | `unused_lines` | 原文と行範囲を保存。いずれのブロックにも割り当てない |
 
 ## ブロックの形式
 
