@@ -1,6 +1,6 @@
 # Review Bridge
 
-![Review Bridge — AI work audit and verification harness](docs/public/readme-cover.png)
+![Review Bridge — AI work audit and verification harness](https://review-bridge.akasa-lab.dev/readme-cover.png)
 
 Review Bridge is an AI work audit and verification harness. It runs your work orders with a writer agent and an independent, read-only reviewer. You approve the plan; Bridge enforces the scope, budget, test command, and stopping point. The agents can't change those limits.
 
