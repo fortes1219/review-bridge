@@ -202,7 +202,9 @@ test("a start port that is taken gives the next port up, and the server is found
   await new Promise((resolve) => squatter.listen(start, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => squatter.close(resolve)));
   const { port } = await startServer(root, { binaries });
-  assert.equal(port, start + 1);
+  // Up from the taken one: other test files take ports the system hands out meanwhile, so the next free
+  // one up is not always start + 1.
+  assert.ok(port > start, "the taken start port " + start + " was passed over, and " + port + " was used");
   assert.deepEqual(await query(root, "select 1 as one"), [{ one: 1 }]);
 });
 
@@ -230,7 +232,9 @@ test("the search has no limit of its own: with 21 ports taken from the start por
   const root = await cluster(t);
   const start = await squatRow(t, 21);
   await startPortIs(root, start);
-  assert.equal((await startServer(root, { binaries })).port, start + 21);
+  // Past the 21 held here; another test file may have taken one above them meanwhile.
+  const { port } = await startServer(root, { binaries });
+  assert.ok(port >= start + 21, "the 21 taken ports from " + start + " were passed over, and " + port + " was used");
 });
 
 test("when every port from the start port up to 65535 is taken, the start is refused by name", { timeout: 120_000 }, async (t) => {

@@ -7,8 +7,53 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch or pull request cancels the run before it, as Vitest's CI does.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # A push that changes only documentation skips the test matrix, as Vite's and Vitest's CI do.
+  changed:
+    name: Get changed files
+    runs-on: ubuntu-latest
+    outputs:
+      should_skip: ${{ steps.changed-files.outputs.only_changed == 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Assume a push or a pull request is less than 50 commits, as Vite does.
+          fetch-depth: 50
+          persist-credentials: false
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+        with:
+          files: |
+            docs/**
+            .github/**
+            !.github/workflows/ci.yml
+            **.md
+
+  # README's Commands section is generated from the command table, so it is checked on every push,
+  # one that changes only documentation included.
+  readme:
+    name: README commands match the command table
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/render-commands.mjs --check
+
   test:
+    needs: changed
+    if: needs.changed.outputs.should_skip != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -21,8 +66,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: README commands match the command table
-        run: node scripts/render-commands.mjs --check
       - run: npm test
       - name: Runtime tests
         run: node --test "review-bridge/tests/*.test.mjs"
