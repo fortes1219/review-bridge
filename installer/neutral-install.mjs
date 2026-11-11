@@ -920,21 +920,28 @@ async function stopPageService(target) {
 const REASON_LIMIT = 200;
 const lastLine = (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, REASON_LIMIT) || "";
 
-// Restarts the page service through Bridge's runtime, the same way init starts it. A failure
-// carries what up said: its exit, the last line of its stdout (where up explains a failure) and of
-// its stderr, each clipped. The reason is shown to the person and never written into a marker.
-async function startPageServiceDetailed(target) {
-  if (!(await statOptional(path.join(sourceRuntime, "bootstrap.mjs")))) return { running: false, reason: "the Bridge runtime has no bootstrap.mjs" };
-  const up = spawnSync(process.execPath, [path.join(sourceRuntime, "bootstrap.mjs"), "up", "--project", target], {
+function runUpCommand(target) {
+  return spawnSync(process.execPath, [path.join(sourceRuntime, "bootstrap.mjs"), "up", "--project", target], {
     cwd: target, windowsHide: true, timeout: 30_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+// Restarts the page service through Bridge's runtime, the same way init starts it. up waits for the page
+// itself and exits 0 only once it answered (pageService.mjs serviceUp), so its 0 is the answer: the page
+// is up, and it is not asked again, as a caller of `pg_ctl -w` takes its exit code and Playwright's
+// webServerPlugin stops asking once the server answered. A failure carries what up said: its exit, the
+// last line of its stdout (where up says why the page did not answer: no_session, pid_dead, timeout,
+// unreachable, wrong_service) and of its stderr, each clipped. The reason is shown to the person and never
+// written into a marker. `runUp` and `checkPage` are seams for tests; `checkPage` is not asked here.
+export async function startPageServiceDetailed(target, { runUp = runUpCommand, checkPage = pageServiceRunning } = {}) {
+  if (!(await statOptional(path.join(sourceRuntime, "bootstrap.mjs")))) return { running: false, reason: "the Bridge runtime has no bootstrap.mjs" };
+  const up = await runUp(target);
   if (up.error?.code === "ETIMEDOUT") return { running: false, reason: "up timed out" };
   if (up.error || up.status !== 0 || up.signal) {
     const exit = up.signal || (up.status ?? up.error?.code ?? "error");
     return { running: false, reason: ["up exited " + exit, lastLine(up.stdout), lastLine(up.stderr)].filter(Boolean).join(" | ") };
   }
-  if (await pageServiceRunning(target)) return { running: true, reason: null };
-  return { running: false, reason: "up returned 0 but the service is not answering" };
+  return { running: true, reason: null };
 }
 
 // Every restart goes through here. A restart hook (tests, or a caller's own) may answer a boolean or
@@ -952,7 +959,7 @@ async function restartOutcome(hook, target) {
   return { running: Boolean(value), reason: null };
 }
 
-const didNotRestart = (outcome) => "did not restart" + (outcome.reason ? ": " + outcome.reason : "");
+export const didNotRestart = (outcome) => "did not restart" + (outcome.reason ? ": " + outcome.reason : "");
 
 // Codex 2026-10-14: a missing run folder or a record that cannot be read is "cannot confirm", not "none".
 // The runs are in the service's state; a project still in the nested layout kept them in review-queue/.

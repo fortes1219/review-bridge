@@ -190,3 +190,62 @@ claim that nothing else is wrong.
   content, not only an empty or cut-off one, is read the same way. "Run reconciliation is already in
   progress." is not among the errors delivery retries, so a delivery that meets a live guard still fails
   as before this fix.
+
+## RB-GATE-2026-008 — a second command starting the database was told to restart the computer while the first was starting it
+
+- **affected_gate:** Records (database start)
+- **symptom:** GitHub Actions `windows-latest` on `dev/ci-test` at `806d8fb`, `review-bridge/tests/postgres-server.test.mjs:359`
+  "two processes creating the cluster for the first time at once both end up on the same server" failed: one
+  process threw `OldServerError` ("the server was not shut down properly last time … Restart the computer and
+  run this again") from `postgresServer.mjs:496`, the only failure of 544. The same test passed on the run
+  before (6.5 s).
+- **expected_vs_actual:** expected both processes to end on the one server; actually the second was told a dead
+  server's processes were still running, when the first process's server was starting.
+- **reproduction:** not on demand on a real server; the moment is fixed through `startServer`'s seams: `detached`
+  answers held, `pg_ctl status` answers not running twice and then running.
+- **root_cause:** on Windows the server holds pg_ctl's `-l` file from the moment cmd.exe opens it for it, before
+  it writes `postmaster.pid`. A second start that found the file held asked once whether a server ran, got
+  "no" while the first was still starting, and took the held file for a dead server's leftovers.
+- **fix:** the commit that adds this entry — a held file with no server yet is a server still starting, as
+  pg_ctl's `wait_for_postmaster_start` reads one that is not up yet ("just keep waiting", `pg_ctl.c:602-605`):
+  the start asks again every 100 ms (`WAITS_PER_SEC` 10) until its own deadline (60 s) and uses the server once
+  it runs. Only a file still held with no server by then is reported as before. A start still clears nothing
+  (Owner 2026-11-08).
+- **regression_test:** `review-bridge/tests/database-down.test.mjs` "a held -l file while another command's
+  server is still starting: the start waits and uses that server", "a held -l file with no server by the
+  start's deadline is a dead server's leftovers, said as before"; on a real server (Windows CI)
+  `postgres-server.test.mjs` "two processes creating the cluster …" and "four processes starting the same
+  cluster at once …".
+- **mutation_case:** `RB-M-held-asked-once`, `RB-M-held-taken-as-started` (killed on Windows 11 here; the seams
+  make them platform-independent).
+- **residual_risk:** a dead server's leftovers are now reported after the start's deadline (60 s) instead of at
+  once; the start has no way to end early, since pg_ctl's own early end needs the process it started. Each
+  wait asks `pg_ctl status`, one process per 100 ms at most, for that one start.
+  A failed delete of the `-l` file for lack of permission (`EACCES`) is held too, on every platform, so off Windows
+  that start also waits out its deadline before it reports.
+
+## RB-GATE-2026-009 — a page service that came back was reported as not restarted
+
+- **affected_gate:** Install (restarting the page service)
+- **symptom:** GitHub Actions `ubuntu-latest` on `dev/ci-test`, installer job, `tests/neutral-upgrade.test.mjs:970`
+  "a failed upgrade whose page service does not come back keeps the marker and says why" failed at its rollback:
+  "did not restart: up returned 0 but the service is not answering", thrown from `installer/neutral-install.mjs:2497`,
+  the only failure of 200. The same code passed on ubuntu and windows the run before.
+- **expected_vs_actual:** expected the rollback to restart the page and remove the maintenance marker; actually
+  `up` exited 0 and the installer reported the page as not restarted, kept the marker and gave no reason.
+- **reproduction:** through the installer's seams, `tests/page-restart.test.mjs`: `up` answers 0 and the one check
+  of the page answers not running.
+- **root_cause:** `up` already waits for the page and exits 0 only once it answered (`pageService.mjs` serviceUp,
+  every 250 ms up to 10 s). The installer then asked once more, and one answer that came late or not at all (each
+  ask is a request to `/api/status` with a 2 s limit) turned a restart that worked into a failure; the check's own
+  reason was dropped for a fixed sentence.
+- **fix:** the commit that adds this entry — `up`'s 0 is the answer, as a caller of `pg_ctl -w` takes its exit
+  code and Playwright's webServerPlugin stops asking once the server answered; a failed `up` keeps its exit and
+  last line, where `up` names why the page did not answer.
+- **regression_test:** `tests/page-restart.test.mjs` "up exits 0: the page service is up, and the page is not asked
+  again even when that ask would time out", "up exits non-zero: …", "each reason the page did not answer reaches
+  the person's message"; on real services `tests/neutral-upgrade.test.mjs` and `tests/neutral-uninstall.test.mjs`.
+- **mutation_case:** `RB-M-restart-asks-again-after-up`, `RB-M-restart-drops-up-reason` (killed).
+- **residual_risk:** which of the reasons made the CI check fail is not known; the log has none. The other one-off
+  checks of whether the page runs (`neutral-install.mjs` plan and journal steps) are unchanged: a wrong answer
+  there costs one more `up`, which says the page is already running.

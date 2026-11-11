@@ -242,6 +242,50 @@
       "test": "review-bridge/tests/run-closing.test.mjs",
       "case": "an empty run lock written during the takeover's wait is not taken over",
       "expect": "Missing expected rejection"
+    },
+    {
+      "id": "RB-M-held-asked-once",
+      "gate": "Records",
+      "target": "review-bridge/service/database/postgresServer.mjs",
+      "anchor": "if (result.held && await anotherServerStarted(root, { binaries, tool, clock, sleep, deadline })) break;",
+      "replacement": "if (false) break;",
+      "reason": "A start that finds the -l file held asks once whether a server runs, so on Windows a command that starts the shared database while another is still starting it is told to restart the computer (CI windows, 806d8fb).",
+      "test": "review-bridge/tests/database-down.test.mjs",
+      "case": "a held -l file while another command's server is still starting: the start waits and uses that server",
+      "expect": "was not shut down properly"
+    },
+    {
+      "id": "RB-M-held-taken-as-started",
+      "gate": "Records",
+      "target": "review-bridge/service/database/postgresServer.mjs",
+      "anchor": "if (result.held && await anotherServerStarted(root, { binaries, tool, clock, sleep, deadline })) break;",
+      "replacement": "if (result.held) break;",
+      "reason": "A start that finds the -l file held takes it as a server that started, without asking up to the deadline, so a dead server's leftovers are used as a running server and never told to the person.",
+      "test": "review-bridge/tests/database-down.test.mjs",
+      "case": "a held -l file with no server by the start's deadline is a dead server's leftovers, said as before",
+      "expect": "Missing expected rejection"
+    },
+    {
+      "id": "RB-M-restart-asks-again-after-up",
+      "gate": "Install",
+      "target": "installer/neutral-install.mjs",
+      "anchor": "  return { running: true, reason: null };",
+      "replacement": "  if (!(await checkPage(target))) return { running: false, reason: \"up returned 0 but the service is not answering\" };\n  return { running: true, reason: null };",
+      "reason": "After up has waited for the page and exited 0, the installer asks once more; one slow or failed answer turns a restart that worked into \"did not restart\", keeps the maintenance marker and drops why (CI ubuntu, neutral-upgrade, 2026-11-11).",
+      "test": "tests/page-restart.test.mjs",
+      "case": "up exits 0: the page service is up, and the page is not asked again even when that ask would time out",
+      "expect": "not answering"
+    },
+    {
+      "id": "RB-M-restart-drops-up-reason",
+      "gate": "Install",
+      "target": "installer/neutral-install.mjs",
+      "anchor": "return { running: false, reason: [\"up exited \" + exit, lastLine(up.stdout), lastLine(up.stderr)].filter(Boolean).join(\" | \") };",
+      "replacement": "return { running: false, reason: \"up exited \" + exit };",
+      "reason": "A failed up is reported by its exit alone, so the person is not told why the page did not answer (no session, pid gone, timeout, unreachable, another service).",
+      "test": "tests/page-restart.test.mjs",
+      "case": "each reason the page did not answer reaches the person's message",
+      "expect": "Bridge did not start"
     }
   ]
 }
