@@ -535,24 +535,6 @@ Options:
 
 Shown by `review-bridge --help --all`. `start` does what `work-plan` and `work-start` do in one command.
 
-#### page-service
-
-```text
-Usage: review-bridge page-service [options]
-
-The local page service itself; up and watch start it and read its readiness
-
-Options:
-  --port <n>
-      Port of the local page (number; default: the port init chose)
-  --lifetime <session|detached>
-      session: ends with its stdin (watch); detached: runs until down (up) (string)
-  --fake-cli
-      Use the built-in fake CLI instead of a model (tests and self-checks) (boolean)
-  --project <folder>
-      The project folder (string; default: the current folder)
-```
-
 #### work-plan
 
 ```text

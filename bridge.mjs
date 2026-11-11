@@ -396,6 +396,8 @@ async function startService(target, fakeCli) {
   if (up.status === 0) {
     try {
       found = await modules.service.connectPage(paths);
+      // init --json's service_reason says "running" for a page service found, as serviceUp's reason does.
+      reason = "running";
     } catch (error) {
       reason = error.reason;
     }

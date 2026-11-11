@@ -22,7 +22,6 @@ import { getBridgePaths } from "../utils/paths.mjs";
 // readiness report, or finding the page service. Ports are the ones the services bind (0) and report.
 const here = path.dirname(fileURLToPath(import.meta.url));
 const bridgeRoot = path.resolve(here, "..");
-const bootstrapPath = path.join(bridgeRoot, "bootstrap.mjs");
 const fixtureOwner = path.join(here, "fixtures", "page-owner-fixture.mjs");
 const FAKE = ["--fake-cli"];
 
@@ -136,7 +135,7 @@ test("starts exactly one page service for concurrent launches and attaches the o
   // database-start work, not to this test.
   await openDatabase();
   // Every launch settles before anything is asserted, so each pid is kept for the clean-up first.
-  const settled = await Promise.allSettled([1, 2, 3].map(() => launch(paths, { bootstrapPath, ownerArgs: FAKE })));
+  const settled = await Promise.allSettled([1, 2, 3].map(() => launch(paths, { ownerArgs: FAKE })));
   // A launch that failed is said with the end of the page service's log, before the clean-up removes it
   // (supabase/cli AGENTS.md:179: subprocess diagnostics).
   const failures = await Promise.all(settled.filter((outcome) => outcome.status === "rejected").map(async ({ reason }) => {
@@ -152,7 +151,7 @@ test("starts exactly one page service for concurrent launches and attaches the o
 
 test("relaunches after shutdown while a foreign listener holds the previous control port; control requests need the secret", { timeout: 120_000 }, async (t) => {
   const { paths } = await project(t);
-  const first = await launch(paths, { bootstrapPath, ownerArgs: FAKE });
+  const first = await launch(paths, { ownerArgs: FAKE });
   const old = first.endpoint;
   assert.equal((await connectPage(paths)).endpoint.pid, old.pid);
   assert.equal(await request(old.port, "GET", "/identity"), 401, "identity requires the secret");
@@ -162,7 +161,7 @@ test("relaunches after shutdown while a foreign listener holds the previous cont
   const foreign = http.createServer((req, res) => res.writeHead(200).end("{}"));
   await new Promise((resolve) => foreign.listen(old.port, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => { foreign.closeAllConnections(); foreign.close(() => resolve()); }));
-  const relaunched = await launch(paths, { bootstrapPath, ownerArgs: FAKE });
+  const relaunched = await launch(paths, { ownerArgs: FAKE });
   assert.notEqual(relaunched.endpoint.pid, old.pid);
   assert.notEqual(relaunched.endpoint.port, old.port);
   assert.deepEqual((await connectPage(paths)).endpoint, relaunched.endpoint);
@@ -204,7 +203,7 @@ test("ignores a stale record once no process holds the lease", { timeout: 120_00
   const unresponsive = await silentListener(t);
   await writeStaleRecord(paths, unresponsive.port);
   assert.equal((await observePage(paths)).running, false);
-  const launched = await launch(paths, { bootstrapPath, ownerArgs: FAKE });
+  const launched = await launch(paths, { ownerArgs: FAKE });
   assert.notEqual(launched.endpoint.port, unresponsive.port);
   assert.equal(unresponsive.connections(), 0);
 });
@@ -222,7 +221,7 @@ test("status reads a free lease without a request to the recorded endpoint", { t
 
 test("a page service that exits before it reports ready is said so, and leaves no process", { timeout: 60_000 }, async (t) => {
   const { paths } = await project(t);
-  await assert.rejects(launch(paths, { bootstrapPath: fixtureOwner, ownerArgs: ["--fixture-mode", "exit-early"] }),
+  await assert.rejects(launch(paths, { entrypoint: fixtureOwner, ownerArgs: ["--fixture-mode", "exit-early"] }),
     /The Bridge page service failed to start: The page service exited before reporting it is ready \(log: /);
   const pid = Number(await fsp.readFile(path.join(paths.privateRoot, "fixture-owner.pid"), "utf8"));
   await waitForOwnerExit(pid, ownerExitProbe());
@@ -233,7 +232,7 @@ test("a page service that exits before it reports ready is said so, and leaves n
 // its reason and where its log is, never with the log's lines.
 test("a startup failure the page service reports is said with its reason and its log's place, not the log", { timeout: 60_000 }, async (t) => {
   const { paths } = await project(t);
-  await assert.rejects(launch(paths, { bootstrapPath: fixtureOwner, ownerArgs: ["--fixture-mode", "report-error"] }), (error) => {
+  await assert.rejects(launch(paths, { entrypoint: fixtureOwner, ownerArgs: ["--fixture-mode", "report-error"] }), (error) => {
     assert.match(error.message, /owner startup failed/);
     assert.match(error.message, /\(log: /);
     assert.doesNotMatch(error.message, /fixture-owner-diagnostic/);
@@ -244,7 +243,7 @@ test("a startup failure the page service reports is said with its reason and its
 
 test("a page service of another release is refused with down; down still stops it", { timeout: 60_000 }, async (t) => {
   const { paths } = await project(t);
-  const launched = await launch(paths, { bootstrapPath: fixtureOwner, ownerArgs: ["--fixture-mode", "other-release"] });
+  const launched = await launch(paths, { entrypoint: fixtureOwner, ownerArgs: ["--fixture-mode", "other-release"] });
   await assert.rejects(connectPage(paths), (error) => {
     assert.equal(error.reason, "release-mismatch");
     assert.match(error.message, /is release 0\.0\.0-other\+fixture, but this command is release .+ Run: .+ down, then run this again\./);
@@ -271,7 +270,7 @@ test("an older release's record with its process alive is neither running nor ab
 
 test("a page service started for a terminal shuts itself down when its stdin ends", { timeout: 120_000 }, async (t) => {
   const { paths } = await project(t);
-  const launched = await launch(paths, { bootstrapPath, ownerArgs: FAKE, lifetime: "session" });
+  const launched = await launch(paths, { ownerArgs: FAKE, lifetime: "session" });
   assert.equal(launched.attached, false);
   await closeLifeline(launched.child);
   assert.equal(alive(launched.endpoint.pid), false);
@@ -285,7 +284,7 @@ test("a page service started for a terminal shuts itself down when its stdin end
 // publish renames over it (Lease.ts:219-221).
 test("a page service whose database session is terminated shuts itself down and leaves its record to the next one", { timeout: 120_000 }, async (t) => {
   const { paths } = await project(t);
-  const launched = await launch(paths, { bootstrapPath, ownerArgs: FAKE });
+  const launched = await launch(paths, { ownerArgs: FAKE });
   const { record } = leaseFiles(paths);
   const before = await fsp.readFile(record, "utf8");
   const projectId = JSON.parse(await fsp.readFile(paths.bridgeConfigPath, "utf8")).project_id;
@@ -298,14 +297,14 @@ test("a page service whose database session is terminated shuts itself down and 
   assert.equal(await held(paths), false);
   assert.equal(await fsp.readFile(record, "utf8").catch(() => null), before, "the record is left as it was");
   await assert.rejects(connectPage(paths), (error) => error.reason === "not-running");
-  const next = await launch(paths, { bootstrapPath, ownerArgs: FAKE });
+  const next = await launch(paths, { ownerArgs: FAKE });
   assert.equal(JSON.parse(await fsp.readFile(record, "utf8")).pid, next.endpoint.pid);
 });
 
 test("page services of two projects run at once without blocking each other", { timeout: 120_000 }, async (t) => {
   const one = await project(t);
   const two = await project(t);
-  const [first, second] = await Promise.all([one, two].map(({ paths }) => launch(paths, { bootstrapPath, ownerArgs: FAKE })));
+  const [first, second] = await Promise.all([one, two].map(({ paths }) => launch(paths, { ownerArgs: FAKE })));
   assert.notEqual(first.endpoint.pid, second.endpoint.pid);
   assert.equal((await connectPage(one.paths)).endpoint.pid, first.endpoint.pid);
   assert.equal((await connectPage(two.paths)).endpoint.pid, second.endpoint.pid);
@@ -314,11 +313,11 @@ test("page services of two projects run at once without blocking each other", { 
 // A page service ended without a shutdown (que README.md:11: a dead holder's lock is available at once).
 test("a page service ended without a shutdown is found not running, and up starts another", { timeout: 120_000 }, async (t) => {
   const { paths } = await project(t);
-  const first = await launch(paths, { bootstrapPath, ownerArgs: FAKE });
+  const first = await launch(paths, { ownerArgs: FAKE });
   process.kill(first.endpoint.pid, "SIGKILL");
   await waitForOwnerExit(first.endpoint.pid, ownerExitProbe());
   await assert.rejects(connectPage(paths), (error) => error.reason === "not-running");
-  const second = await launch(paths, { bootstrapPath, ownerArgs: FAKE });
+  const second = await launch(paths, { ownerArgs: FAKE });
   assert.notEqual(second.endpoint.pid, first.endpoint.pid);
 });
 
@@ -341,7 +340,7 @@ test("a shutdown during a reviewer check cancels it, and the page service ends a
   const previous = process.env.CLAUDE_REVIEW_CLI;
   process.env.CLAUDE_REVIEW_CLI = cli;
   t.after(() => { if (previous === undefined) delete process.env.CLAUDE_REVIEW_CLI; else process.env.CLAUDE_REVIEW_CLI = previous; });
-  const launched = await launch(paths, { bootstrapPath });
+  const launched = await launch(paths);
   const page = await fetch(launched.url);
   const token = /name="review-bridge-session" content="([0-9a-f]{64})"/.exec(await page.text())[1];
   const origin = new URL(launched.url).origin;

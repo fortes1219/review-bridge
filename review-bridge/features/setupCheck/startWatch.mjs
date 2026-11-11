@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import { closeLifeline, launchPage } from "./pageService.mjs";
 
 // The setup page in this terminal until Ctrl+C. The page service is started the one way `up` starts it,
@@ -8,7 +6,7 @@ import { closeLifeline, launchPage } from "./pageService.mjs";
 // HostProcess.ts:439-447,594-604). A page service already running is attached to and left running.
 export async function startWatch({ paths, port, options = {} }) {
   const ownerArgs = [...(port === undefined ? [] : ["--port", String(port)]), ...(options.fakeCli ? ["--fake-cli"] : [])];
-  const launched = await launchPage(paths, { bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs"), ownerArgs, lifetime: "session" });
+  const launched = await launchPage(paths, { ownerArgs, lifetime: "session" });
   if (launched.notice) process.stdout.write(launched.notice + "\n");
   process.stdout.write("Review Bridge setup page: " + launched.url + "\n"
     + "Opening or refreshing the page uses no model. Press Ctrl+C to stop.\n");

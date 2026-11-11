@@ -17,7 +17,6 @@
     "logs",
     "wait",
     "watch",
-    "page-service",
     "up",
     "down",
     "ps",

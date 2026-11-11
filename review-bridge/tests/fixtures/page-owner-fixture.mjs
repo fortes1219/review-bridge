@@ -1,4 +1,4 @@
-// A stand-in for `bootstrap.mjs page-service`, started by launchPage the way it starts the real one
+// A stand-in for the page service's entry file (internal/pageService.mjs), given to launchPage as its entrypoint and started the way it starts the real one
 // (as supabase/cli's tests start tests/host-process-fixture.ts). It writes its pid beside the project's
 // settings first. --fixture-mode exit-early: exits before reporting ready. --fixture-mode other-release:
 // holds the lease and serves the control endpoint as a page service of another release would.

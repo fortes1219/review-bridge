@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { stopPage } from "./fixtures/isolatedDataHome.mjs";
+import { removeProject } from "./fixtures/isolatedDataHome.mjs";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -38,10 +38,7 @@ async function workspace(t, watch) {
   const bridge = (...args) => spawnSync(process.execPath, [path.join(runtime, "bootstrap.mjs"), ...args], {
     cwd: root, encoding: "utf8", windowsHide: true,
   });
-  t.after(async () => {
-    await stopPage(root);
-    await fsp.rm(root, { recursive: true, force: true });
-  });
+  t.after(() => removeProject(root));
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
   // The page keeps its session in the project's state, outside the project.
   await fsp.mkdir(paths.stateRoot, { recursive: true });

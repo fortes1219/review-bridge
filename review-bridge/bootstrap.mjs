@@ -9,7 +9,6 @@ import {
   loadAdapterForInspection,
   resolveAdapterModule,
   selectAdapter,
-  targetKey,
   UNSUPPORTED_ADAPTER,
 } from "./router/platform.mjs";
 import { COMMANDS, dispatchCommand } from "./router/index.mjs";
@@ -92,7 +91,7 @@ async function main() {
   let implementation = {};
   let adapterSource = null;
   if (fakeRequested) {
-    if (!["start", "resume", "work-plan", "work-start", "doctor", "watch", "up", "page-service"].includes(command)) {
+    if (!["start", "resume", "work-plan", "work-start", "doctor", "watch", "up"].includes(command)) {
       throw new Error("--fake-cli is supported only by start, resume, work-plan, work-start, doctor, watch, and up. Leave --fake-cli out.");
     }
     implementation = createFakeAdapter(bridgeRoot, fakeScenario);
@@ -104,18 +103,6 @@ async function main() {
       status: "fake",
       eligible: false,
     };
-  } else if (command === "page-service") {
-    // RC3-LINUX-00: the page and its zero-model checks run on any defined platform; only an eligible
-    // adapter (active or candidate in the manifest) lets the page start the reviewer check.
-    adapterDefinition = loadAdapterForInspection(manifest, process.platform, process.arch, { bridgeRoot });
-    if (adapterDefinition) {
-      const moduleUrl = resolveAdapterModule(bridgeRoot, adapterDefinition.module);
-      adapterSource = fileURLToPath(moduleUrl);
-      implementation = await import(moduleUrl);
-    } else {
-      adapterDefinition = { target: targetKey(process.platform, process.arch), status: "unsupported", eligible: false };
-      implementation = UNSUPPORTED_ADAPTER;
-    }
   } else if (!modelFreeCommands.has(command) && !checksFirst) {
     ({ adapterDefinition, adapterSource, implementation } = await platformAdapter(manifest));
   }

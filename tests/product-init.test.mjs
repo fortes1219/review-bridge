@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { copyProject, dataHome, projectTemplate, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords, removeProject, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fsSync from "node:fs";
@@ -77,12 +77,9 @@ const databasePassword = async () => (await fsp.readFile(path.join(dataHome, "po
 // the way `down` stops the page. The database is left running: `down` stops the person's database too
 // (RC3-DOWN-01) and refuses while any project has a run running, and this process's own pool (inProcess)
 // keeps pointing at that server; the fixture stops it when the file's tests end.
-const { serviceDown } = await import("../review-bridge/features/setupCheck/pageService.mjs");
-async function removeWorkspace(root, env = isolatedEnv()) {
-  const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge", env });
-  await serviceDown({ paths, out: { write() {} } }).catch(() => {});
-  await fsp.rm(root, { recursive: true, force: true });
-}
+// A stop that fails, and a folder that cannot be removed after it, are said with what the stop answered (the fixture).
+const { connectPage, serviceDown } = await import("../review-bridge/features/setupCheck/pageService.mjs");
+const removeWorkspace = (root) => removeProject(root);
 
 // Scripted init: JSON output, fake service adapter, and a free port instead of the default.
 async function scriptedInit(...args) {
@@ -262,8 +259,18 @@ test("init without a terminal takes claude and codex when no role is given or sa
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-"));
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-home-"));
   const env = isolatedEnv({ REVIEW_BRIDGE_DATA_HOME: home });
-  // The page's session is in that data home, so down looks there.
-  t.after(async () => { await removeWorkspace(root, env); stopServerIn(home); await fsp.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); });
+  // init starts the database and the page service in that data home. A command finds a page service in its
+  // own data home only, so down, run as the person runs it with that home, stops both; the server is then
+  // stopped by its data directory in case down did not.
+  t.after(async () => {
+    const down = spawnSync(process.execPath, [path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "down"], {
+      cwd: root, encoding: "utf8", env, windowsHide: true,
+    });
+    stopServerIn(home);
+    assert.equal(down.status, 0, "down in the test's data home: " + down.stdout + down.stderr);
+    await fsp.rm(root, { recursive: true, force: true });
+    await fsp.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  });
   const result = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root), {
     cwd: packageRoot, encoding: "utf8", env, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
@@ -365,10 +372,9 @@ test("init starts the resident service and ends with cd, the work folder, the st
   assert.deepEqual(config.watch, { port, strict_port: false });
   assert.equal((await fsp.readFile(projectPaths(root).watchUrlPath, "utf8")).trim(), url);
   assert.equal((await fetch(url)).status, 200);
-  // B8: the URL init printed is the one the running service recorded and answers for.
-  const session = JSON.parse(await fsp.readFile(projectPaths(root).watchSessionPath, "utf8"));
-  assert.equal(session.url, url);
-  assert.equal((await (await fetch(url + "api/status")).json()).service_id, session.service_id);
+  // B8: the URL init printed is the one of the page service that holds this project's lease and proves
+  // who it is on its control endpoint, found as every command finds it.
+  assert.equal((await connectPage(projectPaths(root))).url, url);
 
   const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const run = (...args) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true });

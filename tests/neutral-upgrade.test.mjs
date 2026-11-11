@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome, removeProject, separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -61,10 +61,7 @@ const stopPage = (root) => serviceDown({ paths: projectPaths(root), out: { write
 
 async function workspace(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-upgrade-"));
-  t.after(async () => {
-    await stopPage(root).catch(() => {});
-    await fsp.rm(root, { recursive: true, force: true });
-  });
+  t.after(() => removeProject(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "vue-test", dependencies: { vue: "latest" }, devDependencies: { vite: "latest" } }));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
   await fsp.mkdir(path.join(root, ".claude"));

@@ -83,7 +83,28 @@ export async function stopPage(root) {
   const runtime = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
   const { serviceDown } = await import("../../features/setupCheck/pageService.mjs");
   const { getBridgePaths } = await import("../../utils/paths.mjs");
-  await serviceDown({ paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }), out: { write() {} } }).catch(() => {});
+  const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
+  // A folder without settings never had a page service.
+  if (!fs.existsSync(paths.bridgeConfigPath)) return "no settings, so no page service";
+  // serviceDown does not throw: it returns exit code 2 and says why on its output.
+  const said = [];
+  const stopped = await serviceDown({ paths, out: { write: (text) => { said.push(text); } } });
+  const answer = "exit " + stopped.exitCode + " (" + stopped.reason + "): " + said.join("").trim();
+  // A stop that fails is said in its own words; passed over, it showed only as the folder it left busy (EBUSY).
+  if (stopped.exitCode === 2) throw new Error("The test's page service did not stop: " + answer);
+  return answer;
+}
+
+// A test's folder removed after its page service is stopped. When the folder cannot be removed, the error
+// carries what the stop answered: a busy folder after a stop that succeeded is not the page service.
+export async function removeProject(root, options = {}) {
+  const answer = await stopPage(root);
+  try {
+    await fs.promises.rm(root, { recursive: true, force: true, ...options });
+  } catch (error) {
+    error.message += " (after the page service's stop answered " + answer + ")";
+    throw error;
+  }
 }
 
 // One real init per test file and kind of project, and a copy of it for each test, as PostgreSQL's tests
@@ -113,10 +134,7 @@ export async function copyProject(t, template, prefix) {
   const file = path.join(root, ".review-bridge", "bridge.json");
   const config = JSON.parse(await fs.promises.readFile(file, "utf8"));
   await fs.promises.writeFile(file, JSON.stringify({ ...config, project_id: randomUUID() }, null, 2) + "\n");
-  t.after(async () => {
-    await stopPage(root);
-    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  });
+  t.after(() => removeProject(root, { maxRetries: 20, retryDelay: 250 }));
   return root;
 }
 

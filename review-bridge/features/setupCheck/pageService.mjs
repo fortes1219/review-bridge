@@ -11,8 +11,12 @@ import fsp from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileExists, isPidAlive, readJson } from "../../service/index.mjs";
+import { fileURLToPath } from "node:url";
 import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 import { createTranslator, resolveLocale } from "../workOrder/i18n.mjs";
+
+// The page service's entry file, which launchPage runs directly; a test gives its own (HostProcess.ts:675,819-823).
+const PAGE_SERVICE_ENTRY = fileURLToPath(new URL("../../internal/pageService.mjs", import.meta.url));
 
 // The lease module reaches the person's database; it is loaded only by the commands that look for the page service.
 const leaseModule = () => import("./pageLease.mjs");
@@ -251,7 +255,7 @@ function readyLine(child) {
   });
 }
 
-async function spawnOwner(paths, { bootstrapPath, ownerArgs, lifetime }) {
+async function spawnOwner(paths, { entrypoint, ownerArgs, lifetime }) {
   const { logPath } = serviceFiles(paths);
   await fsp.mkdir(path.dirname(logPath), { recursive: true });
   const descriptor = fs.openSync(logPath, "a", 0o600);
@@ -260,7 +264,7 @@ async function spawnOwner(paths, { bootstrapPath, ownerArgs, lifetime }) {
       + (logTail(descriptor) ? "\n" + logTail(descriptor) : ""), "startup", extra);
     let child;
     try {
-      child = spawn(process.execPath, [bootstrapPath, "page-service", "--lifetime", lifetime, ...ownerArgs], {
+      child = spawn(process.execPath, [entrypoint, "--lifetime", lifetime, ...ownerArgs], {
         cwd: paths.repoRoot,
         detached: true,
         windowsHide: true,
@@ -304,7 +308,7 @@ async function spawnOwner(paths, { bootstrapPath, ownerArgs, lifetime }) {
 // Connects to the live page service, or starts one and attaches to whichever wins the lease. A spawn
 // that lost the lease to another finds the winner; a page service that is not running yet is tried
 // again every 100 ms for 10 s (HostProcess.ts:662-707).
-export async function launchPage(paths, { bootstrapPath, ownerArgs = [], lifetime = "detached" }) {
+export async function launchPage(paths, { entrypoint = PAGE_SERVICE_ENTRY, ownerArgs = [], lifetime = "detached" } = {}) {
   const deadline = Date.now() + 10_000;
   for (;;) {
     try {
@@ -312,7 +316,7 @@ export async function launchPage(paths, { bootstrapPath, ownerArgs = [], lifetim
     } catch (error) {
       if (error.reason !== "not-running") throw error;
     }
-    const spawned = await spawnOwner(paths, { bootstrapPath, ownerArgs, lifetime });
+    const spawned = await spawnOwner(paths, { entrypoint, ownerArgs, lifetime });
     if (spawned.ready) return { ...spawned, attached: false };
     try {
       return { ...(await connectPage(paths)), attached: true };
@@ -471,11 +475,11 @@ export async function checkService(paths, { reviewer = null, mcp = null } = {}) 
 }
 
 // ---- The commands -----------------------------------------------------------------------------
-export async function serviceUp({ paths, bootstrapPath, ownerArgs = [], out = process.stdout }) {
+export async function serviceUp({ paths, ownerArgs = [], out = process.stdout }) {
   const t = await wordsFor(paths);
   let launched;
   try {
-    launched = await launchPage(paths, { bootstrapPath, ownerArgs, lifetime: "detached" });
+    launched = await launchPage(paths, { ownerArgs, lifetime: "detached" });
   } catch (error) {
     out.write(t("page.up.failed", { reason: error.message }) + "\n");
     return { exitCode: 2, url: null, already_running: false, reason: error.reason };

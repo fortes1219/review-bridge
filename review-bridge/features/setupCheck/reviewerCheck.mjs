@@ -47,7 +47,7 @@ export function probeAuditFile(paths, at = new Date()) {
 export async function ensureReviewerChecked({ paths, onStart = () => {}, reviewer = null, mcp = null }) {
   // The page service running, or started now and attached to (HostProcess.ts:662-707), then its page's status.
   try {
-    await launchPage(paths, { bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs") });
+    await launchPage(paths);
   } catch (error) {
     return { ok: false, reason: "page_not_running", detail: error.message, url: null };
   }
