@@ -88,20 +88,29 @@ async function installWithService(root) {
   assert.equal(await serviceReason(root), "running", "init should leave the page service running");
 }
 
-async function serviceRunning(root) {
+async function pageModules(root) {
   const runtimeRoot = path.join(packageRoot, "review-bridge");
   const modules = await loadInstalledServiceModules(runtimeRoot);
-  if (!modules) return false;
-  return (await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }))).running;
+  if (!modules) throw new Error("The Bridge runtime has no page service module.");
+  return { service: modules.service, paths: modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }) };
 }
 
-// Why the page is or is not running (running, no_session, pid_dead, timeout, unreachable, wrong_service):
-// an assertion that the page runs names the reason when it fails.
+// RC3.1-PAGE-03: only looks, as status does: a free lease is not running without a request.
+async function serviceRunning(root) {
+  const { service, paths } = await pageModules(root);
+  return (await service.observePage(paths)).running === true;
+}
+
+// "running" once the page service is found the waiting way (its lease, record and identity); otherwise why
+// not, so a failed assertion says it.
 async function serviceReason(root) {
-  const runtimeRoot = path.join(packageRoot, "review-bridge");
-  const modules = await loadInstalledServiceModules(runtimeRoot);
-  if (!modules) return "no runtime modules";
-  return (await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }))).reason;
+  const { service, paths } = await pageModules(root);
+  try {
+    await service.connectPage(paths);
+    return "running";
+  } catch (error) {
+    return error.reason + ": " + error.message;
+  }
 }
 
 async function addUserData(root) {

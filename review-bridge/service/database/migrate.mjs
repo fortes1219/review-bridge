@@ -57,8 +57,20 @@ export async function migrationState(client, { dir = MIGRATIONS_DIR } = {}) {
 export async function applyMigrations(client, { dir = MIGRATIONS_DIR } = {}) {
   const files = await migrationFiles(dir);
   refuseUnknown(files, await appliedNames(client));
-  await client.query("create table if not exists schema_migrations ("
-    + "name text primary key, sha256 text not null check (sha256 ~ '^[0-9a-f]{64}$'), applied_at timestamptz not null default now())");
+  // The table is made under the same lock as each migration: two commands opening a new database at once
+  // both reach `create table if not exists`, which is not safe against itself (the loser hits
+  // pg_type_typname_nsp_index). node-pg-migrate takes its lock before it ensures its table
+  // (src/runner.ts:1145-1147, then :1168).
+  await client.query("begin");
+  try {
+    await client.query("select pg_advisory_xact_lock($1)", [MIGRATION_LOCK]);
+    await client.query("create table if not exists schema_migrations ("
+      + "name text primary key, sha256 text not null check (sha256 ~ '^[0-9a-f]{64}$'), applied_at timestamptz not null default now())");
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  }
   const applied = [];
   for (const file of files) {
     await client.query("begin");

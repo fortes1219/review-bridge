@@ -18,13 +18,22 @@ import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 export const DATABASE_NAME = "bridge";
 const opened = new Map();
 
+// Several commands may open the database for the first time at once (two page services, up and start).
+// The look and the create run under a session-level advisory lock on the admin connection, as
+// supabase/cli creates its webhook schema (apps/cli db-setup.ts:636-664: pg_advisory_lock(hashtext(...)),
+// check, create only when missing, unlock): the one that waits finds the database made. CREATE DATABASE
+// cannot run in a transaction, so the lock is the session's, released before the connection ends.
+const CREATE_DATABASE_LOCK = "review-bridge.create-database";
 async function ensureDatabase(root) {
   const admin = await connect(root);
   try {
-    const { rows } = await admin.query("select 1 from pg_database where datname = $1", [DATABASE_NAME]);
-    if (rows.length) return;
-    // Two commands may create it at once; the loser sees 42P04 and uses the winner's.
-    await admin.query("create database " + DATABASE_NAME).catch((error) => { if (error.code !== "42P04") throw error; });
+    await admin.query("select pg_advisory_lock(hashtext($1))", [CREATE_DATABASE_LOCK]);
+    try {
+      const { rows } = await admin.query("select 1 from pg_database where datname = $1", [DATABASE_NAME]);
+      if (!rows.length) await admin.query("create database " + DATABASE_NAME);
+    } finally {
+      await admin.query("select pg_advisory_unlock(hashtext($1))", [CREATE_DATABASE_LOCK]).catch(() => {});
+    }
   } finally {
     await admin.end();
   }
@@ -131,6 +140,57 @@ export async function openReadOnlyDatabase({ dataHome = bridgeDataHome(), statem
   });
   pool.on("error", () => {});
   return { query: (sql, values) => pool.query(sql, values).catch((error) => { throw unavailable(error); }), close: () => pool.end() };
+}
+
+// A server that is not running answers a connection this way: no postmaster.pid (or no port in it) to read
+// its port from, a refused connection, one still starting up, or no Bridge database in it yet.
+const SERVER_DOWN = new Set(["ENOENT", "ECONNREFUSED", "57P03", "3D000"]);
+const serverDown = (error) => SERVER_DOWN.has(error?.code) || /postmaster\.pid has no port/.test(String(error?.message));
+
+// A session-level advisory lock on the person's database (PostgreSQL mvcc.sgml, Advisory Locks: "held
+// until explicitly released or the session ends", "automatically cleaned up by the server at the end of the
+// session"), on its own connection: que's "a connection to the database for locking purposes"
+// (docs/README.md:101). Taken with pg_try_advisory_lock, which answers at once, as node-pg-migrate takes its
+// lock (src/runner.ts `lock`). The keys are hashtext() of two names, as supabase/cli names its locks
+// (apps/cli db-setup.ts:636; packages/stack DatabaseBootstrap.ts:83). Nothing is started here: whoever takes
+// a lock has opened the database first. Null when another session holds it.
+export async function takeAdvisoryLock(space, key, { dataHome = bridgeDataHome() } = {}) {
+  const client = await connect(databaseRoot(dataHome), { database: DATABASE_NAME });
+  try {
+    const { rows } = await client.query("select pg_try_advisory_lock(hashtext($1), hashtext($2)) as taken", [space, key]);
+    if (rows[0].taken === true) return client;
+  } catch (error) {
+    await client.end().catch(() => {});
+    throw error;
+  }
+  await client.end().catch(() => {});
+  return null;
+}
+
+// Whether a session holds that lock, read from pg_locks without taking it: two int4 keys are listed with the
+// first in classid, the second in objid and objsubid 2, and an advisory lock is local to its database
+// (PostgreSQL view-pg-locks). Null when the server is not running: nothing is started to answer.
+export async function openAdvisoryLockReader({ dataHome = bridgeDataHome() } = {}) {
+  let client;
+  try {
+    client = await connect(databaseRoot(dataHome), { database: DATABASE_NAME });
+  } catch (error) {
+    if (serverDown(error)) return null;
+    throw error;
+  }
+  client.on("error", () => {});
+  return {
+    async held(space, key) {
+      const { rows } = await client.query(
+        "select exists (select 1 from pg_locks where locktype = 'advisory' and granted and objsubid = 2"
+        + " and database = (select oid from pg_database where datname = current_database())"
+        + " and classid = hashtext($1)::oid and objid = hashtext($2)::oid) as held",
+        [space, key],
+      );
+      return rows[0].held === true;
+    },
+    close: () => client.end().catch(() => {}),
+  };
 }
 
 // The person's database as `status` says it, nothing started: `running`, `stopped`, or `unusable` with

@@ -19,7 +19,7 @@ export async function upService({ paths, options, out = process.stdout, database
   return (await serviceUp({
     paths,
     bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs"),
-    watchArgs: options.fakeCli ? ["--fake-cli"] : [],
+    ownerArgs: options.fakeCli ? ["--fake-cli"] : [],
     out,
   })).exitCode;
 }

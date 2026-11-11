@@ -78,7 +78,7 @@ async function main() {
   if (gate.mode === "native" && !["start", "resume"].includes(command)) await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "logs", "wait", "up", "down", "ps", "prune", "rm", "clean", "stop", "backup", "graph", "graph-mcp"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "logs", "wait", "up", "down", "ps", "watch", "prune", "rm", "clean", "stop", "backup", "graph", "graph-mcp"]);
   // Native start and resume take this machine's adapter only after the reviewer check and the yes,
   // so without the proof they are refused the same way on every platform, adapter or not.
   const checksFirst = !fakeRequested && ["start", "resume"].includes(command);
@@ -92,7 +92,7 @@ async function main() {
   let implementation = {};
   let adapterSource = null;
   if (fakeRequested) {
-    if (!["start", "resume", "work-plan", "work-start", "doctor", "watch", "up"].includes(command)) {
+    if (!["start", "resume", "work-plan", "work-start", "doctor", "watch", "up", "page-service"].includes(command)) {
       throw new Error("--fake-cli is supported only by start, resume, work-plan, work-start, doctor, watch, and up. Leave --fake-cli out.");
     }
     implementation = createFakeAdapter(bridgeRoot, fakeScenario);
@@ -104,7 +104,7 @@ async function main() {
       status: "fake",
       eligible: false,
     };
-  } else if (command === "watch") {
+  } else if (command === "page-service") {
     // RC3-LINUX-00: the page and its zero-model checks run on any defined platform; only an eligible
     // adapter (active or candidate in the manifest) lets the page start the reviewer check.
     adapterDefinition = loadAdapterForInspection(manifest, process.platform, process.arch, { bridgeRoot });

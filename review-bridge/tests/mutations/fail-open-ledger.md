@@ -239,13 +239,65 @@ claim that nothing else is wrong.
   every 250 ms up to 10 s). The installer then asked once more, and one answer that came late or not at all (each
   ask is a request to `/api/status` with a 2 s limit) turned a restart that worked into a failure; the check's own
   reason was dropped for a fixed sentence.
-- **fix:** the commit that adds this entry — `up`'s 0 is the answer, as a caller of `pg_ctl -w` takes its exit
-  code and Playwright's webServerPlugin stops asking once the server answered; a failed `up` keeps its exit and
-  last line, where `up` names why the page did not answer.
-- **regression_test:** `tests/page-restart.test.mjs` "up exits 0: the page service is up, and the page is not asked
-  again even when that ask would time out", "up exits non-zero: …", "each reason the page did not answer reaches
-  the person's message"; on real services `tests/neutral-upgrade.test.mjs` and `tests/neutral-uninstall.test.mjs`.
-- **mutation_case:** `RB-M-restart-asks-again-after-up`, `RB-M-restart-drops-up-reason` (killed).
-- **residual_risk:** which of the reasons made the CI check fail is not known; the log has none. The other one-off
-  checks of whether the page runs (`neutral-install.mjs` plan and journal steps) are unchanged: a wrong answer
-  there costs one more `up`, which says the page is already running.
+- **fix:** `3d1a8f0` took `up`'s 0 as the answer, citing `pg_ctl -w` and Playwright's webServerPlugin, and left
+  the other one-off checks as they were; the next CI run failed on the test's own one-off check
+  (`neutral-uninstall.test.mjs:781`, `wrong_service`). Redone against supabase/cli's stack owner in
+  RB-GATE-2026-010: the page service reports ready itself, and every check finds it through its lease and
+  identity.
+- **regression_test:** `tests/page-restart.test.mjs` was removed: it reached the installer through an export and a
+  parameter opened for the test only (supabase/cli `.agents/skills/test-audit/SKILL.md:25-27`). Now
+  `review-bridge/tests/page-host.test.mjs` (see RB-GATE-2026-010) and, on real services,
+  `tests/neutral-upgrade.test.mjs` and `tests/neutral-uninstall.test.mjs`, whose assertions that the page runs find
+  it the waiting way and print why when they fail.
+- **mutation_case:** `RB-M-restart-asks-again-after-up` and `RB-M-restart-drops-up-reason` were removed with the
+  test they named; the mutants of RB-GATE-2026-010 replace them.
+- **residual_risk:** which of the reasons made the first CI check fail is not known; the log has none.
+
+## RB-GATE-2026-010 — a page service just started by `up` was found "not running" by the next check
+
+- **affected_gate:** Page (the resident page service)
+- **symptom:** GitHub Actions `ubuntu-latest` on `dev/ci-test` at `f53d7af`, installer job,
+  `tests/neutral-uninstall.test.mjs:781`: the cancel's restart reported `service_restarted: true`, and the
+  test's next check of the page answered `wrong_service`, the only failure of 203.
+- **expected_vs_actual:** expected the page service `up` had just reported to be found running; actually one
+  check of `/api/status` answered something other than this page service's identity and was taken as "not
+  running".
+- **reproduction:** `review-bridge/tests/page-host.test.mjs` makes each situation itself with real page-service
+  processes: a record naming another process while the lease is held, a stale record with no lease holder, a
+  foreign listener on the previous control port.
+- **root_cause:** Bridge decided whether its page service ran from a pid, a session file and one request to a
+  page endpoint that reads the settings and checks both CLIs on every call; every caller asked once, and any
+  answer but a match was "not running". `up` learned that the page was ready by polling that endpoint.
+- **fix:** the commit that adds this entry — the page service is a stack owner as in supabase/cli `c75aea2`
+  (`packages/stack/ARCHITECTURE.md:487-536`), its lease a session-level PostgreSQL advisory lock on a
+  connection of its own, taken with `pg_try_advisory_lock` and read by others from `pg_locks` (as supabase/cli
+  locks in its database, `apps/cli` `db-setup.ts:636-664`; PostgreSQL `mvcc.sgml` Advisory Locks and
+  `view-pg-locks`; que `docs/README.md:101`; node-pg-migrate `src/runner.ts` `lock`), which the server releases
+  when the session ends; the page service shuts itself down when that session ends (`ARCHITECTURE.md:495`, lost
+  ownership); a record published by rename under that lease, withdrawn only while the lock is still held and
+  never touched once it was lost, the next publish renaming over it (`Publication.ts`, `Lease.ts:55,215-237`);
+  a control listener
+  on a port the system gives, with `/identity` and `/shutdown` behind a bearer secret (`StackHost.ts:357-372`);
+  finding it means the lease, then the record, then the identity, a mismatch being a record not yet replaced and
+  looked up again every 50 ms for 30 s (`HostProcess.ts:200-336`), or, for what only looks, once without waiting
+  (`:254-265`); `up` and `watch` start it the one way and read its readiness from a pipe (`:467-707`), `watch`
+  holding its stdin as a session's lifeline (`ARCHITECTURE.md:491`); `down` asks it to shut down and waits until
+  its pid is gone (`:709-815`); shutting down cancels a running reviewer check and waits for its process tree
+  (`ARCHITECTURE.md:505-512`); a page service of another release is refused except by `down` (`:489`). Page services
+  started at once found two races in opening a new database, both fixed: the database is made under an advisory
+  lock on the admin connection (supabase/cli `db-setup.ts:636-664`), and `schema_migrations` is made under the
+  migration lock (node-pg-migrate `src/runner.ts:1145-1168`).
+- **regression_test:** `review-bridge/tests/page-host.test.mjs` (one page service for concurrent launches;
+  relaunch with a foreign listener on the old control port, and 401 without the secret; a record naming another
+  process while the lease is held; a stale record without a lease holder; status without a request; a page
+  service that exits before ready; a startup failure it reports, said without its log; another release; an older release's record; the terminal's lifeline; its
+  database session terminated, its record left for the next one to replace; two projects at once;
+  a page service ended without a shutdown; a shutdown during a reviewer check),
+  `review-bridge/tests/page-exit.test.mjs` (waiting for the pid to go, with a controllable probe and clock).
+- **mutation_case:** `RB-M-page-lease-not-taken`, `RB-M-page-identity-mismatch-not-running`,
+  `RB-M-page-running-by-pid`, `RB-M-page-retract-unconditional`, `RB-M-page-ready-by-polling`,
+  `RB-M-page-lost-lease-kept-running`, `RB-M-page-record-pruned`.
+- **residual_risk:** the page service keeps one database connection of its own while it runs. A page service that
+  never reports ready is ended after 30 s; that wait is not tested, as supabase/cli does not test it. The shutdown
+  during a reviewer check is tested on POSIX only. How fast the database releases a lock whose holder died was
+  measured on Windows (7 to 8 ms); Linux is measured by these tests in the container.

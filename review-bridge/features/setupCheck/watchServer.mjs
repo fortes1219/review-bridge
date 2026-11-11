@@ -166,6 +166,7 @@ export async function startWatchServer({
           if (error.code === "reviewer_not_ready") return reject(res, 409, "reviewer_not_ready");
           if (error.code === "unsupported_reviewer") return reject(res, 409, "unsupported_reviewer");
           if (error.code === "adapter_not_verified") return reject(res, 409, "adapter_not_verified");
+          if (error.code === "shutting_down") return reject(res, 409, "shutting_down");
           // T0-11 F3: the service knows nothing was started. Anything else is not known (F6).
           if (error.code === "probe_not_started") return reject(res, 409, "probe_not_started");
           return reject(res, 500, "probe_failed");

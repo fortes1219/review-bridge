@@ -76,8 +76,8 @@ export function separatePerson(t) {
 // A test's clean-up stops the page service init started for it the way Playwright's webServer teardown
 // stops what it started: by the service's own record, never by asking Bridge to stop itself
 // (ECOSYSTEM-REFERENCES K). `down` refuses while a run of the test is still open, and that left page
-// services running with the test's folder as their working directory (2026-11-09). serviceDown kills
-// only the pid the session names and that answers on its port as that service. The database is the
+// services running with the test's folder as their working directory (2026-11-09). serviceDown asks only the
+// page service that holds this project's lease and proves its identity to shut down (RC3.1-PAGE-03). The database is the
 // file's: stopped by pg_ctl on this file's own data directory when the file's tests end (below).
 export async function stopPage(root) {
   const runtime = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");

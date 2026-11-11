@@ -12,7 +12,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { getBridgePaths } from "../utils/paths.mjs";
-import { checkService } from "../features/setupCheck/pageService.mjs";
+import { checkService, observePage } from "../features/setupCheck/pageService.mjs";
 
 const runtimeSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -81,24 +81,25 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
   // and the page's lines are English alike.
   assert.deepEqual(withoutDatabaseLine(up.stdout), ["Page: " + url]);
   assert.equal((await fsp.readFile(path.join(privateRoot, "watch-url.txt"), "utf8")).trim(), url);
-  // C1 + C3: the watch process recorded itself and /api/status echoes the same identity.
-  const session = JSON.parse(await fsp.readFile(path.join(privateRoot, "watch-session.json"), "utf8"));
-  assert.deepEqual(Object.keys(session).sort(), ["pid", "port", "service_id", "started_at", "url"]);
+  // RC3.1-PAGE-03: the page service published its record under its lease (supabase/cli Lease.ts:11-22):
+  // the control endpoint's port, its pid and release, the page's address and the secret.
+  const session = JSON.parse(await fsp.readFile(path.join(privateRoot, "page-owner.json"), "utf8"));
+  assert.deepEqual(Object.keys(session).sort(), ["lifetime", "page_port", "pid", "port", "project_id", "release", "schema_version", "secret", "started_at", "url"]);
   assert.equal(session.url, url);
-  assert.equal(session.port, port);
+  assert.equal(session.page_port, port);
+  assert.notEqual(session.port, port, "the control endpoint has a port of its own");
+  assert.equal(session.lifetime, "detached");
   assert.ok(Number.isInteger(session.pid));
-  assert.match(session.service_id, /^[0-9a-f]{32}$/);
   const page = await fetch(url);
   assert.equal(page.status, 200);
   const status = await (await fetch(url + "api/status")).json();
-  assert.equal(status.service_id, session.service_id);
   assert.equal(status.pid, session.pid);
   assert.equal(status.port, port);
 
   const again = bridge("up", "--fake-cli");
   assert.equal(again.status, 0);
   assert.deepEqual(withoutDatabaseLine(again.stdout), ["Already running: " + url]);
-  assert.equal(JSON.parse(await fsp.readFile(path.join(privateRoot, "watch-session.json"), "utf8")).pid, session.pid);
+  assert.equal(JSON.parse(await fsp.readFile(path.join(privateRoot, "page-owner.json"), "utf8")).pid, session.pid);
 
   const ps = bridge("ps");
   assert.equal(ps.status, 0);
@@ -121,7 +122,7 @@ test("up starts once, ps reports it, down stops it and removes the pid file", as
   const down = bridge("down");
   assert.equal(down.status, 0, down.stderr);
   assert.deepEqual(down.stdout.trim().split(/\r?\n/), ["Page stopped.", "Database stopped."]);
-  assert.equal(await fsp.stat(path.join(privateRoot, "watch-session.json")).catch(() => null), null);
+  assert.equal(await fsp.stat(path.join(privateRoot, "page-owner.json")).catch(() => null), null);
   const after = bridge("ps");
   assert.equal(after.status, 1);
   assert.equal(after.stdout.trim(), "Bridge is not running. Run: npx review-bridge up");
@@ -166,23 +167,23 @@ test("strict_port refuses an occupied port with a clear line and leaves nothing 
   const up = bridge("up", "--fake-cli");
   assert.equal(up.status, 2);
   assert.match(withoutDatabaseLine(up.stdout).join("\n"), new RegExp(`^Bridge did not start: .*port ${port} 被占用，watch.strict_port 為 true`));
-  assert.equal(await fsp.stat(path.join(privateRoot, "watch-session.json")).catch(() => null), null);
+  assert.equal(await fsp.stat(path.join(privateRoot, "page-owner.json")).catch(() => null), null);
   assert.equal(bridge("ps").status, 1);
 });
 
-test("T2 stale session with a dead pid: ps says not running and up restarts the service", async (t) => {
+test("T2 an older release's record whose process is gone: ps says not running and up starts the service", async (t) => {
   const port = await freePort();
   const { bridge, privateRoot, paths } = await workspace(t, { port, strict_port: false });
   await writeSession(privateRoot, { pid: await deadPid(), port, url: `http://localhost:${port}/` });
-  assert.equal((await checkService(paths)).reason, "pid_dead");
+  assert.equal((await observePage(paths)).reason, "not_running");
   assert.equal(bridge("ps").status, 1);
 
   const up = bridge("up", "--fake-cli");
   assert.equal(up.status, 0, up.stderr);
   assert.deepEqual(withoutDatabaseLine(up.stdout), ["Page: " + `http://localhost:${port}/`]);
-  const check = await checkService(paths);
-  assert.equal(check.reason, "running");
-  assert.ok(check.session.pid !== process.pid);
+  const found = await observePage(paths);
+  assert.equal(found.reason, "running");
+  assert.ok(found.pid !== process.pid);
 });
 
 test("T3 a foreign server answering 200 on the recorded port is wrong_service, not running", async (t) => {
@@ -194,9 +195,11 @@ test("T3 a foreign server answering 200 on the recorded port is wrong_service, n
   await writeSession(privateRoot, { pid: process.pid, port, url: `http://localhost:${port}/` });
 
   assert.equal((await checkService(paths)).reason, "wrong_service");
+  // The record's process (this test) is alive and holds no lease: an older release's page service, said with its pid.
   const ps = bridge("ps");
   assert.equal(ps.status, 1);
-  assert.equal(ps.stdout.trim(), "Bridge is not running. Run: npx review-bridge up");
+  assert.deepEqual(ps.stdout.trim().split(/\r?\n/), ["Bridge is not running. Run: npx review-bridge up",
+    "An older Bridge page service (pid " + process.pid + ") is still running. Run: npx review-bridge down, then run this again."]);
 });
 
 test("T4 a session pointing at a port nobody listens on is unreachable; a malformed record is no_session", async (t) => {

@@ -266,26 +266,81 @@
       "expect": "Missing expected rejection"
     },
     {
-      "id": "RB-M-restart-asks-again-after-up",
-      "gate": "Install",
-      "target": "installer/neutral-install.mjs",
-      "anchor": "  return { running: true, reason: null };",
-      "replacement": "  if (!(await checkPage(target))) return { running: false, reason: \"up returned 0 but the service is not answering\" };\n  return { running: true, reason: null };",
-      "reason": "After up has waited for the page and exited 0, the installer asks once more; one slow or failed answer turns a restart that worked into \"did not restart\", keeps the maintenance marker and drops why (CI ubuntu, neutral-upgrade, 2026-11-11).",
-      "test": "tests/page-restart.test.mjs",
-      "case": "up exits 0: the page service is up, and the page is not asked again even when that ask would time out",
-      "expect": "not answering"
+      "id": "RB-M-page-lease-not-taken",
+      "gate": "Page",
+      "target": "review-bridge/service/database/index.mjs",
+      "anchor": "    if (rows[0].taken === true) return client;",
+      "replacement": "    return client;",
+      "reason": "The page service keeps its lock connection whether pg_try_advisory_lock took the lock or not, so every page service started at once believes it holds the lease: three launches end on three page services.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "starts exactly one page service for concurrent launches and attaches the others",
+      "expect": "!== 1"
     },
     {
-      "id": "RB-M-restart-drops-up-reason",
-      "gate": "Install",
-      "target": "installer/neutral-install.mjs",
-      "anchor": "return { running: false, reason: [\"up exited \" + exit, lastLine(up.stdout), lastLine(up.stderr)].filter(Boolean).join(\" | \") };",
-      "replacement": "return { running: false, reason: \"up exited \" + exit };",
-      "reason": "A failed up is reported by its exit alone, so the person is not told why the page did not answer (no session, pid gone, timeout, unreachable, another service).",
-      "test": "tests/page-restart.test.mjs",
-      "case": "each reason the page did not answer reaches the person's message",
-      "expect": "Bridge did not start"
+      "id": "RB-M-page-identity-mismatch-not-running",
+      "gate": "Page",
+      "target": "review-bridge/features/setupCheck/pageService.mjs",
+      "anchor": "    return stale(\"The control endpoint belongs to another process\");",
+      "replacement": "    return { reason: \"not-running\" };",
+      "reason": "An identity that does not match is taken for no page service at all, so a command that reads the record a page service left while its successor still starts says the page is not running (CI ubuntu, neutral-uninstall wrong_service, 2026-11-11).",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "a record naming another process while the lease is held is a page service still starting, found once it publishes",
+      "expect": "is not running"
+    },
+    {
+      "id": "RB-M-page-running-by-pid",
+      "gate": "Page",
+      "target": "review-bridge/features/setupCheck/pageService.mjs",
+      "anchor": "  if (!reader || !(await reader.held(projectId))) {",
+      "replacement": "  if (!(await readRecord(paths).then((held) => Boolean(held) && isPidAlive(held.pid), () => false))) {",
+      "reason": "Whether the page service runs is read from the record's pid instead of the lease, so a record left behind whose pid is alive again sends requests to whatever now listens on its port.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "ignores a stale record once no process holds the lease",
+      "expect": "Timed out connecting"
+    },
+    {
+      "id": "RB-M-page-retract-unconditional",
+      "gate": "Page",
+      "target": "review-bridge/features/setupCheck/pageLease.mjs",
+      "anchor": "      if (lost || !(await holdsLock())) return;\n      await retrySharingViolation(() => fs.promises.rm(files.record, { force: true }));",
+      "replacement": "      await retrySharingViolation(() => fs.promises.rm(files.record, { force: true }));",
+      "reason": "A page service shutting down removes the record whether it still holds the lock or lost it, so one that lost its lease can remove the record a successor has just published, and the running page service can no longer be found.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "a page service whose database session is terminated shuts itself down and leaves its record to the next one",
+      "expect": "the record is left as it was"
+    },
+    {
+      "id": "RB-M-page-ready-by-polling",
+      "gate": "Page",
+      "target": "review-bridge/features/setupCheck/pageService.mjs",
+      "anchor": "      line = JSON.parse(await readyLine(child));",
+      "replacement": "      line = await (async () => { for (const end = Date.now() + 30_000; ;) { try { const found = await connectPage(paths); return { type: \"ready\", endpoint: found.endpoint, secret: found.record.secret }; } catch (error) { if (Date.now() > end) throw error; await pause(250); } } })();",
+      "reason": "up learns that the page service is ready by asking it again and again instead of reading its readiness report, so a page service that exits before it is ready is only said as not running once the wait runs out.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "a page service that exits before it reports ready is said so, and leaves no process",
+      "expect": "is not running"
+    },
+    {
+      "id": "RB-M-page-lost-lease-kept-running",
+      "gate": "Page",
+      "target": "review-bridge/features/setupCheck/pageOwner.mjs",
+      "anchor": "      process.stderr.write(\"The page service lost its lease: \" + (error?.message || \"its database session ended\") + \"\\n\");\n      done();",
+      "replacement": "      process.stderr.write(\"The page service lost its lease: \" + (error?.message || \"its database session ended\") + \"\\n\");",
+      "reason": "A page service whose database session ended keeps running without its lease, so a second page service can start beside it and both answer as this project's.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "a page service whose database session is terminated shuts itself down and leaves its record to the next one",
+      "expect": "still running"
+    },
+    {
+      "id": "RB-M-page-record-pruned",
+      "gate": "Page",
+      "target": "review-bridge/features/records/retention.mjs",
+      "anchor": "  \"page-owner.json\",\n",
+      "replacement": "",
+      "reason": "The daily prune takes the page service's record for an orphan and removes it, so a page service that is running holds its lease without a record and every command waits 30 s and says it did not become reachable.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "relaunches after shutdown while a foreign listener holds the previous control port; control requests need the secret",
+      "expect": "has not published its record"
     }
   ]
 }

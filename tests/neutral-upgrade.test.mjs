@@ -94,19 +94,32 @@ async function installWithService(root) {
   assert.equal(await serviceReason(root), "running", "init should leave the page service running");
 }
 
-async function serviceCheck(root) {
+async function pageModules(root) {
   const modules = await loadInstalledServiceModules(sourceRuntime);
-  return await modules.service.checkService(modules.getBridgePaths(root, sourceRuntime, { privateRootName: ".review-bridge" }));
+  return { service: modules.service, paths: modules.getBridgePaths(root, sourceRuntime, { privateRootName: ".review-bridge" }) };
 }
 
+// RC3.1-PAGE-03: the page service found the waiting way (its lease, record and identity), then its page's status.
+async function serviceCheck(root) {
+  const { service, paths } = await pageModules(root);
+  return await service.checkPageStatus(paths);
+}
+
+// Only looks, as status does: a free lease is not running without a request.
 async function serviceRunning(root) {
-  return (await serviceCheck(root)).running === true;
+  const { service, paths } = await pageModules(root);
+  return (await service.observePage(paths)).running === true;
 }
 
-// Why the page is or is not running (running, no_session, pid_dead, timeout, unreachable, wrong_service):
-// an assertion that the page runs names the reason when it fails.
+// "running" once the page service is found the waiting way; otherwise why not, so a failed assertion says it.
 async function serviceReason(root) {
-  return (await serviceCheck(root)).reason;
+  const { service, paths } = await pageModules(root);
+  try {
+    await service.connectPage(paths);
+    return "running";
+  } catch (error) {
+    return error.reason + ": " + error.message;
+  }
 }
 
 async function tree(root) {

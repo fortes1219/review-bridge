@@ -7,7 +7,7 @@
 // held by the running page service (below), and the commands other than the ones a person starts
 // stay closed in native mode.
 
-import { checkService } from "../../features/setupCheck/index.mjs";
+import { checkPageStatus } from "../../features/setupCheck/index.mjs";
 import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 
 export const NATIVE_MODEL_COMMANDS = Object.freeze(["start", "resume", "work-start", "review", "bounded-resume"]);
@@ -38,14 +38,15 @@ export function assertNativeAllowed(input) {
 // N7: native execution needs the reviewer read-only proof (installer contract: native is
 // blocked until the probe proves the reviewer cannot write). That proof deliberately lives only in
 // the running page service's memory, so it cannot be forged by editing a file; a start asks that
-// service over loopback after T0-01's identity check (session pid and service_id must match). The
-// service recomputes its configuration fingerprint on every status call, so a changed CLI, adapter
-// or probe turns the proof stale. This is an operating restriction: an agent under the same
-// OS account could stand up a look-alike service.
-export async function checkReviewerProof(paths, { check = checkService, reviewer = null, mcp = null } = {}) {
+// service over loopback once the page service is found through its lease and its control endpoint's
+// identity (pageService.mjs connectPage). The service recomputes its configuration fingerprint on every
+// status call, so a changed CLI, adapter or probe turns the proof stale. This is an operating
+// restriction: an agent under the same OS account could stand up a look-alike service.
+export async function checkReviewerProof(paths, { check = checkPageStatus, reviewer = null, mcp = null } = {}) {
   const service = await check(paths, { reviewer, mcp });
-  if (!service.running) {
-    return { ok: false, reason: "watch_not_running", detail: service.reason, message: PREFIX + ": the Bridge page service is not running (" + service.reason + "). Run: " + bridgeRunner() + " start <file> (it starts the page and runs the check first)" };
+  if (!service.running || !service.status) {
+    const why = service.message || service.reason;
+    return { ok: false, reason: "watch_not_running", detail: service.reason, message: PREFIX + ": the Bridge page service is not running (" + why + "). Run: " + bridgeRunner() + " start <file> (it starts the page and runs the check first)" };
   }
   const state = service.status?.reviewer_readonly?.state || "unknown";
   if (service.status?.reviewer_readonly_proven !== true || state !== "proven") {

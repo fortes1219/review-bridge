@@ -1419,10 +1419,10 @@ test("a page started with the fake CLI cannot give a native work-start the revie
   const runtime = path.join(packageRoot, "review-bridge");
   const load = (relative) => import(pathToFileURL(path.join(runtime, ...relative.split("/"))).href);
   const { getBridgePaths } = await load("utils/paths.mjs");
-  const { checkService } = await load("features/setupCheck/index.mjs");
+  const { checkPageStatus } = await load("features/setupCheck/index.mjs");
   const { checkReviewerProof } = await load("router/guards/nativeGate.mjs");
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
-  const service = await checkService(paths);
+  const service = await checkPageStatus(paths);
   assert.equal(service.running, true, service.reason);
   assert.deepEqual([service.status.platform_eligible, service.status.platform_status, service.status.probe_available], [false, "fake", false]);
   // Pressing the check on that page, with a request the page accepts, starts nothing.

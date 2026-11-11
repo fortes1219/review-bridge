@@ -124,7 +124,7 @@ export const COMMANDS = {
     configFree: true,
     summary: "Show what Bridge is doing now: the page, this project's runs, and how to look at the database",
     options: { "--after": AFTER, "--json": { ...JSON_OUT } },
-    run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.checkService(context.paths) }),
+    run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.observePage(context.paths) }),
   },
   logs: {
     audience: "human",
@@ -159,9 +159,20 @@ export const COMMANDS = {
       "--port": { key: "port", type: "number", value: "<n>", default: "the port init chose", help: "Port of the local page" },
       "--fake-cli": FAKE_CLI,
     },
-    run: (context) => setupCheck.startWatch({
+    run: (context) => setupCheck.startWatch({ ...context, port: context.options.port }),
+  },
+  "page-service": {
+    audience: "agent",
+    summary: "The local page service itself; up and watch start it and read its readiness",
+    options: {
+      "--port": { key: "port", type: "number", value: "<n>", default: "the port init chose", help: "Port of the local page" },
+      "--lifetime": { key: "lifetime", type: "string", value: "<session|detached>", help: "session: ends with its stdin (watch); detached: runs until down (up)" },
+      "--fake-cli": FAKE_CLI,
+    },
+    run: (context) => setupCheck.runPageService({
       ...context,
       port: context.options.port,
+      lifetime: context.options.lifetime,
       daily: () => records.runPrune(context.paths, { deliver: deliverQuietly(context) }),
     }),
   },
