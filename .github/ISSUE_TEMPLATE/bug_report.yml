@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the report. Please read [Known issues](https://github.com/fortes1219/review-bridge#known-issues-in-030-rc3-read-before-your-first-run) first: a run left "running" after its terminal or agent died is a known one.
+        Thanks for the report. Please read [Known issues](https://github.com/fortes1219/review-bridge#known-issues-in-031-rc3-read-before-your-first-run) first: a run left "running" after its terminal or agent died is a known one.
   - type: textarea
     id: bug-description
     attributes:
@@ -93,7 +93,7 @@ body:
     attributes:
       label: Validations
       options:
-        - label: I read the [Known issues](https://github.com/fortes1219/review-bridge#known-issues-in-030-rc3-read-before-your-first-run) and this is not one of them, or it is one and this report adds something.
+        - label: I read the [Known issues](https://github.com/fortes1219/review-bridge#known-issues-in-031-rc3-read-before-your-first-run) and this is not one of them, or it is one and this report adds something.
           required: true
         - label: I checked the [Known limitations](https://github.com/fortes1219/review-bridge/blob/master/CHANGELOG.md) for this version.
           required: true
