@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
+  assertPlatformContract,
   bridgeRootFrom,
   loadAdapterForInspection,
   resolveAdapterModule,
@@ -32,14 +33,6 @@ function takeProject(argv) {
   const value = argv[index + 1];
   if (!value || value.startsWith("--")) throw new Error("Missing value for --project");
   return { repoRoot: path.resolve(value), args: [...argv.slice(0, index), ...argv.slice(index + 2)] };
-}
-
-function assertPlatformContract(implementation) {
-  if (typeof implementation.resolveExecutable !== "function"
-      || typeof implementation.buildInvocation !== "function"
-      || typeof implementation.notify !== "function") {
-    throw new Error("Selected adapter does not implement the platform contract.");
-  }
 }
 
 async function platformAdapter(manifest) {

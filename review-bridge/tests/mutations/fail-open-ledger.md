@@ -312,3 +312,56 @@ claim that nothing else is wrong.
   measured on Windows (7 to 8 ms); Linux is measured by these tests in the container. Two commands upgrading at
   the same moment both read pending migrations and both back up; left as it was (index.mjs open), for the
   database-start work.
+
+## RB-GATE-2026-011 — the page service's adapter was no longer checked against the platform contract
+
+- **affected_gate:** Platform (the adapter a command or the page service takes)
+- **symptom:** found by reading `66778c8`: `review-bridge/internal/pageService.mjs` hands the adapter it loads to the
+  page service without the check `bootstrap.mjs` gives the adapter of every command that is not model-free.
+- **expected_vs_actual:** expected an adapter module without `resolveExecutable`, `buildInvocation` or `notify` to
+  stop the page service at its start, as it did while the page service ran through `bootstrap.mjs` (`66778c8~1`
+  `bootstrap.mjs:81,131`: `page-service` was not model-free, so `assertPlatformContract` ran on its adapter);
+  actually the entry file took any module.
+- **reproduction:** `review-bridge/tests/page-host.test.mjs` copies this tree's runtime and points its manifest, for
+  this platform, at an adapter module without `notify`, as `tests/product-init.test.mjs` `packageForPlatform` changes a
+  copy's manifest (`router/platform.mjs` `loadAdapterForInspection` asks only for an id and a module inside the
+  runtime), then starts the page service from the copy's entry file without `--fake-cli`.
+- **root_cause:** moving the page service out of the command table into its own entry file moved the adapter's
+  loading but not the check after it.
+- **fix:** the commit that adds this entry — `assertPlatformContract` is in `router/platform.mjs`, and both
+  `bootstrap.mjs` and the entry file call it on the adapter they take, the entry file right after loading it.
+- **regression_test:** `review-bridge/tests/page-host.test.mjs`, a page service whose adapter does not implement the
+  platform contract does not start: the launch fails at startup with the refusal from the page service's log, and no
+  page service holds the lease. Before `66778c8` the check had no test either: its message appeared only where it
+  is thrown.
+- **mutation_case:** `RB-M-page-adapter-contract-unchecked`.
+- **residual_risk:** the check is asserted where the launcher starts the page service; `up`'s line to the person
+  ("Bridge did not start: …") is not, and the launcher in the test is this package's while the entry file is the
+  copy's, the two being the same source.
+
+## RB-GATE-2026-012 — a page service that exited before it was ready was said without its log's last lines
+
+- **affected_gate:** Page (the resident page service)
+- **symptom:** `review-bridge/tests/page-host.test.mjs`, the page service whose adapter does not implement the
+  platform contract: the launch failed at startup, and its message named the log but held none of it, so the
+  refusal the page service had written there did not reach the caller.
+- **expected_vs_actual:** expected a page service that exits before reporting ready to be said with the last lines
+  of its log, as supabase/cli says a stack owner that does so (`c75aea2`, `packages/stack/src/HostProcess.ts:487-490`);
+  actually only the log's place, from `1b284d5` on.
+- **reproduction:** that test; any page service that exits before it reports ready.
+- **root_cause:** the launcher opened the log to append only (`"a"`) while it read the log's tail back through the
+  same descriptor; the read failed, and the tail reader's catch, there for a log that cannot be read, answered "".
+  supabase/cli opens it `"a+"` (`HostProcess.ts:481`); the port kept the reader (`:449-461`) and changed the mode.
+- **fix:** the commit that adds this entry — the log is opened `"a+"`, as `HostProcess.ts:481`. A failure the page
+  service reports on its readiness pipe is still said without the log (`:583`).
+- **regression_test:** `review-bridge/tests/page-host.test.mjs`, a page service whose adapter does not implement the
+  platform contract does not start (its message is asserted to carry the refusal, which only the log holds).
+- **mutation_case:** `RB-M-page-log-tail-unreadable`.
+- **residual_risk:** what reads only the last line of `up`'s output now reads the log's last line instead of the
+  launcher's own line: the installer's restart reason (`installer/neutral-install.mjs:922,937`) and init's
+  `service_reason` when `up` fails (`bridge.mjs:405`). The log is appended to and never cleared between starts:
+  Bridge does not rotate or remove it (the retention pass skips files at the log root,
+  `features/records/retention.mjs:358-359`; no other writer of it was seen in a sample), so its last 20 lines may hold
+  earlier starts' lines, and a page service that exits having written nothing this time is said with old lines, the
+  last of them being what those places read. Whether supabase/cli clears or rotates its owner log beside opening it
+  `"a+"` (`HostProcess.ts:449-461,481`) was not read.

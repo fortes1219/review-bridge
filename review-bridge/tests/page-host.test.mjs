@@ -1,6 +1,6 @@
 import "./fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -67,6 +67,28 @@ async function launch(paths, options) {
 const alive = (pid) => {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
 };
+
+// Whether a process the reviewer check started has ended, decided by the test itself as supabase/cli's tests
+// decide it for a descendant (c75aea2, packages/stack/src/preparation/artifacts.integration.test.ts:1264-1297,
+// isDescendantTerminated), never by the product's own check: gone (ESRCH) has ended; otherwise `ps -o stat=`
+// answers, and a zombie (Z) has ended, only not yet reaped by whoever adopted it; no answer, or ps failing, is
+// asked of kill once more. Any other error from kill is thrown. `stat` is what ps said, for the message.
+function descendantEnded(pid) {
+  const probeAlive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      if (error.code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  if (!probeAlive()) return { ended: true, stat: "gone" };
+  const listed = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  const stat = String(listed.stdout || "").trim();
+  if (listed.status === 0 && stat.length > 0) return { ended: stat.startsWith("Z"), stat };
+  return { ended: !probeAlive(), stat: "no answer from ps" };
+}
 
 function request(port, method, requestPath, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -241,6 +263,50 @@ test("a startup failure the page service reports is said with its reason and its
   own(paths, Number(await fsp.readFile(path.join(paths.privateRoot, "fixture-owner.pid"), "utf8")));
 });
 
+// A copy of this tree's runtime (so a mutant of it is what is copied) whose manifest names, for this platform,
+// an adapter module without `notify`, the way product-init's packageForPlatform changes a copy's manifest; it
+// resolves its packages through a link to this package's node_modules, removed before the copy is. Its entry
+// file is returned. The module refuses to start anything, so even a page service that took it calls no model.
+async function runtimeWithoutContract(t) {
+  const copy = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-page-runtime-"));
+  t.after(async () => {
+    await fsp.unlink(path.join(copy, "node_modules")).catch(() => {});
+    await fsp.rm(copy, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  });
+  const runtime = path.join(copy, "review-bridge");
+  await fsp.cp(bridgeRoot, runtime, { recursive: true, filter: (from) => path.relative(bridgeRoot, from).split(path.sep)[0] !== "tests" });
+  await fsp.copyFile(path.join(bridgeRoot, "..", "package.json"), path.join(copy, "package.json"));
+  await fsp.symlink(fs.realpathSync(path.join(bridgeRoot, "..", "node_modules")), path.join(copy, "node_modules"), "junction");
+  await fsp.mkdir(path.join(runtime, "platforms", "no-contract"), { recursive: true });
+  await fsp.writeFile(path.join(runtime, "platforms", "no-contract", "adapter.mjs"), [
+    "// An adapter without notify, for a test; it starts nothing.",
+    "export async function resolveExecutable() { throw new Error(\"This adapter starts nothing.\"); }",
+    "export function buildInvocation() { throw new Error(\"This adapter starts nothing.\"); }",
+    "",
+  ].join("\n"));
+  const manifestFile = path.join(runtime, "manifest.json");
+  const manifest = JSON.parse(await fsp.readFile(manifestFile, "utf8"));
+  const key = process.platform + "-" + process.arch;
+  manifest.adapters[key] = { ...manifest.adapters[key], id: "no-contract", module: "./platforms/no-contract/adapter.mjs", status: "active" };
+  await fsp.writeFile(manifestFile, JSON.stringify(manifest, null, 2) + "\n");
+  return path.join(runtime, "internal", "pageService.mjs");
+}
+
+// The adapter the page service loads is checked against the platform contract, as bootstrap.mjs checks a
+// command's: started from the copy's entry file without --fake-cli, it loads the manifest's module for this
+// platform (router/platform.mjs loadAdapterForInspection), and one without the contract stops it before it
+// takes the lease. The refusal goes to its log, which the launcher's failure ends with.
+test("a page service whose adapter does not implement the platform contract does not start", { timeout: 60_000 }, async (t) => {
+  const { paths } = await project(t);
+  const entrypoint = await runtimeWithoutContract(t);
+  await assert.rejects(launch(paths, { entrypoint }), (error) => {
+    assert.equal(error.reason, "startup");
+    assert.match(error.message, /does not implement the platform contract/);
+    return true;
+  });
+  assert.equal((await observePage(paths)).running, false);
+});
+
 test("a page service of another release is refused with down; down still stops it", { timeout: 60_000 }, async (t) => {
   const { paths } = await project(t);
   const launched = await launch(paths, { entrypoint: fixtureOwner, ownerArgs: ["--fixture-mode", "other-release"] });
@@ -353,8 +419,10 @@ test("a shutdown during a reviewer check cancels it, and the page service ends a
   const pids = (await fileWritten(markers)).split(" ").map(Number);
   for (const pid of pids) own(paths, pid);
   assert.deepEqual(await stopPage(paths), { stopped: true });
-  assert.equal(alive(pids[0]), false, "the reviewer CLI is gone");
-  assert.equal(alive(pids[1]), false, "the process it started is gone");
+  const cliEnded = descendantEnded(pids[0]);
+  assert.ok(cliEnded.ended, "the reviewer CLI is gone (ps stat: " + cliEnded.stat + ")");
+  const childEnded = descendantEnded(pids[1]);
+  assert.ok(childEnded.ended, "the process it started is gone (ps stat: " + childEnded.stat + ")");
   assert.equal(alive(launched.endpoint.pid), false);
   await check;
 });

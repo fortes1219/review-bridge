@@ -373,8 +373,11 @@ test("init starts the resident service and ends with cd, the work folder, the st
   assert.equal((await fsp.readFile(projectPaths(root).watchUrlPath, "utf8")).trim(), url);
   assert.equal((await fetch(url)).status, 200);
   // B8: the URL init printed is the one of the page service that holds this project's lease and proves
-  // who it is on its control endpoint, found as every command finds it.
-  assert.equal((await connectPage(projectPaths(root))).url, url);
+  // who it is on its control endpoint, found as every command finds it, and the page at that URL is
+  // served by that same process.
+  const found = await connectPage(projectPaths(root));
+  assert.equal(found.url, url);
+  assert.equal((await (await fetch(url + "api/status")).json()).pid, found.record.pid);
 
   const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const run = (...args) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true });

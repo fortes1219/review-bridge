@@ -10,7 +10,7 @@ import "../utils/nodeVersion.mjs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { loadAdapterForInspection, resolveAdapterModule, targetKey, UNSUPPORTED_ADAPTER } from "../router/platform.mjs";
+import { assertPlatformContract, loadAdapterForInspection, resolveAdapterModule, targetKey, UNSUPPORTED_ADAPTER } from "../router/platform.mjs";
 import { runPageServiceProcess } from "../router/index.mjs";
 import { createFakeAdapter, readJson } from "../service/index.mjs";
 import { failureLine } from "../service/database/serverErrors.mjs";
@@ -44,6 +44,8 @@ const args = process.argv.slice(2);
 let code;
 try {
   const { implementation, adapterSource, adapterDefinition } = await pageAdapter(args);
+  // The same check bootstrap.mjs gives the adapter of every command that is not model-free.
+  assertPlatformContract(implementation);
   code = await runPageServiceProcess({
     args, repoRoot: process.cwd(), bridgeRoot, adapter: implementation, adapterId: adapterDefinition.id || null,
     adapterDefinition, adapterSource, privateRootName: PRIVATE_ROOT_NAME,

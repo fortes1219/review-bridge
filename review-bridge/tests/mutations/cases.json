@@ -385,6 +385,28 @@
       "test": "review-bridge/tests/backup.test.mjs",
       "case": "an upgrade is refused while a run is running: no copy is made and no new migration is applied",
       "expect": "the upgrade is refused while a run is running"
+    },
+    {
+      "id": "RB-M-page-adapter-contract-unchecked",
+      "gate": "Platform",
+      "target": "review-bridge/internal/pageService.mjs",
+      "anchor": "  assertPlatformContract(implementation);\n  code = await runPageServiceProcess({",
+      "replacement": "  code = await runPageServiceProcess({",
+      "reason": "The page service takes the adapter its manifest names without checking it against the platform contract, so one without notify starts the page service and is found missing only when it is called.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "a page service whose adapter does not implement the platform contract does not start",
+      "expect": "Missing expected rejection"
+    },
+    {
+      "id": "RB-M-page-log-tail-unreadable",
+      "gate": "Page",
+      "target": "review-bridge/features/setupCheck/pageService.mjs",
+      "anchor": "  const descriptor = fs.openSync(logPath, \"a+\", 0o600);",
+      "replacement": "  const descriptor = fs.openSync(logPath, \"a\", 0o600);",
+      "reason": "The page service log is opened only to append, so its last lines cannot be read back, and a page service that exits before it is ready is said without why: the failure names the log but carries none of it.",
+      "test": "review-bridge/tests/page-host.test.mjs",
+      "case": "a page service whose adapter does not implement the platform contract does not start",
+      "expect": "did not match the regular expression"
     }
   ]
 }

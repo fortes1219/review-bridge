@@ -258,7 +258,8 @@ function readyLine(child) {
 async function spawnOwner(paths, { entrypoint, ownerArgs, lifetime }) {
   const { logPath } = serviceFiles(paths);
   await fsp.mkdir(path.dirname(logPath), { recursive: true });
-  const descriptor = fs.openSync(logPath, "a", 0o600);
+  // Opened to append and to read, so a failure can end with the log's last lines (HostProcess.ts:481, `a+`).
+  const descriptor = fs.openSync(logPath, "a+", 0o600);
   try {
     const failure = (message, extra) => new PageServiceError("The Bridge page service failed to start: " + message + " (log: " + logPath + ")"
       + (logTail(descriptor) ? "\n" + logTail(descriptor) : ""), "startup", extra);
