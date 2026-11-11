@@ -76,14 +76,40 @@ export function separatePerson(t) {
 // A test's clean-up stops the page service init started for it the way Playwright's webServer teardown
 // stops what it started: by the service's own record, never by asking Bridge to stop itself
 // (ECOSYSTEM-REFERENCES K). `down` refuses while a run of the test is still open, and that left page
-// services running with the test's folder as their working directory (2026-11-09). serviceDown kills
-// only the pid the session names and that answers on its port as that service. The database is the
+// services running with the test's folder as their working directory (2026-11-09). serviceDown asks only the
+// page service that holds this project's lease and proves its identity to shut down (RC3.1-PAGE-03). The database is the
 // file's: stopped by pg_ctl on this file's own data directory when the file's tests end (below).
 export async function stopPage(root) {
   const runtime = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
   const { serviceDown } = await import("../../features/setupCheck/pageService.mjs");
   const { getBridgePaths } = await import("../../utils/paths.mjs");
-  await serviceDown({ paths: getBridgePaths(root, runtime, { privateRootName: ".review-bridge" }), out: { write() {} } }).catch(() => {});
+  const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
+  // A folder without settings never had a page service.
+  if (!fs.existsSync(paths.bridgeConfigPath)) return "no settings, so no page service";
+  // serviceDown does not throw: it returns exit code 2 and says why on its output.
+  const said = [];
+  const stopped = await serviceDown({ paths, out: { write: (text) => { said.push(text); } } });
+  const answer = "exit " + stopped.exitCode + " (" + stopped.reason + "): " + said.join("").trim();
+  // A stop that fails is said in its own words; passed over, it showed only as the folder it left busy (EBUSY).
+  if (stopped.exitCode === 2) throw new Error("The test's page service did not stop: " + answer);
+  return answer;
+}
+
+// A test's folder removed after its page service is stopped. Windows may still hold a folder another process
+// had open as a transient sharing violation, so the removal is retried a bounded number of times: supabase/cli
+// retries removing a folder so (c75aea2, packages/stack/src/namespace/Registry.ts:181-182,
+// src/internal/sharing-violation.ts:15-34), and this takes Node's own way for a test's temporary folder, fs.rm
+// retried 3 times with its default delay, about 600 ms in all (nodejs/node v24.16.0 test/common/tmpdir.js:26,31;
+// lib/internal/fs/rimraf.js:28-44). When the folder still cannot be removed, the error carries what the stop
+// answered: a busy folder after a stop that succeeded is not the page service.
+export async function removeProject(root, options = {}) {
+  const answer = await stopPage(root);
+  try {
+    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 3, ...options });
+  } catch (error) {
+    error.message += " (after the page service's stop answered " + answer + ")";
+    throw error;
+  }
 }
 
 // One real init per test file and kind of project, and a copy of it for each test, as PostgreSQL's tests
@@ -113,10 +139,7 @@ export async function copyProject(t, template, prefix) {
   const file = path.join(root, ".review-bridge", "bridge.json");
   const config = JSON.parse(await fs.promises.readFile(file, "utf8"));
   await fs.promises.writeFile(file, JSON.stringify({ ...config, project_id: randomUUID() }, null, 2) + "\n");
-  t.after(async () => {
-    await stopPage(root);
-    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  });
+  t.after(() => removeProject(root, { maxRetries: 20, retryDelay: 250 }));
   return root;
 }
 

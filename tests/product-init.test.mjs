@@ -1,7 +1,7 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { copyProject, dataHome, projectTemplate, queryRecords, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { copyProject, dataHome, projectTemplate, queryRecords, removeProject, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fsSync from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -77,12 +77,9 @@ const databasePassword = async () => (await fsp.readFile(path.join(dataHome, "po
 // the way `down` stops the page. The database is left running: `down` stops the person's database too
 // (RC3-DOWN-01) and refuses while any project has a run running, and this process's own pool (inProcess)
 // keeps pointing at that server; the fixture stops it when the file's tests end.
-const { serviceDown } = await import("../review-bridge/features/setupCheck/pageService.mjs");
-async function removeWorkspace(root, env = isolatedEnv()) {
-  const paths = getBridgePaths(root, path.join(packageRoot, "review-bridge"), { privateRootName: ".review-bridge", env });
-  await serviceDown({ paths, out: { write() {} } }).catch(() => {});
-  await fsp.rm(root, { recursive: true, force: true });
-}
+// A stop that fails, and a folder that cannot be removed after it, are said with what the stop answered (the fixture).
+const { connectPage, launchPage, serviceDown } = await import("../review-bridge/features/setupCheck/pageService.mjs");
+const removeWorkspace = (root) => removeProject(root);
 
 // Scripted init: JSON output, fake service adapter, and a free port instead of the default.
 async function scriptedInit(...args) {
@@ -262,8 +259,19 @@ test("init without a terminal takes claude and codex when no role is given or sa
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-"));
   const home = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-default-roles-home-"));
   const env = isolatedEnv({ REVIEW_BRIDGE_DATA_HOME: home });
-  // The page's session is in that data home, so down looks there.
-  t.after(async () => { await removeWorkspace(root, env); stopServerIn(home); await fsp.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); });
+  // init starts the database and the page service in that data home. A command finds a page service in its
+  // own data home only, so down, run as the person runs it with that home, stops both; the server is then
+  // stopped by its data directory in case down did not.
+  t.after(async () => {
+    const down = spawnSync(process.execPath, [path.join(packageRoot, "review-bridge", "bootstrap.mjs"), "down"], {
+      cwd: root, encoding: "utf8", env, windowsHide: true,
+    });
+    stopServerIn(home);
+    assert.equal(down.status, 0, "down in the test's data home: " + down.stdout + down.stderr);
+    // Retried as removeProject retries it (the fixture says why); removeProject itself looks in this process's data home.
+    await fsp.rm(root, { recursive: true, force: true, maxRetries: 3 });
+    await fsp.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  });
   const result = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root), {
     cwd: packageRoot, encoding: "utf8", env, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
   });
@@ -365,10 +373,12 @@ test("init starts the resident service and ends with cd, the work folder, the st
   assert.deepEqual(config.watch, { port, strict_port: false });
   assert.equal((await fsp.readFile(projectPaths(root).watchUrlPath, "utf8")).trim(), url);
   assert.equal((await fetch(url)).status, 200);
-  // B8: the URL init printed is the one the running service recorded and answers for.
-  const session = JSON.parse(await fsp.readFile(projectPaths(root).watchSessionPath, "utf8"));
-  assert.equal(session.url, url);
-  assert.equal((await (await fetch(url + "api/status")).json()).service_id, session.service_id);
+  // B8: the URL init printed is the one of the page service that holds this project's lease and proves
+  // who it is on its control endpoint, found as every command finds it, and the page at that URL is
+  // served by that same process.
+  const found = await connectPage(projectPaths(root));
+  assert.equal(found.url, url);
+  assert.equal((await (await fetch(url + "api/status")).json()).pid, found.record.pid);
 
   const bootstrap = path.join(packageRoot, "review-bridge", "bootstrap.mjs");
   const run = (...args) => spawnSync(process.execPath, [bootstrap, ...args], { cwd: root, encoding: "utf8", windowsHide: true });
@@ -640,6 +650,52 @@ test("init that reinitializes a set-up folder reads the project into its graph a
   assert.match(again.stdout, /^Reinitialized existing Review Bridge setup in /);
   const projectId = projectPaths(root).projectId;
   assert.deepEqual((await queryRecords("select path from graph_files where project_id = $1 order by path", [projectId])).map((row) => row.path), ["src/a.ts", "src/b.ts"]);
+});
+
+// The first user (2026-11-09): a Nuxt project got no project type, and a folder set up could change its type
+// only through uninstall and init, which drops the project's id. A Nuxt project is now a Vue frontend; init
+// with --profile in a folder set up says which type it has and the test block to put into bridge.json (here
+// on the path that rebuilds a missing install record); the next start reads it, and the project keeps its id.
+test("a Nuxt project is set up as a Vue frontend, and a project type changed in bridge.json is used by the next start", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-nuxt-"));
+  t.after(() => removeWorkspace(root));
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "nuxt-app", private: true, scripts: { test: "vitest run" }, dependencies: { nuxt: "^4" } }, null, 2) + "\n");
+  const first = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(first.status, 0, first.stderr);
+  const configFile = path.join(root, ".review-bridge", "bridge.json");
+  const config = JSON.parse(await fsp.readFile(configFile, "utf8"));
+  assert.equal(config.test.profile_id, "vue-frontend");
+  assert.notDeepEqual(config.test.rules, [], "a Nuxt project's tests have rules");
+
+  // The install record gone, init rebuilds it; asked for another type, it says how to change it and writes nothing to bridge.json.
+  await serviceDown({ paths: projectPaths(root), out: { write() {} } });
+  await fsp.rm(projectPaths(root).stateRoot, { recursive: true, force: true });
+  const configText = await fsp.readFile(configFile, "utf8");
+  const again = spawnSync(process.execPath, [bridge, "init", "--target", root, "--profile", "react-frontend", "--yes", "--fake-cli"], {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(again.status, 0, again.stderr);
+  const react = JSON.parse(await fsp.readFile(path.join(packageRoot, "profiles", "react-frontend.json"), "utf8"));
+  const block = { test: { profile_id: "react-frontend", rules: react.verification_rules } };
+  assert.match(again.stdout, /^Reinitialized existing Review Bridge setup in /);
+  assert.ok(again.stdout.includes("This folder's project type is vue-frontend. To use react-frontend instead, replace the \"test\" block in " + configFile + " with this one; the next start uses it, and nothing else changes:\n" + JSON.stringify(block, null, 2) + "\n"),
+    "init says how to change the project type: " + again.stdout);
+  assert.equal(await fsp.readFile(configFile, "utf8"), configText, "bridge.json is not written");
+
+  // The block as the person pastes it: the next start's card runs that type's command, and the id stays.
+  await fsp.writeFile(configFile, JSON.stringify({ ...JSON.parse(configText), ...block }, null, 2) + "\n");
+  await fsp.mkdir(path.join(root, "node_modules", ".bin"), { recursive: true });
+  await fsp.writeFile(path.join(root, "node_modules", ".bin", "react-scripts"), "#!/bin/sh\n");
+  const order = ".review-bridge/work-packages/hello.md";
+  await fsp.writeFile(path.join(root, order), "# Add a README\n\n<!-- bridge:requested_work -->\nAdd a README at the project root.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n1. `README.md` exists at the project root.\n");
+  const card = spawnSync(process.execPath, [bridge, "start", order, "--fake-cli"], {
+    cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(card.status, 1, card.stderr);
+  assert.ok(card.stdout.split(/\r?\n/).includes("Tests:        runs npm test -- --watchAll=false after each writer call"), card.stdout);
+  assert.equal(JSON.parse(await fsp.readFile(configFile, "utf8")).project_id, config.project_id, "the project keeps its id");
 });
 
 // An agent's one yes, to the card the start before it printed (Owner 2026-11-08: one card, one yes).
@@ -1378,6 +1434,53 @@ test("without the reviewer proof a real start is refused before any model call, 
   assert.deepEqual(await listed("authorizations"), []);
 });
 
+// GitHub #6 (the first user's report): a start refused because the page service cannot be used says the page
+// service's own words. Another release's page service, or an older Bridge's still running after an upgrade,
+// says to run down first, as `up` says it, and no rerun or Check is offered; a page service that fails to start
+// says why and where its log is. The page service's reason travels as supabase/cli carries an owner's
+// (c75aea2, packages/stack/src/HostProcess.ts:327-332). No model is called on any of these paths.
+const pageOwnerFixture = path.join(packageRoot, "review-bridge", "tests", "fixtures", "page-owner-fixture.mjs");
+const genericRerun = (order) => new RegExp("Run: npx review-bridge start " + order.replaceAll(".", "\\.") + " again|press Check");
+
+test("a start refused because the page service cannot be used says the page service's own words, and no rerun when they say to run down", async (t) => {
+  const { root, order, cli } = await fourActionsProject(t, "review-bridge-page-refused-");
+  const paths = projectPaths(root);
+  // A card to say yes to (shown with the fake CLI, so the native --yes below has one); a copy has no page.
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+
+  // An older Bridge's page service still running (0.3.0-rc.3 kept watch-session.json and no lease), as
+  // review-bridge/tests/page-host.test.mjs makes it: the record names a process that is alive.
+  const older = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { windowsHide: true, stdio: "ignore" });
+  t.after(() => { try { older.kill(); } catch {} });
+  await fsp.mkdir(path.dirname(paths.watchSessionPath), { recursive: true });
+  await fsp.writeFile(paths.watchSessionPath, JSON.stringify({ pid: older.pid, port: 1, url: "http://localhost:1/", service_id: "0".repeat(32), started_at: new Date().toISOString() }));
+  const olderRefused = cli(["start", order, "--yes"]);
+  assert.equal(olderRefused.status, 1, olderRefused.stderr);
+  assert.match(olderRefused.stdout, new RegExp("Reviewer read-only check: not passed \\(the Bridge page service cannot be used\\)\\nAn older Bridge page service \\(pid " + older.pid + "\\) is still running\\. Run: npx review-bridge down, then run this again\\.\\n"), "start says the page service's own words");
+  assert.doesNotMatch(olderRefused.stdout, genericRerun(order), "no rerun is offered when the page service says to run down");
+  assert.doesNotMatch(olderRefused.stdout, /Checking that the reviewer/);
+  await fsp.rm(paths.watchSessionPath, { force: true });
+
+  // Another release's page service holding this project's lease.
+  await launchPage(paths, { entrypoint: pageOwnerFixture, ownerArgs: ["--fixture-mode", "other-release"] });
+  const otherRefused = cli(["start", order, "--yes"]);
+  assert.equal(otherRefused.status, 1, otherRefused.stderr);
+  assert.match(otherRefused.stdout, /\(the Bridge page service cannot be used\)\nThe Bridge page service is release 0\.0\.0-other\+fixture, but this command is release \S+\. Run: npx review-bridge down, then run this again\.\n/, "start says the page service's own words");
+  assert.doesNotMatch(otherRefused.stdout, genericRerun(order), "no rerun is offered when the page service says to run down");
+  assert.equal((await serviceDown({ paths, out: { write() {} } })).exitCode, 0, "down stops another release's page service");
+
+  // A page service that fails to start: its port taken while the settings say to keep it.
+  const blocker = net.createServer();
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => blocker.close(resolve)));
+  const config = JSON.parse(await fsp.readFile(paths.bridgeConfigPath, "utf8"));
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ ...config, watch: { port: blocker.address().port, strict_port: true } }, null, 2) + "\n");
+  const failed = cli(["start", order, "--yes"]);
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.match(failed.stdout, /\(the Bridge page service cannot be used\)\nThe Bridge page service failed to start: [^\n]*\(log: [^\n]*page-service\.log\)\n/, "start says why the page service did not start, and where its log is");
+  assert.match(failed.stdout, genericRerun(order), "a page service that failed to start may start on a rerun");
+});
+
 // RC3-LINUX-00: a page started with the fake CLI (as init starts it) can never hold the reviewer
 // proof that a native work-start asks the running page for. The fake work itself still runs.
 function post(url, { headers, body }) {
@@ -1419,10 +1522,10 @@ test("a page started with the fake CLI cannot give a native work-start the revie
   const runtime = path.join(packageRoot, "review-bridge");
   const load = (relative) => import(pathToFileURL(path.join(runtime, ...relative.split("/"))).href);
   const { getBridgePaths } = await load("utils/paths.mjs");
-  const { checkService } = await load("features/setupCheck/index.mjs");
+  const { checkPageStatus } = await load("features/setupCheck/index.mjs");
   const { checkReviewerProof } = await load("router/guards/nativeGate.mjs");
   const paths = getBridgePaths(root, runtime, { privateRootName: ".review-bridge" });
-  const service = await checkService(paths);
+  const service = await checkPageStatus(paths);
   assert.equal(service.running, true, service.reason);
   assert.deepEqual([service.status.platform_eligible, service.status.platform_status, service.status.probe_available], [false, "fake", false]);
   // Pressing the check on that page, with a request the page accepts, starts nothing.
@@ -1463,7 +1566,7 @@ for (const [label, change, adapterStatus] of [
   ["marks this platform experimental", (adapters, key) => { adapters[key].status = "experimental"; }, "experimental"],
   ["has no definition for this platform", (adapters, key) => { delete adapters[key]; }, "unsupported"],
 ]) {
-  test("init and roles-check where the manifest " + label + ": every readiness key is there, and nothing is ready", async (t) => {
+  test("init, roles-check and start where the manifest " + label + ": every readiness key is there, nothing is ready, and start offers no rerun", async (t) => {
     const copy = await packageForPlatform(t, change);
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-platform-init-"));
     t.after(() => removeWorkspace(root));
@@ -1499,6 +1602,23 @@ for (const [label, change, adapterStatus] of [
       }
     }
     assert.equal(roles.native_ready, false);
+    // GitHub #6: a native start on this platform is refused before any model call, and says why without
+    // offering a rerun or Check: a page service of this same release reads the same manifest, so neither
+    // changes whether this platform's adapter is verified. The page init started runs the fake CLI, so it
+    // is stopped first and start starts its own.
+    const order = ".review-bridge/work-packages/hello.md";
+    await fsp.writeFile(path.join(root, order), "# Add a README\n\n<!-- bridge:requested_work -->\nAdd a README at the project root.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n1. `README.md` exists at the project root.\n");
+    const copyCli = (args) => spawnSync(process.execPath, [path.join(copy, "bridge.mjs"), ...args], {
+      cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+    });
+    assert.equal(copyCli(["start", order, "--fake-cli"]).status, 1);
+    await serviceDown({ paths: projectPaths(root), out: { write() {} } });
+    const unverified = copyCli(["start", order, "--yes"]);
+    assert.equal(unverified.status, 1, unverified.stderr);
+    const refusal = unverified.stdout.slice(unverified.stdout.indexOf("Reviewer read-only check:"));
+    assert.match(refusal, /^Reviewer read-only check: not passed \(this platform's adapter is not verified, so the check is not available here\)\n/);
+    assert.doesNotMatch(refusal, /again|press Check/, "no rerun is offered for an unverified platform");
+    assert.doesNotMatch(unverified.stdout, /Checking that the reviewer/);
   });
 }
 
@@ -1515,7 +1635,7 @@ function localName(at) {
 // results alone, and folds away the events the database refused to take late.
 test("each run's result is its own file in .review-bridge/results/, never in work-packages/; clean keeps them and takes refused events", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-results-");
-  const { resultCopies } = await import("../review-bridge/tests/fixtures/resultCopies.mjs");
+  const { nextSecond, resultCopies } = await import("../review-bridge/tests/fixtures/resultCopies.mjs");
   // Once its contract is sealed, the card is the sealed one: one yes.
   const runOnce = () => {
     const card = cli(["start", order, "--fake-cli"]);
@@ -1525,6 +1645,9 @@ test("each run's result is its own file in .review-bridge/results/, never in wor
     return started;
   };
   const first = runOnce();
+  // A result is named to the second it closed in, and a second run closing in the same second gets no file
+  // of its own, so the second run is let into a second of its own.
+  await nextSecond();
   const second = runOnce();
   const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   const runs = await queryRecords("select run_id, closed_at, conclusion from runs where project_id = $1 order by closed_at", [projectId]);

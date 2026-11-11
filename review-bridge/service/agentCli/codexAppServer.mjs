@@ -137,18 +137,27 @@ export async function runCodexAppServerTurn({
   invocation, cwd, prompt, thread = {}, effort = null, outputSchema = null,
   timeoutMs = 0, signal = null, eventsPath = null, stderrPath = null, onSpawn = null,
 }) {
-  const server = spawn(invocation.command, invocation.args, {
-    cwd, env: invocation.env || process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-  });
-  const log = eventsPath ? fs.createWriteStream(eventsPath) : null;
-  // stderr is always read: an unread pipe fills up and the server stalls on its next write.
-  const stderrLog = stderrPath ? fs.createWriteStream(stderrPath) : null;
-  if (stderrLog) {
-    stderrLog.on("error", () => {});
-    server.stderr.pipe(stderrLog);
-  } else {
-    server.stderr.resume();
+  // stderr is only a log, read once the call is over (providerFailure.mjs readEvidenceTail), so the server is
+  // given the log file's descriptor, as supabase/cli gives its stack owner its log (c75aea2,
+  // packages/stack/src/HostProcess.ts:513-518) and setupCheck/pageService.mjs spawnOwner gives the page service
+  // its own: the system writes it into the file, so nothing is left in a pipe when the call ends, and no pipe
+  // fills up when nothing reads it. A process writes to a file synchronously (Node v24.16.0
+  // doc/api/process.md, "A note on process I/O"). The child has its own copy once it is spawned, so this
+  // process closes its. Without a log, or with one that cannot be opened (a stream's error was ignored
+  // before too), stderr is ignored.
+  let stderrDescriptor = null;
+  if (stderrPath) {
+    try { stderrDescriptor = fs.openSync(stderrPath, "w"); } catch {}
   }
+  let server;
+  try {
+    server = spawn(invocation.command, invocation.args, {
+      cwd, env: invocation.env || process.env, windowsHide: true, stdio: ["pipe", "pipe", stderrDescriptor ?? "ignore"],
+    });
+  } finally {
+    if (stderrDescriptor !== null) fs.closeSync(stderrDescriptor);
+  }
+  const log = eventsPath ? fs.createWriteStream(eventsPath) : null;
   // What the server said went wrong, in its own typed messages, for the caller to classify.
   const errors = [];
   // The last error's codexErrorInfo (app-server-protocol's TurnError, rust-v0.166.0) when it is a plain
@@ -265,15 +274,13 @@ export async function runCodexAppServerTurn({
     await Promise.race([Promise.all(interrupts), new Promise((resolve) => setTimeout(resolve, INTERRUPT_GRACE_MS))]);
     treeKill = await killProcessTree(server.pid);
   }
-  // Both files are closed before the caller reads them. The pipe closes stderr's itself when the
-  // server's stderr ends, which may already have happened; a process left holding that pipe is cut
-  // off here, so nothing is written to a closed file.
-  if (stderrLog) server.stderr.unpipe(stderrLog);
+  // The events file is closed before the caller reads it. stderr is the server's own file: what the server
+  // wrote is in it, and a process left running after the tree was killed may still append to it.
   const closed = (stream) => (stream && !stream.closed ? new Promise((resolve) => {
     stream.once("close", resolve);
     stream.end();
   }) : null);
-  await Promise.all([closed(log), closed(stderrLog)]);
+  await closed(log);
   const summary = tracker
     ? tracker.summary()
     : { threads: [], tokens: { input: 0, cache_write: 0, cache_read: 0, output: 0 }, total_tokens: 0, complete: false, missing: ["root"], running: [], ended_early: [] };

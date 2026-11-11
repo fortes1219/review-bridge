@@ -59,6 +59,16 @@ export const UNSUPPORTED_ADAPTER = Object.freeze({
   async notify() { return { sent: false, reason: "no_adapter" }; },
 });
 
+// What every adapter a command or the page service uses must provide; bootstrap.mjs and the page service's
+// entry file (internal/pageService.mjs) check the one they take. UNSUPPORTED_ADAPTER and the fake adapter provide all three.
+export function assertPlatformContract(implementation) {
+  if (typeof implementation.resolveExecutable !== "function"
+      || typeof implementation.buildInvocation !== "function"
+      || typeof implementation.notify !== "function") {
+    throw new Error("Selected adapter does not implement the platform contract.");
+  }
+}
+
 export function resolveAdapterModule(bridgeRoot, modulePath) {
   const root = path.resolve(bridgeRoot);
   const candidate = path.resolve(root, modulePath);

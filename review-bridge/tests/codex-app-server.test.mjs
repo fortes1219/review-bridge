@@ -94,7 +94,7 @@ test("interrupted root: the running sub-agent has no usage yet, so the record is
   assert.deepEqual(usage.missing, ["thread:thread-sleep_task", "running:thread-sleep_task", "interrupted:thread-root"]);
 });
 
-test("the server's stderr is always read: a flood neither stalls it nor is lost", async (t) => {
+test("the server's stderr goes straight into its log file: a flood neither stalls it nor is lost", async (t) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-app-server-"));
   t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
   const stderrPath = path.join(dir, "stderr.log");
@@ -120,7 +120,7 @@ test("the server's stderr is always read: a flood neither stalls it nor is lost"
   assert.equal(written.status, "completed");
   assert.equal((await fsp.stat(stderrPath)).size, bytes, "all of it reached the file, and the file is closed");
   const unlogged = await runCodexAppServerTurn({ invocation: flooding(), cwd: os.tmpdir(), prompt: "x", timeoutMs: 20_000 });
-  assert.equal(unlogged.status, "completed", "without a file it is read and dropped");
+  assert.equal(unlogged.status, "completed", "without a file it is ignored, and the call still completes");
 });
 
 test("what the server says went wrong comes back for the caller to classify", async () => {

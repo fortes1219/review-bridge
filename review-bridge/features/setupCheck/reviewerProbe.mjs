@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { classifyProviderFailure, DEFAULT_RETENTION_DAYS, graphServerArgs, inspectRoleReadiness, mcpConfigFor, mcpOffArgs, NO_CONNECTORS_ARGS, pruneProbeRecords, READ_ONLY_TOOLS, readOnlyArgs } from "../../service/index.mjs";
 import { localDateKey } from "../../utils/dates.mjs";
+import { killProcessTree } from "../../service/agentCli/process.mjs";
 
 // The two proofs differ in strength and each says what it is. Codex runs under an OS sandbox and
 // shows a write that was tried and denied. Claude Code has no sandbox on this CLI's Windows build;
@@ -81,13 +82,26 @@ function defaultVersionProbe(executable) {
   return String(result.stdout || "").trim().slice(0, 200) || null;
 }
 
-export function defaultProbeRunner({ invocation, cwd, input, timeoutMs }) {
+export function defaultProbeRunner({ invocation, cwd, input, timeoutMs, signal = null }) {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let settled = false;
-    const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+    // A check cancelled because the page service is shutting down: its process tree is stopped and the
+    // result waits until the CLI process has closed (ARCHITECTURE.md:511, cancel and settle).
+    let cancelled = false;
+    let treeKill = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (!cancelled) return resolve(value);
+      Promise.resolve(treeKill).then((kill) => resolve({ ...value, cancelled: true, tree_kill: kill }), () => resolve({ ...value, cancelled: true, tree_kill: null }));
+    };
+    if (signal?.aborted) {
+      finish({ status: null, stdout, stderr, timedOut, error: "cancelled", started: false, cancelled: true });
+      return;
+    }
     // T0-11 F5: `started` is true only once the reviewer CLI process exists; a spawn that fails
     // (missing executable) is not a model call.
     let started = false;
@@ -110,6 +124,10 @@ export function defaultProbeRunner({ invocation, cwd, input, timeoutMs }) {
     child.on("error", (error) => { clearTimeout(timer); finish({ status: null, stdout, stderr, timedOut, error: error.message, started }); });
     child.on("close", (status) => { clearTimeout(timer); finish({ status, stdout, stderr, timedOut, error: null, started }); });
     child.stdin.on("error", () => {});
+    signal?.addEventListener("abort", () => {
+      cancelled = true;
+      treeKill = killProcessTree(child.pid).catch(() => null);
+    }, { once: true });
     child.stdin.end(input);
   });
 }
@@ -369,7 +387,7 @@ export function evaluateProbe({ provider, result, sentinelName, probeDir, sentin
 }
 
 export async function runReviewerProbe({
-  provider, executable, adapter, runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot = os.tmpdir(), mcp = NO_MCP,
+  provider, executable, adapter, runner = defaultProbeRunner, timeoutMs = PROBE_TIMEOUT_MS, tmpRoot = os.tmpdir(), mcp = NO_MCP, signal = null,
 }) {
   if (!PROBE_ADAPTERS[provider]?.supported) {
     return { proven: "unknown", reason: "unsupported_provider", evidence: { adapter_id: PROBE_ADAPTERS[provider]?.id || null }, cli_launches: 0 };
@@ -386,9 +404,11 @@ export async function runReviewerProbe({
     const invocation = adapter.buildInvocation(provider, executable, buildProbeArgs(provider, probeDir, mcp));
     // Exactly one invocation per call; the result is never retried.
     stage = "runner";
-    const result = await runner({ invocation, cwd: probeDir, input: probePrompt(sentinelName), timeoutMs });
+    const result = await runner({ invocation, cwd: probeDir, input: probePrompt(sentinelName), timeoutMs, signal });
     started = result?.started !== false;
     stage = "after";
+    // Cancelled by a shutdown: nothing is concluded from a CLI that was stopped part way.
+    if (result?.cancelled) return { proven: "unknown", reason: "cancelled", evidence: { adapter_id: PROBE_ADAPTERS[provider].id }, cli_launches: started ? 1 : 0, tree_kill: result.tree_kill ?? null };
     const sentinelPresent = Boolean(await fsp.lstat(path.join(probeDir, sentinelName)).catch(() => null));
     const unexpectedEntries = (await fsp.readdir(probeDir)).filter((name) => name !== "README.txt");
     // F5: counted only when the CLI process started. It is a launch (an attempt), not proof that a
@@ -528,10 +548,39 @@ export function createReviewerProbeService({
     throw error;
   }
 
-  async function run({ reviewer: requested = null, mcp: requestedMcp = null } = {}) {
+  // Draining (ARCHITECTURE.md:505-512): once the page service is shutting down no check is admitted,
+  // and the running one is cancelled; drain() settles once that check, and the processes it started, are done.
+  let draining = false;
+  let current = null;
+  let controller = null;
+  // Settled means the cancelled check's processes are confirmed gone; one whose stop is not confirmed is
+  // reported, never taken as stopped (ARCHITECTURE.md:530).
+  let cancelled = null;
+  async function drain() {
+    draining = true;
+    controller?.abort();
+    await current?.catch(() => {});
+    const kill = cancelled;
+    if (!kill || kill.killed === true || kill.reason === "not_running") return { settled: true };
+    return { settled: false, detail: kill.reason || "not confirmed" };
+  }
+
+  async function run(options = {}) {
+    if (draining) refuse("shutting_down", "The page service is shutting down.");
+    const pending = runOnce(options);
+    current = pending;
+    try {
+      return await pending;
+    } finally {
+      if (current === pending) current = null;
+    }
+  }
+
+  async function runOnce({ reviewer: requested = null, mcp: requestedMcp = null } = {}) {
     if (!eligible) refuse("adapter_not_verified", "This platform's adapter is not verified; the reviewer read-only check is not available here.");
     if (inFlight) refuse("in_flight", "A reviewer check is already running.");
     inFlight = true;
+    controller = new AbortController();
     try {
       const selected = await rolesFor(requested);
       const provider = selected.reviewer;
@@ -560,7 +609,9 @@ export function createReviewerProbeService({
       }
       let outcome;
       try {
-        outcome = await runReviewerProbe({ provider, executable, adapter, runner, timeoutMs, tmpRoot, mcp });
+        outcome = await runReviewerProbe({ provider, executable, adapter, runner, timeoutMs, tmpRoot, mcp, signal: controller.signal });
+        // A check cancelled before its CLI started has nothing to stop.
+        if (outcome.reason === "cancelled") cancelled = outcome.cli_launches === 0 ? { killed: false, reason: "not_running" } : outcome.tree_kill ?? { killed: false, reason: "unknown" };
       } catch (error) {
         if (error.modelCall === "no") refuse("probe_not_started", "The reviewer check did not start: " + error.message);
         // T0-11 F4: the CLI was started (or it is not known whether it was): an unknown result,
@@ -631,5 +682,5 @@ export function createReviewerProbeService({
     }
   }
 
-  return { status, run, isInFlight: () => inFlight };
+  return { status, run, drain, isInFlight: () => inFlight };
 }

@@ -13,7 +13,8 @@
       {
         "file": "package.json",
         "patterns": [
-          "\\\"(vue|react|next|nuxt|svelte|angular)\\\"\\s*:"
+          "\\\"(vue|react|next|nuxt|svelte|angular)\\\"\\s*:",
+          "\\\"(@angular/core|vitepress|@slidev/cli)\\\"\\s*:"
         ]
       }
     ]

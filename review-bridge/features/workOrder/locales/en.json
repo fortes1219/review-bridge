@@ -292,6 +292,7 @@
   "init.already_set_up": "This folder is already set up ({folder}). To move it to this version, run: {bridge} upgrade",
   "init.not_a_folder": "The project folder must be an existing, non-symlink folder: {folder}",
   "init.reinitialized": "Reinitialized existing Review Bridge setup in {folder}",
+  "init.profile_change": "This folder's project type is {current}. To use {requested} instead, replace the \"test\" block in {file} with this one; the next start uses it, and nothing else changes:",
   "init.graph_failed": "The project's graph was not built: {error} Run: {bridge} graph",
   "init.done.title": "Done. Now:",
   "init.done.agent": "put a work order .md in .review-bridge/work-packages/, then in Claude Code type:",

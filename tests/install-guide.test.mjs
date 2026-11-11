@@ -294,6 +294,39 @@ test("--json asks nothing and prints nothing; the caller prints the result", asy
   assert.equal(result.printed, false);
 });
 
+// A project type asked for in a folder already set up (the first user, 2026-11-09: init refused, and only
+// uninstall then init changed it, which also drops the project's id). Nothing is written: init says which type
+// the folder has and the test block to put into bridge.json, which the next start reads. A type that does not
+// exist is refused as it is everywhere, and init without --profile says what it said before.
+test("a folder already set up is told how to change its project type, and nothing is written", async (t) => {
+  const project = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-change-type-"));
+  t.after(() => fsp.rm(project, { recursive: true, force: true }));
+  const config = path.join(project, ".review-bridge", "bridge.json");
+  await fsp.mkdir(path.dirname(config), { recursive: true });
+  await fsp.writeFile(config, JSON.stringify({ schema_version: 4, project_id: "00000000-0000-4000-8000-000000000000", locale: "en", profile_id: null, test: { profile_id: null, rules: [] } }, null, 2) + "\n");
+  const text = await fsp.readFile(config, "utf8");
+  const { mtimeMs } = await fsp.stat(config);
+  const run = (options) => runGuide(options, {
+    packageRoot, cwd: project, interactive: false, asRoot: () => false,
+    inspectProvider: async () => signedIn, setUpProject: async () => { throw new Error("setup must not run"); },
+  });
+  const vue = JSON.parse(await fsp.readFile(path.join(packageRoot, "profiles", "vue-frontend.json"), "utf8"));
+  const block = JSON.stringify({ test: { profile_id: "vue-frontend", rules: vue.verification_rules } }, null, 2);
+  await assert.rejects(run({ profile: "vue-frontend" }), (error) => {
+    assert.ok(error.message.includes("This folder's project type is none. To use vue-frontend instead, replace the \"test\" block in " + config + " with this one; the next start uses it, and nothing else changes:\n" + block),
+      "init says how to change the project type: " + error.message);
+    assert.match(error.message, /^This folder is already set up .*\n/);
+    return true;
+  });
+  await assert.rejects(run({ profile: "no-such-type" }), /Unsupported profile: no-such-type/);
+  await assert.rejects(run({}), (error) => {
+    assert.match(error.message, /^This folder is already set up \(.*\)\. To move it to this version, run: npx review-bridge upgrade$/);
+    return true;
+  });
+  assert.equal(await fsp.readFile(config, "utf8"), text, "bridge.json is not written");
+  assert.equal((await fsp.stat(config)).mtimeMs, mtimeMs, "bridge.json is not touched");
+});
+
 test("a folder already set up, or root on macOS and Linux, is refused before any question", async (t) => {
   const done = await guide(t, {}, { setUp: false });
   await done.run.catch(() => {});

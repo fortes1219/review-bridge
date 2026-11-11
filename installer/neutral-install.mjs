@@ -897,7 +897,8 @@ async function currentPageRunning(target) {
   if ((await installLayout(target).catch(() => null))?.nested !== false) return false;
   const runtime = await runtimeModules(target).catch(() => null);
   if (!runtime) return false;
-  return (await runtime.service.checkService(runtime.paths)).running === true;
+  // Only looks: a free lease is "not running" without a request (pageService.mjs observePage).
+  return (await runtime.service.observePage(runtime.paths)).running === true;
 }
 
 async function pageServiceRunning(target) {
@@ -920,9 +921,11 @@ async function stopPageService(target) {
 const REASON_LIMIT = 200;
 const lastLine = (text) => String(text || "").trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, REASON_LIMIT) || "";
 
-// Restarts the page service through Bridge's runtime, the same way init starts it. A failure
-// carries what up said: its exit, the last line of its stdout (where up explains a failure) and of
-// its stderr, each clipped. The reason is shown to the person and never written into a marker.
+// Restarts the page service through Bridge's runtime, the same way init starts it. up exits 0 only once
+// the page service it started, or the one it found, has reported ready (pageService.mjs launchPage), so
+// its 0 is the answer and nothing is asked again. A failure carries what up said: its exit, the last line
+// of its stdout (where up says why) and of its stderr, each clipped. The reason is shown to the person and
+// never written into a marker.
 async function startPageServiceDetailed(target) {
   if (!(await statOptional(path.join(sourceRuntime, "bootstrap.mjs")))) return { running: false, reason: "the Bridge runtime has no bootstrap.mjs" };
   const up = spawnSync(process.execPath, [path.join(sourceRuntime, "bootstrap.mjs"), "up", "--project", target], {
@@ -933,8 +936,7 @@ async function startPageServiceDetailed(target) {
     const exit = up.signal || (up.status ?? up.error?.code ?? "error");
     return { running: false, reason: ["up exited " + exit, lastLine(up.stdout), lastLine(up.stderr)].filter(Boolean).join(" | ") };
   }
-  if (await pageServiceRunning(target)) return { running: true, reason: null };
-  return { running: false, reason: "up returned 0 but the service is not answering" };
+  return { running: true, reason: null };
 }
 
 // Every restart goes through here. A restart hook (tests, or a caller's own) may answer a boolean or

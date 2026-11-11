@@ -59,8 +59,10 @@ export function clusterPaths(root) {
 
 // The server writes its own log, one file per day. What it says before that log is open (a start that
 // fails says it there) goes to pg_ctl's -l file, as PostgreSQL's pg_ctl page asks for on Windows. On
-// Windows the running server holds that file (cmd.exe opened it for it): a second start finds it held,
-// launches nothing, and finds the first one's server running (see startServer).
+// Windows the server holds that file from the moment cmd.exe opens it for it, while it is still starting
+// and while it runs: a second start finds it held and launches nothing. The first one's server may not be
+// running yet, so the second waits for it until its own deadline, and only a file still held with no
+// server by then is a dead server's leftovers (see startServer).
 const SERVER_SETTINGS = [
   "",
   "# Set by Review Bridge when the cluster was created.",
@@ -449,6 +451,19 @@ export async function clearOldServer(root, {
   return { cleared: "processes", stopped: old.map((entry) => entry.pid) };
 }
 
+// A server that is not up yet is still starting, as pg_ctl's wait_for_postmaster_start reads it ("If it's
+// not valid, or if the status line isn't there yet, just keep waiting", pg_ctl.c:602-605): ask again every
+// 1/WAITS_PER_SEC of a second (WAITS_PER_SEC 10, pg_usleep at :702) until the deadline. pg_ctl ends early only
+// when the process it started dies; this start started none, so it has nothing to end early on.
+const WAITS_PER_SEC = 10;
+async function anotherServerStarted(root, { binaries, tool, clock, sleep, deadline }) {
+  while (clock() < deadline) {
+    await sleep(1000 / WAITS_PER_SEC);
+    if (await serverRunning(root, { binaries, tool })) return true;
+  }
+  return false;
+}
+
 // What the server itself said when it stopped: its FATAL, ERROR, DETAIL and HINT lines.
 const serverWords = (text) => String(text || "").split(/\r?\n/).filter((line) => /\b(PANIC|FATAL|ERROR|DETAIL|HINT):/.test(line)).slice(-4).join(" | ");
 
@@ -458,12 +473,13 @@ const serverWords = (text) => String(text || "").split(/\r?\n/).filter((line) =>
 // it, as PostgreSQL and Postgres.app do: PostgreSQL removes a dead server's postmaster.pid itself
 // (miscinit.c CreateLockFile), and a start that meets processes a dead server left (its hint, or the
 // -l file held) is told to the person and not cleared (OldServerError; Owner 2026-11-08).
-// `tool`, `detached` and `ready` are seams for tests.
+// `tool`, `detached`, `ready`, `clock` and `sleep` are seams for tests.
 export async function startServer(root, {
   binaries, timeoutSeconds = 60, tool = runTool, detached = runDetaching, ready = waitUntilReady,
+  clock = Date.now, sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 }) {
   const paths = clusterPaths(root);
-  const deadline = Date.now() + timeoutSeconds * 1000;
+  const deadline = clock() + timeoutSeconds * 1000;
   try {
     await fsp.access(path.join(paths.data, "PG_VERSION"));
   } catch {
@@ -486,6 +502,9 @@ export async function startServer(root, {
       "-o", "-h " + LISTEN_HOST + " -p " + port,
     ], { timeoutMs: (timeoutSeconds + 30) * 1000, logFile: paths.control, cwd: paths.root });
     if (result.code === 0 || (await serverRunning(root, { binaries, tool }))) break;
+    // A held -l file and no server yet: another command's server may still be starting, so wait for it
+    // until this start's own deadline; only then is the file a dead server's leftovers (RC3.1-PG-01).
+    if (result.held && await anotherServerStarted(root, { binaries, tool, clock, sleep, deadline })) break;
     const latest = (await serverLogFiles(root)).at(-1);
     const log = latest ? await fsp.readFile(latest, "utf8").catch(() => "") : "";
     const said = result.output + "\n" + log.split(/\r?\n/).slice(-5).join("\n");
