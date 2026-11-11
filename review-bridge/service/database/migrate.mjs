@@ -16,7 +16,7 @@ export const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.u
 // second, as Rails's next_migration_number does. Name order is time order.
 const MIGRATION_NAME = /^\d{14}_[a-z0-9_]+\.sql$/;
 // One key for every Bridge that migrates this database, so two processes never apply one file twice.
-const MIGRATION_LOCK = 7_420_251;
+export const MIGRATION_LOCK = 7_420_251;
 
 export async function migrationFiles(dir = MIGRATIONS_DIR) {
   const names = (await fsp.readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
@@ -57,20 +57,11 @@ export async function migrationState(client, { dir = MIGRATIONS_DIR } = {}) {
 export async function applyMigrations(client, { dir = MIGRATIONS_DIR } = {}) {
   const files = await migrationFiles(dir);
   refuseUnknown(files, await appliedNames(client));
-  // The table is made under the same lock as each migration: two commands opening a new database at once
-  // both reach `create table if not exists`, which is not safe against itself (the loser hits
-  // pg_type_typname_nsp_index). node-pg-migrate takes its lock before it ensures its table
-  // (src/runner.ts:1145-1147, then :1168).
-  await client.query("begin");
-  try {
-    await client.query("select pg_advisory_xact_lock($1)", [MIGRATION_LOCK]);
-    await client.query("create table if not exists schema_migrations ("
-      + "name text primary key, sha256 text not null check (sha256 ~ '^[0-9a-f]{64}$'), applied_at timestamptz not null default now())");
-    await client.query("commit");
-  } catch (error) {
-    await client.query("rollback").catch(() => {});
-    throw error;
-  }
+  // `create table if not exists` is not safe against itself (two at once: pg_type_typname_nsp_index). The
+  // database's own caller, open() in index.mjs, holds MIGRATION_LOCK for the whole run before it gets
+  // here, as node-pg-migrate takes its lock before it ensures its table (src/runner.ts:1145-1147, then :1168).
+  await client.query("create table if not exists schema_migrations ("
+    + "name text primary key, sha256 text not null check (sha256 ~ '^[0-9a-f]{64}$'), applied_at timestamptz not null default now())");
   const applied = [];
   for (const file of files) {
     await client.query("begin");

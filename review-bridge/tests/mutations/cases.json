@@ -341,6 +341,50 @@
       "test": "review-bridge/tests/page-host.test.mjs",
       "case": "relaunches after shutdown while a foreign listener holds the previous control port; control requests need the secret",
       "expect": "has not published its record"
+    },
+    {
+      "id": "RB-M-database-create-unlocked",
+      "gate": "Records",
+      "target": "review-bridge/service/database/index.mjs",
+      "anchor": "    await admin.query(\"select pg_advisory_lock(hashtext($1))\", [CREATE_DATABASE_LOCK]);\n",
+      "replacement": "",
+      "reason": "Commands opening a new database look for it and create it without waiting for one another, so two at once both try to create it and the loser fails.",
+      "test": "review-bridge/tests/database.test.mjs",
+      "case": "commands creating the Bridge database at once wait for one another, and every migration is applied once",
+      "expect": "the three commands waited"
+    },
+    {
+      "id": "RB-M-migrations-run-unlocked",
+      "gate": "Records",
+      "target": "review-bridge/service/database/index.mjs",
+      "anchor": "    await client.query(\"select pg_advisory_lock($1)\", [MIGRATION_LOCK]);\n    return client;",
+      "replacement": "    return client;",
+      "reason": "A command reads which migrations were applied without waiting for the one applying them, takes the half-migrated database for an upgrade and backs it up, which stops the server under the first.",
+      "test": "review-bridge/tests/database.test.mjs",
+      "case": "a command that comes while another applies the migrations waits for its whole run and backs nothing up",
+      "expect": "waited for the first"
+    },
+    {
+      "id": "RB-M-upgrade-not-backed-up",
+      "gate": "Records",
+      "target": "review-bridge/service/database/index.mjs",
+      "anchor": "    if (state.applied && state.pending.length) {",
+      "replacement": "    if (false) {",
+      "reason": "Opening a database that has had migrations and is about to get more applies them without backing it up first, so an upgrade that goes wrong leaves no copy of the database before it.",
+      "test": "review-bridge/tests/backup.test.mjs",
+      "case": "an upgraded Bridge backs up the database before its first new migration, and the copy is the database before it",
+      "expect": "one backup is made before the first new migration"
+    },
+    {
+      "id": "RB-M-upgrade-not-refused-while-running",
+      "gate": "Records",
+      "target": "review-bridge/service/database/index.mjs",
+      "anchor": "    if (!(error instanceof BackupRefusedError) || !error.runs.length) throw error;",
+      "replacement": "    if (!(error instanceof BackupRefusedError) || !error.runs.length) throw error;\n    return null;",
+      "reason": "A backup refused because a run is running is taken as nothing to back up, so the new migrations are applied under a running run with no copy made.",
+      "test": "review-bridge/tests/backup.test.mjs",
+      "case": "an upgrade is refused while a run is running: no copy is made and no new migration is applied",
+      "expect": "the upgrade is refused while a run is running"
     }
   ]
 }

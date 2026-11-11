@@ -128,9 +128,23 @@ async function writeStaleRecord(paths, port) {
 
 test("starts exactly one page service for concurrent launches and attaches the others", { timeout: 120_000 }, async (t) => {
   const { paths } = await project(t);
+  // The database the lease lives in is up before the three launches, as supabase/cli saves the stack's
+  // state before its three concurrent launchers (HostProcess.integration.test.ts:310-340) and as `up` opens
+  // the database before it starts the page service (setupCheck/commands.mjs). Several processes starting
+  // one new database at once is another contract: on Windows a loser's `pg_ctl start` can wait 30 s on the
+  // -l file the winner's server holds (pg_ctl.c:521-554, port/open.c:110-137), which belongs to the
+  // database-start work, not to this test.
+  await openDatabase();
   // Every launch settles before anything is asserted, so each pid is kept for the clean-up first.
   const settled = await Promise.allSettled([1, 2, 3].map(() => launch(paths, { bootstrapPath, ownerArgs: FAKE })));
-  assert.deepEqual(settled.map((outcome) => outcome.status), ["fulfilled", "fulfilled", "fulfilled"], settled.map((outcome) => outcome.reason?.message).join(" | "));
+  // A launch that failed is said with the end of the page service's log, before the clean-up removes it
+  // (supabase/cli AGENTS.md:179: subprocess diagnostics).
+  const failures = await Promise.all(settled.filter((outcome) => outcome.status === "rejected").map(async ({ reason }) => {
+    const log = /\(log: (.+?)\)/.exec(reason.message)?.[1];
+    const tail = log ? (await fsp.readFile(log, "utf8").catch(() => "")).split(/\r?\n/).slice(-30).join("\n") : "";
+    return reason.message + "\n" + tail;
+  }));
+  assert.deepEqual(settled.map((outcome) => outcome.status), ["fulfilled", "fulfilled", "fulfilled"], failures.join("\n----\n"));
   const launched = settled.map((outcome) => outcome.value);
   assert.equal(new Set(launched.map(({ endpoint }) => endpoint.pid)).size, 1);
   assert.equal(new Set(launched.map(({ endpoint }) => endpoint.port)).size, 1);

@@ -284,9 +284,15 @@ claim that nothing else is wrong.
   holding its stdin as a session's lifeline (`ARCHITECTURE.md:491`); `down` asks it to shut down and waits until
   its pid is gone (`:709-815`); shutting down cancels a running reviewer check and waits for its process tree
   (`ARCHITECTURE.md:505-512`); a page service of another release is refused except by `down` (`:489`). Page services
-  started at once found two races in opening a new database, both fixed: the database is made under an advisory
-  lock on the admin connection (supabase/cli `db-setup.ts:636-664`), and `schema_migrations` is made under the
-  migration lock (node-pg-migrate `src/runner.ts:1145-1168`).
+  started at once found races in opening a new database, fixed with two locks: the database is made under an
+  advisory lock on the admin connection (supabase/cli `db-setup.ts:636-664`), and the whole run of migrations, from
+  reading the history to the last one, is under one session-level migration lock taken before the migrations table
+  is made and released in its finally, as node-pg-migrate holds its lock in its wait mode (`src/runner.ts:481-484`,
+  `:1145-1168,1294-1307`; its default mode refuses instead, `:479,486-494`), so a second
+  command neither collides creating that table nor reads a half-migrated database as one to upgrade and backs it up
+  (the backup stops the server). The concurrent-launch test opens the database first: several processes starting one new database at
+  once on Windows can wait 30 s on pg_ctl's -l file (pg_ctl.c:521-554, port/open.c:110-137), left to the
+  database-start work.
 - **regression_test:** `review-bridge/tests/page-host.test.mjs` (one page service for concurrent launches;
   relaunch with a foreign listener on the old control port, and 401 without the secret; a record naming another
   process while the lease is held; a stale record without a lease holder; status without a request; a page
@@ -296,8 +302,13 @@ claim that nothing else is wrong.
   `review-bridge/tests/page-exit.test.mjs` (waiting for the pid to go, with a controllable probe and clock).
 - **mutation_case:** `RB-M-page-lease-not-taken`, `RB-M-page-identity-mismatch-not-running`,
   `RB-M-page-running-by-pid`, `RB-M-page-retract-unconditional`, `RB-M-page-ready-by-polling`,
-  `RB-M-page-lost-lease-kept-running`, `RB-M-page-record-pruned`.
+  `RB-M-page-lost-lease-kept-running`, `RB-M-page-record-pruned`, `RB-M-database-create-unlocked`,
+  `RB-M-migrations-run-unlocked`, `RB-M-upgrade-not-backed-up`, `RB-M-upgrade-not-refused-while-running`
+  (the last two in `review-bridge/tests/backup.test.mjs`, which now opens the database from a command of its own; `review-bridge/tests/database.test.mjs`: the test holds the lock and sees the
+  commands wait for it in pg_locks, so a command that does not wait fails it every time).
 - **residual_risk:** the page service keeps one database connection of its own while it runs. A page service that
   never reports ready is ended after 30 s; that wait is not tested, as supabase/cli does not test it. The shutdown
   during a reviewer check is tested on POSIX only. How fast the database releases a lock whose holder died was
-  measured on Windows (7 to 8 ms); Linux is measured by these tests in the container.
+  measured on Windows (7 to 8 ms); Linux is measured by these tests in the container. Two commands upgrading at
+  the same moment both read pending migrations and both back up; left as it was (index.mjs open), for the
+  database-start work.

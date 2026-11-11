@@ -6,7 +6,7 @@ import pg from "pg";
 
 import { BackupRefusedError, backupDatabase, runLines, runningRuns } from "./backup.mjs";
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
-import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
+import { applyMigrations, MIGRATION_LOCK, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
 import { databaseBackedUp } from "./notices.mjs";
 import { UnknownMigrationsError } from "./serverErrors.mjs";
@@ -42,15 +42,8 @@ async function ensureDatabase(root) {
 // An upgraded Bridge backs up the database before its first new migration (Owner 2026-10-29): a
 // database that has had migrations and is about to get more. A new database has nothing to keep,
 // and a running run refuses it, so no table changes before the copy exists. Returns the backup's
-// folder, or null when there was nothing to back up.
-export async function backUpBeforeMigrating(root, { dataHome, dir = MIGRATIONS_DIR } = {}) {
-  const client = await connect(root, { database: DATABASE_NAME });
-  let state;
-  try {
-    state = await migrationState(client, { dir });
-  } finally {
-    await client.end();
-  }
+// folder, or null when there was nothing to back up. `state` is read under the migration lock (open()).
+async function backUpPending(state, { dataHome }) {
   if (!state.applied || !state.pending.length) return null;
   try {
     return (await backupDatabase({ dataHome })).path;
@@ -67,18 +60,42 @@ async function open(dataHome, dir) {
   await ensureCluster(root, { binaries });
   await startServer(root, { binaries });
   await ensureDatabase(root);
-  const backup = await backUpBeforeMigrating(root, { dataHome, dir });
-  // One line, in the project's language when the command entry gave it (notices.mjs).
-  if (backup) await databaseBackedUp(backup);
+  // One session-level lock from before the history is read until the last migration is applied, as
+  // node-pg-migrate holds its lock in its wait mode (src/runner.ts:481-484, pg_advisory_lock; its default
+  // 'fail' mode refuses instead, :479,486-494), taken before the history is read (:1145-1147) and released in
+  // the finally (:1294-1307); supabase/cli waits for its lock the same way (db-setup.ts:652). A command that
+  // comes second waits until the first has applied every migration, instead of reading a database half
+  // migrated and taking it for one to upgrade (and back up, which stops the server).
+  const lockMigrations = async () => {
+    const client = await connect(root, { database: DATABASE_NAME });
+    // A connection the server ends while it is idle is reported as an event; the awaited calls carry it.
+    client.on("error", () => {});
+    await client.query("select pg_advisory_lock($1)", [MIGRATION_LOCK]);
+    return client;
+  };
+  let migrator = await lockMigrations();
+  try {
+    const state = await migrationState(migrator, { dir });
+    if (state.applied && state.pending.length) {
+      // The backup stops the server, which ends this session and its lock; the lock is taken again after.
+      // Two commands upgrading at the same moment are not covered here, as before.
+      await migrator.end().catch(() => {});
+      migrator = null;
+      const backup = await backUpPending(state, { dataHome });
+      // One line, in the project's language when the command entry gave it (notices.mjs).
+      if (backup) await databaseBackedUp(backup);
+      migrator = await lockMigrations();
+    }
+    await applyMigrations(migrator, { dir });
+  } finally {
+    if (migrator) {
+      await migrator.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK]).catch(() => {});
+      await migrator.end().catch(() => {});
+    }
+  }
   const pool = new pg.Pool({ ...(await connectionSettings(root, { database: DATABASE_NAME })), max: 4, allowExitOnIdle: true, idleTimeoutMillis: 1000 });
   // A connection the server ends between queries is reported here; the next query reports it again.
   pool.on("error", () => {});
-  const client = await pool.connect();
-  try {
-    await applyMigrations(client, { dir });
-  } finally {
-    client.release();
-  }
   const settings = await connectionSettings(root, { database: DATABASE_NAME });
   return {
     root,
