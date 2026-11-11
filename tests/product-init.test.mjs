@@ -1525,7 +1525,7 @@ function localName(at) {
 // results alone, and folds away the events the database refused to take late.
 test("each run's result is its own file in .review-bridge/results/, never in work-packages/; clean keeps them and takes refused events", async (t) => {
   const { root, order, cli, queue } = await fourActionsProject(t, "review-bridge-results-");
-  const { resultCopies } = await import("../review-bridge/tests/fixtures/resultCopies.mjs");
+  const { nextSecond, resultCopies } = await import("../review-bridge/tests/fixtures/resultCopies.mjs");
   // Once its contract is sealed, the card is the sealed one: one yes.
   const runOnce = () => {
     const card = cli(["start", order, "--fake-cli"]);
@@ -1535,6 +1535,9 @@ test("each run's result is its own file in .review-bridge/results/, never in wor
     return started;
   };
   const first = runOnce();
+  // A result is named to the second it closed in, and a second run closing in the same second gets no file
+  // of its own, so the second run is let into a second of its own.
+  await nextSecond();
   const second = runOnce();
   const { project_id: projectId } = JSON.parse(await fsp.readFile(path.join(root, ".review-bridge", "bridge.json"), "utf8"));
   const runs = await queryRecords("select run_id, closed_at, conclusion from runs where project_id = $1 order by closed_at", [projectId]);
