@@ -1,10 +1,10 @@
 ---
-description: Known issues in Review Bridge 0.3.0-rc.3, what can interrupt a run, and how to stop and resume it.
+description: Known issues in Review Bridge 0.3.0-rc.3 and 0.3.1-rc.3, what can interrupt a run, and how to stop and resume it.
 ---
 
 # Known issues
 
-## 0.3.0-rc.3: interrupted runs can stay marked as running
+## 0.3.0-rc.3 and 0.3.1-rc.3: interrupted runs can stay marked as running
 
 `start` runs in the foreground of whatever launches it. If that process is killed mid-run, Bridge can still list the run as running even though the work has stopped.
 
@@ -31,8 +31,8 @@ Replace `<run_id>` with the ID shown by `status`. `resume` creates a new run and
 
 If you're updating first, stop the run, run `npx review-bridge down`, then update. Resume after the update. `down` won't close a run that's still marked as running for you.
 
-### Coming in the next patch
+### Coming in 0.3.2
 
-**The next patch release will add automatic detection of dead runs.** This is not available in 0.3.0-rc.3; use the manual steps above for now.
+**0.3.2 will add automatic detection of dead runs.** Neither 0.3.0-rc.3 nor 0.3.1-rc.3 has this feature; use the manual steps above for now.
 
 For other limitations, see the [release notes](./release-notes).
