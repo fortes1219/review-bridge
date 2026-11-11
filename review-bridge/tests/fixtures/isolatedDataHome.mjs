@@ -95,12 +95,17 @@ export async function stopPage(root) {
   return answer;
 }
 
-// A test's folder removed after its page service is stopped. When the folder cannot be removed, the error
-// carries what the stop answered: a busy folder after a stop that succeeded is not the page service.
+// A test's folder removed after its page service is stopped. Windows may still hold a folder another process
+// had open as a transient sharing violation, so the removal is retried a bounded number of times: supabase/cli
+// retries removing a folder so (c75aea2, packages/stack/src/namespace/Registry.ts:181-182,
+// src/internal/sharing-violation.ts:15-34), and this takes Node's own way for a test's temporary folder, fs.rm
+// retried 3 times with its default delay, about 600 ms in all (nodejs/node v24.16.0 test/common/tmpdir.js:26,31;
+// lib/internal/fs/rimraf.js:28-44). When the folder still cannot be removed, the error carries what the stop
+// answered: a busy folder after a stop that succeeded is not the page service.
 export async function removeProject(root, options = {}) {
   const answer = await stopPage(root);
   try {
-    await fs.promises.rm(root, { recursive: true, force: true, ...options });
+    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 3, ...options });
   } catch (error) {
     error.message += " (after the page service's stop answered " + answer + ")";
     throw error;

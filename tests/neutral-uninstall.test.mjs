@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { separatePerson, stopPage } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { removeProject, separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -39,10 +39,7 @@ const projectPaths = (root) => getBridgePaths(root, path.join(packageRoot, "revi
 
 async function workspace(t, { gitRepo = true } = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-uninstall-"));
-  t.after(async () => {
-    await stopPage(root);
-    await fsp.rm(root, { recursive: true, force: true });
-  });
+  t.after(() => removeProject(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "vue-test", dependencies: { vue: "latest" }, devDependencies: { vite: "latest" } }));
   await fsp.mkdir(path.join(root, ".claude"));
   await fsp.writeFile(path.join(root, ".claude", "settings.local.json"), "{\"hooks\":{}}\n");

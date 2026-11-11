@@ -268,7 +268,8 @@ test("init without a terminal takes claude and codex when no role is given or sa
     });
     stopServerIn(home);
     assert.equal(down.status, 0, "down in the test's data home: " + down.stdout + down.stderr);
-    await fsp.rm(root, { recursive: true, force: true });
+    // Retried as removeProject retries it (the fixture says why); removeProject itself looks in this process's data home.
+    await fsp.rm(root, { recursive: true, force: true, maxRetries: 3 });
     await fsp.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   });
   const result = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root), {
