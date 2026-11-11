@@ -429,6 +429,72 @@
       "test": "tests/product-init.test.mjs",
       "case": "init, roles-check and start where the manifest marks this platform experimental: every readiness key is there, nothing is ready, and start offers no rerun",
       "expect": "no rerun is offered for an unverified platform"
+    },
+    {
+      "id": "RB-M-vue-misses-nuxt",
+      "gate": "Install",
+      "target": "profiles/vue-frontend.json",
+      "anchor": "          \"\\\\\\\"nuxt\\\\\\\"\\\\s*:\",\n",
+      "replacement": "",
+      "reason": "A Nuxt project, whose package.json names nuxt and not vue, is detected as no project type, so its tests have no rules and every work order runs without them (the first user, 2026-11-09).",
+      "test": "tests/project-profile.test.mjs",
+      "case": "a Nuxt project is a Vue frontend, with nuxt in dependencies or in devDependencies",
+      "expect": "vue-frontend"
+    },
+    {
+      "id": "RB-M-react-claims-next",
+      "gate": "Install",
+      "target": "profiles/react-frontend.json",
+      "anchor": "          \"\\\\\\\"next\\\\\\\"\\\\s*:\"",
+      "replacement": "          \"\\\\\\\"next-is-not-excluded\\\\\\\"\\\\s*:\"",
+      "reason": "A Next project, which always has react, is detected as a React frontend too, so detection refuses it as ambiguous.",
+      "test": "tests/project-profile.test.mjs",
+      "case": "a Next project is a Next frontend, and not a React frontend too",
+      "expect": "ambiguous"
+    },
+    {
+      "id": "RB-M-node-claims-angular",
+      "gate": "Install",
+      "target": "profiles/node-backend.json",
+      "anchor": "          \"\\\\\\\"(@angular/core|vitepress|@slidev/cli)\\\\\\\"\\\\s*:\"",
+      "replacement": "          \"\\\\\\\"(vitepress|@slidev/cli)\\\\\\\"\\\\s*:\"",
+      "reason": "An Angular project is detected as a Node backend too, so detection refuses it as ambiguous (before the Angular type, it was taken for a Node backend).",
+      "test": "tests/project-profile.test.mjs",
+      "case": "an Angular project is an Angular frontend, and not a Node backend",
+      "expect": "ambiguous"
+    },
+    {
+      "id": "RB-M-angular-tests-watch",
+      "gate": "Install",
+      "target": "profiles/angular-frontend.json",
+      "anchor": "      \"command\": \"npm test -- --watch=false\",",
+      "replacement": "      \"command\": \"npm test\",",
+      "reason": "An Angular workspace runs ng test, whose Karma builder watches by default, so the tests never end and every run is killed at its limit.",
+      "test": "tests/project-profile.test.mjs",
+      "case": "an Angular workspace runs its tests once with --watch=false, and a project without angular.json runs npm test",
+      "expect": "an Angular workspace's tests do not watch"
+    },
+    {
+      "id": "RB-M-cra-tests-watch",
+      "gate": "Install",
+      "target": "profiles/react-frontend.json",
+      "anchor": "      \"command\": \"npm test -- --watchAll=false\",",
+      "replacement": "      \"command\": \"npm test\",",
+      "reason": "A Create React App project runs react-scripts test, which watches unless CI is set, so the tests never end and every run is killed at its limit.",
+      "test": "tests/project-profile.test.mjs",
+      "case": "a Create React App project runs its tests once with --watchAll=false, and another React project runs npm test",
+      "expect": "a Create React App project's tests do not watch"
+    },
+    {
+      "id": "RB-M-init-hides-profile-change",
+      "gate": "Install",
+      "target": "installer/install-guide.mjs",
+      "anchor": "    const change = options.profile === undefined ? null : await profileChange(target, options.profile);",
+      "replacement": "    const change = null;",
+      "reason": "init with --profile in a folder already set up says only to upgrade, so the person is left with uninstall then init, which drops the project's id (the first user, 2026-11-09).",
+      "test": "tests/install-guide.test.mjs",
+      "case": "a folder already set up is told how to change its project type, and nothing is written",
+      "expect": "init says how to change the project type"
     }
   ]
 }

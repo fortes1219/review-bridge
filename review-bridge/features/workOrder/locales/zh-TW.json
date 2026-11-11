@@ -292,6 +292,7 @@
   "init.already_set_up": "這個資料夾已經設定過（{folder}）。要換成這一版，請執行：{bridge} upgrade",
   "init.not_a_folder": "專案資料夾必須是已經存在、而且不是符號連結的資料夾：{folder}",
   "init.reinitialized": "已重新初始化 {folder} 裡的 Review Bridge 設定",
+  "init.profile_change": "這個資料夾的專案類型是 {current}。要改用 {requested}，把 {file} 裡的 \"test\" 區塊換成下面這段；下一次 start 就會用它，其他設定都不變：",
   "init.graph_failed": "專案的 graph 沒有建好：{error} 請執行：{bridge} graph",
   "init.done.title": "完成。接下來：",
   "init.done.agent": "把工單 .md 放進 .review-bridge/work-packages/，然後在 Claude Code 輸入：",

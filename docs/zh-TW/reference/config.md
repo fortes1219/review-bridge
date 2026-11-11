@@ -36,7 +36,7 @@
 | `watch.port` | 本機頁面的連接埠。`strict_port` 為 `false` 時，若埠被占用，會依序尋找下一個可用埠 |
 | `retention.days` | 執行日誌與已結束紀錄的保留天數，供 `clean` 清理時使用 |
 | `locale` | 卡片、`status`、`up`、`down`、`ps`、`init` 與結果檔使用的語言：`en` 或 `zh-TW`。`init` 依系統語言寫入 |
-| `test.profile_id` / `test.rules` | 專案類型與對應的驗證指令，見下方 profiles 表格 |
+| `test.profile_id` / `test.rules` | 專案類型與對應的驗證指令，見下方 profiles 表格。可以自己改，下一次 `start` 就生效，`upgrade` 也會保留。要換專案類型時，在專案資料夾執行 `npx review-bridge init --profile <類型>`：它不改任何檔，只印出目前的類型和要貼進來的 `test` 區塊，把這裡的 `test` 換成那段即可；不必 `uninstall` 再 `init`（那樣會換掉專案的 `project_id`，資料庫裡的紀錄就接不上了） |
 
 ## `.review-bridge/policy.override.json`
 
@@ -100,7 +100,10 @@ Bridge 每次開始工作前提供給 writer 的規則摘要，說明可做事�
 
 | `profile_id` | 偵測 | 驗證指令 |
 |---|---|---|
-| `vue-frontend` | Vue 與 TypeScript 前端 | `npm test` |
+| `vue-frontend` | Vue 與 TypeScript 前端，含 Nuxt、VitePress、Slidev | `npm test` |
+| `react-frontend` | React 前端（不含 Next） | `npm test`；Create React App（裝了 `react-scripts`）是 `npm test -- --watchAll=false`，否則測試會一直等檔案變更 |
+| `next-frontend` | Next.js | `npm test` |
+| `angular-frontend` | Angular | 有 `angular.json` 時是 `npm test -- --watch=false`（用 Karma 的 `ng test` 預設會一直等檔案變更），否則 `npm test` |
 | `node-backend` | Node.js 後端 | `npm test` |
 | `rust-backend` | Rust | `cargo test --workspace` |
 | `go-backend` | Go | `go test ./...` |

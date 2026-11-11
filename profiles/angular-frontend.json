@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "profile_id": "angular-frontend",
+  "display_name": "Angular frontend",
+  "required_files_any": [
+    "package.json"
+  ],
+  "auto_detection": {
+    "files_any": [
+      "package.json"
+    ],
+    "content_any": [
+      {
+        "file": "package.json",
+        "patterns": [
+          "\\\"@angular/core\\\"\\s*:"
+        ]
+      }
+    ]
+  },
+  "verification_rules": [
+    {
+      "command": "npm test -- --watch=false",
+      "files_any": [
+        "angular.json"
+      ],
+      "package_script": "test"
+    },
+    {
+      "command": "npm test",
+      "package_script": "test"
+    }
+  ],
+  "verification_script_candidates": [
+    "format:check",
+    "lint",
+    "test",
+    "build"
+  ],
+  "dependency_manifest": {
+    "file": "package.json",
+    "sections": [
+      "dependencies",
+      "devDependencies"
+    ],
+    "script_section": "scripts",
+    "script_runner": "npm run",
+    "capabilities": [
+      {
+        "name": "angular",
+        "dependencies": [
+          "@angular/core"
+        ]
+      },
+      {
+        "name": "angular-cli",
+        "dependencies": [
+          "@angular/cli"
+        ]
+      },
+      {
+        "name": "typescript",
+        "dependencies": [
+          "typescript"
+        ]
+      }
+    ]
+  }
+}

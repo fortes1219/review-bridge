@@ -652,6 +652,52 @@ test("init that reinitializes a set-up folder reads the project into its graph a
   assert.deepEqual((await queryRecords("select path from graph_files where project_id = $1 order by path", [projectId])).map((row) => row.path), ["src/a.ts", "src/b.ts"]);
 });
 
+// The first user (2026-11-09): a Nuxt project got no project type, and a folder set up could change its type
+// only through uninstall and init, which drops the project's id. A Nuxt project is now a Vue frontend; init
+// with --profile in a folder set up says which type it has and the test block to put into bridge.json (here
+// on the path that rebuilds a missing install record); the next start reads it, and the project keeps its id.
+test("a Nuxt project is set up as a Vue frontend, and a project type changed in bridge.json is used by the next start", async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-nuxt-"));
+  t.after(() => removeWorkspace(root));
+  await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "nuxt-app", private: true, scripts: { test: "vitest run" }, dependencies: { nuxt: "^4" } }, null, 2) + "\n");
+  const first = spawnSync(process.execPath, await scriptedInit(bridge, "init", "--target", root, "--writer", "claude", "--reviewer", "codex", "--yes"), {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(first.status, 0, first.stderr);
+  const configFile = path.join(root, ".review-bridge", "bridge.json");
+  const config = JSON.parse(await fsp.readFile(configFile, "utf8"));
+  assert.equal(config.test.profile_id, "vue-frontend");
+  assert.notDeepEqual(config.test.rules, [], "a Nuxt project's tests have rules");
+
+  // The install record gone, init rebuilds it; asked for another type, it says how to change it and writes nothing to bridge.json.
+  await serviceDown({ paths: projectPaths(root), out: { write() {} } });
+  await fsp.rm(projectPaths(root).stateRoot, { recursive: true, force: true });
+  const configText = await fsp.readFile(configFile, "utf8");
+  const again = spawnSync(process.execPath, [bridge, "init", "--target", root, "--profile", "react-frontend", "--yes", "--fake-cli"], {
+    cwd: packageRoot, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(again.status, 0, again.stderr);
+  const react = JSON.parse(await fsp.readFile(path.join(packageRoot, "profiles", "react-frontend.json"), "utf8"));
+  const block = { test: { profile_id: "react-frontend", rules: react.verification_rules } };
+  assert.match(again.stdout, /^Reinitialized existing Review Bridge setup in /);
+  assert.ok(again.stdout.includes("This folder's project type is vue-frontend. To use react-frontend instead, replace the \"test\" block in " + configFile + " with this one; the next start uses it, and nothing else changes:\n" + JSON.stringify(block, null, 2) + "\n"),
+    "init says how to change the project type: " + again.stdout);
+  assert.equal(await fsp.readFile(configFile, "utf8"), configText, "bridge.json is not written");
+
+  // The block as the person pastes it: the next start's card runs that type's command, and the id stays.
+  await fsp.writeFile(configFile, JSON.stringify({ ...JSON.parse(configText), ...block }, null, 2) + "\n");
+  await fsp.mkdir(path.join(root, "node_modules", ".bin"), { recursive: true });
+  await fsp.writeFile(path.join(root, "node_modules", ".bin", "react-scripts"), "#!/bin/sh\n");
+  const order = ".review-bridge/work-packages/hello.md";
+  await fsp.writeFile(path.join(root, order), "# Add a README\n\n<!-- bridge:requested_work -->\nAdd a README at the project root.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n1. `README.md` exists at the project root.\n");
+  const card = spawnSync(process.execPath, [bridge, "start", order, "--fake-cli"], {
+    cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+  });
+  assert.equal(card.status, 1, card.stderr);
+  assert.ok(card.stdout.split(/\r?\n/).includes("Tests:        runs npm test -- --watchAll=false after each writer call"), card.stdout);
+  assert.equal(JSON.parse(await fsp.readFile(configFile, "utf8")).project_id, config.project_id, "the project keeps its id");
+});
+
 // An agent's one yes, to the card the start before it printed (Owner 2026-11-08: one card, one yes).
 function yesTo(cli, order, args = [], env = {}) {
   return cli(["start", order, "--fake-cli", ...args, "--yes"], env);

@@ -13,7 +13,10 @@
       {
         "file": "package.json",
         "patterns": [
-          "\\\"vue\\\"\\s*:"
+          "\\\"vue\\\"\\s*:",
+          "\\\"nuxt\\\"\\s*:",
+          "\\\"vitepress\\\"\\s*:",
+          "\\\"@slidev/cli\\\"\\s*:"
         ]
       }
     ]

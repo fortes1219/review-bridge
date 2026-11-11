@@ -91,3 +91,63 @@ test("auto profile detection fails closed for a mixed-stack repository", async (
   });
   await assert.rejects(resolveProfile(target, "auto"), /ambiguous/i);
 });
+
+// The frontend frameworks a package.json names, told apart as Storybook tells them apart (storybookjs/storybook
+// v8.6.14 code/core/src/cli/project_types.ts: nuxt, next, @angular/core, and react last, since every React
+// framework has react) and as antfu/eslint-config takes vue, nuxt, vitepress and @slidev/cli for Vue
+// (src/factory.ts:56-61). A folder of each is detected as one type only, or detection would refuse as ambiguous.
+const detected = async (t, packageJson, files = {}) => (await resolveProfile(await profileFixture(t, { "package.json": packageJson, ...files }), "auto")).profile_id;
+
+test("a Nuxt project is a Vue frontend, with nuxt in dependencies or in devDependencies", async (t) => {
+  assert.equal(await detected(t, { scripts: { test: "vitest run" }, dependencies: { nuxt: "^4" } }), "vue-frontend");
+  assert.equal(await detected(t, { scripts: { test: "vitest run" }, devDependencies: { nuxt: "^4" } }), "vue-frontend");
+});
+
+test("a VitePress site and a Slidev deck are Vue frontends, not Node backends", async (t) => {
+  assert.equal(await detected(t, { devDependencies: { vitepress: "^1" } }), "vue-frontend");
+  assert.equal(await detected(t, { dependencies: { "@slidev/cli": "^52" } }), "vue-frontend");
+});
+
+test("a React project is a React frontend", async (t) => {
+  assert.equal(await detected(t, { dependencies: { react: "^19", "react-dom": "^19" } }), "react-frontend");
+});
+
+test("a Next project is a Next frontend, and not a React frontend too", async (t) => {
+  assert.equal(await detected(t, { dependencies: { next: "^16", react: "^19", "react-dom": "^19" } }), "next-frontend");
+});
+
+test("an Angular project is an Angular frontend, and not a Node backend", async (t) => {
+  assert.equal(await detected(t, { dependencies: { "@angular/core": "^21", rxjs: "^7" }, devDependencies: { "@angular/cli": "^21" } }), "angular-frontend");
+});
+
+// Which rule runs the tests is decided by the rules a profile writes into bridge.json's test block, read here
+// from the profile file itself (selectTest takes the first whose conditions hold, features/workOrder/test.mjs).
+// A test run has no terminal, so a runner that watches by default never ends and is killed at its limit:
+// react-scripts watches unless CI is set or --watchAll=false is given (facebook/create-react-app
+// packages/react-scripts/scripts/test.js:48-57), found by its installed bin as Storybook finds it
+// (project_types.ts:183-192); Angular's Karma builder watches by default (angular/angular-cli
+// packages/angular/build/src/builders/karma/schema.json:230-234), found by the workspace's angular.json.
+const { selectTest } = await import("../review-bridge/features/workOrder/test.mjs");
+async function chosenCommand(t, profileId, files) {
+  const repoRoot = await profileFixture(t, files);
+  const profile = await resolveProfile(repoRoot, profileId);
+  const chosen = await selectTest({ repoRoot, bridgeConfig: { test: { profile_id: profile.profile_id, rules: profile.verification_rules } } });
+  return chosen.command;
+}
+
+test("an Angular workspace runs its tests once with --watch=false, and a project without angular.json runs npm test", async (t) => {
+  const packageJson = { scripts: { test: "ng test" }, dependencies: { "@angular/core": "^21" } };
+  assert.equal(await chosenCommand(t, "angular-frontend", { "package.json": packageJson, "angular.json": { version: 1, projects: {} } }), "npm test -- --watch=false", "an Angular workspace's tests do not watch");
+  assert.equal(await chosenCommand(t, "angular-frontend", { "package.json": packageJson }), "npm test");
+});
+
+test("a Create React App project runs its tests once with --watchAll=false, and another React project runs npm test", async (t) => {
+  const packageJson = { scripts: { test: "react-scripts test" }, dependencies: { react: "^19", "react-scripts": "5.0.1" } };
+  assert.equal(await chosenCommand(t, "react-frontend", { "package.json": packageJson, "node_modules/.bin/react-scripts": "#!/bin/sh\n" }), "npm test -- --watchAll=false", "a Create React App project's tests do not watch");
+  assert.equal(await chosenCommand(t, "react-frontend", { "package.json": { scripts: { test: "vitest run" }, dependencies: { react: "^19" } } }), "npm test");
+});
+
+test("a Next project runs npm test, and one without a test script has none", async (t) => {
+  assert.equal(await chosenCommand(t, "next-frontend", { "package.json": { scripts: { test: "vitest run" }, dependencies: { next: "^16" } } }), "npm test");
+  assert.equal(await chosenCommand(t, "next-frontend", { "package.json": { scripts: { dev: "next dev" }, dependencies: { next: "^16" } } }), null);
+});

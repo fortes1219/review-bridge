@@ -12,7 +12,7 @@ import * as clack from "@clack/prompts";
 
 import { createTranslator, defaultTranslator, resolveLocale, systemLocale } from "../review-bridge/features/workOrder/i18n.mjs";
 import { readDefaultRoles, saveDefaultRoles } from "./personal-settings.mjs";
-import { listProfiles, matchingProfiles } from "./project-profile.mjs";
+import { listProfiles, matchingProfiles, resolveProfile } from "./project-profile.mjs";
 import { PROVIDERS, validateRoles } from "./role-readiness.mjs";
 import { PROJECT_TASKS_RELATIVE, projectTasksFile, writeVscodeTasks } from "./vscode-tasks.mjs";
 import { bridgeRunner } from "../review-bridge/utils/bridgeCommand.mjs";
@@ -72,6 +72,28 @@ async function guideTranslator(target) {
   return await createTranslator(fs.existsSync(bridgeConfigPath) ? await resolveLocale({ bridgeConfigPath }) : await systemLocale());
 }
 
+// A project type asked for in a folder already set up. init does not write it: bridge.json's `test` block is
+// the project's own to change (upgrade keeps it, neutral-install.mjs OWNER_EDITABLE_KEYS, and every start reads
+// it, features/workOrder/test.mjs selectTest), so init says what to put there, as supabase/cli refuses to
+// overwrite an existing config and says how to go on (c75aea2, apps/cli/src/commands/init/init.handler.ts:40-53).
+// The block is the one a first init writes for that type (neutral-install.mjs neutralBridgeConfig).
+async function profileChange(target, requested) {
+  const profile = await resolveProfile(target, requested);
+  const bridgeJson = path.join(target, ".review-bridge", "bridge.json");
+  const config = await fsp.readFile(bridgeJson, "utf8").then((text) => JSON.parse(text), () => null);
+  return {
+    current: config?.test?.profile_id ?? config?.profile_id ?? null,
+    requested: profile.profile_id,
+    bridge_json: bridgeJson,
+    test: { profile_id: profile.profile_id, rules: structuredClone(profile.verification_rules || []) },
+  };
+}
+
+function profileChangeText(change, t) {
+  return t("init.profile_change", { current: change.current ?? "none", requested: change.requested ?? "none", file: change.bridge_json })
+    + "\n" + JSON.stringify({ test: change.test }, null, 2) + "\n";
+}
+
 // `ui` is @clack/prompts (or a stand-in with the same calls). `inspectProvider` reports one
 // provider's CLI and sign-in state without a model call. `setUpProject(settings, step)` sets the
 // project up, running each part through `step(label, work)`.
@@ -90,10 +112,17 @@ export async function runGuide(options, {
   // A folder already set up: with its record in the data folder it is an install, which upgrade moves;
   // without it, init rebuilds the record and leaves everything else as it is, as git init reinitializes.
   if (fs.existsSync(path.join(target, ".review-bridge"))) {
+    // A type asked for is read first, so one that does not exist is refused before anything is rebuilt.
+    const change = options.profile === undefined ? null : await profileChange(target, options.profile);
     const reinitialized = await reinitialize(target, t);
-    if (!reinitialized) throw new Error(t("init.already_set_up", { folder: path.join(target, ".review-bridge") }));
-    if (!options.json) write(t("init.reinitialized", { folder: reinitialized.private_root }) + "\n" + (reinitialized.graph_lines ?? []).map((line) => line + "\n").join(""));
-    return { ...reinitialized, printed: !options.json };
+    if (!reinitialized) {
+      throw new Error(t("init.already_set_up", { folder: path.join(target, ".review-bridge") }) + (change ? "\n" + profileChangeText(change, t).trimEnd() : ""));
+    }
+    if (!options.json) {
+      write(t("init.reinitialized", { folder: reinitialized.private_root }) + "\n" + (reinitialized.graph_lines ?? []).map((line) => line + "\n").join("")
+        + (change ? profileChangeText(change, t) : ""));
+    }
+    return { ...reinitialized, ...(change ? { profile_change: change } : {}), printed: !options.json };
   }
   if (asRoot()) throw new Error(t("init.root"));
 
