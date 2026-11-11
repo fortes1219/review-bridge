@@ -54,7 +54,7 @@ Other designs must have a precedent in the open-source ecosystem. Designs withou
 
 | Version | Scope | Status |
 |---|---|---|
-| **0.3.0-rc.3** | `npx review-bridge init` → work order → `start` → human approval → execution → result file → **SQL queries**, including VS Code database access. Agent, VS Code, and terminal entry points; four role pairings; both providers' read-only checks; personal connector isolation; contracts without model calls; directory pipelines; a project graph; and records in OS data directories | Released on npm November 10, 2026; this documentation covers that version |
+| **0.3.0-rc.3** | `npx review-bridge init` → work order → `start` → human approval → execution → result file → **SQL queries**, including VS Code database access. Agent, VS Code, and terminal entry points; four role pairings; both providers' read-only checks; personal connector isolation; contracts without model calls; directory pipelines; a project graph; and records in OS data directories | Released on npm November 10, 2026; the 0.3.1-rc.3 update was released November 12, 2026. This documentation covers 0.3.1-rc.3 |
 | **Upcoming work** | Isolate concurrent work with git worktrees and verify each additional reviewer MCP server | Planned; not available yet |
 | **rc4** | A Vue 3.5 interface for contracts, run status, acceptance decisions, work controls, and budgets, integrated with data storage | Planned |
 | Future direction | Use pgvector to retrieve past decisions, contracts, and team documents for the reviewer | No version assigned |
