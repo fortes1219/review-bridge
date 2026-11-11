@@ -85,7 +85,7 @@ async function installWithService(root) {
     cwd: packageRoot, encoding: "utf8", windowsHide: true, env: childEnv, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(await serviceRunning(root), true, "init should leave the page service running");
+  assert.equal(await serviceReason(root), "running", "init should leave the page service running");
 }
 
 async function serviceRunning(root) {
@@ -93,6 +93,15 @@ async function serviceRunning(root) {
   const modules = await loadInstalledServiceModules(runtimeRoot);
   if (!modules) return false;
   return (await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }))).running;
+}
+
+// Why the page is or is not running (running, no_session, pid_dead, timeout, unreachable, wrong_service):
+// an assertion that the page runs names the reason when it fails.
+async function serviceReason(root) {
+  const runtimeRoot = path.join(packageRoot, "review-bridge");
+  const modules = await loadInstalledServiceModules(runtimeRoot);
+  if (!modules) return "no runtime modules";
+  return (await modules.service.checkService(modules.getBridgePaths(root, runtimeRoot, { privateRootName: ".review-bridge" }))).reason;
 }
 
 async function addUserData(root) {
@@ -431,7 +440,7 @@ test("V6 / V8h / V8i / V8l with the page service running: stop before backup, re
   const indexEntry = (await readJson(path.join(defaultBackupRoot(), "index.json"))).open[await fsp.realpath(root)];
   assert.ok(indexEntry, "the index names the transaction");
   assert.equal((await readJson(indexEntry.journal)).state, "started");
-  assert.equal(await serviceRunning(root), true, "the service was not stopped yet");
+  assert.equal(await serviceReason(root), "running", "the service was not stopped yet");
   let plan = await planNeutralUninstall({ target: root });
   assert.equal(plan.kind, "cancel");
   assert.equal(plan.restart_service, false, "the service was never stopped");
@@ -440,7 +449,7 @@ test("V6 / V8h / V8i / V8l with the page service running: stop before backup, re
   // V8i: the journal cannot be written: refused before the stop.
   await assert.rejects(uninstall(root, {}, { failJournal: true }), /nothing was stopped or deleted/);
   assert.equal(await exists(marker), false);
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
   // V8h: crash after the stop, before the backup: the cancel plan restarts the service.
   const before = await tree(path.join(root, ".review-bridge"));
   await crashAt(root, "afterServiceStop");
@@ -450,7 +459,7 @@ test("V6 / V8h / V8i / V8l with the page service running: stop before backup, re
   assert.equal(plan.restart_service, true);
   const cancelled = await applyNeutralUninstall(plan, plan.plan_sha256);
   assert.equal(cancelled.service_restarted, true);
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
   assert.equal(await exists(marker), false);
   const after = await tree(path.join(root, ".review-bridge"));
   for (const [name, hash] of before) {
@@ -472,7 +481,7 @@ test("V6 / V8h / V8i / V8l with the page service running: stop before backup, re
     plan = await planNeutralUninstall({ target: root });
     assert.equal(plan.kind, "cancel", "clearIndex=" + clearIndex);
     await applyNeutralUninstall(plan, plan.plan_sha256);
-    assert.equal(await serviceRunning(root), true);
+    assert.equal(await serviceReason(root), "running");
     assert.equal(await exists(marker), false);
     assert.equal((await readJson(path.join(defaultBackupRoot(), "index.json"))).open[await fsp.realpath(root)], undefined);
   }
@@ -718,7 +727,7 @@ test("S1 a cancel whose running page service does not come back keeps the marker
   assert.equal(again.kind, "cancel");
   assert.equal(again.restart_service, true);
   await applyNeutralUninstall(again, again.plan_sha256);
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
   assert.equal(await exists(marker), false);
   assert.equal((await planNeutralUninstall({ target: root })).kind, "fresh");
 });
@@ -736,7 +745,7 @@ test("S2 a stop that throws after the service is already down is still recovered
       throw new Error("status check failed after the stop");
     },
   }), /stopped before deleting anything and was cancelled: status check failed after the stop/);
-  assert.equal(await serviceRunning(root), true, "the cancel brought the service back");
+  assert.equal(await serviceReason(root), "running", "the cancel brought the service back");
   assert.equal(await exists(marker), false);
   // The same throw, and the restart cannot be confirmed: the marker stays for a rerun.
   const second = await planNeutralUninstall({ target: root });
@@ -751,7 +760,7 @@ test("S2 a stop that throws after the service is already down is still recovered
   const again = await planNeutralUninstall({ target: root });
   assert.equal(again.kind, "cancel");
   await applyNeutralUninstall(again, again.plan_sha256);
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
   assert.equal(await exists(marker), false);
 });
 
@@ -769,7 +778,7 @@ test("a cancel whose page service fails to restart with a reason shows that reas
   const again = await planNeutralUninstall({ target: root });
   const finished = await applyNeutralUninstall(again, again.plan_sha256);
   assert.equal(finished.service_restarted, true);
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
 });
 
 // RC3-ENTRY-02: the entries are the person's and every project's; the last project takes them along.

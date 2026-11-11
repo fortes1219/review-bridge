@@ -91,7 +91,7 @@ async function installWithService(root) {
     cwd: packageRoot, encoding: "utf8", windowsHide: true, env: childEnv, maxBuffer: 16 * 1024 * 1024,
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(await serviceRunning(root), true, "init should leave the page service running");
+  assert.equal(await serviceReason(root), "running", "init should leave the page service running");
 }
 
 async function serviceCheck(root) {
@@ -101,6 +101,12 @@ async function serviceCheck(root) {
 
 async function serviceRunning(root) {
   return (await serviceCheck(root)).running === true;
+}
+
+// Why the page is or is not running (running, no_session, pid_dead, timeout, unreachable, wrong_service):
+// an assertion that the page runs names the reason when it fails.
+async function serviceReason(root) {
+  return (await serviceCheck(root)).reason;
 }
 
 async function tree(root) {
@@ -330,7 +336,7 @@ test("W2 a failure at each step rolls back: persistent data bit for bit, the old
     sameTree(await persistent(root), before, hook);
     assert.equal(await exists(markerOf(root)), false, hook + ": marker");
     assert.equal(await exists(lockOf(root)), false, hook + ": lock");
-    assert.equal(await serviceRunning(root), true, hook + ": the page service is back");
+    assert.equal(await serviceReason(root), "running", hook + ": the page service is back");
   }
   // Without the page service it stays off.
   assert.equal((await stopPage(root)).exitCode, 0);
@@ -397,7 +403,7 @@ test("W3b interrupted after the page service stopped and before the backup: the 
   assert.equal(formatUpgradeRollbackPlan(plan), "上一次升級在備份之前中斷，設定都沒動。\n這次會：拿掉維護標記、重新啟動網頁服務。\n");
   await applyNeutralUpgradeRollback(plan, plan.plan_sha256);
   assert.equal(await exists(markerOf(root)), false);
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
   sameTree(await persistent(root), before, "release with service");
   // The same point when nothing was running: only the marker goes.
   assert.equal((await stopPage(root)).exitCode, 0);
@@ -672,7 +678,7 @@ test("W10 / W11 the CLI has no --yes and needs a terminal; the plan route works;
   const rolled = cli(["upgrade", "--rollback", "--target", root, "--plan", planFile, "--approve", JSON.parse(rollbackWritten.stdout).plan_sha256]);
   assert.equal(rolled.status, 0, rolled.stderr);
   assert.equal(rolled.stdout, "已拿掉上一次升級留下的維護標記，網頁服務已重新啟動。\n");
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
 });
 
 async function recordInstalled(root, relative) {
@@ -976,7 +982,7 @@ test("a failed upgrade whose page service does not come back keeps the marker an
   assert.equal(await exists(markerOf(root)), true);
   const { result } = await rollback(root);
   assert.equal(result.service_restarted, true);
-  assert.equal(await serviceRunning(root), true);
+  assert.equal(await serviceReason(root), "running");
 });
 
 test("a rollback whose page service does not come back keeps the marker and says why", async (t) => {

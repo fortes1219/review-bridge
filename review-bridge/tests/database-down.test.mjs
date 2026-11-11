@@ -45,8 +45,12 @@ async function cluster(t, { pid = null, said = null } = {}) {
 function seams({ root, live = [], listing = null, starts = [], running = null, stopWorks = true } = {}) {
   const calls = { tool: [], listed: 0, parents: [], signals: [], starts: [], ready: 0, programs: [] };
   const paths = clusterPaths(root);
+  // A clock that only the waits move: a start that waits for another's server ends at its deadline at once.
+  let now = 0;
   return {
     calls,
+    clock: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
     binaries: { pg_ctl: "fake-pg_ctl", postgres: "fake-postgres" },
     tool: async (file, args) => {
       calls.tool.push(args[0]);
@@ -213,6 +217,43 @@ test("a start that meets a dead server's leftovers is not cleared or started aga
     assert.ok(zh.includes(paths.control), "the details stay in pg_ctl's file, which the sentence names");
     assert.match(failureLine(error, await createTranslator("en")), /^The database was not shut down properly last time, .*Restart the computer and run this again\. Details are in /);
   }
+});
+
+// RC3.1-PG-01: on Windows a server still starting holds the -l file, so a second start finds it held before
+// that server is running (CI windows, postgres-server "two processes creating the cluster …", 806d8fb).
+const OTHER_PORT = 54_999;
+const STATUS_ASKED = (fake) => fake.calls.tool.filter((action) => action === "status").length;
+
+test("a held -l file while another command's server is still starting: the start waits and uses that server", async (t) => {
+  const { root, paths } = await cluster(t);
+  const fake = seams({ root, starts: ["held"] });
+  // Not running before the start, not right after it, then up: the other command's server wrote its pid file.
+  const answers = [3, 3, 0];
+  fake.tool = async (file, args) => {
+    fake.calls.tool.push(args[0]);
+    const code = answers.shift() ?? 0;
+    if (code === 0) await fsp.writeFile(path.join(paths.data, "postmaster.pid"), NEW_POSTMASTER + "\n" + paths.data + "\n0\n" + OTHER_PORT + "\n");
+    return { code, stdout: "", stderr: "" };
+  };
+  assert.deepEqual(await startServer(root, fake), { port: OTHER_PORT });
+  assert.equal(STATUS_ASKED(fake), 3);
+  assert.deepEqual([fake.calls.starts.length, fake.calls.ready, fake.calls.listed, fake.calls.signals], [1, 1, 0, []]);
+});
+
+test("a held -l file with no server by the start's deadline is a dead server's leftovers, said as before", async (t) => {
+  const { root, paths } = await cluster(t, { pid: DEAD_POSTMASTER });
+  const fake = seams({ root });
+  // Held without touching the dead server's pid file: a start that took held for a server would read its port.
+  fake.detached = async (file, args, options) => { fake.calls.starts.push({ args, options }); return { code: 1, held: true, output: "" }; };
+  await assert.rejects(startServer(root, fake), (error) => {
+    assert.ok(error instanceof OldServerError, error.message);
+    assert.equal(error.message, new OldServerError(paths.control).message);
+    return true;
+  });
+  // Asked before and right after the start, then every 100 ms up to the 60 s deadline.
+  assert.equal(STATUS_ASKED(fake), 2 + 600);
+  assert.equal(fake.clock(), 60_000);
+  assert.deepEqual([fake.calls.starts.length, fake.calls.ready, fake.calls.listed, fake.calls.signals], [1, 0, 0, []]);
 });
 
 test("Windows rows: only this binary's processes, by path or by the command line's program, and --forkchild marks a child", () => {
