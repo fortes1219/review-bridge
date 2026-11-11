@@ -407,6 +407,28 @@
       "test": "review-bridge/tests/page-host.test.mjs",
       "case": "a page service whose adapter does not implement the platform contract does not start",
       "expect": "did not match the regular expression"
+    },
+    {
+      "id": "RB-M-start-drops-page-service-words",
+      "gate": "Page",
+      "target": "review-bridge/features/workOrder/commands.mjs",
+      "anchor": "  const said = check.reason === \"page_not_running\" && check.said ? [String(check.said)] : [];",
+      "replacement": "  const said = [];",
+      "reason": "A start refused because the page service cannot be used drops what the page service said, so a person whose older Bridge page service is still running after an upgrade is never told to run down first (GitHub #6).",
+      "test": "tests/product-init.test.mjs",
+      "case": "a start refused because the page service cannot be used says the page service's own words, and no rerun when they say to run down",
+      "expect": "start says the page service's own words"
+    },
+    {
+      "id": "RB-M-unverified-platform-offers-rerun",
+      "gate": "Platform",
+      "target": "review-bridge/features/workOrder/commands.mjs",
+      "anchor": "      : check.reason === \"adapter_not_verified\" || PAGE_REASONS_WITH_A_WAY.has(check.page_reason)",
+      "replacement": "      : PAGE_REASONS_WITH_A_WAY.has(check.page_reason)",
+      "reason": "A start refused because this platform's adapter is not verified tells the person to run it again or press Check, neither of which can ever pass (GitHub #6).",
+      "test": "tests/product-init.test.mjs",
+      "case": "init, roles-check and start where the manifest marks this platform experimental: every readiness key is there, nothing is ready, and start offers no rerun",
+      "expect": "no rerun is offered for an unverified platform"
     }
   ]
 }

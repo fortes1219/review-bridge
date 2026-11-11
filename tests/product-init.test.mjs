@@ -1,7 +1,7 @@
 // Keeps the person's database out of these tests (see the fixture).
 import { copyProject, dataHome, projectTemplate, queryRecords, removeProject, stopServerIn } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fsSync from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -78,7 +78,7 @@ const databasePassword = async () => (await fsp.readFile(path.join(dataHome, "po
 // (RC3-DOWN-01) and refuses while any project has a run running, and this process's own pool (inProcess)
 // keeps pointing at that server; the fixture stops it when the file's tests end.
 // A stop that fails, and a folder that cannot be removed after it, are said with what the stop answered (the fixture).
-const { connectPage, serviceDown } = await import("../review-bridge/features/setupCheck/pageService.mjs");
+const { connectPage, launchPage, serviceDown } = await import("../review-bridge/features/setupCheck/pageService.mjs");
 const removeWorkspace = (root) => removeProject(root);
 
 // Scripted init: JSON output, fake service adapter, and a free port instead of the default.
@@ -1388,6 +1388,53 @@ test("without the reviewer proof a real start is refused before any model call, 
   assert.deepEqual(await listed("authorizations"), []);
 });
 
+// GitHub #6 (the first user's report): a start refused because the page service cannot be used says the page
+// service's own words. Another release's page service, or an older Bridge's still running after an upgrade,
+// says to run down first, as `up` says it, and no rerun or Check is offered; a page service that fails to start
+// says why and where its log is. The page service's reason travels as supabase/cli carries an owner's
+// (c75aea2, packages/stack/src/HostProcess.ts:327-332). No model is called on any of these paths.
+const pageOwnerFixture = path.join(packageRoot, "review-bridge", "tests", "fixtures", "page-owner-fixture.mjs");
+const genericRerun = (order) => new RegExp("Run: npx review-bridge start " + order.replaceAll(".", "\\.") + " again|press Check");
+
+test("a start refused because the page service cannot be used says the page service's own words, and no rerun when they say to run down", async (t) => {
+  const { root, order, cli } = await fourActionsProject(t, "review-bridge-page-refused-");
+  const paths = projectPaths(root);
+  // A card to say yes to (shown with the fake CLI, so the native --yes below has one); a copy has no page.
+  assert.equal(cli(["start", order, "--fake-cli"]).status, 1);
+
+  // An older Bridge's page service still running (0.3.0-rc.3 kept watch-session.json and no lease), as
+  // review-bridge/tests/page-host.test.mjs makes it: the record names a process that is alive.
+  const older = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { windowsHide: true, stdio: "ignore" });
+  t.after(() => { try { older.kill(); } catch {} });
+  await fsp.mkdir(path.dirname(paths.watchSessionPath), { recursive: true });
+  await fsp.writeFile(paths.watchSessionPath, JSON.stringify({ pid: older.pid, port: 1, url: "http://localhost:1/", service_id: "0".repeat(32), started_at: new Date().toISOString() }));
+  const olderRefused = cli(["start", order, "--yes"]);
+  assert.equal(olderRefused.status, 1, olderRefused.stderr);
+  assert.match(olderRefused.stdout, new RegExp("Reviewer read-only check: not passed \\(the Bridge page service cannot be used\\)\\nAn older Bridge page service \\(pid " + older.pid + "\\) is still running\\. Run: npx review-bridge down, then run this again\\.\\n"), "start says the page service's own words");
+  assert.doesNotMatch(olderRefused.stdout, genericRerun(order), "no rerun is offered when the page service says to run down");
+  assert.doesNotMatch(olderRefused.stdout, /Checking that the reviewer/);
+  await fsp.rm(paths.watchSessionPath, { force: true });
+
+  // Another release's page service holding this project's lease.
+  await launchPage(paths, { entrypoint: pageOwnerFixture, ownerArgs: ["--fixture-mode", "other-release"] });
+  const otherRefused = cli(["start", order, "--yes"]);
+  assert.equal(otherRefused.status, 1, otherRefused.stderr);
+  assert.match(otherRefused.stdout, /\(the Bridge page service cannot be used\)\nThe Bridge page service is release 0\.0\.0-other\+fixture, but this command is release \S+\. Run: npx review-bridge down, then run this again\.\n/, "start says the page service's own words");
+  assert.doesNotMatch(otherRefused.stdout, genericRerun(order), "no rerun is offered when the page service says to run down");
+  assert.equal((await serviceDown({ paths, out: { write() {} } })).exitCode, 0, "down stops another release's page service");
+
+  // A page service that fails to start: its port taken while the settings say to keep it.
+  const blocker = net.createServer();
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => blocker.close(resolve)));
+  const config = JSON.parse(await fsp.readFile(paths.bridgeConfigPath, "utf8"));
+  await fsp.writeFile(paths.bridgeConfigPath, JSON.stringify({ ...config, watch: { port: blocker.address().port, strict_port: true } }, null, 2) + "\n");
+  const failed = cli(["start", order, "--yes"]);
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.match(failed.stdout, /\(the Bridge page service cannot be used\)\nThe Bridge page service failed to start: [^\n]*\(log: [^\n]*page-service\.log\)\n/, "start says why the page service did not start, and where its log is");
+  assert.match(failed.stdout, genericRerun(order), "a page service that failed to start may start on a rerun");
+});
+
 // RC3-LINUX-00: a page started with the fake CLI (as init starts it) can never hold the reviewer
 // proof that a native work-start asks the running page for. The fake work itself still runs.
 function post(url, { headers, body }) {
@@ -1473,7 +1520,7 @@ for (const [label, change, adapterStatus] of [
   ["marks this platform experimental", (adapters, key) => { adapters[key].status = "experimental"; }, "experimental"],
   ["has no definition for this platform", (adapters, key) => { delete adapters[key]; }, "unsupported"],
 ]) {
-  test("init and roles-check where the manifest " + label + ": every readiness key is there, and nothing is ready", async (t) => {
+  test("init, roles-check and start where the manifest " + label + ": every readiness key is there, nothing is ready, and start offers no rerun", async (t) => {
     const copy = await packageForPlatform(t, change);
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-platform-init-"));
     t.after(() => removeWorkspace(root));
@@ -1509,6 +1556,23 @@ for (const [label, change, adapterStatus] of [
       }
     }
     assert.equal(roles.native_ready, false);
+    // GitHub #6: a native start on this platform is refused before any model call, and says why without
+    // offering a rerun or Check: a page service of this same release reads the same manifest, so neither
+    // changes whether this platform's adapter is verified. The page init started runs the fake CLI, so it
+    // is stopped first and start starts its own.
+    const order = ".review-bridge/work-packages/hello.md";
+    await fsp.writeFile(path.join(root, order), "# Add a README\n\n<!-- bridge:requested_work -->\nAdd a README at the project root.\n\n<!-- bridge:acceptance -->\n## Acceptance\n\n1. `README.md` exists at the project root.\n");
+    const copyCli = (args) => spawnSync(process.execPath, [path.join(copy, "bridge.mjs"), ...args], {
+      cwd: root, encoding: "utf8", env: isolatedEnv(), windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+    });
+    assert.equal(copyCli(["start", order, "--fake-cli"]).status, 1);
+    await serviceDown({ paths: projectPaths(root), out: { write() {} } });
+    const unverified = copyCli(["start", order, "--yes"]);
+    assert.equal(unverified.status, 1, unverified.stderr);
+    const refusal = unverified.stdout.slice(unverified.stdout.indexOf("Reviewer read-only check:"));
+    assert.match(refusal, /^Reviewer read-only check: not passed \(this platform's adapter is not verified, so the check is not available here\)\n/);
+    assert.doesNotMatch(refusal, /again|press Check/, "no rerun is offered for an unverified platform");
+    assert.doesNotMatch(unverified.stdout, /Checking that the reviewer/);
   });
 }
 

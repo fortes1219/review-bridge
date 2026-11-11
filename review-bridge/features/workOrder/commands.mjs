@@ -309,7 +309,7 @@ export async function startWork({ paths, options, adapter, guard }) {
 }
 
 const CHECK_REFUSALS = Object.freeze({
-  page_not_running: "the Bridge page could not be started",
+  page_not_running: "the Bridge page service cannot be used",
   page_runs_fake_cli: "the Bridge page is running with the fake CLI",
   adapter_not_verified: "this platform's adapter is not verified, so the check is not available here",
   reviewer_not_ready: "the reviewer CLI is not installed and signed in",
@@ -318,17 +318,28 @@ const CHECK_REFUSALS = Object.freeze({
   probe_not_started: "the check did not start",
 });
 
+// The page service's reasons whose own words already say what to do: another release's, or an older Bridge's
+// still running, is stopped with down first (setupCheck/pageService.mjs connectPage), as `up` says it.
+const PAGE_REASONS_WITH_A_WAY = new Set(["release-mismatch", "older-release"]);
+
 function checkFailureLines(check, again) {
   const why = CHECK_REFUSALS[check.reason] || check.reason;
+  // The page service's own words, when it said why it cannot be used (GitHub #6); a bare reason code is not printed.
+  const said = check.reason === "page_not_running" && check.said ? [String(check.said)] : [];
+  // A next step only where one helps: none when the page service's words already give it, and none for a
+  // platform whose adapter is not verified, which no rerun, Check or restart of the same release changes.
   const next = check.reason === "page_runs_fake_cli"
-    ? "Run: " + bridgeRunner() + " down, then " + again
+    ? ["Run: " + bridgeRunner() + " down, then " + again]
     : check.reason === "reviewer_not_ready"
-      ? "Sign the reviewer in (" + (SIGN_IN_COMMANDS[check.provider] || "see its CLI's help") + "), then run: " + again
-      : "Run: " + again + " again" + (check.url ? ", or open " + check.url + " and press Check" : "");
+      ? ["Sign the reviewer in (" + (SIGN_IN_COMMANDS[check.provider] || "see its CLI's help") + "), then run: " + again]
+      : check.reason === "adapter_not_verified" || PAGE_REASONS_WITH_A_WAY.has(check.page_reason)
+        ? []
+        : ["Run: " + again + " again" + (check.url ? ", or open " + check.url + " and press Check" : "")];
   return [
     "Reviewer read-only check: not passed (" + why + ")",
+    ...said,
     ...(check.diagnostic_id ? ["Record: " + check.audit_path + " (" + check.diagnostic_id + ")"] : []),
-    next,
+    ...next,
   ];
 }
 

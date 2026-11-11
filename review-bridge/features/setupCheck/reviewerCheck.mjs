@@ -46,13 +46,18 @@ export function probeAuditFile(paths, at = new Date()) {
 // session, passed now, or not passed with the reason and where its record is.
 export async function ensureReviewerChecked({ paths, onStart = () => {}, reviewer = null, mcp = null }) {
   // The page service running, or started now and attached to (HostProcess.ts:662-707), then its page's status.
+  // A page service that cannot be used is said in its own words and with its typed reason, as supabase/cli
+  // carries an owner's reason and message to the caller (c75aea2, packages/stack/src/HostProcess.ts:327-332,
+  // effect.ts:176-192): another release's, or an older Bridge's still running, says to run down first.
   try {
     await launchPage(paths);
   } catch (error) {
-    return { ok: false, reason: "page_not_running", detail: error.message, url: null };
+    return { ok: false, reason: "page_not_running", detail: error.message, said: error.message, page_reason: error.reason ?? null, url: null };
   }
   const service = await checkPageStatus(paths, { reviewer, mcp });
-  if (!service.running || !service.status) return { ok: false, reason: "page_not_running", detail: service.message || service.reason, url: service.url };
+  if (!service.running || !service.status) {
+    return { ok: false, reason: "page_not_running", detail: service.message || service.reason, said: service.message ?? null, page_reason: service.reason ?? null, url: service.url };
+  }
   const url = service.url;
   const provider = reviewer || service.status?.roles?.reviewer || null;
   if (service.status?.reviewer_readonly?.state === "proven") return { ok: true, already: true, url, provider };

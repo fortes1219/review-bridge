@@ -365,3 +365,42 @@ claim that nothing else is wrong.
   earlier starts' lines, and a page service that exits having written nothing this time is said with old lines, the
   last of them being what those places read. Whether supabase/cli clears or rotates its owner log beside opening it
   `"a+"` (`HostProcess.ts:449-461,481`) was not read.
+
+## RB-GATE-2026-013 — a start refused because the page service could not be used told the person to run it again
+
+- **affected_gate:** Page (the resident page service, as `start`'s reviewer check reports it before the first model call)
+- **symptom:** GitHub #6 (2026-11-10, the first user, Ubuntu 26.04, `review-bridge@0.3.0-rc.3`): a page service started
+  before the platform's state changed made `start` refuse with "Reviewer read-only check: not passed (this platform's
+  adapter is not verified, so the check is not available here)" and "Run: npx review-bridge start
+  .review-bridge/work-packages/poc-1.md again, or open http://localhost:8081/ and press Check"; neither helped, only
+  `down` then `up`. After `1b284d5` an upgrade with the older page service still running said "the Bridge page could
+  not be started" and to run it again, though the page service had said to run `down` first.
+- **expected_vs_actual:** expected the page service's own words, which for another release's page service or an
+  older Bridge's still running say to run `down` first, as `up` prints them; actually a fixed reason and a rerun
+  that could not pass.
+- **reproduction:** `tests/product-init.test.mjs`: a record of an older Bridge's page service naming a live process
+  (as `review-bridge/tests/page-host.test.mjs` makes it), another release's page service holding the lease
+  (`review-bridge/tests/fixtures/page-owner-fixture.mjs --fixture-mode other-release`), a page service whose port is
+  taken while the settings keep it, and a copy of the package whose manifest leaves this platform unverified; each
+  followed by `start --yes`, which calls no model.
+- **root_cause:** `features/setupCheck/reviewerCheck.mjs` turned every page service failure into `page_not_running`
+  and kept its words in a `detail` nothing printed; `features/workOrder/commands.mjs` `checkFailureLines` then gave
+  every reason without a step of its own the same "Run: … again, or open … and press Check", which cannot pass for
+  another release's page service, an older Bridge's, or a platform whose adapter is not verified. The test of that
+  refusal (`tests/product-init.test.mjs`, without the reviewer proof a real start is refused) asserted only the
+  first line, so both shapes passed it.
+- **fix:** the commit that adds this entry — the check carries the page service's own words and its typed reason,
+  as supabase/cli carries an owner's reason and message to the caller (`c75aea2`,
+  `packages/stack/src/HostProcess.ts:327-332`, `effect.ts:176-192`); `start` prints those words, adds no rerun when
+  the reason is another release's or an older Bridge's page service (their words say to run `down` first), and
+  offers no next step for a platform whose adapter is not verified.
+- **regression_test:** `tests/product-init.test.mjs`, a start refused because the page service cannot be used says
+  the page service's own words, and no rerun when they say to run down; and init, roles-check and start where the
+  manifest marks this platform experimental (and has no definition for it): start offers no rerun.
+- **mutation_case:** `RB-M-start-drops-page-service-words`, `RB-M-unverified-platform-offers-rerun`.
+- **residual_risk:** a page service that failed to start is still followed by "Run: … again", since a rerun may
+  help and its reason is now printed. A hand edit of an installed `manifest.json` that leaves the release unchanged
+  leaves a running page service with its old eligibility: the release is a digest of the `.mjs` modules, as
+  supabase/cli's covers its program modules only (`packages/stack/src/internal/release.ts:9-42`). The older Bridge's
+  page service has no mutation case of its own: it is in the same set as another release's, and the first case's
+  expected words are those of the older Bridge's line.
