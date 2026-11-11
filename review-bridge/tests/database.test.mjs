@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { recordCard } from "../features/workOrder/workOrderRecords.mjs";
 import { createTranslator } from "../features/workOrder/i18n.mjs";
-import { applyMigrations, migrationFiles, migrationState, MIGRATIONS_DIR } from "../service/database/migrate.mjs";
+import { applyMigrations, MIGRATION_LOCK, migrationFiles, migrationState, MIGRATIONS_DIR } from "../service/database/migrate.mjs";
 import { failureLine, UNKNOWN_MIGRATIONS_CODE, UnknownMigrationsError } from "../service/database/serverErrors.mjs";
 import { connect, ensureCluster, postgresBinaries, startServer, stopServer } from "../service/database/postgresServer.mjs";
 
@@ -163,4 +165,103 @@ test("the migrations are named in time order: each one's 14 digits follow the on
     assert.match(name, /^\d{14}_[a-z0-9_]+\.sql$/);
     if (index) assert.ok(name.slice(0, 14) > names[index - 1].slice(0, 14), name + " comes after " + names[index - 1]);
   }
+});
+
+// RC3.1-PAGE-03: several commands opening a new database at once. Each test starts its own server in its
+// own data home, without the Bridge database, and opens the database from child processes, as separate
+// commands do (openDatabase keeps one per process). The situation is made by the test: it holds the lock
+// the commands should wait at, and sees them wait in pg_locks, so a command that does not wait fails the
+// test every time, not only when the timing happens to collide. Watching for a session blocked on a lock
+// from a control connection is how PostgreSQL's own isolation tests see it (src/test/isolation/
+// isolationtester.c, REL_18_STABLE: the wait query :213-224, checked every 10 ms :867).
+const indexUrl = pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "service", "database", "index.mjs")).href;
+
+async function serverWithoutBridge(t) {
+  const dataHome = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-open-"));
+  const root = path.join(dataHome, "postgres");
+  const started = new Set();
+  const clients = [];
+  t.after(async () => {
+    for (const client of clients) await client.end().catch(() => {});
+    for (const child of started) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await stopServer(root, { binaries }).catch(() => {});
+    await fsp.rm(dataHome, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  });
+  await ensureCluster(root, { binaries });
+  await startServer(root, { binaries });
+  const session = async (options) => {
+    const client = await connect(root, options);
+    client.on("error", () => {});
+    clients.push(client);
+    return client;
+  };
+  // A command of its own: opens the person's database in this data home and says how it went.
+  const open = () => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e",
+      "const m = await import(process.env.RB_INDEX); const db = await m.openDatabase({ dataHome: process.env.RB_DATA_HOME }); await db.close();"],
+    { windowsHide: true, env: { ...process.env, RB_INDEX: indexUrl, RB_DATA_HOME: dataHome }, stdio: ["ignore", "ignore", "pipe"] });
+    started.add(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const done = new Promise((resolve) => child.once("close", (code) => resolve({ code, stderr })));
+    return { child, done };
+  };
+  return { dataHome, root, session, open };
+}
+
+// The sessions waiting for an advisory lock: in a server of the test's own, only the commands it started.
+const waitingForAdvisory = async (client) => {
+  try {
+    return Number((await client.query("select count(*) as n from pg_locks where locktype = 'advisory' and not granted")).rows[0].n);
+  } catch {
+    return -1;
+  }
+};
+// True once `count` commands wait for a lock; false once they have all ended without that. Checked every
+// 10 ms, as isolationtester checks for lock waits.
+async function waitedFor(client, count, commands) {
+  for (;;) {
+    if ((await waitingForAdvisory(client)) === count) return true;
+    if (commands.every(({ child }) => child.exitCode !== null || child.signalCode !== null)) return false;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+const backedUp = async (dataHome) => (await fsp.readdir(path.join(dataHome, "backups", "database")).catch(() => [])).length > 0;
+
+test("commands creating the Bridge database at once wait for one another, and every migration is applied once", { timeout: 180_000 }, async (t) => {
+  const { dataHome, session, open } = await serverWithoutBridge(t);
+  const admin = await session();
+  // The lock the commands take before they look for the database (index.mjs ensureDatabase).
+  await admin.query("select pg_advisory_lock(hashtext($1))", ["review-bridge.create-database"]);
+  const commands = [1, 2, 3].map(() => open());
+  const waited = await waitedFor(admin, 3, commands);
+  assert.equal(waited, true, "the three commands waited for the lock before they looked for the database");
+  assert.equal((await admin.query("select 1 from pg_database where datname = 'bridge'")).rows.length, 0);
+  await admin.query("select pg_advisory_unlock(hashtext($1))", ["review-bridge.create-database"]);
+  for (const result of await Promise.all(commands.map(({ done }) => done))) assert.equal(result.code, 0, result.stderr);
+  const bridge = await session({ database: "bridge" });
+  assert.deepEqual((await bridge.query("select name from schema_migrations order by name")).rows.map((row) => row.name), (await migrationFiles()).map((file) => file.name));
+  assert.equal(await backedUp(dataHome), false, "a new database is not backed up");
+});
+
+test("a command that comes while another applies the migrations waits for its whole run and backs nothing up", { timeout: 180_000 }, async (t) => {
+  const { dataHome, session, open } = await serverWithoutBridge(t);
+  await (await session()).query("create database bridge");
+  const first = await session({ database: "bridge" });
+  // The first command, part way: it holds the migration lock for its whole run and has applied three files.
+  const files = await migrationFiles();
+  const partial = await fsp.mkdtemp(path.join(os.tmpdir(), "review-bridge-migrations-"));
+  t.after(() => fsp.rm(partial, { recursive: true, force: true }));
+  for (const file of files.slice(0, 3)) await fsp.writeFile(path.join(partial, file.name), file.sql);
+  await first.query("select pg_advisory_lock($1)", [MIGRATION_LOCK]);
+  await applyMigrations(first, { dir: partial });
+  const second = open();
+  const waited = await waitedFor(first, 1, [second]);
+  assert.equal(waited, true, "the second command waited for the first's whole run");
+  await applyMigrations(first);
+  await first.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK]);
+  const result = await second.done;
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(await backedUp(dataHome), false, "a database half migrated by another command is not taken for an upgrade");
+  assert.deepEqual((await first.query("select name from schema_migrations order by name")).rows.map((row) => row.name), files.map((file) => file.name));
 });

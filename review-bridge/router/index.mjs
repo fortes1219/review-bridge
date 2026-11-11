@@ -124,7 +124,7 @@ export const COMMANDS = {
     configFree: true,
     summary: "Show what Bridge is doing now: the page, this project's runs, and how to look at the database",
     options: { "--after": AFTER, "--json": { ...JSON_OUT } },
-    run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.checkService(context.paths) }),
+    run: (context) => workOrder.statusOverview({ ...context, page: () => setupCheck.observePage(context.paths) }),
   },
   logs: {
     audience: "human",
@@ -159,11 +159,7 @@ export const COMMANDS = {
       "--port": { key: "port", type: "number", value: "<n>", default: "the port init chose", help: "Port of the local page" },
       "--fake-cli": FAKE_CLI,
     },
-    run: (context) => setupCheck.startWatch({
-      ...context,
-      port: context.options.port,
-      daily: () => records.runPrune(context.paths, { deliver: deliverQuietly(context) }),
-    }),
+    run: (context) => setupCheck.startWatch({ ...context, port: context.options.port }),
   },
   upgrade: {
     audience: "human",
@@ -385,6 +381,30 @@ async function recordRunsOf(paths) {
     return db;
   };
   installRunRecorder(createRunRecorder(database), database);
+}
+
+// The page service's own process, run from its entry file (internal/pageService.mjs), which launchPage runs
+// directly: it is no command, as supabase/cli's stack owner is none (c75aea2, packages/stack/src/HostProcess.ts:819-823).
+// Its options are the ones launchPage passes; up and watch start it (setupCheck/pageService.mjs launchPage).
+const PAGE_SERVICE_OPTIONS = {
+  "--port": { key: "port", type: "number", value: "<n>", help: "Port of the local page" },
+  "--lifetime": { key: "lifetime", type: "string", value: "<session|detached>", help: "session: ends with its stdin (watch); detached: runs until down (up)" },
+  "--fake-cli": FAKE_CLI,
+};
+
+export async function runPageServiceProcess({ args, repoRoot, bridgeRoot, adapter, adapterId = null, adapterDefinition = null, adapterSource = null, privateRootName }) {
+  const paths = getBridgePaths(repoRoot, bridgeRoot, { privateRootName });
+  const options = parseOptions(args, PAGE_SERVICE_OPTIONS);
+  if (!(await fileExists(paths.bridgeConfigPath))) {
+    throw new Error("This folder is not set up for Review Bridge. Run: " + bridgeRunner() + " init");
+  }
+  await recordRunsOf(paths);
+  return await setupCheck.runPageService({
+    paths, adapter, adapterId, adapterDefinition, adapterSource,
+    port: options.port,
+    lifetime: options.lifetime,
+    daily: () => records.runPrune(paths, { deliver: deliverQuietly({ paths, adapter }) }),
+  });
 }
 
 // `loadAdapter` is how start and resume take the platform adapter when it was not given: only after

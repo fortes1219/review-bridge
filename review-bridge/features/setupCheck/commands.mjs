@@ -2,8 +2,6 @@
 // treats what `up` starts (RC3-DOWN-01): `up` starts the database and then the page in the background,
 // `down` stops the page and then the database and refuses while a run is running, `ps` shows the page.
 // What these say about the database is in the project's language.
-import path from "node:path";
-
 import { createTranslator, resolveLocale } from "../workOrder/i18n.mjs";
 import { serviceDown, serviceStatus, serviceUp } from "./pageService.mjs";
 
@@ -18,8 +16,7 @@ export async function upService({ paths, options, out = process.stdout, database
   out.write(t("up.database", { port: opened.connection.port }) + "\n");
   return (await serviceUp({
     paths,
-    bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs"),
-    watchArgs: options.fakeCli ? ["--fake-cli"] : [],
+    ownerArgs: options.fakeCli ? ["--fake-cli"] : [],
     out,
   })).exitCode;
 }

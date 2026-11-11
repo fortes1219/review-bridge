@@ -6,7 +6,7 @@ import pg from "pg";
 
 import { BackupRefusedError, backupDatabase, runLines, runningRuns } from "./backup.mjs";
 import { bridgeDataHome, databaseRoot } from "./dataHome.mjs";
-import { applyMigrations, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
+import { applyMigrations, MIGRATION_LOCK, migrationState, MIGRATIONS_DIR } from "./migrate.mjs";
 import { DatabaseUnavailableError } from "../records/runRecords.mjs";
 import { databaseBackedUp } from "./notices.mjs";
 import { UnknownMigrationsError } from "./serverErrors.mjs";
@@ -18,13 +18,22 @@ import { bridgeRunner } from "../../utils/bridgeCommand.mjs";
 export const DATABASE_NAME = "bridge";
 const opened = new Map();
 
+// Several commands may open the database for the first time at once (two page services, up and start).
+// The look and the create run under a session-level advisory lock on the admin connection, as
+// supabase/cli creates its webhook schema (apps/cli db-setup.ts:636-664: pg_advisory_lock(hashtext(...)),
+// check, create only when missing, unlock): the one that waits finds the database made. CREATE DATABASE
+// cannot run in a transaction, so the lock is the session's, released before the connection ends.
+const CREATE_DATABASE_LOCK = "review-bridge.create-database";
 async function ensureDatabase(root) {
   const admin = await connect(root);
   try {
-    const { rows } = await admin.query("select 1 from pg_database where datname = $1", [DATABASE_NAME]);
-    if (rows.length) return;
-    // Two commands may create it at once; the loser sees 42P04 and uses the winner's.
-    await admin.query("create database " + DATABASE_NAME).catch((error) => { if (error.code !== "42P04") throw error; });
+    await admin.query("select pg_advisory_lock(hashtext($1))", [CREATE_DATABASE_LOCK]);
+    try {
+      const { rows } = await admin.query("select 1 from pg_database where datname = $1", [DATABASE_NAME]);
+      if (!rows.length) await admin.query("create database " + DATABASE_NAME);
+    } finally {
+      await admin.query("select pg_advisory_unlock(hashtext($1))", [CREATE_DATABASE_LOCK]).catch(() => {});
+    }
   } finally {
     await admin.end();
   }
@@ -33,15 +42,8 @@ async function ensureDatabase(root) {
 // An upgraded Bridge backs up the database before its first new migration (Owner 2026-10-29): a
 // database that has had migrations and is about to get more. A new database has nothing to keep,
 // and a running run refuses it, so no table changes before the copy exists. Returns the backup's
-// folder, or null when there was nothing to back up.
-export async function backUpBeforeMigrating(root, { dataHome, dir = MIGRATIONS_DIR } = {}) {
-  const client = await connect(root, { database: DATABASE_NAME });
-  let state;
-  try {
-    state = await migrationState(client, { dir });
-  } finally {
-    await client.end();
-  }
+// folder, or null when there was nothing to back up. `state` is read under the migration lock (open()).
+async function backUpPending(state, { dataHome }) {
   if (!state.applied || !state.pending.length) return null;
   try {
     return (await backupDatabase({ dataHome })).path;
@@ -58,18 +60,42 @@ async function open(dataHome, dir) {
   await ensureCluster(root, { binaries });
   await startServer(root, { binaries });
   await ensureDatabase(root);
-  const backup = await backUpBeforeMigrating(root, { dataHome, dir });
-  // One line, in the project's language when the command entry gave it (notices.mjs).
-  if (backup) await databaseBackedUp(backup);
+  // One session-level lock from before the history is read until the last migration is applied, as
+  // node-pg-migrate holds its lock in its wait mode (src/runner.ts:481-484, pg_advisory_lock; its default
+  // 'fail' mode refuses instead, :479,486-494), taken before the history is read (:1145-1147) and released in
+  // the finally (:1294-1307); supabase/cli waits for its lock the same way (db-setup.ts:652). A command that
+  // comes second waits until the first has applied every migration, instead of reading a database half
+  // migrated and taking it for one to upgrade (and back up, which stops the server).
+  const lockMigrations = async () => {
+    const client = await connect(root, { database: DATABASE_NAME });
+    // A connection the server ends while it is idle is reported as an event; the awaited calls carry it.
+    client.on("error", () => {});
+    await client.query("select pg_advisory_lock($1)", [MIGRATION_LOCK]);
+    return client;
+  };
+  let migrator = await lockMigrations();
+  try {
+    const state = await migrationState(migrator, { dir });
+    if (state.applied && state.pending.length) {
+      // The backup stops the server, which ends this session and its lock; the lock is taken again after.
+      // Two commands upgrading at the same moment are not covered here, as before.
+      await migrator.end().catch(() => {});
+      migrator = null;
+      const backup = await backUpPending(state, { dataHome });
+      // One line, in the project's language when the command entry gave it (notices.mjs).
+      if (backup) await databaseBackedUp(backup);
+      migrator = await lockMigrations();
+    }
+    await applyMigrations(migrator, { dir });
+  } finally {
+    if (migrator) {
+      await migrator.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK]).catch(() => {});
+      await migrator.end().catch(() => {});
+    }
+  }
   const pool = new pg.Pool({ ...(await connectionSettings(root, { database: DATABASE_NAME })), max: 4, allowExitOnIdle: true, idleTimeoutMillis: 1000 });
   // A connection the server ends between queries is reported here; the next query reports it again.
   pool.on("error", () => {});
-  const client = await pool.connect();
-  try {
-    await applyMigrations(client, { dir });
-  } finally {
-    client.release();
-  }
   const settings = await connectionSettings(root, { database: DATABASE_NAME });
   return {
     root,
@@ -131,6 +157,57 @@ export async function openReadOnlyDatabase({ dataHome = bridgeDataHome(), statem
   });
   pool.on("error", () => {});
   return { query: (sql, values) => pool.query(sql, values).catch((error) => { throw unavailable(error); }), close: () => pool.end() };
+}
+
+// A server that is not running answers a connection this way: no postmaster.pid (or no port in it) to read
+// its port from, a refused connection, one still starting up, or no Bridge database in it yet.
+const SERVER_DOWN = new Set(["ENOENT", "ECONNREFUSED", "57P03", "3D000"]);
+const serverDown = (error) => SERVER_DOWN.has(error?.code) || /postmaster\.pid has no port/.test(String(error?.message));
+
+// A session-level advisory lock on the person's database (PostgreSQL mvcc.sgml, Advisory Locks: "held
+// until explicitly released or the session ends", "automatically cleaned up by the server at the end of the
+// session"), on its own connection: que's "a connection to the database for locking purposes"
+// (docs/README.md:101). Taken with pg_try_advisory_lock, which answers at once, as node-pg-migrate takes its
+// lock (src/runner.ts `lock`). The keys are hashtext() of two names, as supabase/cli names its locks
+// (apps/cli db-setup.ts:636; packages/stack DatabaseBootstrap.ts:83). Nothing is started here: whoever takes
+// a lock has opened the database first. Null when another session holds it.
+export async function takeAdvisoryLock(space, key, { dataHome = bridgeDataHome() } = {}) {
+  const client = await connect(databaseRoot(dataHome), { database: DATABASE_NAME });
+  try {
+    const { rows } = await client.query("select pg_try_advisory_lock(hashtext($1), hashtext($2)) as taken", [space, key]);
+    if (rows[0].taken === true) return client;
+  } catch (error) {
+    await client.end().catch(() => {});
+    throw error;
+  }
+  await client.end().catch(() => {});
+  return null;
+}
+
+// Whether a session holds that lock, read from pg_locks without taking it: two int4 keys are listed with the
+// first in classid, the second in objid and objsubid 2, and an advisory lock is local to its database
+// (PostgreSQL view-pg-locks). Null when the server is not running: nothing is started to answer.
+export async function openAdvisoryLockReader({ dataHome = bridgeDataHome() } = {}) {
+  let client;
+  try {
+    client = await connect(databaseRoot(dataHome), { database: DATABASE_NAME });
+  } catch (error) {
+    if (serverDown(error)) return null;
+    throw error;
+  }
+  client.on("error", () => {});
+  return {
+    async held(space, key) {
+      const { rows } = await client.query(
+        "select exists (select 1 from pg_locks where locktype = 'advisory' and granted and objsubid = 2"
+        + " and database = (select oid from pg_database where datname = current_database())"
+        + " and classid = hashtext($1)::oid and objid = hashtext($2)::oid) as held",
+        [space, key],
+      );
+      return rows[0].held === true;
+    },
+    close: () => client.end().catch(() => {}),
+  };
 }
 
 // The person's database as `status` says it, nothing started: `running`, `stopped`, or `unusable` with

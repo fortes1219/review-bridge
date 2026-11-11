@@ -5,11 +5,11 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
+  assertPlatformContract,
   bridgeRootFrom,
   loadAdapterForInspection,
   resolveAdapterModule,
   selectAdapter,
-  targetKey,
   UNSUPPORTED_ADAPTER,
 } from "./router/platform.mjs";
 import { COMMANDS, dispatchCommand } from "./router/index.mjs";
@@ -33,14 +33,6 @@ function takeProject(argv) {
   const value = argv[index + 1];
   if (!value || value.startsWith("--")) throw new Error("Missing value for --project");
   return { repoRoot: path.resolve(value), args: [...argv.slice(0, index), ...argv.slice(index + 2)] };
-}
-
-function assertPlatformContract(implementation) {
-  if (typeof implementation.resolveExecutable !== "function"
-      || typeof implementation.buildInvocation !== "function"
-      || typeof implementation.notify !== "function") {
-    throw new Error("Selected adapter does not implement the platform contract.");
-  }
 }
 
 async function platformAdapter(manifest) {
@@ -78,7 +70,7 @@ async function main() {
   if (gate.mode === "native" && !["start", "resume"].includes(command)) await assertReviewerProof(getBridgePaths(repoRoot, bridgeRoot, { privateRootName }));
   const scenarioIndex = args.indexOf("--fake-scenario");
   const fakeScenario = scenarioIndex >= 0 ? args[scenarioIndex + 1] : "PASS";
-  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "logs", "wait", "up", "down", "ps", "prune", "rm", "clean", "stop", "backup", "graph", "graph-mcp"]);
+  const modelFreeCommands = new Set(["work-plan", "work-status", "work-cancel", "status", "logs", "wait", "up", "down", "ps", "watch", "prune", "rm", "clean", "stop", "backup", "graph", "graph-mcp"]);
   // Native start and resume take this machine's adapter only after the reviewer check and the yes,
   // so without the proof they are refused the same way on every platform, adapter or not.
   const checksFirst = !fakeRequested && ["start", "resume"].includes(command);
@@ -104,18 +96,6 @@ async function main() {
       status: "fake",
       eligible: false,
     };
-  } else if (command === "watch") {
-    // RC3-LINUX-00: the page and its zero-model checks run on any defined platform; only an eligible
-    // adapter (active or candidate in the manifest) lets the page start the reviewer check.
-    adapterDefinition = loadAdapterForInspection(manifest, process.platform, process.arch, { bridgeRoot });
-    if (adapterDefinition) {
-      const moduleUrl = resolveAdapterModule(bridgeRoot, adapterDefinition.module);
-      adapterSource = fileURLToPath(moduleUrl);
-      implementation = await import(moduleUrl);
-    } else {
-      adapterDefinition = { target: targetKey(process.platform, process.arch), status: "unsupported", eligible: false };
-      implementation = UNSUPPORTED_ADAPTER;
-    }
   } else if (!modelFreeCommands.has(command) && !checksFirst) {
     ({ adapterDefinition, adapterSource, implementation } = await platformAdapter(manifest));
   }

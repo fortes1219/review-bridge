@@ -239,13 +239,129 @@ claim that nothing else is wrong.
   every 250 ms up to 10 s). The installer then asked once more, and one answer that came late or not at all (each
   ask is a request to `/api/status` with a 2 s limit) turned a restart that worked into a failure; the check's own
   reason was dropped for a fixed sentence.
-- **fix:** the commit that adds this entry — `up`'s 0 is the answer, as a caller of `pg_ctl -w` takes its exit
-  code and Playwright's webServerPlugin stops asking once the server answered; a failed `up` keeps its exit and
-  last line, where `up` names why the page did not answer.
-- **regression_test:** `tests/page-restart.test.mjs` "up exits 0: the page service is up, and the page is not asked
-  again even when that ask would time out", "up exits non-zero: …", "each reason the page did not answer reaches
-  the person's message"; on real services `tests/neutral-upgrade.test.mjs` and `tests/neutral-uninstall.test.mjs`.
-- **mutation_case:** `RB-M-restart-asks-again-after-up`, `RB-M-restart-drops-up-reason` (killed).
-- **residual_risk:** which of the reasons made the CI check fail is not known; the log has none. The other one-off
-  checks of whether the page runs (`neutral-install.mjs` plan and journal steps) are unchanged: a wrong answer
-  there costs one more `up`, which says the page is already running.
+- **fix:** `3d1a8f0` took `up`'s 0 as the answer, citing `pg_ctl -w` and Playwright's webServerPlugin, and left
+  the other one-off checks as they were; the next CI run failed on the test's own one-off check
+  (`neutral-uninstall.test.mjs:781`, `wrong_service`). Redone against supabase/cli's stack owner in
+  RB-GATE-2026-010: the page service reports ready itself, and every check finds it through its lease and
+  identity.
+- **regression_test:** `tests/page-restart.test.mjs` was removed: it reached the installer through an export and a
+  parameter opened for the test only (supabase/cli `.agents/skills/test-audit/SKILL.md:25-27`). Now
+  `review-bridge/tests/page-host.test.mjs` (see RB-GATE-2026-010) and, on real services,
+  `tests/neutral-upgrade.test.mjs` and `tests/neutral-uninstall.test.mjs`, whose assertions that the page runs find
+  it the waiting way and print why when they fail.
+- **mutation_case:** `RB-M-restart-asks-again-after-up` and `RB-M-restart-drops-up-reason` were removed with the
+  test they named; the mutants of RB-GATE-2026-010 replace them.
+- **residual_risk:** which of the reasons made the first CI check fail is not known; the log has none.
+
+## RB-GATE-2026-010 — a page service just started by `up` was found "not running" by the next check
+
+- **affected_gate:** Page (the resident page service)
+- **symptom:** GitHub Actions `ubuntu-latest` on `dev/ci-test` at `f53d7af`, installer job,
+  `tests/neutral-uninstall.test.mjs:781`: the cancel's restart reported `service_restarted: true`, and the
+  test's next check of the page answered `wrong_service`, the only failure of 203.
+- **expected_vs_actual:** expected the page service `up` had just reported to be found running; actually one
+  check of `/api/status` answered something other than this page service's identity and was taken as "not
+  running".
+- **reproduction:** `review-bridge/tests/page-host.test.mjs` makes each situation itself with real page-service
+  processes: a record naming another process while the lease is held, a stale record with no lease holder, a
+  foreign listener on the previous control port.
+- **root_cause:** Bridge decided whether its page service ran from a pid, a session file and one request to a
+  page endpoint that reads the settings and checks both CLIs on every call; every caller asked once, and any
+  answer but a match was "not running". `up` learned that the page was ready by polling that endpoint.
+- **fix:** the commit that adds this entry — the page service is a stack owner as in supabase/cli `c75aea2`
+  (`packages/stack/ARCHITECTURE.md:487-536`), its lease a session-level PostgreSQL advisory lock on a
+  connection of its own, taken with `pg_try_advisory_lock` and read by others from `pg_locks` (as supabase/cli
+  locks in its database, `apps/cli` `db-setup.ts:636-664`; PostgreSQL `mvcc.sgml` Advisory Locks and
+  `view-pg-locks`; que `docs/README.md:101`; node-pg-migrate `src/runner.ts` `lock`), which the server releases
+  when the session ends; the page service shuts itself down when that session ends (`ARCHITECTURE.md:495`, lost
+  ownership); a record published by rename under that lease, withdrawn only while the lock is still held and
+  never touched once it was lost, the next publish renaming over it (`Publication.ts`, `Lease.ts:55,215-237`);
+  a control listener
+  on a port the system gives, with `/identity` and `/shutdown` behind a bearer secret (`StackHost.ts:357-372`);
+  finding it means the lease, then the record, then the identity, a mismatch being a record not yet replaced and
+  looked up again every 50 ms for 30 s (`HostProcess.ts:200-336`), or, for what only looks, once without waiting
+  (`:254-265`); `up` and `watch` start it the one way and read its readiness from a pipe (`:467-707`), `watch`
+  holding its stdin as a session's lifeline (`ARCHITECTURE.md:491`); `down` asks it to shut down and waits until
+  its pid is gone (`:709-815`); shutting down cancels a running reviewer check and waits for its process tree
+  (`ARCHITECTURE.md:505-512`); a page service of another release is refused except by `down` (`:489`). Page services
+  started at once found races in opening a new database, fixed with two locks: the database is made under an
+  advisory lock on the admin connection (supabase/cli `db-setup.ts:636-664`), and the whole run of migrations, from
+  reading the history to the last one, is under one session-level migration lock taken before the migrations table
+  is made and released in its finally, as node-pg-migrate holds its lock in its wait mode (`src/runner.ts:481-484`,
+  `:1145-1168,1294-1307`; its default mode refuses instead, `:479,486-494`), so a second
+  command neither collides creating that table nor reads a half-migrated database as one to upgrade and backs it up
+  (the backup stops the server). The concurrent-launch test opens the database first: several processes starting one new database at
+  once on Windows can wait 30 s on pg_ctl's -l file (pg_ctl.c:521-554, port/open.c:110-137), left to the
+  database-start work.
+- **regression_test:** `review-bridge/tests/page-host.test.mjs` (one page service for concurrent launches;
+  relaunch with a foreign listener on the old control port, and 401 without the secret; a record naming another
+  process while the lease is held; a stale record without a lease holder; status without a request; a page
+  service that exits before ready; a startup failure it reports, said without its log; another release; an older release's record; the terminal's lifeline; its
+  database session terminated, its record left for the next one to replace; two projects at once;
+  a page service ended without a shutdown; a shutdown during a reviewer check),
+  `review-bridge/tests/page-exit.test.mjs` (waiting for the pid to go, with a controllable probe and clock).
+- **mutation_case:** `RB-M-page-lease-not-taken`, `RB-M-page-identity-mismatch-not-running`,
+  `RB-M-page-running-by-pid`, `RB-M-page-retract-unconditional`, `RB-M-page-ready-by-polling`,
+  `RB-M-page-lost-lease-kept-running`, `RB-M-page-record-pruned`, `RB-M-database-create-unlocked`,
+  `RB-M-migrations-run-unlocked`, `RB-M-upgrade-not-backed-up`, `RB-M-upgrade-not-refused-while-running`
+  (the last two in `review-bridge/tests/backup.test.mjs`, which now opens the database from a command of its own; `review-bridge/tests/database.test.mjs`: the test holds the lock and sees the
+  commands wait for it in pg_locks, so a command that does not wait fails it every time).
+- **residual_risk:** the page service keeps one database connection of its own while it runs. A page service that
+  never reports ready is ended after 30 s; that wait is not tested, as supabase/cli does not test it. The shutdown
+  during a reviewer check is tested on POSIX only. How fast the database releases a lock whose holder died was
+  measured on Windows (7 to 8 ms); Linux is measured by these tests in the container. Two commands upgrading at
+  the same moment both read pending migrations and both back up; left as it was (index.mjs open), for the
+  database-start work.
+
+## RB-GATE-2026-011 — the page service's adapter was no longer checked against the platform contract
+
+- **affected_gate:** Platform (the adapter a command or the page service takes)
+- **symptom:** found by reading `66778c8`: `review-bridge/internal/pageService.mjs` hands the adapter it loads to the
+  page service without the check `bootstrap.mjs` gives the adapter of every command that is not model-free.
+- **expected_vs_actual:** expected an adapter module without `resolveExecutable`, `buildInvocation` or `notify` to
+  stop the page service at its start, as it did while the page service ran through `bootstrap.mjs` (`66778c8~1`
+  `bootstrap.mjs:81,131`: `page-service` was not model-free, so `assertPlatformContract` ran on its adapter);
+  actually the entry file took any module.
+- **reproduction:** `review-bridge/tests/page-host.test.mjs` copies this tree's runtime and points its manifest, for
+  this platform, at an adapter module without `notify`, as `tests/product-init.test.mjs` `packageForPlatform` changes a
+  copy's manifest (`router/platform.mjs` `loadAdapterForInspection` asks only for an id and a module inside the
+  runtime), then starts the page service from the copy's entry file without `--fake-cli`.
+- **root_cause:** moving the page service out of the command table into its own entry file moved the adapter's
+  loading but not the check after it.
+- **fix:** the commit that adds this entry — `assertPlatformContract` is in `router/platform.mjs`, and both
+  `bootstrap.mjs` and the entry file call it on the adapter they take, the entry file right after loading it.
+- **regression_test:** `review-bridge/tests/page-host.test.mjs`, a page service whose adapter does not implement the
+  platform contract does not start: the launch fails at startup with the refusal from the page service's log, and no
+  page service holds the lease. Before `66778c8` the check had no test either: its message appeared only where it
+  is thrown.
+- **mutation_case:** `RB-M-page-adapter-contract-unchecked`.
+- **residual_risk:** the check is asserted where the launcher starts the page service; `up`'s line to the person
+  ("Bridge did not start: …") is not, and the launcher in the test is this package's while the entry file is the
+  copy's, the two being the same source.
+
+## RB-GATE-2026-012 — a page service that exited before it was ready was said without its log's last lines
+
+- **affected_gate:** Page (the resident page service)
+- **symptom:** `review-bridge/tests/page-host.test.mjs`, the page service whose adapter does not implement the
+  platform contract: the launch failed at startup, and its message named the log but held none of it, so the
+  refusal the page service had written there did not reach the caller.
+- **expected_vs_actual:** expected a page service that exits before reporting ready to be said with the last lines
+  of its log, as supabase/cli says a stack owner that does so (`c75aea2`, `packages/stack/src/HostProcess.ts:487-490`);
+  actually only the log's place, from `1b284d5` on.
+- **reproduction:** that test; any page service that exits before it reports ready.
+- **root_cause:** the launcher opened the log to append only (`"a"`) while it read the log's tail back through the
+  same descriptor; the read failed, and the tail reader's catch, there for a log that cannot be read, answered "".
+  supabase/cli opens it `"a+"` (`HostProcess.ts:481`); the port kept the reader (`:449-461`) and changed the mode.
+- **fix:** the commit that adds this entry — the log is opened `"a+"`, as `HostProcess.ts:481`. A failure the page
+  service reports on its readiness pipe is still said without the log (`:583`).
+- **regression_test:** `review-bridge/tests/page-host.test.mjs`, a page service whose adapter does not implement the
+  platform contract does not start (its message is asserted to carry the refusal, which only the log holds).
+- **mutation_case:** `RB-M-page-log-tail-unreadable`.
+- **residual_risk:** what reads only the last line of `up`'s output now reads the log's last line instead of the
+  launcher's own line: the installer's restart reason (`installer/neutral-install.mjs:922,937`) and init's
+  `service_reason` when `up` fails (`bridge.mjs:405`). The log is appended to and never cleared between starts:
+  Bridge does not rotate or remove it (the retention pass skips files at the log root,
+  `features/records/retention.mjs:358-359`; no other writer of it was seen in a sample), so its last 20 lines may hold
+  earlier starts' lines, and a page service that exits having written nothing this time is said with old lines, the
+  last of them being what those places read. Whether supabase/cli clears or rotates its owner log beside opening it
+  `"a+"` (`HostProcess.ts:449-461,481`) was not read.

@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { probeAuditDir } from "../../service/index.mjs";
 import { localDateKey } from "../../utils/dates.mjs";
-import { checkService, serviceUp } from "./pageService.mjs";
+import { checkPageStatus, launchPage } from "./pageService.mjs";
 import { PROBE_TIMEOUT_MS } from "./reviewerProbe.mjs";
 import { TOKEN_HEADER } from "./watchServer.mjs";
 
@@ -45,12 +45,14 @@ export function probeAuditFile(paths, at = new Date()) {
 // Starts the page if it is not running, then reports the check: passed earlier in this page
 // session, passed now, or not passed with the reason and where its record is.
 export async function ensureReviewerChecked({ paths, onStart = () => {}, reviewer = null, mcp = null }) {
-  let service = await checkService(paths, { reviewer, mcp });
-  if (!service.running) {
-    await serviceUp({ paths, bootstrapPath: path.join(paths.bridgeRoot, "bootstrap.mjs"), out: { write: () => {} } });
-    service = await checkService(paths, { reviewer, mcp });
+  // The page service running, or started now and attached to (HostProcess.ts:662-707), then its page's status.
+  try {
+    await launchPage(paths);
+  } catch (error) {
+    return { ok: false, reason: "page_not_running", detail: error.message, url: null };
   }
-  if (!service.running) return { ok: false, reason: "page_not_running", detail: service.reason, url: null };
+  const service = await checkPageStatus(paths, { reviewer, mcp });
+  if (!service.running || !service.status) return { ok: false, reason: "page_not_running", detail: service.message || service.reason, url: service.url };
   const url = service.url;
   const provider = reviewer || service.status?.roles?.reviewer || null;
   if (service.status?.reviewer_readonly?.state === "proven") return { ok: true, already: true, url, provider };
@@ -63,7 +65,7 @@ export async function ensureReviewerChecked({ paths, onStart = () => {}, reviewe
     return { ok: false, reason: service.status?.probe_in_flight ? "in_flight" : service.status?.probe_supported === false ? "unsupported_reviewer" : "reviewer_not_ready", url, provider };
   }
   onStart(provider || "reviewer");
-  const port = service.session.port;
+  const port = service.pagePort;
   const response = await pageRequest(port, {
     method: "POST", requestPath: "/api/reviewer-probe", timeoutMs: PROBE_TIMEOUT_MS + 30_000,
     headers: { [TOKEN_HEADER]: await pageToken(port) },

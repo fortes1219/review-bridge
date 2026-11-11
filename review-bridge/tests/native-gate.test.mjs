@@ -12,7 +12,9 @@ import { dispatchCommand } from "../router/index.mjs";
 import { writeJson } from "../service/records/fileStore.mjs";
 import { getBridgePaths } from "../utils/paths.mjs";
 import { assertNativeAllowed, checkReviewerProof, NATIVE_MODEL_COMMANDS, nativeGateDecision } from "../router/guards/nativeGate.mjs";
-import { writeServiceSession } from "../features/setupCheck/pageService.mjs";
+import { acquireLease } from "../features/setupCheck/pageLease.mjs";
+import { openDatabase } from "../service/database/index.mjs";
+import { currentRelease } from "../features/setupCheck/pageService.mjs";
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Owner 2026-10-25: the yes may come from the terminal or through an agent (--yes / --approve);
@@ -62,17 +64,34 @@ test("G3 without the reviewer proof dispatchCommand refuses native work-start, w
   assert.deepEqual(authorizations, []);
 });
 
-// A minimal page service: answers /api/status with the identity fields and a given proof state.
-async function pageService(t, paths, { state, proven, serviceId = "a".repeat(32), answerId = serviceId }) {
+// A minimal page service, in this process: it holds the project's lease, answers /identity on its control
+// endpoint (with this release, or another) and /api/status on its page with a given proof state, and
+// has published its record (RC3.1-PAGE-03).
+async function pageService(t, paths, { state, proven, release = null }) {
   const http = await import("node:http");
-  const server = http.createServer((req, res) => {
+  const listen = async (handler) => {
+    const server = http.createServer(handler);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
+    return server.address().port;
+  };
+  await openDatabase();
+  const lease = await acquireLease(paths, JSON.parse(await fsp.readFile(paths.bridgeConfigPath, "utf8")).project_id);
+  t.after(() => lease.release());
+  const secret = randomUUID();
+  const page = await listen((req, res) => {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, reviewer_readonly_proven: proven, reviewer_readonly: { state }, service_id: answerId, pid: process.pid }));
+    res.end(JSON.stringify({ ok: true, reviewer_readonly_proven: proven, reviewer_readonly: { state }, pid: process.pid }));
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const port = server.address().port;
-  await writeServiceSession(paths, { pid: process.pid, port, url: "http://127.0.0.1:" + port + "/", service_id: serviceId, started_at: new Date().toISOString() });
+  let identity = null;
+  const control = await listen((req, res) => {
+    if (req.headers.authorization !== "Bearer " + secret) return res.writeHead(401).end();
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(identity));
+  });
+  const projectId = JSON.parse(await fsp.readFile(paths.bridgeConfigPath, "utf8")).project_id;
+  identity = { project_id: projectId, pid: process.pid, port: control, release: release ?? await currentRelease(bridgeRoot), url: "http://localhost:" + page + "/", page_port: page };
+  await lease.publishRecord({ ...identity, secret, lifetime: "detached", started_at: new Date().toISOString() });
 }
 
 async function configuredPaths(t) {
@@ -85,7 +104,7 @@ async function configuredPaths(t) {
 
 test("G4 the reviewer proof comes only from the running page service with a matching identity", async (t) => {
   const none = await configuredPaths(t);
-  assert.deepEqual(await checkReviewerProof(none.paths).then(({ ok, reason, detail }) => ({ ok, reason, detail })), { ok: false, reason: "watch_not_running", detail: "no_session" });
+  assert.deepEqual(await checkReviewerProof(none.paths).then(({ ok, reason, detail }) => ({ ok, reason, detail })), { ok: false, reason: "watch_not_running", detail: "not-running" });
   for (const [state, proven] of [["not_run", "not_run"], ["stale", false], ["failed", false], ["unknown", false]]) {
     const rt = await configuredPaths(t);
     await pageService(t, rt.paths, { state, proven });
@@ -94,10 +113,10 @@ test("G4 the reviewer proof comes only from the running page service with a matc
     assert.equal(result.reason, "reviewer_not_proven");
     assert.equal(result.detail, state);
   }
-  // A look-alike on the port with another service id is not the Bridge page.
-  const imposter = await configuredPaths(t);
-  await pageService(t, imposter.paths, { state: "proven", proven: true, answerId: "b".repeat(32) });
-  assert.deepEqual((({ ok, reason, detail }) => ({ ok, reason, detail }))(await checkReviewerProof(imposter.paths)), { ok: false, reason: "watch_not_running", detail: "wrong_service" });
+  // A page service of another release holds no proof this release accepts.
+  const other = await configuredPaths(t);
+  await pageService(t, other.paths, { state: "proven", proven: true, release: "0.0.0-other" });
+  assert.deepEqual((({ ok, reason, detail }) => ({ ok, reason, detail }))(await checkReviewerProof(other.paths)), { ok: false, reason: "watch_not_running", detail: "release-mismatch" });
   // A Boolean without the proven state (or the reverse) is not a proof.
   const half = await configuredPaths(t);
   await pageService(t, half.paths, { state: "not_run", proven: true });

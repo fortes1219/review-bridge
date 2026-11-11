@@ -10,7 +10,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { BackupRefusedError, backupDatabase, databaseBackupsRoot } from "../service/database/backup.mjs";
-import { backUpBeforeMigrating, openDatabase } from "../service/database/index.mjs";
+import { openDatabase } from "../service/database/index.mjs";
 import { migrationFiles } from "../service/database/migrate.mjs";
 import { connect, postgresBinaries, serverRunning, startServer } from "../service/database/postgresServer.mjs";
 import { readJson } from "../service/records/fileStore.mjs";
@@ -183,6 +183,18 @@ test("backup with no database yet says so and makes nothing", { timeout: 60_000 
   assert.deepEqual(await fsp.readdir(empty), []);
 });
 
+// A command of its own opening the database: openDatabase opens a data home once per process, so a
+// test that needs the opening itself (its backup decision, its refusal) goes through another process,
+// as the next command would. It says the error's name and words on stderr.
+const indexUrl = new URL("../service/database/index.mjs", import.meta.url).href;
+function openInCommand({ dir = null } = {}) {
+  return spawnSync(process.execPath, ["--input-type=module", "-e", [
+    "const m = await import(process.env.RB_INDEX);",
+    "try { const db = await m.openDatabase({ dataHome: process.env.RB_DATA_HOME, ...(process.env.RB_DIR ? { migrationsDir: process.env.RB_DIR } : {}) }); await db.close(); }",
+    "catch (error) { process.stderr.write(error.name + ': ' + error.message + '\\n'); process.exit(2); }",
+  ].join("\n")], { windowsHide: true, encoding: "utf8", env: { ...process.env, RB_INDEX: indexUrl, RB_DATA_HOME: dataHome, RB_DIR: dir ?? "" } });
+}
+
 // The package's migrations plus the ones a newer Bridge would bring.
 async function migrationsWith(t, extra) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-upgrade-migrations-"));
@@ -194,7 +206,10 @@ async function migrationsWith(t, extra) {
 
 test("a new database, or one with every migration applied, is not backed up when it is opened", { timeout: 120_000 }, async (t) => {
   await projectWithRun();
-  assert.equal(await backUpBeforeMigrating(databaseRoot, { dataHome }), null);
+  const kept = await backupFolders();
+  const opened = openInCommand();
+  assert.equal(opened.status, 0, opened.stderr);
+  assert.deepEqual(await backupFolders(), kept, "a database with every migration applied is not backed up");
   const fresh = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-fresh-home-"));
   t.after(async () => {
     stopServerIn(fresh);
@@ -211,9 +226,10 @@ test("an upgrade is refused while a run is running: no copy is made and no new m
   const before = await backupFolders();
   await queryRecords("update runs set status = 'in_progress' where run_id = $1", [runId]);
   try {
-    await assert.rejects(backUpBeforeMigrating(databaseRoot, { dataHome, dir }), (error) => error instanceof BackupRefusedError
-      && /^Bridge backs up the database before it applies 1 new migration\(s\), and a run is running\. Let it end/.test(error.message)
-      && error.message.includes(runId));
+    const opened = openInCommand({ dir });
+    assert.equal(opened.status, 2, "the upgrade is refused while a run is running: " + opened.stderr);
+    assert.match(opened.stderr, /^BackupRefusedError: Bridge backs up the database before it applies 1 new migration\(s\), and a run is running\. Let it end/);
+    assert.ok(opened.stderr.includes(runId), opened.stderr);
   } finally {
     await queryRecords("update runs set status = 'completed' where run_id = $1", [runId]);
   }
@@ -233,7 +249,7 @@ test("an upgraded Bridge backs up the database before its first new migration, a
     await db.close();
   }
   const made = (await backupFolders()).filter((name) => !before.includes(name));
-  assert.equal(made.length, 1);
+  assert.equal(made.length, 1, "one backup is made before the first new migration");
   const copyHome = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-before-upgrade-"));
   t.after(async () => {
     stopServerIn(copyHome);

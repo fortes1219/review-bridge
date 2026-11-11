@@ -43,6 +43,9 @@ const MAX_ARCHIVED_TEXT_BYTES = 256 * 1024;
 const PROTECTED_ROOT_FILES = new Set([
   "review-bridge-install.json",
   "watch-session.json",
+  // The page service's record (features/setupCheck/pageLease.mjs): written by the page service holding the
+  // lease, and only meaningful while it holds it; never an orphan of a run.
+  "page-owner.json",
   "watch-url.txt",
   "CONTROL.json",
   "bounded-resume-state.json",

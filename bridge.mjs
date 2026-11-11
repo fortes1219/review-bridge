@@ -383,18 +383,30 @@ function mapProject(target, update) {
 // the runtime's own health check (T0-01 C4). Nothing printed by `up` is parsed; a failure
 // to start leaves the project setup in place and is reported instead of rolled back.
 async function startService(target, fakeCli) {
-  run(process.execPath, [bootstrapPath, "up", "--project", target, ...(fakeCli ? ["--fake-cli"] : [])], {
+  const up = run(process.execPath, [bootstrapPath, "up", "--project", target, ...(fakeCli ? ["--fake-cli"] : [])], {
     cwd: target, expected: [0, 1, 2],
   });
   const modules = await loadInstalledServiceModules(runtimeRoot);
   if (!modules) throw new Error("The Bridge runtime has no page service module.");
-  const { checkService, serviceFiles } = modules.service;
   const paths = modules.getBridgePaths(target, runtimeRoot, { privateRootName: ".review-bridge" });
-  const check = await checkService(paths);
-  // Display only: the port-bump line the watch process logged.
-  const stdoutLog = await fsp.readFile(serviceFiles(paths).stdoutPath, "utf8").catch(() => "");
-  const notice = stdoutLog.split(/\r?\n/).find((line) => line.includes("占用，改用")) || null;
-  return { started: check.running, url: check.running ? check.url : null, reason: check.reason, notice };
+  // up exits 0 once the page service has reported ready; its address is read from the page service found
+  // through its lease and identity (pageService.mjs connectPage), never from a page that answers.
+  let found = null;
+  let reason = null;
+  if (up.status === 0) {
+    try {
+      found = await modules.service.connectPage(paths);
+      // init --json's service_reason says "running" for a page service found, as serviceUp's reason does.
+      reason = "running";
+    } catch (error) {
+      reason = error.reason;
+    }
+  } else {
+    reason = String(up.stdout || "").trim().split(/\r?\n/).at(-1) || "up exited " + up.status;
+  }
+  // Display only: the line up printed when the page took another port than the one asked for.
+  const notice = String(up.stdout || "").split(/\r?\n/).find((line) => line.includes("占用，改用")) || null;
+  return { started: Boolean(found), url: found ? found.url : null, reason, notice };
 }
 
 // How to reach the person's database, for init's last lines: the same connection `status` prints.

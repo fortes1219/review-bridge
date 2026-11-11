@@ -1,5 +1,5 @@
 // Keeps the person's database out of these tests (see the fixture).
-import { dataHome, separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
+import { dataHome, removeProject, separatePerson } from "../review-bridge/tests/fixtures/isolatedDataHome.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -61,10 +61,7 @@ const stopPage = (root) => serviceDown({ paths: projectPaths(root), out: { write
 
 async function workspace(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rb-upgrade-"));
-  t.after(async () => {
-    await stopPage(root).catch(() => {});
-    await fsp.rm(root, { recursive: true, force: true });
-  });
+  t.after(() => removeProject(root));
   await fsp.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "vue-test", dependencies: { vue: "latest" }, devDependencies: { vite: "latest" } }));
   await fsp.writeFile(path.join(root, "README.md"), "# demo\n");
   await fsp.mkdir(path.join(root, ".claude"));
@@ -94,19 +91,32 @@ async function installWithService(root) {
   assert.equal(await serviceReason(root), "running", "init should leave the page service running");
 }
 
-async function serviceCheck(root) {
+async function pageModules(root) {
   const modules = await loadInstalledServiceModules(sourceRuntime);
-  return await modules.service.checkService(modules.getBridgePaths(root, sourceRuntime, { privateRootName: ".review-bridge" }));
+  return { service: modules.service, paths: modules.getBridgePaths(root, sourceRuntime, { privateRootName: ".review-bridge" }) };
 }
 
+// RC3.1-PAGE-03: the page service found the waiting way (its lease, record and identity), then its page's status.
+async function serviceCheck(root) {
+  const { service, paths } = await pageModules(root);
+  return await service.checkPageStatus(paths);
+}
+
+// Only looks, as status does: a free lease is not running without a request.
 async function serviceRunning(root) {
-  return (await serviceCheck(root)).running === true;
+  const { service, paths } = await pageModules(root);
+  return (await service.observePage(paths)).running === true;
 }
 
-// Why the page is or is not running (running, no_session, pid_dead, timeout, unreachable, wrong_service):
-// an assertion that the page runs names the reason when it fails.
+// "running" once the page service is found the waiting way; otherwise why not, so a failed assertion says it.
 async function serviceReason(root) {
-  return (await serviceCheck(root)).reason;
+  const { service, paths } = await pageModules(root);
+  try {
+    await service.connectPage(paths);
+    return "running";
+  } catch (error) {
+    return error.reason + ": " + error.message;
+  }
 }
 
 async function tree(root) {
