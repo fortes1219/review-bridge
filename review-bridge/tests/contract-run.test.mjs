@@ -394,8 +394,16 @@ test("starting an edited work order again stops the running version first, and n
   await fsp.writeFile(old.recordPath, JSON.stringify(old.record));
   const started = start(rt, second);
   assert.equal(started.status, 0, started.stderr);
-  assert.equal(alive(old.record.pid), false);
-  await old.exit;
+  // The old writer is gone when its work-start has closed: runProcess waits for its child's close
+  // (service/agentCli/process.mjs:36-47). Its pid is not asked: by now the whole new version has run,
+  // and on Windows that number may already name another process.
+  let timer;
+  const late = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error("the old version's work-start did not end")), 30_000); });
+  try {
+    await Promise.race([old.exit, late]);
+  } finally {
+    clearTimeout(timer);
+  }
   const oldRun = await runOf(rt, first);
   assert.equal(oldRun.conclusion, "cancelled");
   assert.equal(oldRun.closed_reason, "superseded");
@@ -671,7 +679,9 @@ test("the new version starts only after the old work-start has let go of its run
   await fsp.writeFile(workLockFile(rt.paths, first.plan.proposed_run_id), JSON.stringify({ pid: closing.pid }));
   const started = start(rt, second);
   assert.equal(started.status, 0, started.stderr);
-  assert.equal(alive(old.record.pid), false);
+  // The old writer's pid is not asked here: the new version starts only once its stop confirmed that
+  // writer gone (features/workOrder/writerLoop.mjs:284-290, tested above with an unkillable record), and
+  // after the whole new version has run, that number may name another process on Windows.
   assert.equal((await runOf(rt, second)).conclusion, "success");
   // The old version's work-start is gone, so the new start delivered it.
   const oldRun = await runOf(rt, first);
