@@ -17,6 +17,8 @@
 - **好幾個指令同時第一次開 Bridge 的資料庫，不再失敗，也不再互相停掉。** 資料庫第一次被開啟時，兩個指令同時執行（兩個頁面服務，或 `up` 和 `start`），可能在建資料庫或建遷移表時失敗；也可能有一個把另一個遷移到一半的資料庫當成要升級，於是去備份，而備份會把伺服器停掉，另一個就斷線了。現在建資料庫在一把資料庫的鎖底下進行；整趟遷移，從讀取已套用了哪些、到最後一個，在另一把鎖底下進行。後到的指令會等先到的整趟做完。
 - **Codex 當 writer 時，它寫到錯誤輸出的最後一段不再遺失。** Bridge 會把 Codex app server 寫到錯誤輸出的內容留在這次呼叫的 log 裡，呼叫失敗時讀最後一段來說明原因。原本這些內容經過管道寫進檔案，回合一結束管道就被切斷，最後一段——通常就是原因——可能沒寫進去。現在由 app server 直接寫進 log 檔。
 - **`start` 因為本機頁面服務用不了而被擋時，會說出頁面服務自己的原因。** 升級之後，舊版 Bridge 起的頁面服務可能還在跑；原本 `start` 只說頁面起不來，叫人再跑一次或按 Check，兩個都沒用。現在印出頁面服務自己的話——先執行 `npx review-bridge down`，和 `up` 說的一樣——這時就不再叫人重跑。平台的 adapter 還沒驗證時，照實說明，不再給不會過的重跑或 Check。（[#6](https://github.com/fortes1219/review-bridge/issues/6)）
+- **Nuxt、VitePress、Slidev 專案會偵測成 Vue 前端，React、Next.js、Angular 專案也有了自己的專案類型。** Nuxt 專案的 `package.json` 只列 `nuxt`、沒有 `vue`，原本偵測不到類型，測試沒有規則；React 和 Next.js 專案也一樣偵測不到，Angular 專案則被當成 Node 後端。現在各自有類型和對應的測試指令。Create React App 專案的測試用 `--watchAll=false`、Angular 工作區用 `--watch=false` 執行：Create React App 和 Angular 用 Karma 的測試，不加這個參數就會一直等檔案變更、不會結束。
+- **已經設定過的資料夾執行 `init --profile`，會說明怎麼換專案類型。** 原本只叫人升級，結果只能 `uninstall` 再 `init`，而那樣會給專案一個新的 id，和原本的紀錄就接不上了。現在會印出這個資料夾目前的類型，以及要貼進 `.review-bridge/bridge.json` 的 `test` 區塊，下一次 `start` 就會用它；不會改任何檔。
 
 ## 0.3.0-rc.3（2026-11-10）
 

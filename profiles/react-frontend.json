@@ -1,0 +1,91 @@
+{
+  "schema_version": 2,
+  "profile_id": "react-frontend",
+  "display_name": "React frontend",
+  "required_files_any": [
+    "package.json"
+  ],
+  "auto_detection": {
+    "files_any": [
+      "package.json"
+    ],
+    "content_any": [
+      {
+        "file": "package.json",
+        "patterns": [
+          "\\\"react\\\"\\s*:"
+        ]
+      }
+    ],
+    "content_none": [
+      {
+        "file": "package.json",
+        "patterns": [
+          "\\\"next\\\"\\s*:"
+        ]
+      }
+    ]
+  },
+  "verification_rules": [
+    {
+      "command": "npm test -- --watchAll=false",
+      "files_any": [
+        "node_modules/.bin/react-scripts"
+      ],
+      "package_script": "test"
+    },
+    {
+      "command": "npm test",
+      "package_script": "test"
+    }
+  ],
+  "verification_script_candidates": [
+    "format:check",
+    "lint",
+    "typecheck",
+    "test:run",
+    "test",
+    "build"
+  ],
+  "dependency_manifest": {
+    "file": "package.json",
+    "sections": [
+      "dependencies",
+      "devDependencies"
+    ],
+    "script_section": "scripts",
+    "script_runner": "npm run",
+    "capabilities": [
+      {
+        "name": "react",
+        "dependencies": [
+          "react"
+        ]
+      },
+      {
+        "name": "react-scripts",
+        "dependencies": [
+          "react-scripts"
+        ]
+      },
+      {
+        "name": "typescript",
+        "dependencies": [
+          "typescript"
+        ]
+      },
+      {
+        "name": "vite",
+        "dependencies": [
+          "vite"
+        ]
+      },
+      {
+        "name": "vitest",
+        "dependencies": [
+          "vitest"
+        ]
+      }
+    ]
+  }
+}

@@ -27,7 +27,7 @@ npx review-bridge init
 
 問完就開始設定，每完成一步印一行，不再顯示計畫、不再要你確認。
 
-也可以使用 `--writer`、`--reviewer`、`--profile <type|none>`、`--target <folder>` 直接指定設定。在非互動式環境中，或加上 `--yes` 時，未指定的項目會採用預設值，不再詢問。
+也可以使用 `--writer`、`--reviewer`、`--profile <type|none>`、`--target <folder>` 直接指定設定。在非互動式環境中，或加上 `--yes` 時，未指定的項目會採用預設值，不再詢問。已經設定過的資料夾要換專案類型時，`init --profile <類型>` 不會改任何檔，會印出要貼進 `.review-bridge/bridge.json` 的 `test` 區塊；詳見[設定檔](../reference/config)。
 
 ### init 做了什麼
 

@@ -404,3 +404,50 @@ claim that nothing else is wrong.
   supabase/cli's covers its program modules only (`packages/stack/src/internal/release.ts:9-42`). The older Bridge's
   page service has no mutation case of its own: it is in the same set as another release's, and the first case's
   expected words are those of the older Bridge's line.
+
+## RB-GATE-2026-014 — common frontends got no project type or the wrong one, and a folder set up could not change its type
+
+- **affected_gate:** Install (the project type `init` detects, and the test rules it writes)
+- **symptom:** the first user (2026-11-09, Ubuntu, `review-bridge@0.3.0-rc.3`): "init does not detect a profile for a
+  Nuxt project (package.json lists nuxt, not vue directly), so test.rules is empty; --profile vue-frontend has to be
+  given by hand", and "a folder already initialized that wants another profile is refused by init; only uninstall
+  then init works". Read against the profiles then: a React or Next.js project got no type either, an Angular project
+  (`@angular/core`) and a package.json listing only `vitepress` were taken for a Node backend.
+- **expected_vs_actual:** expected a type, and its test command, for the frontends people build with, and a way to
+  change a folder's type that keeps its project id; actually no type or the wrong one, and `init --profile` in a
+  folder set up said only to upgrade (with an install record) or ignored the type (without one), leaving `uninstall`
+  then `init`, which gives the project a new id and cuts it off from its records.
+- **reproduction:** `tests/project-profile.test.mjs` (a package.json naming each framework), `tests/install-guide.test.mjs`
+  and `tests/product-init.test.mjs` (`init --profile` in a folder set up, on both paths).
+- **root_cause:** `profiles/vue-frontend.json` matched `vue` only; `profiles/node-backend.json` excluded the AngularJS
+  name `angular`, not `@angular/core`; there was no React, Next.js or Angular type. The detection test asserted only
+  the stacks it listed, so the others passed unasserted. `installer/install-guide.mjs` never read `--profile` in a
+  folder set up, and no test gave it one.
+- **fix:** the commit that adds this entry — `vue-frontend` takes `nuxt`, `vitepress` and `@slidev/cli`, as
+  antfu/eslint-config takes them for Vue (`src/factory.ts:56-61`); `react-frontend`, `next-frontend` and
+  `angular-frontend` are detected by `react`, `next` and `@angular/core`, as Storybook's project types are
+  (storybookjs/storybook `v8.6.14` `code/core/src/cli/project_types.ts`), React excluding `next` and `node-backend`
+  excluding `@angular/core`, `vitepress` and `@slidev/cli`; a Create React App project's tests run with
+  `--watchAll=false` (facebook/create-react-app `packages/react-scripts/scripts/test.js:48-57`, found by its installed
+  bin as Storybook finds it, `project_types.ts:183-192`) and an Angular workspace's with `--watch=false`, since
+  react-scripts and Angular's Karma test builder otherwise watch and never end (its `watch` defaults to true,
+  angular/angular-cli `packages/angular/build/src/builders/karma/schema.json:230-234`; the unit-test builder watches
+  only in a terminal, `.../unit-test/schema.json:59-62`, and a test run has none); `init --profile` in a folder set up
+  writes nothing and prints the folder's type and
+  the `test` block for `.review-bridge/bridge.json`, which the next start reads, as supabase/cli refuses an existing
+  config and says how to go on (`c75aea2`, `apps/cli/src/commands/init/init.handler.ts:40-53`).
+- **regression_test:** `tests/project-profile.test.mjs` (Nuxt in dependencies and devDependencies, VitePress and Slidev,
+  React, Next with react, Angular; and the rule chosen for an Angular workspace, a Create React App project and a Next
+  project); `tests/install-guide.test.mjs`, a folder already set up is told how to change its project type, and nothing
+  is written; `tests/product-init.test.mjs`, a Nuxt project is set up as a Vue frontend, and a project type changed in
+  bridge.json is used by the next start.
+- **mutation_case:** `RB-M-vue-misses-nuxt`, `RB-M-react-claims-next`, `RB-M-node-claims-angular`,
+  `RB-M-angular-tests-watch`, `RB-M-cra-tests-watch`, `RB-M-init-hides-profile-change`.
+- **residual_risk:** a backend with a React or Next.js frontend in the same folder (Laravel, .NET, Python or Java beside
+  a package.json naming react) now matches two types and `init` refuses it as ambiguous until `--profile` is given; a
+  backend beside a Vue frontend already did. A Create React App project whose `node_modules` is not installed, or that
+  uses Yarn Plug'n'Play, has no `.bin/react-scripts` and runs plain `npm test`, which watches. An Angular workspace
+  whose test script is not `ng test` gets `--watch=false` all the same; how Vitest reads it was not read. React Native
+  is taken for a React frontend. Bridge does not set `CI=true` for the tests it runs. The whole package.json text is
+  matched, so a name under `peerDependencies` or `overrides` counts too. After a type is changed in `bridge.json`, the
+  top-level `profile_id`, `policy.override.json` and the install record keep the old type; nothing reads them at work.
